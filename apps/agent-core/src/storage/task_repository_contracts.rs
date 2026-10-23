@@ -175,6 +175,7 @@ pub struct TaskAttempt {
 pub enum TaskControl {
     Pause,
     Resume,
+    Revise,
     Cancel,
 }
 

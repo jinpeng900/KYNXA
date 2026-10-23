@@ -605,7 +605,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
 
     connection
         .execute_batch("BEGIN IMMEDIATE")
-        .map_err(failure)?;
+        .map_err(sql_failure)?;
     let result = match operation {
         "storage.index.publish" => publish(&connection, arguments),
         "storage.index.remove" => remove(&connection, arguments, false),

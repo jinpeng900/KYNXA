@@ -115,8 +115,8 @@ public sealed partial class RetrievalSettingsWindow : Window
         if (_closed) return;
         Title = UiText.Get("KYNXA · 检索与网页搜索");
         RefreshPickerSelections();
-        // The last status snapshot can predate job polling; language changes must retain the newer observation.
-        // 状态快照可能早于任务轮询；切换语言时保留较新的任务观察，不退回旧状态。
+        // Keep newer job observations when language changes refresh an older status snapshot.
+        // 切换语言时保留较新的任务观察，不回退到旧状态快照。
         var currentJob = _job;
         if (_status is { } status) RenderStatus(status);
         if (currentJob is { } job) ShowJob(job);
@@ -427,8 +427,8 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_closed) return;
         _job = job;
-        // Paused checkpoints remain owned by the gateway; polling can observe recovery, but UI never resumes them.
-        // 暂停检查点仍归网关所有；轮询只观察恢复，界面不自行恢复或重复创建任务。
+        // Poll paused checkpoints without resuming or recreating gateway-owned tasks.
+        // 暂停检查点归网关；界面仅轮询观察，不自行恢复或重复创建任务。
         bool active = IsActiveJob(job.Status);
         _cancelJob.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         _rebuild.IsEnabled = !active;

@@ -3,10 +3,8 @@
 
 use serde_json::{Value, json};
 
-/// Switch for DeepSeek's Messages route: on by default where it keeps tool additions cached (deepseek-flash);
-/// "0" restores the configured OpenAI-compatible route, "1" also routes models without verified tool updates.
-/// DeepSeek Messages 路线开关：默认只对能保持新增工具缓存的 deepseek-flash 开启；设为 "0" 恢复已配置的
-/// OpenAI 兼容路线，设为 "1" 时没有核验工具更新的模型也改道。
+/// Default to Messages for deepseek-flash's verified tool updates; "0" disables routing, "1" skips the tool-update check.
+/// 默认仅为已核验工具更新的 deepseek-flash 改用 Messages；"0" 关闭改道，"1" 不要求工具更新已核验。
 const DEEPSEEK_MESSAGES_SWITCH: &str = "KYNXA_DEEPSEEK_MESSAGES_ROUTE";
 const DEEPSEEK_MESSAGES_BASE_URL: &str = "https://api.deepseek.com/anthropic";
 

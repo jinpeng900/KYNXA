@@ -284,21 +284,21 @@ fn acquire_owned(
                         OpenFlags::SQLITE_OPEN_READ_ONLY
                     }) | OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 )
-                .map_err(sqlite_store::failure)?;
+                .map_err(sqlite_store::sql_failure)?;
                 connection
                     .busy_timeout(
                         timeout
                             .saturating_sub(started.elapsed())
                             .min(Duration::from_secs(3)),
                     )
-                    .map_err(sqlite_store::failure)?;
+                    .map_err(sqlite_store::sql_failure)?;
                 connection
                     .execute_batch(if writable {
                         "PRAGMA foreign_keys=ON;PRAGMA synchronous=FULL;"
                     } else {
                         "PRAGMA foreign_keys=ON;"
                     })
-                    .map_err(sqlite_store::failure)?;
+                    .map_err(sqlite_store::sql_failure)?;
                 connection.set_prepared_statement_cache_capacity(128);
                 if checked_identity(root, path)? != pool.identity {
                     return Err(ContractError::new(
@@ -348,18 +348,18 @@ fn acquire_owned(
                 .saturating_sub(started.elapsed())
                 .min(Duration::from_secs(3)),
         )
-        .map_err(sqlite_store::failure)?;
+        .map_err(sqlite_store::sql_failure)?;
     lease
         .progress_handler(
             256,
             Some(move || cancellation::is_cancelled() || started.elapsed() >= timeout),
         )
-        .map_err(sqlite_store::failure)?;
+        .map_err(sqlite_store::sql_failure)?;
     let version: i64 = lease
         .prepare_cached("PRAGMA user_version")
-        .map_err(sqlite_store::failure)?
+        .map_err(sqlite_store::sql_failure)?
         .query_row([], |row| row.get(0))
-        .map_err(sqlite_store::failure)?;
+        .map_err(sqlite_store::sql_failure)?;
     if version > 6 {
         return Err(ContractError::new(
             "A newer retrieval index exists. / 检索索引由更新版本创建，原文件已保留。",
@@ -579,6 +579,27 @@ mod tests {
                 .unwrap(),
             "first"
         );
+    }
+
+    #[test]
+    fn interrupted_write_preserves_timeout_and_does_not_poison_the_next_writer() {
+        let fixture = Fixture::new();
+        {
+            let writer = acquire_write(&fixture.root, &fixture.path, 120_000).unwrap();
+            writer.execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value='uncommitted';").unwrap();
+            writer.progress_handler(256, Some(||true)).unwrap();
+            let result = sqlite_store::sql_execute(&writer,
+                "WITH RECURSIVE spin(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM spin WHERE x<1000000) INSERT INTO sample SELECT x FROM spin", vec![]);
+            assert_eq!(result.as_ref().unwrap_err().code(), "RETRIEVAL_SEARCH_TIMEOUT");
+            let result = sqlite_store::finish(&writer, result.map(|_|serde_json::Value::Null));
+            assert_eq!(result.unwrap_err().code(), "RETRIEVAL_SEARCH_TIMEOUT");
+            assert!(writer.is_autocommit());
+        }
+        let writer = acquire_write(&fixture.root, &fixture.path, 120_000).unwrap();
+        assert_eq!(writer.query_row("SELECT value FROM sample", [], |row|row.get::<_,String>(0)).unwrap(), "first");
+        writer.execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value='confirmed';").unwrap();
+        sqlite_store::finish(&writer, Ok(serde_json::json!({"saved":true}))).unwrap();
+        assert_eq!(writer.query_row("SELECT value FROM sample", [], |row|row.get::<_,String>(0)).unwrap(), "confirmed");
     }
 
     #[test]

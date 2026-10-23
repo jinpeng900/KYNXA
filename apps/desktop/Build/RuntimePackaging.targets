@@ -116,10 +116,8 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\filter-runtime-pri-layout.ps1&quot; -LayoutPath &quot;$(_FilteredLayoutResfilesPath)&quot; -ExcludedLayoutPath &quot;$(_ExcludedLayoutResfilesPath)&quot;" />
   </Target>
-  <!-- WinUI copies compiled pages to bin, but its copy-local items do not enter the .NET publish list.
-       Publish this build's generated pages and project PRI explicitly, retaining their resource paths.
-       WinUI 将编译页面复制到 bin，但复制项不会自动进入 .NET 发布清单。
-       显式发布本轮生成的页面和项目 PRI，保留资源相对路径，不从历史输出拼装。 -->
+  <!-- WinUI copy-local items are absent from publish; add this build's pages and PRI with their resource paths.
+       WinUI 复制项未进入发布清单，需补入本轮页面和 PRI，并保留资源路径。 -->
   <Target Name="IncludeUnpackagedWinUiPublishResources"
           AfterTargets="ComputeResolvedFilesToPublishList"
           DependsOnTargets="Prep_ComputeProcessXamlFiles;_GenerateProjectPriFile"

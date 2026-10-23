@@ -7,17 +7,16 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Use the framework hash API in MSBuild's PowerShell host, which may not load Get-FileHash's script module.
-# 使用框架哈希 API；MSBuild 的 PowerShell 宿主可能没有加载 Get-FileHash 所属脚本模块。
+# Use the framework hash API when MSBuild's PowerShell host lacks Get-FileHash.
+# 使用框架哈希 API，兼容未加载 Get-FileHash 的 MSBuild 宿主。
 function Get-NoticeHash([string]$Path) {
     $noticeStream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
     $noticeHasher = [Security.Cryptography.SHA256]::Create()
     try { return [BitConverter]::ToString($noticeHasher.ComputeHash($noticeStream)).Replace('-', '').ToLowerInvariant() }
     finally { $noticeHasher.Dispose(); $noticeStream.Dispose() }
 }
-# Resolve exactly the runtime packs selected by ToolHost restore, rather than a
-# developer's SDK folder or a guessed pack version. Preserve the original text.
-# 只解析 ToolHost 还原实际选中的运行时包，不使用开发机 SDK 目录或猜测的版本；保留原始许可文本。
+# Read the runtime packs selected by ToolHost restore and preserve their original licenses.
+# 读取 ToolHost 实际还原的运行时包，保留许可原文。
 $runtimeAssets = Get-Content -LiteralPath $AssetsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $runtimePackNames = @("Microsoft.NETCore.App.Runtime.$RuntimeIdentifier", "Microsoft.WindowsDesktop.App.Runtime.$RuntimeIdentifier", 'Microsoft.Windows.SDK.NET.Ref')
 $runtimeNoticesOutput = [IO.Path]::GetFullPath($OutputDirectory)
@@ -36,8 +35,8 @@ foreach ($framework in $runtimeAssets.project.frameworks.PSObject.Properties) {
         if (-not $runtimePackDirectory) { throw "Restored ToolHost runtime pack not found: $($dependency.name) $runtimePackVersion" }
         $runtimeNotices = @(Get-ChildItem -LiteralPath $runtimePackDirectory -File | Where-Object Name -Match '^(LICENSE(\.TXT)?|THIRD-PARTY-NOTICES\.TXT|ThirdPartyNotices\.txt|NOTICE(\.TXT)?)$')
         if ($dependency.name -eq 'Microsoft.Windows.SDK.NET.Ref') {
-            # The SDK targeting pack declares its license by URL; bundle verified official original bytes and provenance.
-            # SDK 目标包仅声明许可网址；随包保留已校验的官方原文和来源，不猜其他版本的许可。
+            # The targeting pack gives a license URL; bundle the verified official text and source.
+            # 目标包仅提供许可网址，随包保留已核验的官方原文和来源。
             $winRtSourcesDirectory = Join-Path $PSScriptRoot 'licenses'
             $winRtSourcesPath = Join-Path $winRtSourcesDirectory 'toolhost-winrt-license-sources.json'
             $winRtSources = Get-Content -LiteralPath $winRtSourcesPath -Raw -Encoding UTF8 | ConvertFrom-Json

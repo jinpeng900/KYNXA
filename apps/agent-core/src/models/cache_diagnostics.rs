@@ -1,5 +1,5 @@
-//! Private, request-local prefix comparisons; provider cache usage remains the source of actual hits.
-//! 请求内私有前缀比较；实际缓存命中仍以供应商用量回执为准，不保存第二份请求历史。
+//! Compare request prefixes privately; provider usage proves actual cache hits.
+//! 私下比较请求前缀；实际命中以供应商计量为准，不另存请求历史。
 
 use std::io::{self, Write};
 
@@ -28,8 +28,8 @@ struct Fingerprint {
     truncated: bool,
 }
 
-/// An uncommitted observation must be discarded when admission or validation prevented dispatch.
-/// 准入或校验阻止派发时丢弃待提交观察，不能让未发送的请求污染下一次比较基线。
+/// Discard undispatched observations so the next baseline reflects sent requests.
+/// 丢弃未派发的观察，只用已发送请求更新比较基线。
 pub struct PrefixObservation {
     next: Fingerprint,
     report: Value,
@@ -74,8 +74,8 @@ impl Serialize for Canonical<'_> {
 fn fingerprint(salt: &[u8; 32], domain: &[u8], previous: &[u8; 32], value: &Value) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(salt); digest.update(domain); digest.update(previous);
-    // Serializing JSON values into an infallible hashing writer cannot expose prompt bytes in a receipt.
-    // JSON 仅写入无失败的哈希接收器，不复制大图片字符串，也不把提示原文带入回执。
+    // Hash JSON directly without copying large images or exposing prompts in receipts.
+    // 直接计算 JSON 哈希，不复制大图片，也不将提示原文写入回执。
     let _ = serde_json::to_writer(DigestWriter(&mut digest), &Canonical(value));
     digest.finalize().into()
 }

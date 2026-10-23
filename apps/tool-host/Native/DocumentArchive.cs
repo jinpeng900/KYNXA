@@ -24,8 +24,8 @@ internal sealed class DocumentArchiveException(string code, string message) : Ex
 }
 
 /// <summary>
-/// Decode immutable caller-authorized bytes in an owned worker, without creating member paths or executing content.
-/// 在受控子进程解码调用方已授权的固定字节，不创建成员路径，也不执行内容。
+/// Decode authorized immutable bytes in an owned worker, without extraction or execution.
+/// 在受控子进程解码已授权的固定字节，不落盘解压或执行内容。
 /// </summary>
 internal static class DocumentArchive
 {
@@ -48,8 +48,8 @@ internal static class DocumentArchive
             throw Failure("ARCHIVE_FORMAT_MISMATCH", "Archive bytes do not match their format. / 压缩包字节与格式不符。");
         cancellation.ThrowIfCancellationRequested();
         using var input = new MemoryStream(bytes, writable: false);
-        // Archive APIs do not extract files; entry streams preserve cancellation and per-member byte bounds.
-        // 只使用归档与成员流接口，不调用落盘解压 API；每个成员按实际字节核算并支持取消。
+        // Read archive entries as streams, with cancellation and per-entry byte limits.
+        // 仅流式读取归档成员，不落盘解压；按实际字节限量并支持取消。
 
         await EmitAsync(new { kind = "header", protocolVersion = 1, boundary = "document-archive", version = Version }, cancellation);
         long expandedBytes = 0;

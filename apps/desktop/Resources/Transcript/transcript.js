@@ -132,9 +132,8 @@
         durationMs = mode === 'final' && hasTotal ? message.durationMs : elapsedMs ?? retainedElapsedMs;
       }
     } else if (message.role === 'assistant') {
-      // Older snapshots lack clock identity. Preserve their preparation reset, but never erase
-      // an established clock just because the final prose arrived before its official total.
-      // 旧快照没有时钟身份，保留准备阶段清零行为；最终正文先于正式总时长到达时不抹掉已知计时。
+      // Keep legacy preparation resets; final text arriving before totals must not erase an established clock.
+      // 保留旧快照的准备阶段清零；正文先于总时长到达时，保留已有计时。
       const presentation = presentationFor(message);
       if (message.streaming && elapsedMs !== null) {
         mode = 'live'; durationMs = Math.max(elapsedMs, entry.elapsedMode === 'live' ? previousElapsedMs ?? 0 : 0);
@@ -333,9 +332,8 @@
     window.kynxaTables?.setLanguage(uiStrings);
     window.kynxaTranscriptSearch?.setLanguage(uiStrings);
     if (!localizingUi) return;
-    // Labels may wrap differently. Keep the user's scroll position and suppress only
-    // the automatic bottom-follow triggered by this layout, without touching ranges.
-    // 文案换行可能改变布局；保留用户滚动位置，仅暂停本次布局触发的底部跟随，不修改选择范围。
+    // Label wrapping may shift layout; preserve scroll position and selection, skipping this auto-follow.
+    // 文案换行可能改变布局；保留滚动位置和选区，仅跳过本次自动跟随。
     if (scrollX !== left || scrollY !== top) scrollTo({ left, top, behavior: 'instant' });
     languageFrame = requestAnimationFrame(() => {
       languageFrame = requestAnimationFrame(() => {
@@ -844,9 +842,8 @@
       const expected = previous ? previous.nextSibling : entry.tools.firstChild;
       if (expected !== row.root) entry.tools.insertBefore(row.root, expected);
       previous = row.root;
-      // Immutable source records get a lightweight display revision from the desktop.
-      // Historical/standalone clients fall back to a signature without changing formal events.
-      // 不可变的源记录由桌面分配轻量展示版本；旧版或独立客户端回退到签名，正式事件不变。
+      // Use the desktop display revision, falling back to a signature for older or standalone clients.
+      // 优先使用桌面展示版本，旧版或独立客户端回退到签名；正式记录不变。
       const signature = JSON.stringify(group.views.map(view => view.signature));
       if (row.signature === signature) continue;
       row.signature = signature;
@@ -883,9 +880,8 @@
   function cacheCharactersWithin(value, remaining) {
     const pendingValues = [value];
     let characters = 0, visited = 0;
-    // Cache admission estimates plain transport data without serializing a second large JSON copy.
-    // Complex payloads that exceed traversal or size bounds remain rereadable rather than blocking navigation.
-    // 缓存准入直接估算传输对象，不再次编码大型 JSON；超出遍历或容量边界时不缓存，保持可回读。
+    // Estimate cache size without copying large JSON; oversized or complex data stays rereadable.
+    // 直接估算缓存大小，避免复制大型 JSON；过大或过于复杂的数据保留回读能力。
     while (pendingValues.length) {
       if (++visited > 8192 || characters > remaining) return Infinity;
       const item = pendingValues.pop();
@@ -916,9 +912,8 @@
     window.kynxaTables?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
     pending = null; clearSelection(); cancelAnimationFrame(scrollFrame);
-    // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
-    // and expanded reasoning instead of rebuilding every element.
-    // 暂存完整 DOM 树；返回聊天时复用公式、高亮与展开状态，避免重建所有元素。
+    // Cache the DOM tree so returning to a chat reuses formulas, highlighting and expanded reasoning.
+    // 缓存 DOM 树，返回聊天时复用公式、高亮和思考展开状态。
     const restored = removeCached(id);
     if (restored?.view && !restored.view.following) {
       stopFollowing();
@@ -1159,9 +1154,8 @@
     if (!selection || !selection.rangeCount || selection.isCollapsed || !activeSelection()) return null;
     const range = selection.getRangeAt(0);
     const fragment = range.cloneContents();
-    // Selected ranges may span unloaded messages. Reconstruct their literal bodies for copying,
-    // instead of silently returning only the currently mounted viewport.
-    // 选区可能跨越已卸载消息；复制时补回这些消息的原始正文，不能静默只复制可见窗口。
+    // Restore unloaded message bodies when copying a selection beyond the mounted viewport.
+    // 复制跨越当前视口的选区时，补回已卸载消息的原始正文。
     for (const node of fragment.querySelectorAll('article[data-virtualized]')) {
       const entry = entries.get(node.dataset.messageId);
       if (!entry) continue;
@@ -1219,9 +1213,8 @@
     return fragment ? fragmentText(fragment) : '';
   }
   function fragmentText(fragment) {
-    // A range entirely inside literal user text/code has no structural block separators.
-    // Preserve even deliberately selected leading/trailing newlines in that case.
-    // 选择完全位于用户原文或代码内部时，不额外添加结构分隔；保留用户明确选中的首尾换行。
+    // Inside literal text or code, preserve selected boundary newlines without adding separators.
+    // 选区完全位于原文或代码内时，保留选中的首尾换行，不额外添加分隔。
     if (fragment.childNodes.length === 1 && fragment.firstChild.nodeType === Node.ELEMENT_NODE
       && fragment.firstChild.hasAttribute('data-copy-plain')) return fragment.firstChild.textContent;
     return serializeSelectionNode(fragment).replace(/^\n+|\n+$/g, '');
@@ -1260,13 +1253,11 @@
     // Update the direction baseline even for guarded restoration and navigation scrolls.
     // 锚点恢复或导航屏蔽的程序滚动也更新方向基准，避免沿用上一会话的位置。
     lastScrollTop = scrollY;
-    // Clearing the old DOM may queue a scroll event until after the new long chat is rendered.
-    // Keep explicit navigation alive until its first bottom frame; real upward input cancels it immediately.
-    // 清空旧 DOM 产生的滚动事件可能在新长聊天渲染后才到达；首个底部帧前保留显式导航，真实上滚输入立即撤销。
+    // Old DOM scroll events may arrive late; keep explicit navigation until the first bottom frame or real upward input.
+    // 旧 DOM 滚动事件可能迟到；显式导航保持到首个底部帧，用户上滚则立即取消。
     if (!applying && !localizingUi && !updatingAppearance && !anchoringScroll && !bottomNavigationPending && !restoringReadingNavigation()) {
-      // A smooth upward wheel starts inside the usual 36 px bottom tolerance. Keep its reading pause
-      // until a real downward scroll reaches the bottom; viewport reconciliation must not pull it back.
-      // 平滑上滚首帧仍可能处于常用的 36 px 底部容差内；仅真实向下滚动到底才解除阅读暂停，避免虚拟视口协调反拉到底。
+      // Upward scrolling can start within the 36 px bottom tolerance; resume following only after a real downward scroll to bottom.
+      // 上滚可能始于底部 36 px 容差内；仅在用户真实下滚到底后恢复跟随，避免视口更新拉回。
       if (movedUp) bottomFollowingPaused = true;
       const reachedBottom = document.documentElement.scrollHeight - innerHeight - scrollY <= 1;
       if (bottomFollowingPaused && movedDown && reachedBottom && !activeSelection() && !pointerSelecting)
@@ -1352,9 +1343,8 @@
   }
   function beforeContentLayoutChange(block) {
     if (activeSelection() || pointerSelecting || localizingUi) return false;
-    // An explicit reading control keeps its visible header, or the surrounding prose,
-    // in place rather than moving the reader to the end of the reply.
-    // 主动调整阅读方式时保留可见工具栏或周围正文的位置，避免把读者带到回复末尾。
+    // Reading controls preserve the visible header or prose instead of jumping to the reply's end.
+    // 调整阅读方式时保留可见工具栏或正文的位置，避免跳到回复末尾。
     stopFollowing(); cancelAnimationFrame(scrollFrame);
     const anchors = scrollAnchors(), bounds = block.getBoundingClientRect();
     const visibleHeader = bounds.top >= 0 && bounds.top < innerHeight;

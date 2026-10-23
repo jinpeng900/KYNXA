@@ -8,8 +8,8 @@ pub struct HandleIdentity {
     pub is_link: bool,
 }
 
-/// Inspect the opened object, so all service domains use the same stable link and file identity rules.
-/// 检查已打开的文件对象，各服务领域共用相同的稳定链接及文件身份规则。
+/// Check the opened object with shared link and file-identity rules.
+/// 按统一规则核对已打开对象的链接和文件身份。
 pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
     #[cfg(windows)]
     {
@@ -39,8 +39,8 @@ pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
             ) -> i32;
         }
         let mut information = HandleInformation::default();
-        // The exact BY_HANDLE_FILE_INFORMATION buffer remains live throughout this borrowed handle call.
-        // 精确匹配 BY_HANDLE_FILE_INFORMATION 的缓冲区在借用句柄调用期间始终有效。
+        // Keep the BY_HANDLE_FILE_INFORMATION buffer valid for the borrowed handle call.
+        // 借用句柄调用期间，BY_HANDLE_FILE_INFORMATION 缓冲保持有效。
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -74,8 +74,8 @@ pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
     }
 }
 
-/// A Windows change stamp detects in-place edits even when the last-write time is restored.
-/// Windows 变更时间可识别原地修改，即使调用方恢复了最后写入时间；不支持时继续核对完整字节。
+/// Windows change stamps detect edits despite restored write times; otherwise hash the bytes.
+/// Windows 变更时间可识别写入时间被还原的修改；不支持时核对文件哈希。
 pub fn change_stamp(file: &File) -> std::io::Result<Option<i64>> {
     #[cfg(windows)]
     {
@@ -109,8 +109,8 @@ pub fn change_stamp(file: &File) -> std::io::Result<Option<i64>> {
             ) -> i32;
         }
         let mut filesystem_name = [0u16; 16];
-        // Coarse timestamp filesystems cannot prove an unchanged source; they retain full hashing.
-        // 粗粒度时间戳文件系统不能证明来源未变，继续采用完整哈希，不把时间相等当成字节相等。
+        // Coarse timestamps cannot prove unchanged content; hash the full file.
+        // 粗粒度时间戳不足以证明内容未变，仍核对完整哈希。
         if unsafe {
             GetVolumeInformationByHandleW(
                 file.as_raw_handle(),
@@ -133,8 +133,8 @@ pub fn change_stamp(file: &File) -> std::io::Result<Option<i64>> {
             return Ok(None);
         }
         let mut information = BasicInformation::default();
-        // FileBasicInfo is read from the checked live handle; no cached path can substitute another file.
-        // 从已核验的活动句柄读取 FileBasicInfo，缓存路径不能替换为另一个文件对象。
+        // Read FileBasicInfo from the checked handle, not a cached path.
+        // 从已核对的句柄读取 FileBasicInfo，避免缓存路径指向其他文件。
         if unsafe {
             GetFileInformationByHandleEx(
                 file.as_raw_handle(),

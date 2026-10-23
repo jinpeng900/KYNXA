@@ -147,8 +147,8 @@ else {
             $semanticHash = if ($version.Count -eq 1 -and $version[0].PSObject.Properties['semanticSha256']) { [string]$version[0].semanticSha256 } else { '' }
             if ($version.Count -eq 1 -and -not $semanticHash -and
                 -not (Test-KynxaConfigHash -Path (Join-Path $PSScriptRoot $current.path) -ExpectedHash $version[0].sha256)) {
-                # Older packs can prove semantic identity only through their own hash-bound source configuration.
-                # 旧包仅能通过包内绑定原摘要的配置原文证明语义一致，不能从未知摘要猜测兼容版本。
+                # Verify older packs against their hash-bound source configuration, never a guessed version.
+                # 用哈希绑定的原配置核验旧包，不猜测兼容版本。
                 $configEntries = @{'native-assets/native-runtime.json'='runtime/native/licenses/native-runtime-manifest.json';
                     'native-assets/embedding.json'='runtime/embedding/builtin-multilingual/manifest.json';
                     'native-assets/mcp-runtime.json'='runtime/mcp/licenses/source-manifest.json';
@@ -219,8 +219,8 @@ else {
                 }
             }
         }
-        # Upgrade a previously prepared cache with one native batch pass, then reuse its metadata on later runs.
-        # 旧缓存首次用原生批量校验补建完成记录，后续只比较元数据，避免逐文件 PowerShell 调用。
+        # Validate old caches in one native batch; later runs compare metadata only.
+        # 旧缓存先做一次原生批量校验，后续只比较元数据。
         if (Test-KynxaResourceFiles -Root $DestinationRoot -Files @($manifest.files) -Cache $preparedFiles) {
             [IO.File]::WriteAllText((Join-Path $DestinationRoot 'resource-pack.json'), ($manifest | ConvertTo-Json -Depth 8), $utf8)
             & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $DestinationRoot

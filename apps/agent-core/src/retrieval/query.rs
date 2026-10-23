@@ -116,8 +116,8 @@ fn is_symbol_shape(value: &str) -> bool {
     )
 }
 
-/// Natural-language clues stay preferences; only explicit caller constraints can exclude a retrieval domain.
-/// 自然语言线索保持可纠正的偏好；只有调用方明确约束才排除检索领域，原话与改写依据保留。
+/// Treat language clues as preferences; exclude domains only for explicit constraints.
+/// 自然语言线索仅影响偏好，显式约束才排除检索范围。
 pub fn interpret(query: &Value, options: &Value, context: &Value, relation: &Value) -> Value {
     let text = active(query);
     let mut clues = Vec::new();

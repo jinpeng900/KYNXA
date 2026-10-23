@@ -51,7 +51,7 @@ await File.WriteAllTextAsync(pointer, "{\"version\":1,\"dataRoot\":\"old\"}");
 string originalPointer = await File.ReadAllTextAsync(pointer);
 var target = Path.Combine(root, "new");
 Directory.CreateDirectory(target); // The folder picker may return an existing empty directory.
-// 文件夹选择器可能返回已存在的空目录。
+// 文件夹选择器可能返回已有空目录。
 bool initialized = false;
 var result = await StorageMigrationService.MoveAsync(desktop, models, target, pointer, initializeTarget: async (destination, token) =>
 {
@@ -137,8 +137,8 @@ await File.WriteAllTextAsync(Path.Combine(customModels, "Conversations", "Chats"
 await StorageMigrationService.MoveAsync(desktop, customModels, customTarget, pointer);
 Check(File.Exists(Path.Combine(customTarget, "Chats", "custom-chat", "events.jsonl")), "custom conversation root relocated");
 Check(!Directory.Exists(Path.Combine(customTarget, "Models", "Conversations")), "custom root not copied twice");
-// These malformed headers exercise the pre-copy gate; real SQLite contents are checked by the native HTTP suite.
-// 这些损坏文件头验证复制前守卫；真实 SQLite 内容由原生 HTTP 套件核验。
+// Test malformed headers before copying; native HTTP tests validate SQLite content.
+// 损坏文件头验证复制前检查；SQLite 内容由原生 HTTP 测试核验。
 string taskDatabase = Path.Combine(oldRoot, "Agent", "tasks.sqlite");
 foreach (byte[] invalidHeader in new[] { new byte[12], new byte[100] })
 {

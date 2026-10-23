@@ -265,8 +265,8 @@ fn connection_contract(operation: &str, args: Value) -> Result<Value, ModelError
     Ok(value)
 }
 
-/// Read and atomically replace the same configured connections document through formal storage services.
-/// 经正式存储服务读取并原子替换同一配置连接文档，不再通过 JavaScript 保存密钥或配置。
+/// Read and atomically replace connection settings through formal storage.
+/// 经正式存储读取并原子替换连接配置。
 pub struct ModelConfigStore {
     home: PathBuf,
 }
@@ -448,8 +448,8 @@ pub fn validate_connection(mut input: Value, require_models: bool) -> Result<Val
     )
 }
 
-/// Consume a small unsupported-discovery response so the shared transport can reuse its connection.
-/// 有界消费不支持目录发现的响应，复用已建立连接；不解析错误正文、不发生成请求。
+/// Drain bounded discovery-error bodies to reuse the connection; do not parse them or generate content.
+/// 有界读完发现错误正文以复用连接；不解析正文或发起生成。
 async fn drain_discovery_response(
     response: reqwest::Response,
     cancellation: &mut watch::Receiver<bool>,

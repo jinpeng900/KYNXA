@@ -7,8 +7,8 @@ using Microsoft.Win32;
 namespace KYNXA.ToolHost;
 
 /// <summary>
-/// Discovers desktop executables and launches approved applications independently of the helper job.
-/// 发现桌面可执行文件，并将已批准的应用以独立于助手作业的生命周期启动。
+/// Discover executables and launch approved applications outside the helper job.
+/// 发现桌面程序，并在助手作业之外启动已批准应用。
 /// </summary>
 internal static class DesktopApplications
 {
@@ -25,8 +25,8 @@ internal static class DesktopApplications
     ];
 
     /// <summary>
-    /// Returns bounded executable candidates from known system apps and registry paths; it starts no application.
-    /// 有界返回已知系统应用及注册表路径中的候选可执行文件，不在发现阶段启动应用。
+    /// Return bounded candidates from known apps and registry paths without launching them.
+    /// 限量返回已知应用和注册表路径中的候选程序，不执行启动。
     /// </summary>
     internal static Dictionary<string, object?> Apps()
     {
@@ -153,8 +153,8 @@ internal static class DesktopApplications
         try
         {
             // Launched applications must never inherit this helper's gateway IPC pipes.
-            // Explicitly leave the launch-only helper job; a denied breakaway must fail, never return a short-lived GUI as success.
-            // 已启动应用不得继承网关 IPC 管道；显式脱离仅供启动的助手作业，脱离被拒绝时直接失败，不虚报随后被清理的 GUI 已成功启动。
+            // Leave the launch-only job; report failure if breakaway is denied.
+            // 应用不得继承网关 IPC 管道；必须脱离启动助手作业，失败时不虚报启动成功。
             if (!NativeMethods.CreateProcessW(
                 executable,
                 commandLine,
@@ -201,8 +201,8 @@ internal static class DesktopApplications
         }
     }
 
-    // Match the Windows command-line parser, including backslashes before quotes and the closing delimiter.
-    // 与 Windows 命令行解析规则保持一致，处理引号前与结尾反斜杠，不能简单替换或拼接参数。
+    // Match Windows quoting rules, including backslashes before quotes and the closing delimiter.
+    // 按 Windows 引用规则处理引号前和结尾反斜杠，不能直接拼接参数。
     private static string QuoteArgument(string argument)
     {
         var result = new StringBuilder("\"");

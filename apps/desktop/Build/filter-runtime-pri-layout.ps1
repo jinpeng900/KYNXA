@@ -6,9 +6,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# These are separate executable payloads. WinUI must not interpret their file
-# names or satellite languages as localized resources of the desktop UI.
-# 这些文件是独立的可执行负载；WinUI 不应将其文件名或卫星语言资源解释为桌面界面的本地化资源。
+# Keep executable payloads out of WinUI resource classification.
+# 可执行载荷不参与 WinUI 本地化资源分类。
 $layoutFile = [IO.Path]::GetFullPath($LayoutPath)
 $excludedFile = [IO.Path]::GetFullPath($ExcludedLayoutPath)
 $layoutLines = [IO.File]::ReadAllLines($layoutFile, [Text.Encoding]::UTF8)
@@ -37,11 +36,10 @@ foreach ($line in $runtimePayloadPaths) {
     if ($knownExcludedPaths.Add($line.Replace('/', '\'))) { $excludedResourcePaths.Add($line) }
 }
 
-# The SDK reads the excluded list when constructing a main package file map,
-# so these files remain ordinary payloads even when resource packs are split.
-# Do not alter the unfiltered layout, Content items, or physical bundle files.
-# SDK 构建主包文件映射时读取排除列表，拆分资源包后这些文件仍作为普通负载保留。
-# 不修改未筛选的布局清单、Content 项或实际捆绑文件。
+# The exclusion list keeps these files in the main payload when resources are split.
+# 排除列表确保资源拆包后，这些文件仍留在主载荷中。
+# Keep the original layout, Content items and bundle files unchanged.
+# 保留原布局、Content 项和实际捆绑文件。
 $utf8 = [Text.UTF8Encoding]::new($false)
 [IO.File]::WriteAllLines($excludedFile, $excludedResourcePaths, $utf8)
 [IO.File]::WriteAllLines($layoutFile, $uiResourcePaths, $utf8)

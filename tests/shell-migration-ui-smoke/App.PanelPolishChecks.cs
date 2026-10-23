@@ -135,6 +135,23 @@ public partial class App
             await SettleAsync();
             Check(ActiveId == _gateway.WorkChatId && !WorkPanelVisible && !tabs.HasOpenTabs,
                 "a saved work conversation with text but no resources gives the full column back to the transcript");
+            var taskPanel = Element<ConversationTaskPanel>("TaskPanel");
+            taskPanel.ShowConversation(workChat.Id, workProject.Id);
+            var pausedTask = new TaskRecord(Guid.NewGuid(), Guid.NewGuid().ToString(), "READ_ONLY_TASK_FIXTURE", [],
+                new TaskScope(workChat.Id, workProject.Id), null, [], new TaskBudget(256, null),
+                new TaskUsage(1, 0, 0, 0, 20, 10, 0), "paused", 1, 1, null, 0, "user-paused", 0, 0);
+            var taskDetail = new StackPanel();
+            typeof(ConversationTaskPanel).GetMethod("RenderDetail", PrivateInstance)!.Invoke(taskPanel,
+                [taskDetail, new TaskDetailResponse(pausedTask, [], [], null, []),
+                    typeof(ConversationTaskPanel).GetField("_generation", PrivateInstance)!.GetValue(taskPanel)]);
+            Check(!taskDetail.Children.OfType<Button>().Any() && taskDetail.Children.OfType<TextBlock>().Any(),
+                "a paused root renders read-only task details without execution controls");
+            Check(typeof(ConversationTaskPanel).GetEvent("ResumeRequested") is null &&
+                typeof(ConversationTaskPanel).GetMethod("SetResumePending") is null &&
+                ((ListView)typeof(ConversationTaskPanel).GetField("_list", PrivateInstance)!.GetValue(taskPanel)!).SelectionMode == ListViewSelectionMode.None,
+                "task inspection exposes no resume event or executable task selection");
+            Check(ActiveId == workChat.Id && Prompt.Text == originalWorkDraft && _gateway.Writes == 0,
+                "inspecting a paused task preserves the active chat, draft and formal execution state");
 
             ResizeInDips(800, 720);
             await WaitAsync(() => Element<Grid>("MainRegion").ActualWidth < 900 && !WorkPanelVisible,

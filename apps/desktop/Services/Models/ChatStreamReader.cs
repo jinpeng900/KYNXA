@@ -13,8 +13,8 @@ public static class ChatStreamReader
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaximumEventCharacters = 8 * 1024 * 1024;
-    // Large document writes keep their complete approval parameters within the separately bounded SSE frame.
-    // 长文写入保留完整审批参数；整体 SSE 帧仍有独立的有界保护。
+    // Preserve full write-approval parameters within the SSE frame limit.
+    // 保留完整写入审批参数，SSE 帧仍有大小上限。
     private const int MaximumToolArgumentCharacters = 1024 * 1024;
 
     public static async IAsyncEnumerable<ChatStreamEvent> ReadAsync(Stream stream,
@@ -52,8 +52,8 @@ public static class ChatStreamReader
                         throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
                     if (!ChatDurationRules.IsValid(streamEvent.DurationMs))
                         throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"));
-                    // Optional display timing must never terminate an otherwise valid reply stream.
-                    // 可选展示计时缺失或越界时忽略，不因此结束有效回复，也不改写正式结算用时。
+                    // Ignore invalid display timing without ending the stream or changing settled time.
+                    // 忽略缺失或越界的展示计时，保持有效回复和正式结算用时。
                     if (streamEvent.GenerationElapsedMs is not long elapsed || !ChatDurationRules.IsValid(elapsed)
                         || streamEvent.GenerationActive is null)
                         streamEvent = streamEvent with { GenerationElapsedMs = null, GenerationActive = null };
@@ -110,8 +110,8 @@ public static class ChatStreamReader
                         case "tool_result":
                         case "approval_required":
                             ValidateToolEvent(streamEvent);
-                            // Context maintenance is display-only, including recovery after the latest interrupted step.
-                            // 上下文维护只是展示活动，也可以接在最新中断步骤后恢复；真实工具仍须等待该轮输出完成。
+                            // Context maintenance is display-only, including after interruption; tools wait for round output.
+                            // 上下文维护只作展示，可接续中断步骤；工具仍须等本轮输出结束。
                             bool isContextActivity = streamEvent.Tool!.Name == "context.compact";
                             if (isContextActivity && (streamEvent.Type == "approval_required" ||
                                 streamEvent.Tool.Arguments!.Value.EnumerateObject().Any()))
@@ -160,8 +160,8 @@ public static class ChatStreamReader
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             break;
                         case "mcp_status":
-                            // A service discovery diagnostic does not settle the model reply or its active tools.
-                            // 服务发现诊断不结束模型回复，也不改变当前工具状态；会话身份仍经过上面的统一校验。
+                            // Discovery diagnostics preserve reply/tool state; identity checks still apply.
+                            // 发现诊断不结束回复或改变工具状态，会话身份仍统一校验。
                             if (string.IsNullOrWhiteSpace(streamEvent.ServerId) || streamEvent.ServerId.Length > 80 ||
                                 streamEvent.Ready is null || string.IsNullOrWhiteSpace(streamEvent.Code) || streamEvent.Code.Length > 200 ||
                                 string.IsNullOrWhiteSpace(streamEvent.Message) || streamEvent.Message.Length > 65536)
@@ -261,8 +261,8 @@ public static class ChatStreamReader
         if (previous.Phase == "final_answer" && segment.Phase != "final_answer") return false;
         if (previous.Status == "streaming") return true;
 
-        // Closing a round is idempotent. Later classification may promote its phase or mark an answer continuation.
-        // 同轮结束事件可幂等重放；后续分类可确定最终阶段或正文续写标记，不得借此改写已关闭的正文与摘要。
+        // Round closure is idempotent; classification may refine phase/continuation, not closed body or summary.
+        // 同轮结束可幂等重放；后续可确定阶段或续写标记，但不改已关闭的正文和摘要。
         return previous.Status == segment.Status && previous.Content == segment.Content &&
             previous.Reasoning == segment.Reasoning && previous.ReasoningDurationMs <= segment.ReasoningDurationMs &&
             (!previous.IsAnswerContinuation || segment.IsAnswerContinuation || segment.Phase == "final_answer");
@@ -280,8 +280,8 @@ public static class ChatStreamReader
         if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment =>
             !knownSegments.TryGetValue(segment.Id, out var prior) || !IsValidSegmentUpdate(prior, segment))))
             throw InvalidSegment();
-        // An interrupted model step may recover into a complete final answer; it remains a truthful commentary trace.
-        // 中断的模型步骤可以恢复并得到完整最终回答；先前中断段仍保留为真实的过程轨迹。
+        // Preserve interrupted steps as commentary even if recovery produces a final answer.
+        // 恢复后即使得到完整答案，也保留先前中断的过程记录。
         if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment =>
             segment.Status != "completed" && !(segment.Phase == "commentary" && segment.Status == "interrupted")) ||
             assistantSegments[^1].Phase != "final_answer" || assistantSegments[^1].Status != "completed"))

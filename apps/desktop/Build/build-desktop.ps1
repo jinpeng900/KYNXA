@@ -155,8 +155,8 @@ try {
             $common = @('restore','--runtime','win-x64','-p:NuGetAudit=false','--verbosity','minimal')
             if ($NuGetSource) { $common += @('--source',$NuGetSource) }
             elseif ($Offline) {
-                # Resolve changed projects from the normal package cache, with a local-only source for cache misses.
-                # 项目清单变化时仍从正常包缓存重新求解；缺包只查本地源，不静默复用过期资产或联网。
+                # Resolve changed projects from cache and local sources, without stale assets or network access.
+                # 项目变化后从缓存和本地源重新还原，不复用过期资产或联网。
                 $feed = Join-Path $stateDirectory 'nuget-feed'
                 [IO.Directory]::CreateDirectory($feed) | Out-Null
                 $common += @('--source',$feed)

@@ -247,7 +247,7 @@ if (OperatingSystem.IsWindows())
     await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, Path.Combine(fixture, "linked-source"), failurePointer), "source junction");
     await Reject(() => Task.FromResult(ExtensionPaths.Resolve(junction, null, Path.Combine(fixture, "absent.json"))), "resolver junction");
     Directory.Delete(junction); // Remove only the generated junction, never its destination.
-    // 只删除生成的目录联接，不删除其目标目录。
+    // 只删除创建的目录联接，保留目标目录。
     string hardlink = Path.Combine(source, "Skills", "mine", "linked.txt");
     var hardlinkStart = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
     foreach (string argument in new[] { "/c", "mklink", "/H", hardlink, externalSkill }) hardlinkStart.ArgumentList.Add(argument);
@@ -256,7 +256,7 @@ if (OperatingSystem.IsWindows())
     Check(hardlinkProcess.ExitCode == 0, "hardlink fixture created");
     await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, Path.Combine(fixture, "hardlinked-source"), failurePointer), "source hardlink");
     File.Delete(hardlink); // Delete only this generated link; the external file remains intact.
-    // 只删除生成的链接，保留外部文件。
+    // 只删除创建的链接，保留外部文件。
     Check(File.ReadAllText(externalSkill) == "external stays put", "hardlink target retained");
 }
 

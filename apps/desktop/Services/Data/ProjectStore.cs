@@ -17,8 +17,8 @@ public sealed record ConversationHistoryPage(Guid ConversationId, List<ChatMessa
 /// </summary>
 public sealed class ProjectStore(string dataDirectory) : IDisposable
 {
-    // Cold catalog recovery includes durable history validation; allow bounded startup time on busy machines.
-    // 冷启动目录恢复包含正式历史校验，为繁忙机器保留有界等待时间，调用方取消仍然有效。
+    // Bound cold catalog/history recovery time while respecting caller cancellation.
+    // 冷启动恢复及正式历史校验有等待上限，仍支持调用方取消。
     private readonly HttpClient _httpClient = new() { BaseAddress = ModelGatewayService.Address, Timeout = TimeSpan.FromMinutes(2) };
     private readonly SemaphoreSlim _requestGate = new(1, 1);
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
@@ -34,8 +34,8 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         LoadCatalogAsync(includeMessages: true, cancellationToken);
 
     /// <summary>
-    /// Metadata and history pages share the authoritative gateway; callers decide when to load older bodies.
-    /// 元信息与历史页共用正式网关，调用方按需要读取旧正文，不另存一套聊天状态。
+    /// Read metadata and paged history from the gateway; load older bodies on demand.
+    /// 元信息和历史页均来自网关，按需读旧正文，不另存聊天状态。
     /// </summary>
     public Task<ConversationCatalog> LoadMetadataAsync(CancellationToken cancellationToken = default) =>
         LoadCatalogAsync(includeMessages: false, cancellationToken);
@@ -81,8 +81,8 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         return page;
     }
 
-    // Reusing a page read from durable storage also restores its known IDs after display-window eviction.
-    // 正式历史页从缓存复用时，也恢复此前随展示窗口淘汰的已保存消息身份，不能把旧消息当成新提交。
+    // Restore persisted message IDs when reusing a page evicted from the display window.
+    // 复用历史页时恢复已保存的消息 ID，避免将淘汰的旧消息当成新提交。
     internal void AcceptHistoryPage(ConversationHistoryPage page)
     {
         lock (_knownUserMessagesLock)
@@ -92,7 +92,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
 
     /// <summary>
     /// Acknowledge the user's stable ID only after the gateway confirms its durable submission.
-    /// 网关确认正式提交后再确认稳定用户消息 ID，后续目录保存无需再次上传；仅 started 事件不足以确认。
+    /// 网关确认持久化后才确认用户消息 ID，后续保存不再上传；仅 started 事件不足为据。
     /// </summary>
     internal void AcceptSubmittedMessage(Guid conversationId, Guid userMessageId)
     {
@@ -228,8 +228,8 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
                 catalog = await ReadAsync(retry, cancellationToken);
             }
             else catalog = await ReadAsync(response, cancellationToken);
-            // Apply canonical mount receipts only to unchanged submitted bindings; late replies cannot erase newer local edits.
-            // 规范挂载回执只更新未再编辑的提交值；晚到响应不能覆盖等待期间新增的根或默认目录修改。
+            // Apply mount receipts only to unchanged submissions, preserving later local edits.
+            // 挂载回执只更新提交后未改的绑定，保留后续新增的根和默认目录修改。
             var savedBindings = catalog.Projects.ToDictionary(project => project.Id);
             foreach (var project in projectReferences ?? _loadedProjects)
                 if (snapshotBindings.TryGetValue(project.Id, out var submitted) && JsonElement.DeepEquals(WorkBinding(project), submitted) &&
@@ -237,8 +237,8 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
                 { project.FolderPath = saved.FolderPath; project.Mounts = saved.Mounts.ToList(); project.DefaultMountId = saved.DefaultMountId; }
             if (projectReferences is not null) _loadedProjects = projectReferences;
             AcceptCatalog(catalog);
-            // A successful metadata receipt also acknowledges submitted user IDs, without retransferring every history.
-            // 成功元信息回执同时确认本次用户消息 ID，无需重新传输全部聊天正文。
+            // Successful metadata receipts acknowledge submitted user IDs without resending history.
+            // 元信息保存成功时一并确认用户消息 ID，无需重传历史正文。
             lock (_knownUserMessagesLock)
                 foreach (var submittedChat in new[] { projects, chats }.Where(value => value is not null)
                     .SelectMany(value => value!.Value.EnumerateArray())

@@ -1,13 +1,9 @@
-//! Provider-neutral tool-change projection: keep earlier request bytes while the declared tool set grows.
-//! 与供应商无关的工具变化投影：工具集合增长时保持此前请求字节不变，按端点能力翻译成原生更新。
-//!
-//! The loop keeps choosing tools exactly as before. Only the outgoing body changes on a capable route:
-//! tools present at the series start stay first, later tools are appended with deferred loading, and an
-//! update block at the turn where each tool first appeared activates it. Any mismatch starts a new series
-//! and sends the current declarations unchanged, which is the previous behavior.
-//! 循环照旧选择工具，只在具备能力的路线上改写发出的请求体：序列开始时的工具保持在前，之后新增的工具以
-//! 延迟加载追加，并在其首次出现的轮次插入更新块激活。任一不一致都会重新开始序列并原样发送当前声明，
-//! 即此前的行为。
+//! Preserve request prefixes as tools grow; tool selection stays unchanged.
+//! 工具增加时保留请求前缀，工具选择方式不变。
+//! On supported routes, keep initial tools first, append deferred tools and activate them at their first turn.
+//! 支持的路线保留初始工具顺序，延迟追加新工具，并在首次出现的轮次激活。
+//! A mismatch starts a new series with the current declarations unchanged.
+//! 出现不一致时重建序列，原样发送当前声明。
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -141,10 +137,8 @@ fn strip_deferred(tool: &Value) -> Value {
     tool
 }
 
-/// Rewrite one built request body for the connection's tool-update capability.
-/// 按连接的工具更新能力改写一次已构建的请求体；不具备能力的路线保持原样。
-/// Returns a diagnostic of what happened, for the request's cache policy record.
-/// 返回本次投影的诊断，写入请求的缓存策略记录。
+/// Project supported tool updates and return cache-policy diagnostics; leave other routes unchanged.
+/// 投影已支持的工具更新并返回缓存策略诊断；其他路线保持原样。
 pub(crate) fn project(connection: &Value, body: &mut Value, series: &mut ToolSeries) -> Value {
     let tools = body["tools"].as_array().cloned().unwrap_or_default();
     if mode(connection) == Mode::Rebuild {
@@ -199,8 +193,6 @@ pub(crate) fn project(connection: &Value, body: &mut Value, series: &mut ToolSer
     json!({"series":"continued","additions":series.additions.len()})
 }
 
-/// Extra protocol header required by a projected body, if any.
-/// 投影后的请求体所需的额外协议头。
 pub(crate) fn beta_header(connection: &Value, body: &Value) -> Option<&'static str> {
     (mode(connection) == Mode::AdditionOnly
         && body["messages"].as_array().into_iter().flatten().any(|message| {

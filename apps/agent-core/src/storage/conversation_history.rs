@@ -355,8 +355,8 @@ pub(crate) fn read_latest(
     read_snapshot(root, location, message_ids, user_only, true)
 }
 
-/// Catalog updates need stable message identities, not every assistant body or model transcript.
-/// 目录更新只需稳定消息身份，复用同一日志版本索引，不解码所有助手正文或模型续接记录。
+/// Use the log-version index for catalog message IDs without decoding all bodies.
+/// 目录消息身份复用日志版本索引，不解码全部正文。
 pub(crate) fn read_metadata(root: &Path, location: &Value) -> Result<HistoryRead, ContractError> {
     read_snapshot(root, location, None, false, false)
 }
@@ -370,8 +370,8 @@ fn read_snapshot(
 ) -> Result<HistoryRead, ContractError> {
     conversation_logs::check_cancelled()?;
     let path = conversation_logs::directory(root, location)?.join("events.jsonl");
-    // Hold the writer boundary only while opening. Later appends/moves invalidate the checked version.
-    // 仅安全打开时借用写入边界，长扫描不占全局锁；后续追加或移动会使版本复核失败。
+    // Hold the writer lock only while opening; recheck versions after appends or moves.
+    // 仅打开时持写锁，追加或移动后须重核版本。
     let reader = {
         let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
             .lock()
@@ -474,8 +474,8 @@ fn indexed(
     owner: &str,
 ) -> Result<Arc<HistoryIndex>, ContractError> {
     let version_token = reader.version_token()?;
-    // Unchanged Windows files reuse offsets after checked-open/change-stamp verification; unknown stamps still hash bytes.
-    // Windows 文件经安全打开及变更时间复验后复用未变偏移；无法获取变更时间时仍对完整字节做哈希。
+    // Reuse offsets after Windows identity/change-stamp checks; unknown stamps require full hashing.
+    // Windows 身份及变更时间核验后复用偏移，变更时间未知时仍核对完整哈希。
     let byte_snapshot = if version_token.is_none() {
         Some(source_hash(reader)?)
     } else {
@@ -555,8 +555,8 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 retained_entries += 1;
             }
         }
-        // SDK objects remain at the codec boundary; Rust chooses eviction from oldest-to-newest size facts.
-        // SDK 原始对象留在编码边界；Rust 根据由旧到新的容量事实决定淘汰，不复制正文。
+        // Choose oldest-first eviction from size facts without copying original bodies.
+        // 根据容量事实从旧到新淘汰，不复制原始正文。
         for (index, entry) in entries.iter().enumerate() {
             if retained_bytes <= max_bytes as u64 && retained_entries <= max_entries {
                 break;
@@ -639,8 +639,8 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let mut end = boundary;
     let mut bytes = 0;
     let mut messages = Vec::new();
-    // Both directions use the same owner/version contract; the desktop can bound bodies without losing navigation.
-    // 双向分页共用归属与版本合同，桌面可限制驻留正文而不丢失前后翻页能力。
+    // Use the same owner/version checks for both paging directions.
+    // 双向分页共用归属及版本核验，限制正文驻留不影响导航。
     let positions: Box<dyn Iterator<Item = usize>> = if newer {
         Box::new(boundary..boundary.saturating_add(limit).min(index.records.len()))
     } else {
@@ -649,8 +649,8 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     for position in positions {
         conversation_logs::check_cancelled()?;
         let range = &index.records[position];
-        // A complete first message may exceed the requested page budget, but never the record cap.
-        // 首条完整消息可超过本页请求额度，但不能超过单记录硬限，不能静默截断正文。
+        // Return an oversized first message intact within the record cap; never silently truncate.
+        // 首条消息可超页预算但不可超记录硬限，不静默截断。
         if !messages.is_empty() && bytes + range.length > maximum_bytes {
             break;
         }

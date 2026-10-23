@@ -103,8 +103,8 @@ unsafe extern "system" {
     ) -> i32;
 }
 impl OwnedProcessJob {
-    /// Read only this job's checked process handles; private commit and working set are distinct point samples.
-    /// 只读取本作业已核验的进程句柄，私有提交和工作集分别返回；这是时点采样，不是内存峰值。
+    /// Sample verified job handles; private commit and working set are separate values, not peaks.
+    /// 采样本作业已核验句柄；私有提交和工作集分别返回，不代表峰值。
     pub(crate) fn memory_usage(&self) -> Result<OwnedProcessMemory, GatewayError> {
         #[cfg(windows)]
         unsafe {
@@ -191,8 +191,8 @@ impl OwnedProcessJob {
             ))
         }
     }
-    /// A launcher may exit successfully after handing off to an owned child; observe the job rather than one PID.
-    /// 启动器可能把运行交给自有子进程后正常退出；存活检查针对整个作业，不能仅检查首个 PID。
+    /// A launcher may hand off and exit; check the whole job, not just its first PID.
+    /// 启动器可能交接后退出；检查整个作业，不只看首个 PID。
     pub(crate) fn has_running_processes(&self) -> Result<bool, GatewayError> {
         #[cfg(windows)]
         unsafe {
@@ -354,8 +354,8 @@ pub(crate) fn hide(command: &mut Command) {
     command.creation_flags(0x08000000);
 }
 
-/// Check the limit before allocation, including a peer that never sends a newline.
-/// 即使对端永远不发换行，也在分配之前检查上限，避免先无限读取再验大小。
+/// Check limits before allocating, even when the peer sends no newline.
+/// 分配前检查上限，对端不发换行也不能无限读取。
 pub(crate) async fn bounded_line<T: AsyncRead + Unpin>(
     reader: &mut BufReader<T>,
     maximum_bytes: usize,
@@ -420,8 +420,8 @@ pub(crate) async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
-/// Confirm the owned process tree stopped before returning its reservation; unknown cleanup keeps the existing lease debt.
-/// 自有进程树确认退出后才归还预约；清理无法核验时保留原租约债务，不伪造释放或重派操作。
+/// Release the reservation only after confirming process-tree exit; unknown cleanup retains the lease debt.
+/// 确认自有进程树退出后才归还预约；清理未知时保留租约债务，不重派操作。
 async fn finish_helper_resources(
     owned: &OwnedProcessJob,
     lease: &mut Option<crate::resources::gateway::ResourceLease>,
@@ -678,8 +678,8 @@ async fn invoke(
         terminate(&mut child).await;
     }
     diagnostic.abort();
-    // A helper's exit alone does not certify its descendants stopped; retire the same owned job before releasing admission.
-    // 助手退出不等于子孙进程已结束；先核验同一个自有作业树，再释放准入，已批准的独立应用保持原例外。
+    // Verify the whole job exited before releasing admission; approved independent apps remain exempt.
+    // 核验整个作业退出后才释放准入；已批准的独立应用仍按例外处理。
     if let Err(error) = finish_helper_resources(&_owned, &mut lease, independent_launch).await {
         let value = receipt.get_or_insert_with(|| json!({"protocolVersion":1}));
         value["completed"] = json!(false);
@@ -758,8 +758,8 @@ async fn host_run(
             400,
         ));
     }
-    // Resolve the approved directory before dispatch so Windows short-name expansion cannot invalidate its receipt.
-    // 派发前解析已批准的目录，避免 Windows 短名称展开导致同一真实目录的回执身份误判。
+    // Resolve the approved directory before dispatch to keep Windows short-name receipts consistent.
+    // 派发前解析已批准目录，避免 Windows 长短路径导致回执身份不一致。
     let resolved_cwd = super::service_filesystem::canonical(requested_cwd, false)
         .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
     input["cwd"] = json!(super::local_files::path_text(&resolved_cwd));
@@ -862,8 +862,8 @@ async fn observe_host_start(
             } else { state });
         }
         if tokio::time::Instant::now() >= deadline {
-            // A queued job keeps its original handle; ending this observation never cancels admission or invents a dispatch.
-            // 排队任务保留原句柄；结束本次观察不取消准入，也不能虚构已经派发的未知操作。
+            // Keep the queued job handle; ending observation neither cancels admission nor proves dispatch.
+            // 保留排队任务句柄；观察结束不取消准入，也不代表已派发。
             return Ok(state);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

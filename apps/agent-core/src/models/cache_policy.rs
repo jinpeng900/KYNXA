@@ -138,8 +138,8 @@ fn cache_mark(block: &mut Value, available: &mut usize) -> bool {
 }
 
 fn anthropic(body: &mut Value, stable_system: &str) -> (usize, usize) {
-    // Existing automatic or extended-TTL policies own their ordering; adding a 5m marker before a 1h marker is invalid.
-    // 现有自动策略或长 TTL 策略自行拥有标记顺序；不能在 1h 标记前插入 5m 标记而制造无效请求。
+    // Preserve existing TTL order; a 5m marker before a 1h marker is invalid.
+    // 保留现有 TTL 顺序；5m 标记放在 1h 前会使请求无效。
     if marker_count(body) > 0 {
         return (0, 0);
     }
@@ -172,8 +172,8 @@ fn anthropic(body: &mut Value, stable_system: &str) -> (usize, usize) {
             prefix_bytes = stable_text.len();
         }
     }
-    // A rolling history anchor reuses completed tool turns; changed time, memory or permissions remain exact prefix misses.
-    // 滚动历史锚点复用已完成工具轮次；时间、记忆和权限仍原样发送，发生变化时由精确前缀比对自然失效。
+    // Reuse completed turns; time, memory and permission changes still invalidate the prefix.
+    // 复用已完成轮次；时间、记忆和权限变化仍使前缀失效。
     if slots > 0 {
         if let Some(messages) = body["messages"].as_array_mut() {
             'history: for message in messages.iter_mut().rev() {
@@ -284,8 +284,8 @@ pub(crate) fn apply(
         "stablePrefixBytes":prefix_bytes,"policyHash":&hash[..20]})
 }
 
-/// Official streaming protocols need explicit usage opt-in; unknown compatibility servers receive no extra field.
-/// 官方流式协议明确请求用量回执；未经核验的兼容服务不增加字段，避免引入参数拒绝。
+/// Request streaming usage only from verified protocols to avoid rejected fields.
+/// 仅向已核验协议请求流式计量，避免兼容服务拒绝额外字段。
 pub(crate) fn include_stream_usage(
     connection: &Value,
     model: &str,
@@ -311,8 +311,8 @@ pub(crate) fn include_stream_usage(
     }
 }
 
-/// JSON object order is deterministic, while history, tool pairs, content arrays and opaque strings stay ordered and exact.
-/// 固定 JSON 对象字段顺序；历史、工具配对、内容数组及不透明字符串保持原序与原文。
+/// Sort object keys; preserve history, tool pairs, array order and string contents.
+/// 固定对象键顺序；保留历史、工具配对、数组顺序和字符串原文。
 pub(crate) fn canonicalize_request(value: &mut Value) {
     match value {
         Value::Array(items) => items.iter_mut().for_each(canonicalize_request),

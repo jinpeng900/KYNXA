@@ -89,8 +89,8 @@ internal sealed class MainWindowTrayService : IDisposable
             else if (_taskbarCreatedMessage != 0 && message == _taskbarCreatedMessage && _isIconRegistered)
             {
                 _isIconRegistered = false;
-                // Explorer replaces its notification area after a restart; do not leave a hidden orphan window.
-                // 资源管理器重启后需重新注册通知图标，失败时恢复窗口，避免程序隐藏后无法找回。
+                // Re-register the tray icon after Explorer restarts; restore the window if it fails.
+                // 资源管理器重启后重新注册托盘图标，失败则显示窗口，避免无法找回。
                 if (!EnsureTrayIcon() && !IsWindowVisible(_windowHandle)) Restore();
             }
             else if (message == NonClientDestroyMessage) Dispose();
@@ -103,8 +103,8 @@ internal sealed class MainWindowTrayService : IDisposable
         }
 
         nint result = DefSubclassProc(window, message, wParam, lParam);
-        // A synchronous veto (for example storage migration) leaves the visible window usable and X tray-enabled.
-        // 数据迁移等同步拒绝退出后，窗口仍可操作，下一次点 X 仍应关闭到托盘。
+        // A synchronous exit veto keeps the window usable and close-to-tray enabled.
+        // 数据迁移等操作拒绝退出后，窗口仍可用，下次点 X 仍关闭到托盘。
         if (message == CloseMessage && _exitRequested && !_isDisposed && IsWindowVisible(window)) _exitRequested = false;
         return result;
     }

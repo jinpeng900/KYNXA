@@ -506,8 +506,28 @@ public partial class App : Application
             UiText.Initialize("en");
             await WaitAsync("!!document.querySelector('.message-status')?.textContent.includes('Verification failed')", "task outcome controls translate without rewriting the answer");
             UiText.Initialize(originalLanguage);
+            await CheckBackgroundEncodingNavigationAsync();
         }
         finally { _transcript.HistoryRequested -= history; }
+    }
+
+    private async Task CheckBackgroundEncodingNavigationAsync()
+    {
+        var departed = Guid.NewGuid();
+        var large = Message(departed, "user", "DEPARTED_LARGE_SOURCE\n" + new string('文', 500000));
+        _transcript.ShowConversation(departed, [large]);
+        var encode = (Task)typeof(ConversationTranscript).GetMethod("FlushAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(_transcript, null)!;
+        var current = Guid.NewGuid();
+        var latest = Message(current, "user", "ENCODED_CURRENT_BEGIN\n" + new string('字', 200000) + "\nENCODED_CURRENT_END");
+        _transcript.ShowConversation(current, [latest]);
+        await encode;
+        await WaitAsync("transcriptState().conversationId===" + JsonSerializer.Serialize(current.ToString())
+            + " && __renderCommands.at(-1).last.endsWith('ENCODED_CURRENT_END')", "navigation replaces an encoding in flight with the complete current message");
+        Check(await EvalAsync<string>("__renderCommands.at(-1).last") == latest.Message.Content,
+            "background JSON encoding preserves every character and both endpoints of a large latest message");
+        Check(await EvalAsync<bool>("!__transcriptSmoke.bodyText().includes('DEPARTED_LARGE_SOURCE')"),
+            "an encoding from a departed conversation cannot repaint the active conversation");
     }
 
     private async Task CheckSelectionAndCopyAsync()

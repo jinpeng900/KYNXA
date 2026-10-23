@@ -59,8 +59,8 @@ internal static class HostTerminalRunner
                 }
             };
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set host terminal job limits");
-            // Large logs only limit what is retained; the command keeps running and its real exit decides completion.
-            // 大量日志只限制保留内容；命令继续运行，由真实退出决定是否完成，不再因输出量终止进程树。
+            // Bound retained logs without stopping the command; completion follows its real exit.
+            // 只限制保留日志，不终止命令；是否完成以真实退出为准。
             var output = new BoundedOutput(jobHandle, shell == "cmd", truncateOnOverflow: true);
             var (stdout, stderr) = StartHostShell(shell, request.Script!, cwd, jobHandle, ref processInformation, output, cancellationToken);
             started = true;
@@ -191,9 +191,9 @@ internal static class HostTerminalRunner
                 : QuoteArgument(executable) + " -NoProfile -NonInteractive -Command " + QuoteArgument(powershellWrapper);
             if (arguments.Length >= 32767)
                 throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "The effective shell command line exceeds the Windows limit.");
-            // The original script remains a separately parsed script block: leading using/param syntax is preserved.
-            // A private, per-child source variable also avoids command-line expansion of a 16K quoted script.
-            // 原脚本保持独立解析的脚本块，以保留开头的 using/param 语法；每个子进程独有的源变量也避免在命令行展开 16K 引号脚本。
+            // Parse the script separately to preserve leading using/param syntax.
+            // A per-child source variable avoids expanding 16K quoted scripts on the command line.
+            // 独立解析脚本以保留开头的 using/param；各子进程用独有源变量，避免命令行展开 16K 引号脚本。
             if (shell == "powershell") environmentBlock = Marshal.StringToHGlobalUni(BuildEnvironment(sourceVariable, script));
             cancellationToken.ThrowIfCancellationRequested();
             // Host execution preserves the application's environment, including user-configured application PATH.
@@ -316,8 +316,8 @@ internal static class HostTerminalRunner
                     line.Position = 0;
                 }
                 PublishDelta(channel, decoded.ToString());
-                // Keep draining a background job after its retained output fills; ordinary calls retain their termination policy.
-                // 后台作业的保留日志满后仍持续排空管道；普通调用继续遵守原有的超量终止策略。
+                // Keep draining full background logs; ordinary calls retain their output-limit policy.
+                // 后台日志满后仍排空管道；普通调用沿用原输出超限策略。
                 if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0 && !truncateOnOverflow)
                     TerminateJobObject(jobHandle, 126);
             }
@@ -389,9 +389,9 @@ internal static class HostTerminalRunner
             catch (DecoderFallbackException) { result.Append(oem.GetString(bytes, start, count)); }
             start = end + 1;
         }
-        // Arbitrary encodings mixed within one line, or OEM bytes also valid as UTF-8, are inherently ambiguous.
-        // The receipt names this per-line policy rather than claiming lossless decoding of every binary stream.
-        // 同一行混合编码或同时满足 UTF-8 的 OEM 字节存在固有歧义；回执说明逐行解码策略，不声称任意二进制流都能无损解码。
+        // Mixed encodings and OEM bytes also valid as UTF-8 are ambiguous.
+        // Record the per-line policy without claiming lossless decoding of arbitrary bytes.
+        // 行内混合编码或同时符合 UTF-8 的 OEM 字节有歧义；回执注明逐行策略，不保证任意字节无损解码。
         return result.ToString();
     }
 

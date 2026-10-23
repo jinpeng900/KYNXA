@@ -132,8 +132,8 @@ fn spreadsheet_xml_fallback(xml: &[u8]) -> Result<Option<&'static str>, GatewayE
     }
 }
 
-/// Inspect bounded package metadata/XML without unpacking media; ordinary layouts and formulas stay direct.
-/// 只检查有界包目录和XML，不解压媒体或创建成员路径；普通母版、布局、表格和公式缓存直接展示。
+/// Check bounded package metadata/XML without unpacking media; ordinary Office layouts stay direct.
+/// 有界检查包目录和 XML，不解压媒体或创建成员路径；普通 Office 布局直接展示。
 fn office_package_fallback(bytes: &[u8], kind: &str) -> Result<Option<&'static str>, GatewayError> {
     let (directory, main, unsupported): (&str, &str, &[&str]) = match kind {
         "docx" => ("word/", "word/document.xml", &["word/embeddings/", "word/charts/", "word/diagrams/", "word/activeX/"]),
@@ -175,8 +175,8 @@ fn office_package_fallback(bytes: &[u8], kind: &str) -> Result<Option<&'static s
         if name.starts_with(directory) && name.ends_with(".xml") && !entry.is_dir() {
             expanded_xml = expanded_xml.saturating_add(entry.size());
             if entry.size() > xml_part_limit || expanded_xml > xml_budget { fallback = Some("large-xml"); }
-            // Slide/sheet renderers validate each requested part before creating DOM; do not inflate their entire tail here.
-            // 幻灯片和表格渲染器在生成 DOM 前核验各自部件，此处保留全包容量检查，不预先解压所有后续页。
+            // Check total capacity here; slide/sheet renderers validate parts on demand before creating DOM.
+            // 此处检查总容量；幻灯片和表格按需核验部件后生成 DOM，不预解压后续页。
             if kind == "docx" || name == main { xml_parts.push(index); }
         }
     }

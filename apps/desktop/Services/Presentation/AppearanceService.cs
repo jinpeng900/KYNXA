@@ -112,8 +112,8 @@ public static class AppearanceService
     {
         if (SystemAppearanceRefreshQueued || UiDispatcher is not { } dispatcher) return;
         SystemAppearanceRefreshQueued = true;
-        // Resolve outside the native callback, after Windows has processed its theme notification.
-        // 脱离原生回调后解析，确保 Windows 已处理主题通知，也避免托管异常跨越原生回调边界。
+        // Resolve after the native theme callback to avoid stale state and escaping exceptions.
+        // 原生主题回调结束后再解析，避免读旧状态或让托管异常越界。
         if (!dispatcher.TryEnqueue(() =>
         {
             SystemAppearanceRefreshQueued = false;
@@ -138,8 +138,8 @@ public static class AppearanceService
 
     private static bool TryEraseWindowBackground(nint window, nint deviceContext)
     {
-        // Native erasure can run before XAML paints and after Closed clears its content; keep the current palette throughout.
-        // 原生背景擦除可能发生在 XAML 绘制前或 Closed 清空内容后；整个窗口生命周期沿用当前配色。
+        // Keep the palette through native erasure, including before XAML paint and after Closed.
+        // 原生擦除可能早于 XAML 绘制或晚于 Closed；始终沿用当前配色。
         if (deviceContext == 0) return false;
         try
         {
@@ -311,8 +311,8 @@ public static class AppearanceService
         string highlight = Hex(UIElementType.Highlight);
         string highlightText = Hex(UIElementType.HighlightText);
         string link = Hex(UIElementType.Hotlight);
-        // High contrast honors the OS scheme, and never persists its temporary override as a custom palette.
-        // 高对比度尊重系统方案，临时覆盖不写回用户保存的自定义配色。
+        // Follow system high contrast without saving its temporary colors as custom preferences.
+        // 高对比度沿用系统方案，临时颜色不写回自定义配色。
         return preset with
         {
             IsDark = Luminance(ParseColor(main)) < 0.5, IsHighContrast = true,
@@ -396,8 +396,8 @@ public static class AppearanceService
             }
             OwnedBrushes.Add(key, brush);
         }
-        // Mutate application-owned brushes so existing StaticResource references remain valid.
-        // 只更新应用自有画刷的颜色，保留现有 StaticResource 引用，不重复挂载同一个 XAML 对象。
+        // Update owned brushes in place to preserve StaticResource references.
+        // 原位更新应用画刷，保留 StaticResource 引用，避免重复挂载 XAML 对象。
         try { brush.Color = ParseColor(hex); }
         catch (COMException error)
         {
@@ -407,8 +407,8 @@ public static class AppearanceService
 
     private static SolidColorBrush? FindApplicationBrush(ResourceDictionary resources, string key)
     {
-        // Enumeration examines local entries; TryGetValue also resolves SDK theme resources we must not reparent.
-        // 枚举检查字典本地条目；TryGetValue 还会解析 SDK 主题资源，不能将那些对象重新挂到应用字典。
+        // Enumerate local entries; TryGetValue may return SDK brushes that cannot be reparented.
+        // 枚举只检查本地条目；TryGetValue 可能返回不能重新挂载的 SDK 画刷。
         foreach (var resource in resources)
             if (Equals(resource.Key, key) && resource.Value is SolidColorBrush applicationBrush) return applicationBrush;
         foreach (var merged in resources.MergedDictionaries.Reverse())

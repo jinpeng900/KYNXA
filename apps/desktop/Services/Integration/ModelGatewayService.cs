@@ -21,7 +21,7 @@ public static class ModelGatewayService
         ?? "http://127.0.0.1:5218");
 
     /// <summary>Send the saved selection to the background preparation service after gateway readiness.</summary>
-    /// <remarks>网关就绪后只提交已存选择到后台准备服务；不等待权重就绪，不加入消息发送前置。</remarks>
+    /// <remarks>网关就绪后提交已存选择，后台准备权重，不阻塞消息发送。</remarks>
     public static async Task WarmUpModelsAsync(string? providerId = null, string? modelId = null,
         CancellationToken cancellationToken = default)
     {
@@ -91,8 +91,8 @@ public static class ModelGatewayService
         Task readiness;
         lock (ReadinessSync)
         {
-            // Concurrent catalog, preparation and chat requests share one check instead of queuing health round trips.
-            // 目录、预准备与聊天并发时共享一次检查，不再逐个排队探测；完成后下次请求仍核对协议和存储范围。
+            // Concurrent catalog, preparation and chat requests share one readiness check.
+            // 目录、准备和聊天并发共用一次检查；后续请求仍核对协议及存储范围。
             if (_readinessTask is null || _readinessTask.IsCompleted || _readinessAddress != address)
             {
                 _readinessAddress = address;

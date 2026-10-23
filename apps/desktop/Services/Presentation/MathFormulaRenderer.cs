@@ -187,7 +187,7 @@ public static class MathFormulaRenderer
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or NotSupportedException)
         {
             return null; // Unsupported/incomplete LaTeX remains readable source.
-            // 不支持或未完成的 LaTeX 仍以可读源文展示。
+            // 不支持或未完成的 LaTeX 仍显示可读源文。
         }
     }
 }

@@ -282,7 +282,7 @@
     },
     {
       "name": "filesystem.read",
-      "description": "Read UTF-8 text (file <=1 MiB) with full-file SHA-256. Optional startLine/endLine select inclusive 1-based lines. Continue nextOffset while hasMore, retaining the same line range; restart if hash changes.",
+      "description": "Read UTF-8 or BOM-marked UTF-16LE text from files up to 16 MiB with full-file SHA-256. Reading is streamed; each output page remains limited by maxChars (at most 64000 UTF-16 units). Optional startLine/endLine select inclusive 1-based lines. Supply the search result hash or previous page hash as expectedSha256; continue nextOffset while hasMore, retaining the same line range. A changed version must be searched/read again. This does not increase the 1 MiB text write/edit limit.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -298,7 +298,8 @@
           "maxBytes": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048576
+            "maximum": 16777216,
+            "description": "Maximum source file bytes, not response page bytes; defaults to 16 MiB."
           },
           "maxChars": {
             "type": "integer",
@@ -308,18 +309,23 @@
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 1048576,
+            "maximum": 16777216,
             "description": "Absolute UTF-16 position; use nextOffset to avoid splitting characters."
           },
           "startLine": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048577
+            "maximum": 16777217
           },
           "endLine": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048577
+            "maximum": 16777217
+          },
+          "expectedSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Full-file SHA-256 from filesystem.search or a prior page; rejects stale reads before returning any content."
           }
         },
         "required": [
@@ -1739,7 +1745,7 @@
     },
     {
       "name": "tool.result.read",
-      "description": "Page this chat's saved result by opaque id. Typed media references; no private MCP metadata.",
+      "description": "Read this chat's immutable saved result by opaque id. Offsets are UTF-16 positions in its public projected JSON, not original document offsets. While hasMore is true, continue with nextOffset and the same id/resultRef.sha256; stop paging when false. A successful archive read does not mean the original operation succeeded or that the source document was fully read. Working summaries are derived context, not original evidence. Typed media references; no private MCP metadata.",
       "inputSchema": {
         "type": "object",
         "properties": {

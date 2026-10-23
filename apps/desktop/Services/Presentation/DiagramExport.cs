@@ -149,8 +149,8 @@ public static class DiagramExport
             int separator = declaration.IndexOf(':');
             if (separator <= 0) throw new InvalidDataException("Unsupported diagram SVG style.");
             string property = declaration[..separator].Trim(), value = declaration[(separator + 1)..].Trim();
-            // Only the root document may use these fixed responsive dimensions; geometry remains numeric and inert.
-            // 仅根文档允许这两个固定响应式尺寸；图形节点仍使用明确数值，不能借此放宽任意样式。
+            // Allow fixed responsive sizes only on the root; keep geometry numeric and inert.
+            // 仅根文档允许这两个响应式尺寸；图形仍限明确数值，不放宽样式。
             if (isRoot && (property == "width" && value == "100%" || property == "height" && value == "100vh")) continue;
             if (isRoot && property == "background-color" && value.Length == 7 && value[0] == '#' && value.Skip(1).All(Uri.IsHexDigit)) continue;
             if (!StyleProperties.Contains(property))
@@ -298,8 +298,8 @@ public static class DiagramExport
     public static string CreateSuggestedFileName(string format)
     {
         if (format is not ("svg" or "png")) throw new ArgumentException("Unsupported diagram export format.", nameof(format));
-        // A safe local timestamp plus process sequence keeps repeated exports distinct even within one millisecond.
-        // 安全的本机时间加进程序号让同一毫秒内的重复导出也有独立文件名，不读取聊天文本或路径。
+        // Use a safe timestamp and process sequence to distinguish same-millisecond exports.
+        // 用安全时间戳和进程序号区分同毫秒导出，不读取聊天文本或路径。
         return "KYNXA-diagram-" + format + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture)
             + "-" + Interlocked.Increment(ref _fileNameSequence).ToString("x4", CultureInfo.InvariantCulture);
     }

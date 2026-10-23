@@ -304,6 +304,37 @@ fn partial_work_can_resume_same_identity_without_reviving_completed_or_cancelled
 }
 
 #[test]
+fn explicit_revision_keeps_the_settled_root_and_receipts_without_reviving_cancelled_work() {
+    let fixture = Fixture::new();
+    let task = fixture.task("explicit-root-revision", None);
+    let attempt = fixture.attempt(&task);
+    fixture.repository.record_operation(&attempt.token, &operation("saved-before-revision")).unwrap();
+    fixture.repository.dispatch_operation(&attempt.token, "saved-before-revision").unwrap();
+    fixture.repository.finish_operation(&attempt.token, "saved-before-revision", OperationState::Succeeded,
+        Some(json!({"id":"original-success"})), None).unwrap();
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    let completed = fixture.repository.transition(&attempt.token, current.version, TaskState::Completed, None).unwrap();
+    assert!(fixture.repository.control(&task.task_id, completed.version, TaskControl::Revise).is_err());
+    fixture.repository.release_attempt(&attempt.token, "settled-completion").unwrap();
+    assert!(fixture.repository.control(&task.task_id, completed.version, TaskControl::Resume).is_err());
+    let revised = fixture.repository.control(&task.task_id, completed.version, TaskControl::Revise).unwrap();
+    assert_eq!(revised.task_id, task.task_id);
+    assert_eq!(revised.request_id, task.request_id);
+    assert_eq!(revised.goal, task.goal);
+    assert_eq!(revised.acceptance, task.acceptance);
+    assert_eq!(revised.input_reference, task.input_reference);
+    assert_eq!(revised.state, TaskState::Queued);
+    assert_eq!(revised.stop_reason.as_deref(), Some("user-requested-revision"));
+    assert_eq!(fixture.repository.control(&task.task_id, completed.version, TaskControl::Revise).unwrap().version, revised.version);
+    assert_eq!(fixture.repository.operation(&task.task_id, "saved-before-revision").unwrap().unwrap().state, OperationState::Succeeded);
+    let child = fixture.task("child-cannot-revise-itself", Some(&revised));
+    assert!(fixture.repository.control(&child.task_id, child.version, TaskControl::Revise).is_err());
+    let cancelled = fixture.task("cancelled-not-revised", None);
+    let cancelled = fixture.repository.control(&cancelled.task_id, cancelled.version, TaskControl::Cancel).unwrap();
+    assert!(fixture.repository.control(&cancelled.task_id, cancelled.version, TaskControl::Revise).is_err());
+}
+
+#[test]
 fn unknown_model_cost_acknowledgement_preserves_uncertainty_and_allows_later_real_settlement() {
     let fixture=Fixture::new();
     let task=fixture.task("unknown-model-cost",None);
@@ -674,6 +705,29 @@ fn running_user_steering_retains_execution_and_unfinished_children() {
     assert_eq!(changed.stop_reason, running.stop_reason);
     assert_eq!(fixture.repository.load(&child.task_id).unwrap().state, child.state);
     fixture.repository.transition(&attempt.token, changed.version, TaskState::WaitingChildren, None).unwrap();
+}
+
+#[test]
+fn steering_message_has_one_root_per_chat_and_retries_keep_the_original_receipt() {
+    let fixture = Fixture::new();
+    let first = fixture.task("steering-owner-first", None);
+    let second = fixture.task("steering-owner-second", None);
+    let message = uuid::Uuid::new_v4().to_string();
+    let hash = "b".repeat(64);
+    let accepted = fixture.repository.record_user_steering(&first.task_id, first.version, &message, "continue", &hash).unwrap();
+    assert_eq!(fixture.repository.user_steering_roots(&first.scope.conversation_id, &message).unwrap(), vec![first.task_id.clone()]);
+    let rejected = fixture.repository.record_user_steering(&second.task_id, second.version, &message, "continue", &hash).unwrap_err();
+    assert_eq!(rejected.code(), "TASK_STEERING_TARGET_CONFLICT");
+    assert_eq!(fixture.repository.load(&second.task_id).unwrap().version, second.version);
+    assert!(fixture.repository.user_steering(&second.task_id).unwrap().is_empty());
+    let retry = fixture.repository.record_user_steering(&first.task_id, first.version, &message, "continue", &hash).unwrap();
+    assert_eq!(retry.version, accepted.version);
+    assert_eq!(fixture.repository.user_steering(&first.task_id).unwrap().len(), 1);
+    let mut other_chat = new_task("steering-owner-other-chat");
+    other_chat.scope.conversation_id = uuid::Uuid::new_v4().to_string();
+    let other = fixture.repository.accept_task(&other_chat).unwrap();
+    fixture.repository.record_user_steering(&other.task_id, other.version, &message, "continue", &hash).unwrap();
+    assert_eq!(fixture.repository.user_steering_roots(&first.scope.conversation_id, &message).unwrap(), vec![first.task_id]);
 }
 
 fn operation(id: &str) -> OperationIntent {

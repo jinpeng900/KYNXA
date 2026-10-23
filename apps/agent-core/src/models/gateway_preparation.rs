@@ -113,8 +113,8 @@ impl PreparationService {
         })
     }
 
-    /// Accept a queue quickly; request completion never means that a model is already loaded.
-    /// 快速接受准备队列；请求接受不等于模型已装载，空选择保留当前明确选择，配置和选择变更使旧结果失效。
+    /// Queue without waiting for load; keep the current choice on empty input and invalidate stale configuration results.
+    /// 接受排队不代表已装载；空输入保留当前选择，配置或选择变化使旧结果失效。
     pub async fn schedule(
         self: &Arc<Self>,
         store: ModelConfigStore,
@@ -232,8 +232,8 @@ impl PreparationService {
         }).await.unwrap_or(false)
     }
 
-    /// Join only the selected local preload; completed or unknown preparation still permits a real request.
-    /// 仅等待当前选择的本地预载，避免同一权重重复准入；结束或未知回执仍交正式请求核验，不等待其他连接。
+    /// Join only the selected local preload; completed or unknown results are checked by the real request.
+    /// 仅复用当前本地预载等待，避免重复准入；结束或未知结果交正式请求核验。
     pub async fn wait_model(
         &self,
         provider_id: &str,

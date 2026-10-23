@@ -211,8 +211,8 @@ fn settings_optional_fields(
     }
 }
 
-/// Optionality belongs to the contract, while Node projects only actual JavaScript undefined values.
-/// 可选字段归合同管理；Node 只投影真实 JavaScript undefined，不把用户对象解释成缺省标记。
+/// Declare optional fields explicitly; user objects are not omission markers.
+/// 显式声明可选字段，不将用户对象当作缺省标记。
 fn undefined_policy(arguments: &Value) -> Value {
     let operation = arguments["operation"].as_str().unwrap_or("");
     let mut optional_paths = Vec::new();

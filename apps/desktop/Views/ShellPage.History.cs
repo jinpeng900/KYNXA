@@ -121,21 +121,22 @@ public sealed partial class ShellPage
             if (_projectViewClosed || _historyLifetime.IsCancellationRequested) return;
             if (direction == "refresh" && ActiveChatId == chat.Id && !await ConversationMessages.IsFollowingLatestAsync(chat.Id))
             {
-                // A background refresh must not replace the page being read or selected; keep it ready for explicit latest/reopen.
-                // 后台刷新不替换正在阅读或选择的页面；保留新最近页，供明确跳转或再次打开时使用。
+                // Keep refreshed history ready for latest/reopen without replacing the reader's page.
+                // 后台新页留待跳转或重开，不替换正在阅读或选择的页面。
                 state.LatestPage = page; state.LatestPageCharacters = measured.Page; state.LatestPagePending = true;
                 state.CachedCharacters = state.Window.Characters + measured.Page + measured.Preserved;
                 PublishHistoryAvailability(state);
                 return;
             }
-            // New sends can arrive during background measurement; capture the live tail again before replacement.
-            // 后台统计期间仍可能发送新消息，替换历史窗口前再次保留即时尾部，不能丢掉刚发送的原文。
+            // Re-capture the live tail before replacement to preserve messages sent during measurement.
+            // 替换历史窗口前重取实时尾部，保留后台统计期间新发的消息。
             preserved = PreserveLocalHistory(chat);
             chat.Messages = state.Window.Apply(page, measured.Page, newer, reset, preserved);
             if (!page.HasNewer) { state.LatestPage = page; state.LatestPageCharacters = measured.Page; }
             state.LatestPagePending = false;
             state.ProjectionVersion++;
-            state.CachedCharacters = state.Window.Characters + measured.Preserved;
+            state.CachedCharacters = state.Window.Characters + measured.Preserved
+                + (state.Window.HasNewer ? state.LatestPageCharacters : 0);
             _projectStore.RetainHistoryProjection(chat.Id, chat.Messages.Select(message => message.Id).ToHashSet());
             state.Initialized = true;
             state.HasMore = state.Window.HasOlder;
@@ -144,7 +145,9 @@ public sealed partial class ShellPage
             if (ActiveChatId == chat.Id) UpdateConversationPresentation(openAtBottom: direction == "latest");
             PublishHistoryAvailability(state);
             TrimInactiveHistory();
-            _ = MeasureHistoryProjectionAsync(state);
+            // Page totals are already measured; only a live local tail can add work outside the page window.
+            // 分页总量已经统计，只有本机实时尾部可能在页面窗口之外新增内容。
+            if (preserved.Count > 0) _ = MeasureHistoryProjectionAsync(state);
         }
         catch (OperationCanceledException) when (_historyLifetime.IsCancellationRequested) { }
         catch (Exception error)
@@ -160,8 +163,8 @@ public sealed partial class ShellPage
             if (ActiveChatId == state.Chat.Id)
                 RecoverRunningTaskObservation(state.Chat, FindChat(state.Chat.Id).Project?.Id);
         }
-        // Display the small recent tail before fetching the ordinary page; reuse refresh anchoring for readers who scroll up.
-        // 最近尾部显示后再后台补齐普通页；用户已上翻时沿用刷新锚点保护，不替换正在阅读的内容。
+        // Show the recent tail first; fetch the full page without disturbing readers who scroll up.
+        // 先显示最近尾部，再后台补页；用户上翻时保留阅读锚点和内容。
         if (direction == "initial" && state.Initialized && state.HasMore && !_projectViewClosed
             && ActiveChatId == state.Chat.Id && !_historyLifetime.IsCancellationRequested)
             _ = LoadHistoryAsync(state, "refresh");

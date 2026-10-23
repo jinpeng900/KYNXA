@@ -197,8 +197,8 @@ public partial class App
         PresentationClientToScreen(childHandle, ref childPoint);
         string target = child.GetType().Name, caseName = _presentationCase;
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        // This sampler owns only captured native handles and coordinates, so it keeps observing during synchronous SDK teardown.
-        // 采样器仅持有已捕获的原生句柄和坐标，SDK 同步关闭阻塞 UI 线程时仍可观察真实合成帧。
+        // Captured handles and coordinates let sampling continue during synchronous SDK teardown.
+        // 采样仅依赖已捕获句柄和坐标，SDK 同步关闭阻塞界面时仍能观察合成帧。
         var sampling = Task.Run(async () =>
         {
             var elapsed = Stopwatch.StartNew();
@@ -360,8 +360,8 @@ public partial class App
     private PresentationFrame? RecordOpeningNativeFrame(nint handle, string target, string caseName, string phase, ref long dismissedTicks,
         PresentationPoint? screenPoint = null)
     {
-        // Snapshot ordering before native queries and pixel I/O; a Closed callback during GetPixel cannot rewrite this sample's order.
-        // 在原生查询与像素读取前捕获时序；GetPixel 期间到达的 Closed 不得将当前样本改判为关闭后采样。
+        // Snapshot ordering before native reads; Closed during GetPixel must not reclassify the sample.
+        // 原生查询和读像素前固定时序，GetPixel 期间的 Closed 不改变样本归属。
         long sampleStartedTicks = Stopwatch.GetTimestamp(), dismissedTicksAtSample = Volatile.Read(ref dismissedTicks);
         if (!PresentationIsWindow(handle) || !PresentationIsVisible(handle) || PresentationIsIconic(handle) ||
             !PresentationClientRect(handle, out var client) || client.Right < 25 || client.Bottom < 25 ||
@@ -429,8 +429,8 @@ public partial class App
         void Dismissed(object? sender, object args) => Interlocked.CompareExchange(ref dismissedTicks, Stopwatch.GetTimestamp(), 0);
         void PresenterUnloaded(object sender, RoutedEventArgs args) => Dismissed(sender, args);
         void PopupClosed(object? sender, object args) => Interlocked.CompareExchange(ref popupClosedTicks, Stopwatch.GetTimestamp(), 0);
-        // More's Popup.Closed notification can arrive asynchronously after content unload; only the actual presenter unload gates order.
-        // 更多菜单的 Popup.Closed 可在内容卸载后异步迟到；顺序门槛使用实际 presenter 卸载，弹出层回调仅保留诊断时间。
+        // Gate ordering on presenter unload; Popup.Closed may arrive later.
+        // 以 presenter 卸载判断顺序；Popup.Closed 可能迟到，仅记录诊断时间。
         if (entry.MenuPresenter is not null) entry.MenuPresenter.Unloaded += PresenterUnloaded;
         if (entry.MenuPopup is not null) entry.MenuPopup.Closed += PopupClosed;
         if (entry.PickerFlyout is not null) entry.PickerFlyout.Closed += Dismissed;

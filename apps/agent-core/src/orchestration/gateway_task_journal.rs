@@ -1,5 +1,5 @@
-//! Thin I/O bridge from the existing request loop to its one persistent task repository.
-//! 现有请求循环到唯一任务仓储的薄 I/O 接线；不复制工具原文、模型事实或资源账本。
+//! Connect the request loop to its single task repository without duplicating ledgers.
+//! 请求循环复用唯一任务仓储，不复制账本。
 
 use crate::gateway_contract::GatewayError;
 use crate::storage::{managed_files, task_repository::*};
@@ -64,8 +64,8 @@ mod durability_tests {
     }
 }
 
-/// An attempt owns this bridge; stable work identity stays in TaskRepository across replacement.
-/// 尝试拥有本接线；更换执行者时稳定工作身份和已取得回执继续由 TaskRepository 保存。
+/// The attempt owns this bridge; TaskRepository retains task IDs and receipts across replacement.
+/// 尝试持有本接线，更换执行者后任务身份及回执仍由 TaskRepository 保留。
 pub struct TaskJournal {
     repository: Arc<TaskRepository>,
     root: PathBuf,
@@ -210,8 +210,8 @@ impl TaskJournal {
         }
     }
 
-    /// Queue compact controls, then batch disk writes outside streaming/model execution.
-    /// 小型控制事件先入队；流式和模型执行路径不随每个 token 同步写 SQLite。
+    /// Queue controls and batch writes instead of synchronously writing SQLite per token.
+    /// 控制事件入队后批量落盘，不逐 token 同步写 SQLite。
     pub fn emit_control(self: &Arc<Self>, kind: &str, payload: &Value) -> Result<()> {
         if self.is_released() {
             return Err(GatewayError::new(
@@ -281,8 +281,8 @@ impl TaskJournal {
         loop {
             tokio::select! {_=tokio::time::sleep(Duration::from_millis(100))=>{},_=self.wake_flush.notified()=>{}}
             let succeeded = self.flush().await.is_ok();
-            // Reset scheduling under the buffer lock so an arriving last event cannot be stranded.
-            // 在缓存锁内复位调度标志，避免最后一个晚到事件在后台等待时漏掉定期持久化。
+            // Reset scheduling under the buffer lock to avoid stranding late events.
+            // 缓存锁内复位调度，避免遗漏晚到事件。
             let Ok(pending) = self.pending.lock() else {
                 self.scheduled.store(false, Ordering::Release);
                 break;
@@ -303,8 +303,8 @@ impl TaskJournal {
                     500,
                 )
             })?;
-            // Keep originals owned by the journal until commit acknowledgement, including future cancellation.
-            // 提交确认前原事件始终归日志所有；等待future被取消也不能丢掉待确认正文。
+            // Retain original events until commit acknowledgement, even if the waiting future is cancelled.
+            // 提交确认前保留原事件，等待 Future 取消也不丢失。
             pending.events.clone()
         };
         if batch.is_empty() {
@@ -314,8 +314,8 @@ impl TaskJournal {
         let token = self.token.clone();
         let event_ids = batch.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>();
         let result = tokio::task::spawn_blocking(move || {
-            // Stable event IDs make a partly committed batch safe to replay after a failure.
-            // 稳定事件 ID 允许部分批次提交后安全重放，单次事务仍遵守仓储的 512 条上限。
+            // Stable IDs allow replay after partial commits; keep each transaction within 512 events.
+            // 稳定 ID 支持部分提交后重放，单次事务仍不超 512 条。
             for portion in batch.chunks(512) {
                 repository.append_events(&token, portion)?;
             }
@@ -365,8 +365,8 @@ impl TaskJournal {
         if let Ok(mut saved) = self.last_flush_error.lock() { *saved = Some(error); }
     }
 
-    /// Only task-owned work context/logs use blobs; existing chat/tool originals stay referenced.
-    /// 仅任务自己的工作上下文、日志使用正文对象；已有聊天/工具原文继续按正式引用回读。
+    /// Store task context/logs as blobs; reference existing chat/tool originals.
+    /// 任务上下文及日志存正文对象，已有聊天和工具原文仅保留引用。
     pub async fn save_task_blob(&self, kind: &str, content: &Value) -> Result<TaskArtifact> {
         let bytes = serde_json::to_vec(content).map_err(|_| {
             GatewayError::new(
@@ -502,8 +502,8 @@ impl TaskJournal {
         self.flush().await?;
         Ok(self.repository.save_checkpoint(&self.token, checkpoint)?)
     }
-    /// A root work snapshot is private task state, bound to the original request, scope and provider identity.
-    /// 根工作快照属于私有任务状态，绑定原请求、权限范围和供应商身份，不作为公开工具证据。
+    /// Bind private root snapshots to request, scope and provider; they are not public tool evidence.
+    /// 根私有快照绑定请求、范围及供应商，不作公开工具证据。
     pub async fn save_root_work_context(
         &self,
         request_id: &str,
@@ -526,8 +526,8 @@ impl TaskJournal {
         })?;
         self.save_blob("task-checkpoint", &bytes).await
     }
-    /// Legacy checkpoints have no sidecar; malformed or foreign snapshots cannot silently become trusted context.
-    /// 旧检查点没有侧车时安全降级；损坏或跨任务快照不能静默升级为可信上下文。
+    /// Fall back for missing sidecars; reject corrupt or foreign snapshots as trusted context.
+    /// 缺少侧车时安全回退，不信任损坏或跨任务快照。
     pub async fn read_root_work_context(
         &self,
         assistant_message_id: &str,
@@ -610,8 +610,8 @@ impl TaskJournal {
         &self, id: &str, dispatched: bool, usage: &TaskUsage,
         provider_usage: Option<crate::storage::task_repository::ProviderTokenUsage>,
     ) -> Result<ModelRequestReservation> {
-        // The real I/O outcome precedes accounting, so a crash between the two retains verifiable settlement facts.
-        // 真实 I/O 结果先于计量结算落盘，使两步之间崩溃后仍有可核验的精确结果。
+        // Persist I/O outcomes before accounting so crashes retain verifiable facts.
+        // 先保存 I/O 结果再结算，确保崩溃后仍可核验。
         let mut receipt = json!({"reservationId":id,"attemptId":self.token.attempt_id,"dispatched":dispatched,"usage":usage});
         if let Some(provider) = &provider_usage { receipt["providerUsage"] = json!(provider); }
         self.repository.append_events(&self.token, &[(
@@ -650,8 +650,8 @@ impl TaskJournal {
         )?)
     }
 
-    /// Settle only native I/O evidence already persisted before interruption; this never calls a model or repeats a tool.
-    /// 只结算中断前已落盘的原生 I/O 证据，不调用模型，也不重做工具操作。
+    /// Settle persisted pre-interruption evidence only, without model calls or tool replay.
+    /// 仅结算中断前已保存证据，不调用模型或重放工具。
     pub async fn reconcile_receipts(&self) -> Result<Value> {
         let task = self.load_current()?;
         let events = self.repository.recovery_receipts(self.task_id())?;
@@ -690,11 +690,11 @@ impl TaskJournal {
         {
             match self.reconcile_operation(&task, &operation, &events).await {
                 Ok(true) => resolved_operations += 1,
-                // Missing observation receipts never become unknown mutations or block task recovery.
-                // 观察操作缺少回执不等于未知写入，也不能因此阻塞任务恢复。
+                // Missing read receipts are not unknown writes and cannot block recovery.
+                // 缺失读取回执不是未知写入，不阻塞恢复。
                 _ if operation.intent.effect == OperationEffect::Observation => {},
-                // The user accepted this outcome as unknown: keep it unknown, never replay, and do not block.
-                // 用户已确认该结果未知：保持 unknown、不重放，也不再阻塞恢复。
+                // Acknowledged outcomes stay unknown; do not replay or block recovery.
+                // 已确认结果保持未知，不重放或阻塞恢复。
                 _ if operation.is_unknown_acknowledged() => acknowledged.push(json!({"taskId":self.task_id(),
                     "operationId":operation.intent.operation_id,"toolCallId":operation.intent.tool_call_id,
                     "toolName":operation.intent.tool_name})),
@@ -710,8 +710,8 @@ impl TaskJournal {
             "acknowledgedUnknown":acknowledged}))
     }
 
-    /// Poll a remote task by its journaled identity and settle its original operation exactly once.
-    /// 使用正式日志中的远端任务身份查询，仅结算原操作一次，不再次派发原工具。
+    /// Poll the journaled remote ID and settle its original operation once, without redispatch.
+    /// 按日志中的远端 ID 查询并结算原操作一次，不重新派发。
     pub async fn reconcile_remote_tasks(&self, context: &crate::tools::gateway::GatewayToolContext) -> Result<Value> {
         let task = self.load_current()?;
         let mut resolved = 0;
@@ -781,8 +781,8 @@ impl TaskJournal {
         }
         let mut matched = Vec::new();
         for call in candidates.into_iter().filter(|call| call["id"] == operation.intent.tool_call_id) {
-            // Steering copies the transcript into the new assistant; identical copies are one original call.
-            // 插话会把调用记录复制到新回复；完全相同的副本仍是同一次原始调用。
+            // Identical transcript copies after steering remain one original call.
+            // 插话复制的相同调用记录仍算同一次原始调用。
             if !matched.contains(&call) { matched.push(call); }
         }
         if matched.len() != 1 { return Ok(None); }
@@ -873,6 +873,7 @@ impl TaskJournal {
                     observations.retain(|observation| observation["id"] != call["id"]);
                     observations.push(json!({"id":call["id"],"name":call["name"],"status":receipt["status"],"ref":receipt["resultRef"],
                         "verifiedSuccess":super::task::successful_completion_receipt(&receipt),
+                        "completionProof":super::completion_evidence::from_receipt(&call, &receipt),
                         "completionEvidence":super::task::completed_output_paths(call["name"].as_str().unwrap_or(""), &receipt)}));
                     round["observations"] = json!(observations);
                     patched = true;
@@ -900,8 +901,8 @@ impl TaskJournal {
     }
     pub async fn finish(&self, state: TaskState, reason: Option<&str>) -> Result<TaskRecord> {
         if self.is_released() {
-            // The final state and release may already be committed when draining was interrupted.
-            // 最终状态与释放可能已提交、仅后台收尾被中断；重试不能再次使用已结束的尝试写入。
+            // If final state/release already committed, retry cleanup without reusing the closed attempt.
+            // 终态及释放已提交时，重试仅收尾，不再使用已结束尝试写入。
             self.drain_background().await?;
             let task = self.load_current()?;
             if task.state == state || matches!(task.state, TaskState::Paused | TaskState::Cancelled) {

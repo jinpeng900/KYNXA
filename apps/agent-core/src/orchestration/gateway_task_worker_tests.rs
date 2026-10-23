@@ -17,6 +17,112 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+#[tokio::test]
+async fn child_existing_blender_proofs_recheck_failures_without_changing_original_receipts() {
+    let root = std::env::temp_dir().join(format!("kynxa-child-proof-recheck-{}", new_id()));
+    let chat = new_id();
+    let request = new_id();
+    data::ensure_conversation(&root, &chat, "Isolated child proof recovery").unwrap();
+    let mut state = WorkerContext::default();
+    for (id, text) in [("old-false-success", "Error executing code: object was not found"),
+        ("actual-success", "Code executed successfully: scene saved")] {
+        let call = json!({"id":id,"name":"mcp.fixture.execute_blender_code","arguments":{"code":"fixture"}});
+        let canonical = json!({"content":[{"type":"text","text":text}]});
+        let reference = data::save_tool_result(&root, &chat, &request, &call, &canonical, None).unwrap();
+        let result = json!({"status":"completed","isError":false,"content":canonical,"resultRef":reference});
+        state.receipts.push(json!({"call":call,"result":result,"observation":false,
+            "completionProof":super::super::completion_evidence::from_receipt(&call,&result)}));
+    }
+    let original_results = state.receipts.iter().map(|saved| saved["result"].clone()).collect::<Vec<_>>();
+    assert_eq!(completion_evidence_records(&state).len(), 2);
+    restore_completion_proofs(&root, &chat, &request, &mut state).await;
+    assert_eq!(state.receipts[0]["verifiedSuccess"], false);
+    assert!(state.receipts[0]["completionProof"].is_null());
+    assert_eq!(state.receipts[1]["verifiedSuccess"], true);
+    assert!(state.receipts[1]["completionProof"].is_object());
+    assert_eq!(completion_evidence(&state), vec![json!("actual-success")]);
+    let records = completion_evidence_records(&state);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["id"], "actual-success");
+    assert_eq!(state.receipts.iter().map(|saved| saved["result"].clone()).collect::<Vec<_>>(), original_results);
+    let mut resumed = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
+    restore_completion_proofs(&root, &chat, &request, &mut resumed).await;
+    assert_eq!(completion_evidence(&resumed), vec![json!("actual-success")]);
+    assert_eq!(resumed.receipts[0]["result"], original_results[0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn child_pending_proof_verification_survives_checkpoint_and_recovers_only_owned_archive() {
+    let root = std::env::temp_dir().join(format!("kynxa-child-proof-pending-{}", new_id()));
+    let chat = new_id();
+    let request = new_id();
+    data::ensure_conversation(&root, &chat, "Isolated pending child proof").unwrap();
+    let call = json!({"id":"owned-operation","name":"mcp.fixture.execute_blender_code","arguments":{"code":"fixture"}});
+    let canonical = json!({"content":[{"type":"text","text":"Code executed successfully: scene saved"}]});
+    let reference = data::save_tool_result(&root, &chat, &request, &call, &canonical, None).unwrap();
+    let result = json!({"status":"completed","isError":false,"content":canonical,"resultRef":reference});
+    let proof = super::super::completion_evidence::from_receipt(&call, &result);
+    let missing_call = json!({"id":"missing-operation","name":"mcp.fixture.execute_blender_code"});
+    let missing_result = json!({"status":"completed","isError":false,"content":canonical,
+        "resultRef":{"id":new_id(),"sha256":"a".repeat(64),"bytes":1}});
+    let missing_proof = super::super::completion_evidence::from_receipt(&missing_call, &missing_result);
+    let mut state = WorkerContext { receipts:vec![
+        json!({"call":call,"result":result,"observation":true,"visualDeliveredToModel":true,"completionProof":proof}),
+        json!({"call":missing_call,"result":missing_result,"observation":true,"visualDeliveredToModel":true,"completionProof":missing_proof})],
+        ..Default::default() };
+    restore_completion_proofs(&root, &chat, &new_id(), &mut state).await;
+    for saved in &state.receipts {
+        assert_eq!(saved["verifiedSuccess"], false);
+        assert_eq!(saved["completionProofVerification"], "pending");
+        assert!(saved["completionProof"].is_object());
+    }
+    assert!(completion_evidence(&state).is_empty());
+    assert!(completion_evidence_records(&state).is_empty());
+    assert!(current_readback(&state, true).is_empty());
+    let mut resumed = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
+    restore_completion_proofs(&root, &chat, &request, &mut resumed).await;
+    assert_eq!(resumed.receipts[0]["verifiedSuccess"], true);
+    assert!(resumed.receipts[0].get("completionProofVerification").is_none());
+    assert_eq!(resumed.receipts[0]["result"], result);
+    assert_eq!(resumed.receipts[1]["completionProofVerification"], "pending");
+    assert_eq!(completion_evidence(&resumed), vec![json!("owned-operation")]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn child_checkpoint_keeps_unresolved_checks_until_the_corresponding_retry_passes() {
+    let snapshot = json!({"signature":"a".repeat(64),"complete":true,
+        "files":[{"pathId":"b".repeat(64),"state":"present","sha256":"c".repeat(64)}]});
+    let check = |id: &str, command: &str, exit: i64| {
+        let call = json!({"id":id,"name":"terminal.host.run","arguments":{"script":command}});
+        let result = json!({"status":"completed","isError":exit!=0,"content":{"exitCode":exit}});
+        json!({"call":call,"result":result,"observation":false,
+            "beforeVersion":snapshot,"afterVersion":snapshot,
+            "validationScope":{"cwd":"C:/fixture/project"},
+            "completionProof":super::super::completion_evidence::from_receipt(&call,&result)})
+    };
+    let state = WorkerContext { receipts: vec![check("failed-test","cargo test --lib",1),
+        check("unrelated-build","cargo build",0)], code_version:snapshot.clone(), ..Default::default() };
+    let mut restored = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
+    let verification = execution_validation(&restored, "修复项目代码");
+    assert_eq!(verification["state"], "checks-failed");
+    assert_eq!(verification["pendingValidation"], true);
+    assert_eq!(verification["needsValidation"], true);
+    assert!(verification["unresolvedChecks"].as_array().unwrap().iter()
+        .any(|check| check["toolCallId"] == "failed-test"));
+    assert!(review_instruction(&restored, false, false).contains("failed-test"));
+    assert!(!review_instruction(&restored, false, false).contains("Native receipt directory"));
+    restored.review_attempts = 1;
+    assert!(review_instruction(&restored, false, false).contains("Native receipt directory"));
+    restored.receipts.push(check("test-retried","cargo test --lib",0));
+    let resolved = execution_validation(&restored, "修复项目代码");
+    assert_eq!(resolved["state"], "checks-passed");
+    assert_eq!(resolved["pendingValidation"], false);
+    assert!(resolved["unresolvedChecks"].as_array().unwrap().is_empty());
+    assert_eq!(restored.receipts[0]["result"]["isError"], true);
+}
+
 #[derive(Clone, Default)]
 struct Provider {
     calls: Arc<AtomicUsize>,
@@ -34,6 +140,11 @@ struct Provider {
     review_requests: Arc<AtomicUsize>,
     parallel_reads: Arc<AtomicBool>,
     large_usage: Arc<AtomicBool>,
+    deterministic_recovery: Arc<AtomicBool>,
+    review_native_action: Arc<AtomicBool>,
+    review_dsml_action: Arc<AtomicBool>,
+    review_action_emitted: Arc<AtomicBool>,
+    dsml_optional_claimed: Arc<AtomicBool>,
 }
 async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -> Response {
     provider.calls.fetch_add(1, Ordering::SeqCst);
@@ -55,6 +166,21 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
             && text.contains("Expected acceptance requirements:") && text.contains("Verified completion evidence:"));
     if let Some(assessment) = assessment {
         provider.review_requests.fetch_add(1,Ordering::AcqRel);
+        if (provider.review_native_action.load(Ordering::Acquire) || provider.review_dsml_action.load(Ordering::Acquire))
+            && !provider.review_action_emitted.swap(true, Ordering::AcqRel) {
+            let name = crate::models::protocol::wire_name("filesystem.list");
+            assert!(request["tools"].as_array().is_some_and(|tools|
+                tools.iter().any(|tool| tool["function"]["name"] == name)), "Review must retain its authorized tool declarations.");
+            assert_ne!(request["tool_choice"], "none");
+            let message = if provider.review_dsml_action.load(Ordering::Acquire) {
+                json!({"role":"assistant","content":format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"{name}\">\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">.</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>")})
+            } else {
+                json!({"role":"assistant","content":"Check the actual directory before completing acceptance.","tool_calls":[{"id":"review-native-list","type":"function",
+                    "function":{"name":name,"arguments":json!({"path":"."}).to_string()}}]})
+            };
+            return Json(json!({"choices":[{"index":0,"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}],
+                "usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
+        }
         if provider.invalid_reviews.fetch_update(Ordering::AcqRel,Ordering::Acquire,|remaining|remaining.checked_sub(1)).is_ok() {
             return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"The previous assessment needs a repaired structured footer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
         }
@@ -62,14 +188,41 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
             .and_then(|text|serde_json::from_str(text).ok()).unwrap_or_default();
         let evidence: Vec<Value> = assessment.lines().find_map(|line|line.strip_prefix("Verified completion evidence: "))
             .and_then(|text|serde_json::from_str(text).ok()).unwrap_or_default();
+        if provider.review_native_action.load(Ordering::Acquire) || provider.review_dsml_action.load(Ordering::Acquire) {
+            assert!(evidence.contains(&json!("review-native-list")), "Final acceptance must cite the actual later native result.");
+        }
         let met: Vec<Value> = requirements.iter().map(|requirement| json!({"requirementId":requirement["requirementId"],
             "item":requirement["item"].as_str().unwrap_or("").chars().take(100).collect::<String>(),"evidence":evidence.iter().take(8).collect::<Vec<_>>()})).collect();
         let footer = if evidence.is_empty() { json!({"state":"continue","next":"Discover the file writer, create the delegated file and read it back.","unmet":["The actual requested operation has not executed."]}) }
             else { json!({"state":"complete","next":"","unmet":[],"met":met}) };
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":format!("<kynxa_task>{footer}</kynxa_task>")},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
     }
+    if provider.review_dsml_action.load(Ordering::Acquire) && provider.review_action_emitted.load(Ordering::Acquire)
+        && !request["messages"].as_array().into_iter().flatten().any(|message|
+            message["role"] == "tool" && message["tool_call_id"] == "review-native-list") {
+        let message = if !provider.dsml_optional_claimed.swap(true, Ordering::AcqRel) {
+            json!({"role":"assistant","content":"The remaining directory check is merely optional; the old file receipts already prove completion.\n<kynxa_task>{\"state\":\"complete\"}</kynxa_task>"})
+        } else {
+            json!({"role":"assistant","content":"Perform the pending check through the native protocol.","tool_calls":[{"id":"review-native-list","type":"function",
+                "function":{"name":crate::models::protocol::wire_name("filesystem.list"),"arguments":json!({"path":"."}).to_string()}}]})
+        };
+        return Json(json!({"choices":[{"index":0,"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
+    }
     if provider.pure_answer.load(Ordering::Acquire) {
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"你好！"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}})).into_response();
+    }
+    if provider.deterministic_recovery.load(Ordering::Acquire) {
+        let results = request["messages"].as_array().into_iter().flatten().filter(|message|message["role"]=="tool").collect::<Vec<_>>();
+        let message = if results.is_empty() {
+            let calls = (0..4).map(|index|json!({"id":format!("invalid-read-{index}"),"type":"function","function":{
+                "name":crate::models::protocol::wire_name("filesystem.read"),"arguments":json!({"path":"notes.txt","offset":-1}).to_string()}})).collect::<Vec<_>>();
+            json!({"role":"assistant","content":"Read the source.","tool_calls":calls})
+        } else if results.len() == 4 {
+            json!({"role":"assistant","content":"Correct the invalid offset and continue the same task.","tool_calls":[
+                {"id":"corrected-source-read","type":"function","function":{"name":crate::models::protocol::wire_name("filesystem.read"),"arguments":json!({"path":"notes.txt","offset":0}).to_string()}}]})
+        } else { json!({"role":"assistant","content":"The actual source was read after correcting the offset. <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[]}</kynxa_task>"}) };
+        return Json(json!({"choices":[{"index":0,"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}],"usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
     }
     if provider.parallel_reads.load(Ordering::Acquire) {
         let already_read=request["messages"].as_array().into_iter().flatten().any(|message|message["role"]=="tool");
@@ -267,6 +420,87 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn repeated_invalid_child_reads_are_suppressed_without_stopping_corrected_work() {
+    let fixture = Fixture::new().await;
+    fixture.provider.deterministic_recovery.store(true,Ordering::Release);
+    std::fs::write(fixture.root.join("work/notes.txt"),"Actual source content.").unwrap();
+    let child = fixture.additional_child("Read notes.txt.");
+    let mut input = fixture.input(); input["goal"]=json!(child.goal); input["writeTargets"]=json!([]);
+    let result = execute(fixture.runtime.clone(),fixture.parent.clone(),child.clone(),fixture.context.clone(),input).await.unwrap();
+    assert_eq!(result["status"],"completed","{result}");
+    let repository = TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
+    let operations = repository.operations(&child.task_id).unwrap();
+    assert_eq!(operations.len(),3,"Two actual invalid attempts plus the corrected read; suppressed calls do not dispatch.");
+    assert_eq!(operations.iter().filter(|operation|operation.state==OperationState::Failed).count(),2);
+    assert_eq!(operations.iter().filter(|operation|operation.state==OperationState::Succeeded).count(),1);
+    let saved = fixture.parent.journal.as_ref().unwrap().read_blob(&result["contextRef"]).await.unwrap();
+    let context = checkpoint_decode(&saved).unwrap();
+    assert_eq!(context.receipts.iter().filter(|saved|saved["result"]["code"]=="TOOL_ACTION_REQUIRES_CORRECTION").count(),2);
+    assert!(!serde_json::to_value(&context.deterministic_failures).unwrap()["actions"].as_object().unwrap().is_empty());
+    fixture.close().await;
+}
+
+#[test]
+fn child_checkpoint_preserves_failure_guard_and_successful_receipts_together() {
+    let mut context = WorkerContext::default();
+    let definition = json!({"inputSchema":{"type":"object"}});
+    let environment = json!({"workspace":"fixture"});
+    for id in ["invalid-one","invalid-two"] {
+        context.deterministic_failures.observe(&json!({"id":id,"name":"tool","arguments":{"limit":-1}}),
+            &definition,&environment,&json!({"status":"error","isError":true,"code":"INVALID_TOOL_ARGUMENTS"}));
+    }
+    context.receipts.push(json!({"call":{"id":"successful-write","name":"filesystem.write"},
+        "result":{"status":"completed","resultRef":{"id":"owned-success"}},"mutating":true}));
+    let restored = checkpoint_decode(&serde_json::to_vec(&context).unwrap()).unwrap();
+    assert_eq!(restored.receipts,context.receipts);
+    assert!(restored.deterministic_failures.before_dispatch(&json!({"id":"new-id","name":"tool","arguments":{"limit":-1}}),&definition,&environment).is_some());
+}
+
+#[tokio::test]
+async fn child_review_native_actions_and_dsml_recovery_preserve_successful_effects() {
+    for dsml in [false, true] {
+        let fixture = Fixture::new().await;
+        fixture.provider.review_native_action.store(!dsml, Ordering::Release);
+        fixture.provider.review_dsml_action.store(dsml, Ordering::Release);
+        let result = tokio::time::timeout(Duration::from_secs(15), execute(
+            fixture.runtime.clone(), fixture.parent.clone(), fixture.child.clone(), fixture.context.clone(), fixture.input()))
+            .await.expect("A child review must use the normal dispatch channel and finish.").unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(fixture.provider.review_requests.load(Ordering::Acquire), 2);
+        let repository = TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
+        let operations = repository.operations(&fixture.child.task_id).unwrap();
+        assert_eq!(operations.len(), 4, "DSML creates no operation and original effects must not repeat: {operations:?}");
+        for name in ["filesystem.write", "filesystem.read", "filesystem.list"] {
+            assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name
+                && operation.state == OperationState::Succeeded).count(), 1);
+        }
+        assert_eq!(operations.iter().find(|operation| operation.intent.tool_name == "filesystem.list").unwrap().intent.tool_call_id, "review-native-list");
+        assert!(!operations.iter().any(|operation| operation.intent.tool_name == "tool.result.read"));
+        assert_eq!(std::fs::read_to_string(fixture.root.join("work/created.txt")).unwrap(), "真实子任务产物");
+        if dsml { assert!(fixture.provider.dsml_optional_claimed.load(Ordering::Acquire)); }
+        let output: Value = serde_json::from_slice(&fixture.parent.journal.as_ref().unwrap().read_blob(&result["outputHistoryRef"]).await.unwrap()).unwrap();
+        let checkpoint: WorkerContext = serde_json::from_value(output).unwrap();
+        assert!(!gateway_loop::has_unexecuted_tool_intent(&checkpoint.review_checkpoint));
+        fixture.close().await;
+    }
+}
+
+#[test]
+fn child_unexecuted_intent_survives_checkpoint_and_memory_refresh_until_a_real_result() {
+    let mut state = WorkerContext::default();
+    let wire = crate::models::protocol::wire_name("filesystem.list");
+    let text = format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"{wire}\">\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>");
+    assert!(retain_child_tool_intent(&mut state, &text, &[json!({"name":"filesystem.list"})]));
+    let mut restored = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
+    invalidate_child_memory_plan(&mut restored, &json!({"invalidSources":["withdrawn-fixture"]}));
+    assert!(gateway_loop::has_unexecuted_tool_intent(&restored.review_checkpoint));
+    gateway_loop::settle_unexecuted_tool_intent(&mut restored.review_checkpoint, "filesystem.list", &json!({"status":"error","isError":true}));
+    assert!(gateway_loop::has_unexecuted_tool_intent(&restored.review_checkpoint));
+    gateway_loop::settle_unexecuted_tool_intent(&mut restored.review_checkpoint, "filesystem.list", &json!({"status":"completed","executed":true,"isError":false}));
+    assert!(!gateway_loop::has_unexecuted_tool_intent(&restored.review_checkpoint));
+}
+
+#[tokio::test]
 async fn delegated_model_tool_receipt_loop_uses_private_context_and_actual_file() {
     let fixture = Fixture::new().await;
     let result = execute(
@@ -301,6 +535,12 @@ async fn delegated_model_tool_receipt_loop_uses_private_context_and_actual_file(
     assert_eq!(result["summarySource"],"latest-delivery");
     let saved_output:Value=serde_json::from_slice(&fixture.parent.journal.as_ref().unwrap().read_blob(&result["outputHistoryRef"]).await.unwrap()).unwrap();
     assert!(saved_output["output"].as_str().unwrap().contains("Continue delegated work."));
+    let saved_state: WorkerContext = serde_json::from_value(saved_output).unwrap();
+    let proofs = completion_evidence_records(&saved_state);
+    assert!(proofs.iter().any(|proof| proof["id"] == "child-call-1"
+        && proof["kinds"].as_array().unwrap().contains(&json!("committed-output"))));
+    assert!(proofs.iter().any(|proof| proof["id"] == "child-call-2"
+        && proof["targets"][0]["range"]["complete"] == true));
     assert_eq!(result["acceptanceReview"]["reviewed"],true);
     assert_eq!(result["acceptanceReview"]["parentAcceptance"],"pending");
     assert!(!result["acceptanceReview"]["readbackRefs"].as_array().unwrap().is_empty());

@@ -376,11 +376,10 @@
   }
 
   function centerMindmapCircularLabels(svg) {
-    // Mermaid's SVG mindmap circle labels can omit the class carrying their centred anchor.
-    // Repair only known circular nodes with an unshifted label; rectangular labels retain their
-    // measured negative-x positioning, and other diagram families keep their original geometry.
-    // Mermaid 的 SVG 思维导图圆形标签可能遗漏承载居中锚点的 class；仅修复已知圆形节点中
-    // 未横向移动的标签。矩形标签保留按测量宽度计算的负 x 偏移，其余图表类型不作调整。
+    // Restore missing anchors only on unshifted circular mindmap labels.
+    // 仅为未偏移的思维导图圆形标签补齐居中锚点。
+    // Preserve measured negative-x offsets on rectangles and geometry in other diagram types.
+    // 保留矩形标签测量后的负 x 偏移，以及其他图表的原始布局。
     for (const node of svg.querySelectorAll('g.mindmap-node')) {
       const circle = node.querySelector(':scope > circle.basic.label-container');
       const label = node.querySelector(':scope > g.label');
@@ -427,17 +426,13 @@
     const clone = svg.cloneNode(true), originals = [svg, ...svg.querySelectorAll('*')], copies = [clone, ...clone.querySelectorAll('*')];
     const ids = new Map(originals.filter(element => element.id).map(element => [element.id, element.id]));
     const exportedIds = new Set();
-    // Freeze computed colours and fonts while the safe SVG is attached. The independent file has no
-    // page styles, scripts, links, fonts or assets to fetch, and never includes the zoom/pan container.
-    // 趁安全 SVG 仍在页面中同步固化颜色和字体；独立文件不依赖页面样式、不加载脚本或外部资源，
-    // 也不复制包含缩放和平移的父容器，保证导出整张图表。
+    // Freeze colours and fonts while SVG is attached; export without external assets or the zoom/pan wrapper.
+    // 在 SVG 仍挂载时固化颜色和字体，导出时不带外部资源或缩放平移容器。
     for (let index = 0; index < originals.length; index++) {
       const original = originals[index], copy = copies[index];
       if (copy.localName === 'style') { copy.remove(); continue; }
-      // Mermaid mindmaps may reuse a node ID on its group and shape. Frozen inline styles no longer
-      // need duplicate selector identities; keep the first target, matching local fragment resolution.
-      // Mermaid 思维导图可能让节点组和形状共用 ID；固化内联样式后不再依赖重复选择器身份，
-      // 仅保留首个目标，维持本地片段引用的解析语义，同时输出唯一 ID 的独立文档。
+      // Inline styles allow deduplicating mindmap IDs; keep the first target for fragment links.
+      // 固化样式后去重思维导图 ID，保留首个目标供片段链接使用。
       if (copy.id) {
         if (exportedIds.has(copy.id)) copy.removeAttribute('id');
         else exportedIds.add(copy.id);
@@ -448,10 +443,8 @@
         const value = exportStyleValue(computed.getPropertyValue(property), ids);
         if (value !== null && value.length > 0 && value.length < 1000 && !value.includes(';')) declarations.push(property + ': ' + value + ';');
       }
-      // Preserve the explicit property contract. CSSOM setters can collapse safe longhands into
-      // different shorthands (for example marker), which the native whitelist correctly rejects.
-      // 保留明确的属性合同；CSSOM 赋值会把安全长属性合并成另一种缩写（例如 marker），
-      // 导致原生严格白名单正确拒绝该未约定属性。
+      // Preserve longhand properties; CSSOM shorthands such as marker can fail the native whitelist.
+      // 保留长属性，避免 CSSOM 合并为 marker 等缩写后无法通过原生白名单。
       copy.setAttribute('style', declarations.join(' '));
     }
     clone.setAttribute('xmlns', SVG_NAMESPACE); clone.setAttribute('width', String(box[2])); clone.setAttribute('height', String(box[3]));
@@ -576,9 +569,8 @@
     clearTimeout(state.exportTimer); state.exportReduced = false;
     let task;
     try {
-      // Capture all mutable visual data before the first await. Navigation invalidates the task;
-      // late preparation or native results can never target a reused conversation DOM node.
-      // 首次等待前获取全部视觉快照；导航会使任务失效，迟到的准备结果或原生回执不能污染复用的聊天节点。
+      // Snapshot visual data before awaiting; navigation invalidates late results for reused DOM nodes.
+      // 等待前保存视觉快照；导航后丢弃迟到结果，避免改写复用的聊天节点。
       const snapshot = exportSnapshot(state);
       task = { requestId: 'diagram-export-' + nonce + '-' + (++exportSequence), snapshot, format, cancelled: false,
         objectUrl: null, image: null, canvas: null, preparationTimer: 0, reduced: false };

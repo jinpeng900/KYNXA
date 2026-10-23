@@ -18,8 +18,8 @@ public sealed record RetrievalLocalSettings(bool Enabled, string Semantic, strin
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RerankDevicePolicy = null);
 
-// Missing optional settings stay omitted, so an older settings screen cannot reset backend-owned policy.
-// 可选设置未指定时保持省略，防止旧设置界面把后端设备策略与容量配置重置为默认值。
+// Omit unspecified settings so older clients cannot reset backend policy.
+// 省略未指定设置，避免旧界面重置后端设备策略和容量。
 public sealed record RetrievalIndexingLimits(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumFiles = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumSourceBytes = null,
@@ -90,8 +90,8 @@ public sealed record RetrievalRerankingStatus(string State,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalInferenceBackendStatus? InferenceBackend = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? ResourceReservation = null);
 
-// Dynamic observations retain their bounded HTTP payload without coupling UI contracts to native allocator internals.
-// 动态观察沿用有界 HTTP 响应，不把界面合同绑定到原生分配器内部布局；有 GPU 不代表正在用 GPU。
+// Keep observations bounded and independent of native allocator layout.
+// 观察数据沿用有界 HTTP 响应，不依赖原生分配器布局；存在 GPU 不代表已启用。
 public sealed record RetrievalStatus(string Backend, int SourceCount, int ChunkCount,
     RetrievalEmbeddingStatus Embedding, RetrievalIndexJob[] Jobs,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Resources = null,
@@ -124,8 +124,8 @@ public sealed record RetrievalIndexJob(string JobId, string Status, int Complete
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Semantic = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? ProjectId = null);
 
-// Status stays a string for forward compatibility, including partial; coverage describes actual eligible-source work.
-// 状态保留字符串兼容未来值和 partial；覆盖统计只说明实际来源处理，不代表答案或任务正确性。
+// Keep status strings forward-compatible; coverage measures processed eligible sources.
+// 状态用字符串兼容 partial 和未来值；覆盖仅统计来源处理，不证明答案或任务正确。
 public sealed record RetrievalCoverageStatus(int Discovered, int Lexical, int Semantic, int Failed, int Skipped,
     int Partial, bool Complete,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? ReportTruncated = null,

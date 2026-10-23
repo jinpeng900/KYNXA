@@ -292,8 +292,8 @@ mod tests {
     }
 }
 
-/// Validate exact UTF-16 metadata and return projection recipes; private continuation stays in its SDK archive adapter.
-/// 校验精确 UTF-16 元信息并返回投影配方；私有续传原文留在 SDK 附件适配层，不改变旧哈希表示。
+/// Validate UTF-16 metadata and plan projections; keep private continuation in its archive adapter and preserve hashes.
+/// 校验 UTF-16 元信息并规划投影；私有续传留在归档适配层，保留原哈希表示。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.transcript.hash" => Ok(json!(format!(

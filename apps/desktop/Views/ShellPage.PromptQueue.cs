@@ -1,5 +1,4 @@
 using KYNXA_Desktop.Services;
-using KYNXA_Desktop.Models.UI;
 using Microsoft.UI.Xaml;
 
 namespace KYNXA_Desktop.Views;
@@ -9,6 +8,30 @@ public sealed partial class ShellPage
     private readonly Dictionary<Guid, List<QueuedPrompt>> _queuedPrompts = [];
     private readonly HashSet<Guid> _drainingPromptChats = [];
     private readonly HashSet<Guid> _steeringPromptChats = [];
+
+    private bool HasQueuedTaskActivity(Guid chatId)
+    {
+        if (_pendingReplies.ContainsKey(chatId) || _resumingTaskConversations.Contains(chatId)) return true;
+        if (_runningTaskRecovery is not { } recovery || recovery.Chat.Id != chatId) return false;
+        return recovery.ReadFailed || recovery.Attaching || recovery.ReadTask is { IsCompleted: false }
+            || QueueObservedTasks(recovery).Any(task => task.ParentTaskId is null && task.State is "queued" or "running");
+    }
+
+    private static IEnumerable<KYNXA.Contracts.TaskRecord> QueueObservedTasks(RunningTaskRecovery recovery) =>
+        (recovery.Tasks ?? []).Where(task => task.TaskId != recovery.Detail?.Task.TaskId)
+            .Concat(recovery.Detail is { } detail ? [detail.Task] : []);
+
+    private async Task<bool> AwaitQueueObservationAsync(Guid chatId, bool retry)
+    {
+        if (_runningTaskRecovery is not { } recovery || recovery.Chat.Id != chatId) return true;
+        if (retry && (recovery.ReadFailed || !_pendingReplies.ContainsKey(chatId) && recovery.ReadTask is not { IsCompleted: false }))
+        {
+            recovery.ReadFailed = false; recovery.Finished = false; recovery.Detail = null;
+            recovery.ReadTask = ReadRunningTaskObservationAsync(recovery);
+        }
+        if (recovery.ReadTask is { } reading) await reading;
+        return !recovery.ReadFailed;
+    }
 
     private void InitializePromptQueue()
     {
@@ -49,85 +72,91 @@ public sealed partial class ShellPage
         if (PromptQueue is null) return;
         Guid? chatId = ActiveChatId;
         var messages = chatId is Guid id && _queuedPrompts.TryGetValue(id, out var queue) ? queue : [];
-        PromptQueue.ShowMessages(messages, chatId is Guid active && !HasUnknownOutcome(active)
-            && (IsReplyInProgress(active) || _pausedTaskIds.ContainsKey(active) || messages.Any(prompt => prompt.TargetTaskId is not null)));
+        PromptQueue.ShowMessages(messages, chatId is Guid active &&
+            (HasQueuedTaskActivity(active) || messages.Any(prompt => prompt.IsTaskGuidance)));
         PresentUnknownOutcome();
     }
 
     private bool TryQueuePrompt()
     {
         if (_savingOnClose || _chatClosing || ActiveChatId is not Guid chatId
-            || !(IsReplyInProgress(chatId) || _drainingPromptChats.Contains(chatId)))
-            return false;
+            || !HasQueuedTaskActivity(chatId)) return false;
         string text = PromptTextBox.Text.Trim();
         if (text.Length == 0 && !HasAttachmentDrafts) return true;
-        if (!IsReplyInProgress(chatId) && !_drainingPromptChats.Contains(chatId) &&
-            RecoveredTaskContinuation.IsExplicit(text)) return false;
-        // Queue entries become formal user messages only when sent or explicitly steered.
-        // 排队内容在执行或明确引导时才成为正式用户消息，编辑等待项不会修改聊天日志。
-        QueueFor(chatId).Add(new(Guid.NewGuid(), text, _selectedModel?.ProviderId,
-            _selectedModel?.ModelId, _layout.PermissionMode, TakeAttachmentDrafts()));
+        // Sending during execution leaves an editable waiting card; only its explicit guidance action interrupts work.
+        // 执行中发送先留下可编辑等待卡片，只有明确点击引导才补充当前任务。
+        var prompt = new QueuedPrompt(Guid.NewGuid(), text, _selectedModel?.ProviderId,
+            _selectedModel?.ModelId, _layout.PermissionMode, TakeAttachmentDrafts());
+        QueueFor(chatId).Add(prompt);
         PromptTextBox.Text = ViewModel.Prompt = string.Empty;
         if (FindChat(chatId).Chat is { } chat) chat.Draft = string.Empty;
         RefreshPromptQueue();
         UpdateSendButtonState();
         PromptTextBox.Focus(FocusState.Programmatic);
+        _ = DrainQueuedPromptsAsync(chatId);
         return true;
     }
 
     private async Task SteerQueuedPromptAsync(Guid chatId, QueuedPrompt prompt)
     {
-        // A pending unknown-outcome decision must not be bypassed by steering a queued message into the task.
-        // 结果未知待用户决定时，不能把排队消息作为引导插入任务。
-        if (_chatClosing || prompt.IsSubmitting || HasUnknownOutcome(chatId) || !_steeringPromptChats.Add(chatId)) return;
-        prompt.IsTaskGuidance = true;
+        if (_chatClosing || _savingOnClose || !QueueFor(chatId).Contains(prompt) || prompt.IsSubmitting
+            || !_steeringPromptChats.Add(chatId)) return;
         prompt.IsSubmitting = true;
-        QueueFor(chatId).Remove(prompt);
         RefreshPromptQueue();
         try
         {
-            if (!await SendTaskSteeringAsync(chatId, prompt)) QueueFor(chatId).Insert(0, prompt);
+            if (!prompt.IsTaskGuidance)
+            {
+                if (!await AwaitQueueObservationAsync(chatId, retry: true))
+                { ShowActionFeedback(UiText.Get("消息已保留，请重试。")); return; }
+                if (_pendingReplies.TryGetValue(chatId, out var pending))
+                {
+                    prompt.TargetTaskId = pending.TaskId;
+                    prompt.TargetRequestId = pending.StreamRequestId;
+                }
+                else if (_runningTaskRecovery is { } recovery && recovery.Chat.Id == chatId
+                    && RunningTaskObservation.Select(QueueObservedTasks(recovery), chatId, FindChat(chatId).Project?.Id) is { } task
+                    && Guid.TryParse(task.RequestId, out var requestId))
+                { prompt.TargetTaskId = task.TaskId; prompt.TargetRequestId = requestId; }
+                else
+                {
+                    if (HasQueuedTaskActivity(chatId)) ShowActionFeedback(UiText.Get("消息已保留，请重试。"));
+                    return;
+                }
+                prompt.IsTaskGuidance = true;
+            }
+            await SendTaskSteeringAsync(chatId, prompt);
         }
         finally
         {
             prompt.IsSubmitting = false;
             _steeringPromptChats.Remove(chatId);
             RefreshPromptQueue();
-            if (!IsReplyInProgress(chatId) && !_pausedTaskIds.ContainsKey(chatId))
-                _ = DrainQueuedPromptsAsync(chatId);
+            if (!prompt.IsTaskGuidance) _ = DrainQueuedPromptsAsync(chatId);
         }
     }
 
     private async Task DrainQueuedPromptsAsync(Guid chatId)
     {
-        if (_chatClosing || _savingOnClose || _pausedTaskIds.ContainsKey(chatId)
-            || IsReplyInProgress(chatId) || _steeringPromptChats.Contains(chatId) || !_drainingPromptChats.Add(chatId)) return;
+        if (_chatClosing || _savingOnClose || _steeringPromptChats.Contains(chatId) || !_drainingPromptChats.Add(chatId)) return;
         try
         {
             var queue = QueueFor(chatId);
-            // Check for an unknown-outcome decision first; queued messages wait untouched until the user resolves it.
-            // 先确认是否有待决定的未知结果；有则排队消息原样保留，不自动派发。
-            if (queue.Count > 0) await RefreshUnknownOutcomeAsync(chatId);
-            while (!_chatClosing && !_savingOnClose && !_pausedTaskIds.ContainsKey(chatId) && !HasUnknownOutcome(chatId)
-                && !IsReplyInProgress(chatId) && !_steeringPromptChats.Contains(chatId) && queue.Count > 0)
-            {
-                var prompt = queue[0];
-                // A rejected/unknown recovered steer retains its identity until explicitly retried, never a fresh root.
-                // 恢复引导被拒或结果未知时保留原身份，等用户重试，不能自动降级为新根任务。
-                if (prompt.IsSubmitting || prompt.IsTaskGuidance || prompt.TargetTaskId is not null || FindChat(chatId).Chat is not { } chat) break;
-                queue.RemoveAt(0);
-                chat.Messages.Add(new ChatMessageState { Id = prompt.Id, Role = "user", Content = prompt.Text,
+            if (!await AwaitQueueObservationAsync(chatId, retry: false)) return;
+            if (_chatClosing || _savingOnClose || HasQueuedTaskActivity(chatId) || HasUnknownOutcome(chatId) || queue.Count == 0) return;
+            var prompt = queue[0];
+            if (prompt.IsSubmitting || prompt.IsTaskGuidance || FindChat(chatId).Chat is not { } chat) return;
+            queue.Remove(prompt);
+            if (!chat.Messages.Any(message => message.Id == prompt.Id))
+                chat.Messages.Add(new() { Id = prompt.Id, Role = "user", Content = prompt.Text,
                     Attachments = prompt.Attachments.ToList() });
-                if (prompt.AttachmentDrafts.Length > 0) _messageAttachmentDrafts[prompt.Id] = prompt.AttachmentDrafts;
-                var pending = BeginPendingReply(chatId, prompt.Text, prompt.Provider, prompt.Model, prompt.PermissionMode);
-                RefreshPromptQueue();
-                if (ActiveChatId == chatId) UpdateConversationPresentation(openAtBottom: false);
-                await ReceiveReplyAsync(pending);
-                // A paused or failed request leaves the remaining queue untouched.
-                // 暂停或失败时保留尚未执行的队列，不以自动请求掩盖当前任务的停止。
-                if (pending.Message.Status != "completed") break;
-            }
+            if (prompt.AttachmentDrafts.Length > 0) _messageAttachmentDrafts[prompt.Id] = prompt.AttachmentDrafts;
+            var ordinary = BeginPendingReply(chatId, prompt.Text, prompt.Provider, prompt.Model, prompt.PermissionMode,
+                requestId: prompt.ReplyMessageId, userMessageId: prompt.Id);
+            if (ActiveChatId == chatId) UpdateConversationPresentation(openAtBottom: false);
+            _ = ReceiveReplyAsync(ordinary);
         }
+        catch (OperationCanceledException) when (_historyLifetime.IsCancellationRequested || _chatClosing) { }
         finally
         {
             _drainingPromptChats.Remove(chatId);

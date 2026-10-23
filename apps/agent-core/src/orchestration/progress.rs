@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const DIAGNOSTIC_ERROR: &str = "INVALID_TOOL_RUN_DIAGNOSTICS";
@@ -37,6 +38,7 @@ pub struct RunProgress {
     mutation_revision: u64,
     checked_mutation_revision: u64,
     validation_receipts: Vec<Value>,
+    required_checks: BTreeMap<String, Value>,
     uncertain_mutations: BTreeSet<String>,
     unclassified_terminal_effects: u64,
     latest_code_version: Value,
@@ -53,6 +55,7 @@ impl Default for RunProgress {
             mutation_revision: 0,
             checked_mutation_revision: 0,
             validation_receipts: Vec::new(),
+            required_checks: BTreeMap::new(),
             uncertain_mutations: BTreeSet::new(),
             unclassified_terminal_effects: 0,
             latest_code_version: Value::Null,
@@ -105,6 +108,7 @@ impl RunProgress {
                 self.observe_outcome(args);
                 Ok(Value::Null)
             }
+            "progress.restoreValidation" => self.restore_validation(args),
             "progress.finalVersion" => {
                 self.latest_code_version = version_identity(&args["snapshot"]);
                 if !self.validated_code_version.is_null()
@@ -131,6 +135,8 @@ impl RunProgress {
                 "mutationRevision": self.mutation_revision,
                 "checkedMutationRevision": self.checked_mutation_revision,
                 "validationReceipts": self.validation_receipts,
+                "requiredChecks": self.required_checks.values().collect::<Vec<_>>(),
+                "artifactRevisions": self.artifact_revisions,
                 "uncertainMutations": self.uncertain_mutations,
                 "unclassifiedTerminalEffects": self.unclassified_terminal_effects,
                 "latestCodeVersion": self.latest_code_version,
@@ -148,6 +154,7 @@ impl RunProgress {
             "mutationRevision" => json!(self.mutation_revision),
             "checkedMutationRevision" => json!(self.checked_mutation_revision),
             "validationReceipts" => json!(self.validation_receipts),
+            "requiredChecks" => json!(self.required_checks.values().collect::<Vec<_>>()),
             "uncertainMutations" => json!(self.uncertain_mutations),
             "unclassifiedTerminalEffects" => json!(self.unclassified_terminal_effects),
             "latestCodeVersion" => self.latest_code_version.clone(),
@@ -172,6 +179,9 @@ impl RunProgress {
                     .filter(|items| items.len() <= 64)
                     .ok_or(DIAGNOSTIC_ERROR.to_owned())?;
                 self.validation_receipts = receipts.clone();
+                for receipt in receipts {
+                    self.remember_check(receipt.clone());
+                }
             }
             "uncertainMutations" => {
                 let entries = value.as_array().ok_or(DIAGNOSTIC_ERROR.to_owned())?;
@@ -219,6 +229,97 @@ impl RunProgress {
             _ => return Err(DIAGNOSTIC_ERROR.to_owned()),
         }
         Ok(Value::Null)
+    }
+
+    fn remember_check(&mut self, mut receipt: Value) {
+        if !receipt.is_object() { return; }
+        let identity = receipt["checkId"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
+            .unwrap_or_else(|| {
+                // Old checkpoints lack command identity; unrelated calls must not cancel each other.
+                // 旧断点没有命令身份，按调用隔离，不能让无关成功抵消失败。
+                let legacy = receipt["toolCallId"].as_str().map(str::to_owned)
+                    .unwrap_or_else(|| format!("unidentified-{}", self.required_checks.len()));
+                stable_hash(&json!(["legacy-validation", legacy]))
+            });
+        receipt["checkId"] = json!(identity);
+        self.required_checks.insert(identity, receipt);
+    }
+
+    fn restore_validation(&mut self, args: &Value) -> Result<Value, String> {
+        let state = args.get("state").filter(|state| state.is_object()).unwrap_or(args);
+        for name in ["mutationRevision", "checkedMutationRevision", "unclassifiedTerminalEffects"] {
+            if let Some(value) = state.get(name) {
+                self.patch(&json!({"name":name,"value":value}))?;
+            }
+        }
+        for name in ["latestCodeVersion", "validatedCodeVersion"] {
+            if let Some(value) = state.get(name) {
+                self.patch(&json!({"name":name,"value":value}))?;
+            }
+        }
+        if let Some(entries) = state.get("uncertainMutations") {
+            self.patch(&json!({"name":"uncertainMutations","value":entries}))?;
+        }
+        if let Some(entries) = state["artifactRevisions"].as_array() {
+            self.artifact_revisions = entries.iter().map(safe_integer).collect::<Result<_, _>>()?;
+        }
+        if let Some(receipts) = state["validationReceipts"].as_array() {
+            let receipts: Vec<Value> = receipts.iter().map(|receipt| {
+                let mut receipt = receipt.clone();
+                if receipt["checkId"].as_str().is_none() {
+                    if let Some(legacy) = args["legacyCalls"].as_array().into_iter().flatten()
+                        .find(|legacy| legacy["call"]["id"].is_string() && legacy["call"]["id"] == receipt["toolCallId"] && validation_call(&legacy["call"])) {
+                        let canonical = &legacy["output"];
+                        let output = canonical.get("structuredContent").filter(|value| value.is_object())
+                            .or_else(|| canonical.get("value").filter(|value| value.is_object())).unwrap_or(canonical);
+                        attach_check_identity(&mut receipt, &legacy["call"], output, &legacy["validationScope"]);
+                    }
+                }
+                self.remember_check(receipt.clone());
+                receipt
+            }).collect();
+            self.validation_receipts = receipts.iter().rev().take(64).cloned().collect();
+            self.validation_receipts.reverse();
+        }
+        if let Some(checks) = state["requiredChecks"].as_array() {
+            for check in checks { self.remember_check(check.clone()); }
+        }
+        Ok(Value::Null)
+    }
+
+    fn code_mutation_since(&self, revision: u64) -> bool {
+        let artifacts = self.artifact_revisions.range((std::ops::Bound::Excluded(revision), std::ops::Bound::Unbounded)).count() as u64;
+        self.mutation_revision.saturating_sub(revision) > artifacts
+    }
+
+    fn required_check_views(&self) -> Vec<Value> {
+        let latest_check = self.validation_receipts.last().unwrap_or(&Value::Null);
+        self.required_checks.values().map(|receipt| {
+            let observed = &receipt["codeVersionCoverage"]["after"];
+            // A fresh process may observe a different subset; only a broker-known workspace change can retire it.
+            // 重启后的观察子集可能不同，只有程序明确记录工作区切换时才允许旧目标退出当前核验。
+            let workspace_changed = receipt["workspaceKnown"] == true && latest_check["workspaceKnown"] == true
+                && receipt["workspaceId"] != latest_check["workspaceId"];
+            let active = !(workspace_changed && disjoint_targets(observed, &self.latest_code_version));
+            let changed = observed["complete"] == true && self.latest_code_version["complete"] == true
+                && observed["signature"] != self.latest_code_version["signature"]
+                || self.code_mutation_since(receipt["mutationRevision"].as_u64().unwrap_or(0));
+            let covered = receipt["passed"] == true && receipt["coversObservedRevision"] == true
+                && observed["complete"] == true && self.latest_code_version["complete"] == true
+                && observed["signature"] == self.latest_code_version["signature"] && !changed;
+            let resolution = if !active { "inactive" }
+                else if changed { "needs-revalidation" }
+                else if receipt.get("exitCode").is_some_and(Value::is_null)
+                    || receipt["outcomeUnknown"] == true || receipt["cancelled"] == true || receipt["timedOut"] == true { "execution-unconfirmed" }
+                else if receipt["passed"] != true { "failed" }
+                else if !covered { "version-unverified" }
+                else { "passed" };
+            let mut view = receipt.clone();
+            view["active"] = json!(active);
+            view["current"] = json!(active && !changed && (receipt["passed"] != true || covered));
+            view["resolution"] = json!(resolution);
+            view
+        }).collect()
     }
 
     fn record_model(&mut self, args: &Value) -> Result<Value, String> {
@@ -470,6 +571,7 @@ impl RunProgress {
                 "exhaustive": false
             }
         });
+        attach_check_identity(&mut receipt, call, output, &args["validationScope"]);
         if truthy(&result["resultRef"]) {
             receipt["resultRef"] = result["resultRef"].clone();
         }
@@ -484,11 +586,12 @@ impl RunProgress {
             }
             receipt["outputSummary"] = summary;
         }
+        self.remember_check(receipt.clone());
         self.validation_receipts.push(receipt);
         if self.validation_receipts.len() > 64 {
             self.validation_receipts.remove(0);
         }
-        if covered {
+        if covered && self.required_check_views().iter().all(|check| check["active"] == false || check["resolution"] == "passed") {
             self.checked_mutation_revision = self.mutation_revision;
             self.validated_code_version = after;
         }
@@ -666,6 +769,7 @@ impl RunProgress {
                 .values()
                 .all(|document| document.read_back)
             && self.uncertain_mutations.is_empty()
+            && self.required_check_views().iter().all(|check| check["active"] == false || check["resolution"] == "passed")
         {
             self.checked_mutation_revision = self.mutation_revision;
         }
@@ -686,21 +790,17 @@ impl RunProgress {
     }
 
     fn needs_validation(&self, task: &str) -> bool {
-        let latest = self.validation_receipts.last().unwrap_or(&Value::Null);
-        let changed_during_check = latest["codeVersionCoverage"]["before"]["complete"] == true
-            && latest["codeVersionCoverage"]["after"]["complete"] == true
-            && latest["codeVersionCoverage"]["sameObservedVersion"] != true;
+        let checks = self.required_check_views();
+        let unresolved: Vec<&Value> = checks.iter().filter(|check| check["active"] == true && check["resolution"] != "passed").collect();
+        let retryable_check = unresolved.iter().any(|check| matches!(check["resolution"].as_str(), Some("failed" | "needs-revalidation")));
         if !self.uncertain_mutations.is_empty()
-            || latest.get("exitCode").is_some_and(Value::is_null)
-            || latest["passed"] == true
-                && latest["mutationRevision"] == self.mutation_revision
-                && latest["coversObservedRevision"] != true
-                && !changed_during_check
+            || unresolved.iter().any(|check| check["resolution"] == "execution-unconfirmed")
+            || !retryable_check && unresolved.iter().any(|check| check["resolution"] == "version-unverified")
         {
             return false;
         }
         static TASK_PATTERN: OnceLock<Regex> = OnceLock::new();
-        (self.mutation_revision > self.checked_mutation_revision || latest["passed"] == false)
+        (self.pending_code_mutation() || retryable_check)
             && TASK_PATTERN
                 .get_or_init(|| {
                     Regex::new(r"(?i)代码|修复|实现|重构|\b(?:code|fix|implement|refactor)\b|\.(?:rs|py|js|jsx|ts|tsx|cs|java|go|c|cpp|h|hpp|sql|html|css)\b")
@@ -778,31 +878,27 @@ impl RunProgress {
     }
 
     pub(super) fn verification(&self) -> Value {
-        let latest = self.validation_receipts.last().unwrap_or(&Value::Null);
-        let failed = latest["passed"] == false;
-        let version_unverified =
-            latest["passed"] == true && latest["coversObservedRevision"] != true;
+        let checks = self.required_check_views();
+        let unresolved: Vec<&Value> = checks.iter().filter(|check| check["active"] == true && check["resolution"] != "passed").collect();
+        let failed = unresolved.iter().any(|check| check["resolution"] == "failed");
+        let version_unverified = unresolved.iter().any(|check| check["resolution"] == "version-unverified");
         let pending_document = self
             .document_validations
             .values()
             .any(|document| !document.read_back || document.version_check_required);
         let needs_check = self.pending_code_mutation() || pending_document;
-        let pending =
-            needs_check || failed || version_unverified || !self.uncertain_mutations.is_empty();
+        let pending = needs_check || !unresolved.is_empty() || !self.uncertain_mutations.is_empty();
         let state = if !self.uncertain_mutations.is_empty()
-            || latest.get("exitCode").is_some_and(Value::is_null)
+            || unresolved.iter().any(|check| check["resolution"] == "execution-unconfirmed")
         {
             "execution-unconfirmed"
         } else if failed {
             "checks-failed"
         } else if version_unverified {
             "checks-version-unverified"
-        } else if needs_check {
+        } else if needs_check || unresolved.iter().any(|check| check["resolution"] == "needs-revalidation") {
             "needs-validation"
-        } else if self
-            .validation_receipts
-            .iter()
-            .any(|receipt| receipt["passed"] == true)
+        } else if checks.iter().any(|check| check["active"] == true && check["resolution"] == "passed")
         {
             "checks-passed"
         } else {
@@ -813,7 +909,17 @@ impl RunProgress {
             "mutationRevision": self.mutation_revision,
             "checkedMutationRevision": self.checked_mutation_revision,
             "pendingValidation": pending,
-            "receipts": self.validation_receipts,
+            "receipts": self.validation_receipts.iter().map(|receipt| {
+                let identity = receipt["checkId"].as_str().map(str::to_owned).or_else(||
+                    receipt["toolCallId"].as_str().map(|id| stable_hash(&json!(["legacy-validation",id]))));
+                let latest = checks.iter().find(|check| identity.as_deref() == check["checkId"].as_str());
+                let mut view = receipt.clone();
+                view["active"] = json!(latest.is_none_or(|check| check["active"] == true));
+                view["current"] = json!(latest.is_some_and(|check| check["toolCallId"] == receipt["toolCallId"] && check["current"] == true));
+                view
+            }).collect::<Vec<_>>(),
+            "requiredChecks": checks,
+            "unresolvedChecks": unresolved,
             "documentValidation": {
                 "coverage": "complete-hash-matched-readback",
                 "semanticCorrectnessCertified": false,
@@ -826,7 +932,7 @@ impl RunProgress {
             "codeVersionCoverage": {
                 "coverage": "observed-filesystem-targets",
                 "exhaustive": false,
-                "actualFileHashesVerified": latest["coversObservedRevision"] == true && !self.validated_code_version.is_null() && !pending,
+                "actualFileHashesVerified": !self.validated_code_version.is_null() && !pending,
                 "observedMutationRevision": self.mutation_revision,
                 "checkedMutationRevision": self.checked_mutation_revision,
                 "uncertainMutations": self.uncertain_mutations.len(),
@@ -907,9 +1013,13 @@ fn is_document_target(path: &str) -> bool {
 }
 
 pub fn validation_call(call: &Value) -> bool {
+    validation_command(call).is_some()
+}
+
+fn validation_command(call: &Value) -> Option<String> {
     let name = call["name"].as_str().unwrap_or("");
     if !["terminal.run", "terminal.host.run"].contains(&name) {
-        return false;
+        return None;
     }
     let args = &call["arguments"];
     let arguments = args["args"].as_array();
@@ -945,10 +1055,85 @@ pub fn validation_call(call: &Value) -> bool {
         .chars()
         .any(|value| matches!(value, ';' | '&' | '|' | '`' | '\r' | '\n'))
     {
-        return false;
+        return None;
     }
     static COMMAND_PATTERN: OnceLock<Regex> = OnceLock::new();
-    COMMAND_PATTERN.get_or_init(|| Regex::new(r"(?i)^\s*(?:dotnet(?:\.exe)?\s+(?:test|build)|cargo(?:\.exe)?\s+(?:test|check|build)|npm(?:\.cmd)?\s+(?:test|run\s+(?:test|build))|node(?:\.exe)?\s+--test|pytest(?:\.exe)?|(?:py(?:\.exe)?(?:\s+-[23](?:\.\d+)?)?|python(?:[23](?:\.\d+)?)?(?:\.exe)?)\s+-m\s+(?:pytest|unittest))(?:\s|$)").unwrap()).is_match(&command)
+    COMMAND_PATTERN.get_or_init(|| Regex::new(r"(?i)^\s*(?:dotnet(?:\.exe)?\s+(?:test|build)|cargo(?:\.exe)?\s+(?:test|check|build)|npm(?:\.cmd)?\s+(?:test|run\s+(?:test|build))|node(?:\.exe)?\s+--test|pytest(?:\.exe)?|(?:py(?:\.exe)?(?:\s+-[23](?:\.\d+)?)?|python(?:[23](?:\.\d+)?)?(?:\.exe)?)\s+-m\s+(?:pytest|unittest))(?:\s|$)").unwrap()).is_match(&command).then_some(command)
+}
+
+fn stable_hash(value: &Value) -> String {
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+
+fn attach_check_identity(receipt: &mut Value, call: &Value, output: &Value, scope: &Value) {
+    let Some(command) = validation_command(call) else { return; };
+    let cwd = output["cwd"].as_str().filter(|cwd| !cwd.trim().is_empty())
+        .or_else(|| scope["cwd"].as_str().filter(|cwd| !cwd.trim().is_empty()))
+        .or_else(|| scope.as_str()).unwrap_or("");
+    let environment = if output["sandbox"].as_str().is_some_and(|value| !value.is_empty()) || call["name"] == "terminal.run" {
+        "sandbox"
+    } else { "host" };
+    let command = normalize_command(&command);
+    let cwd = normalize_workdir(cwd);
+    // Identity excludes the code version and keeps command arguments and paths out of the public view.
+    // 身份不含代码版本，公开视图只保存指纹，不新增命令参数和路径明文。
+    receipt["commandId"] = json!(stable_hash(&json!(command)));
+    receipt["scopeId"] = json!(stable_hash(&json!([cwd, environment])));
+    let workspace = scope["cwd"].as_str().or_else(|| scope.as_str()).unwrap_or("");
+    receipt["workspaceKnown"] = json!(!workspace.trim().is_empty());
+    receipt["workspaceId"] = json!(stable_hash(&json!(normalize_workdir(workspace))));
+    receipt["checkId"] = json!(stable_hash(&json!([command, cwd, environment])));
+    receipt["category"] = json!(validation_category(&command));
+    receipt["executionEnvironment"] = json!(environment);
+}
+
+fn normalize_workdir(value: &str) -> String {
+    let path = value.trim().replace('\\', "/");
+    let root = path == "/" || path.len() == 3 && path.as_bytes().get(1) == Some(&b':') && path.ends_with('/');
+    let path = if root { path.as_str() } else { path.trim_end_matches('/') };
+    if path.as_bytes().get(1) == Some(&b':') || path.starts_with("//") { path.to_lowercase() } else { path.to_owned() }
+}
+
+fn normalize_command(value: &str) -> String {
+    let mut result = String::new();
+    let mut quote = None;
+    let mut space = false;
+    for character in value.trim().chars() {
+        if quote.is_none() && character.is_whitespace() { space = true; continue; }
+        if space && !result.is_empty() { result.push(' '); }
+        space = false;
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) { quote = None; }
+            else if quote.is_none() { quote = Some(character); }
+        }
+        result.push(character);
+    }
+    result
+}
+
+fn validation_category(command: &str) -> &'static str {
+    static BUILD: OnceLock<Regex> = OnceLock::new();
+    static CHECK: OnceLock<Regex> = OnceLock::new();
+    if BUILD.get_or_init(|| Regex::new(r"(?i)^\s*(?:(?:dotnet|cargo)(?:\.exe)?\s+build|npm(?:\.cmd)?\s+run\s+build)(?:\s|$)").unwrap()).is_match(command) { "build" }
+    else if CHECK.get_or_init(|| Regex::new(r"(?i)^\s*cargo(?:\.exe)?\s+check(?:\s|$)").unwrap()).is_match(command) { "check" }
+    else { "test" }
+}
+
+fn disjoint_targets(left: &Value, right: &Value) -> bool {
+    fn targets(snapshot: &Value) -> Option<(String, BTreeSet<String>)> {
+        let files = snapshot["files"].as_array()?;
+        if snapshot["complete"] != true || files.is_empty() || snapshot["fileCount"].as_u64() != Some(files.len() as u64) { return None; }
+        let source = files.first()?["identitySource"].as_str().unwrap_or("pathId");
+        let ids = files.iter().map(|file| {
+            (file["identitySource"].as_str().unwrap_or("pathId") == source)
+                .then(|| file["pathId"].as_str().map(str::to_owned)).flatten()
+        }).collect::<Option<BTreeSet<_>>>()?;
+        Some((source.to_owned(), ids))
+    }
+    match (targets(left), targets(right)) {
+        (Some((left_source, left)), Some((right_source, right))) => left_source == right_source && left.is_disjoint(&right),
+        _ => false,
+    }
 }
 
 fn safe_integer(value: &Value) -> Result<u64, String> {
@@ -998,10 +1183,18 @@ fn version_identity(snapshot: &Value) -> Value {
         .as_str()
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let file_count = snapshot["files"].as_array().map_or(0, Vec::len);
+    let files: Vec<Value> = snapshot["files"].as_array().into_iter().flatten().take(64).map(|file| {
+        if let Some(id) = file["pathId"].as_str().filter(|value| !value.is_empty()) {
+            json!({"pathId":id,"identitySource":file["identitySource"].as_str().unwrap_or("pathId")})
+        } else if let Some(path) = file["path"].as_str().filter(|value| !value.is_empty()) {
+            json!({"pathId":stable_hash(&json!(normalize_workdir(path))),"identitySource":"legacy-path"})
+        } else { Value::Null }
+    }).collect();
     let mut result = json!({
         "signature": signature,
         "complete": snapshot["complete"] == true && signature.is_some() && (1..=64).contains(&file_count),
         "fileCount": file_count.min(64),
+        "files": files,
         "coverage": "observed-filesystem-targets",
         "exhaustive": false
     });
@@ -1067,6 +1260,22 @@ mod document_validation_tests {
             false
         );
         assert_eq!(complete["receipts"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn restored_document_progress_keeps_readback_separate_from_code_checks() {
+        let mut original = RunProgress::default();
+        write(&mut original, "/work/report.md", 'a');
+        let state = original.apply("progress.state", &json!({})).unwrap();
+        let targets = original.apply("progress.documentReadbackTargets", &json!({})).unwrap();
+        let mut restored = RunProgress::default();
+        restored.apply("progress.restoreValidation", &json!({"state":state})).unwrap();
+        restored.apply("progress.restoreDocumentReadbackTargets", &json!({"targets":targets,"sameTaskCheckpoint":true})).unwrap();
+        assert!(!restored.needs_validation("修复说明文档"));
+        assert_eq!(restored.verification()["pendingValidation"], true);
+        read(&mut restored, "/work/report.md", 'a', 0, 6, "abcdef");
+        assert_eq!(restored.verification()["pendingValidation"], false);
+        assert!(restored.verification()["receipts"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -1183,6 +1392,7 @@ mod document_validation_tests {
         assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"unknown"},"effectfulWork":true}))["completionState"], "partial");
         assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete","unmet":["彩窗"]}}))["completionState"], "partial");
         // A plain answer without external effects keeps the ordinary completed outcome.
+        // 无外部操作的纯文字答复沿用普通完成状态。
         assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"unknown"}}))["completionState"], "completed");
         assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete","unmet":[]},"effectfulWork":true}))["completionState"], "completed");
         assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"},"requiresVerification":true}))["completionState"],"partial");
@@ -1259,6 +1469,127 @@ mod document_validation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check(progress: &mut RunProgress, id: &str, command: &str, exit: i64, snapshot: &Value) {
+        progress.apply("progress.observeOutcome", &json!({
+            "call":{"id":id,"name":"terminal.host.run","arguments":{"script":command}},
+            "result":{"status":"completed","isError":exit != 0},"canonicalResult":{"exitCode":exit,"cwd":"D:/work"},
+            "validationScope":{"cwd":"D:/fallback"},"beforeVersion":snapshot,"afterVersion":snapshot
+        })).unwrap();
+    }
+
+    #[test]
+    fn failed_test_survives_unrelated_build_and_only_its_current_retry_resolves_it() {
+        let mut progress = RunProgress::default();
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"edit","name":"filesystem.edit"},
+            "result":{"status":"completed","isError":false}})).unwrap();
+        check(&mut progress,"test-failed","cargo test",1,&snapshot('a'));
+        check(&mut progress,"build-passed","cargo build",0,&snapshot('a'));
+        assert_eq!(progress.verification()["state"],"checks-failed");
+        assert_eq!(progress.checked_mutation_revision,0);
+        assert!(progress.needs_validation("修复代码"));
+        check(&mut progress,"test-passed","cargo   test",0,&snapshot('a'));
+        assert_eq!(progress.verification()["pendingValidation"],false);
+        assert_eq!(progress.checked_mutation_revision,1);
+        assert_eq!(progress.verification()["receipts"][0]["current"],false);
+        assert_eq!(progress.verification()["unresolvedChecks"],json!([]));
+    }
+
+    #[test]
+    fn changed_overlapping_versions_require_revalidation_instead_of_reusing_failure_or_success() {
+        let mut progress = RunProgress::default();
+        check(&mut progress,"test-failed","cargo test",1,&snapshot('a'));
+        check(&mut progress,"build-passed","cargo build",0,&snapshot('a'));
+        progress.apply("progress.finalVersion",&json!({"snapshot":snapshot('b')})).unwrap();
+        assert_eq!(progress.verification()["state"],"needs-validation");
+        assert!(progress.verification()["unresolvedChecks"].as_array().unwrap().iter()
+            .all(|check| check["active"] == true && check["resolution"] == "needs-revalidation"));
+        check(&mut progress,"test-current","cargo test",0,&snapshot('b'));
+        assert_eq!(progress.verification()["pendingValidation"],true);
+        check(&mut progress,"build-current","cargo build",0,&snapshot('b'));
+        assert_eq!(progress.verification()["pendingValidation"],false);
+    }
+
+    #[test]
+    fn only_explicit_disjoint_targets_make_old_checks_inactive() {
+        let mut progress = RunProgress::default();
+        let first=json!({"signature":"a".repeat(64),"complete":true,"files":[{"pathId":"target-a"}]});
+        let second=json!({"signature":"b".repeat(64),"complete":true,"files":[{"pathId":"target-b"}]});
+        check(&mut progress,"old-test","cargo test",1,&first);
+        check(&mut progress,"other-build","cargo build",0,&second);
+        assert_eq!(progress.verification()["pendingValidation"],true,
+            "a restarted or changed observation subset in the same workspace cannot retire the original check");
+        progress.apply("progress.observeOutcome", &json!({
+            "call":{"id":"new-workspace-build","name":"terminal.host.run","arguments":{"script":"cargo build"}},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"exitCode":0,"cwd":"D:/other-workspace"},
+            "validationScope":{"cwd":"D:/other-workspace"},"beforeVersion":second,"afterVersion":second
+        })).unwrap();
+        assert_eq!(progress.verification()["pendingValidation"],false);
+        assert!(progress.verification()["requiredChecks"].as_array().unwrap().iter()
+            .any(|check| check["toolCallId"] == "old-test" && check["active"] == false));
+        let extended=json!({"signature":"c".repeat(64),"complete":true,"files":[{"pathId":"target-a"},{"pathId":"target-b"}]});
+        progress.apply("progress.finalVersion",&json!({"snapshot":extended})).unwrap();
+        assert!(progress.verification()["requiredChecks"].as_array().unwrap().iter()
+            .all(|check| check["active"] == true));
+        let opaque=json!({"signature":"d".repeat(64),"complete":true,"files":[{}]});
+        progress.apply("progress.finalVersion",&json!({"snapshot":opaque})).unwrap();
+        assert!(progress.verification()["requiredChecks"].as_array().unwrap().iter().all(|check| check["active"] == true));
+    }
+
+    #[test]
+    fn check_requirements_survive_display_history_trimming_and_checkpoint_restore() {
+        let mut progress = RunProgress::default();
+        check(&mut progress,"failed","cargo test -p old",1,&snapshot('a'));
+        for index in 0..65 {
+            check(&mut progress,&format!("check-{index}"),&format!("cargo check -p fixture-{index}"),0,&snapshot('a'));
+        }
+        assert_eq!(progress.validation_receipts.len(),64);
+        assert_eq!(progress.required_checks.len(),66);
+        assert_eq!(progress.verification()["state"],"checks-failed");
+        let state=progress.apply("progress.state",&json!({})).unwrap();
+        let mut restored=RunProgress::default();
+        restored.apply("progress.restoreValidation",&json!({"state":state})).unwrap();
+        assert_eq!(restored.verification()["state"],"checks-failed");
+        check(&mut restored,"retried","cargo test -p old",0,&snapshot('a'));
+        assert_eq!(restored.verification()["pendingValidation"],false);
+    }
+
+    #[test]
+    fn legacy_calls_only_recover_identity_from_matching_real_validation_calls() {
+        let mut original=RunProgress::default();
+        check(&mut original,"failed","cargo test",1,&snapshot('a'));
+        let mut legacy=original.validation_receipts[0].clone();
+        for key in ["checkId","commandId","scopeId","category","executionEnvironment"] { legacy.as_object_mut().unwrap().remove(key); }
+        let mut restored=RunProgress::default();
+        restored.apply("progress.restoreValidation",&json!({"state":{"validationReceipts":[legacy.clone()]},
+            "legacyCalls":[{"call":{"id":"failed","name":"terminal.host.run","arguments":{"script":"cargo test"}},
+                "output":{"cwd":"D:/work","exitCode":1},"validationScope":{"cwd":"D:/fallback"}}]})).unwrap();
+        check(&mut restored,"retried","cargo test",0,&snapshot('a'));
+        assert_eq!(restored.verification()["pendingValidation"],false);
+        let mut conservative=RunProgress::default();
+        conservative.apply("progress.restoreValidation",&json!({"state":{"validationReceipts":[legacy]}})).unwrap();
+        check(&mut conservative,"unmatched","cargo build",0,&snapshot('a'));
+        assert_eq!(conservative.verification()["state"],"checks-failed");
+    }
+
+    #[test]
+    fn command_identity_uses_actual_cwd_and_separates_execution_environments() {
+        let mut host=RunProgress::default();
+        check(&mut host,"one","cargo test --test specific",1,&snapshot('a'));
+        let receipt=host.validation_receipts[0].clone();
+        let mut other=RunProgress::default();
+        other.apply("progress.observeOutcome",&json!({"call":{"id":"two","name":"terminal.host.run","arguments":{"script":"cargo test --test specific"}},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"exitCode":0,"cwd":"d:\\WORK\\"},
+            "validationScope":{"cwd":"D:/different-fallback"},"beforeVersion":snapshot('a'),"afterVersion":snapshot('a')})).unwrap();
+        assert_eq!(receipt["checkId"],other.validation_receipts[0]["checkId"]);
+        other.apply("progress.observeOutcome",&json!({"call":{"id":"three","name":"terminal.run","arguments":{"command":"cargo","args":["test","--test","specific"]}},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"exitCode":0,"cwd":"D:/work","sandbox":"appcontainer","tokenVerified":true,"workspaceCopy":true},
+            "beforeVersion":snapshot('a'),"afterVersion":snapshot('a')})).unwrap();
+        assert_ne!(receipt["checkId"],other.validation_receipts[1]["checkId"]);
+        let public=host.verification();
+        assert!(public["requiredChecks"][0].get("command").is_none());
+        assert!(public["requiredChecks"][0].get("cwd").is_none());
+    }
 
     #[test]
     fn unloaded_calls_are_measured_as_blocked_without_inventing_dispatch() {

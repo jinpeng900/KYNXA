@@ -43,24 +43,6 @@ await Reject(() => api.ListAsync(conversation, project, taskId));
 // 重开客户端只用 GET 观察已有根，复核聊天及项目身份，不枚举整个项目或提交控制命令。
 transport.Reply = _ => Reply(new TaskListResponse([task with { State = "running" }], false, null));
 var runningPage = await api.ListConversationAsync(conversation, project);
-Check(new[] { "继续", "继续完善刚才的文档", "请接着做", "continue the previous task", "resume current work" }
-    .All(RecoveredTaskContinuation.IsExplicit) && new[] { "你好", "今天天气如何", "新问题：解释什么是缓存", "继续教育是什么意思", "continue education policies" }
-    .All(text => !RecoveredTaskContinuation.IsExplicit(text)),
-    "Only explicit continuation reuses a root; greetings and independent questions remain normal requests.");
-Check(RecoveredTaskContinuation.Select([task], conversation, project).Task is { TaskId: var pausedIdentity, State: "paused" }
-    && pausedIdentity == taskId && RecoveredTaskContinuation.Select([task with { State = "running" }, task with { State = "partial", TaskId = nextId }],
-        conversation, project).Task?.TaskId == taskId,
-    "Discovery preserves a paused root without resuming it and selects the actual active root over ended history.");
-Check(RecoveredTaskContinuation.Select([task, task with { TaskId = nextId, State = "running" }], conversation, project).IsAmbiguous &&
-    RecoveredTaskContinuation.Select([task], Guid.NewGuid(), project).Task is null &&
-    RecoveredTaskContinuation.Select([task], conversation, Guid.NewGuid()).Task is null &&
-    RecoveredTaskContinuation.Select([task with { ParentTaskId = nextId }], conversation, project).Task is null,
-    "Multiple roots require selection; navigation, scope changes and child tasks cannot supply another continuation identity.");
-Check(RecoveredTaskContinuation.Select([task with { State = "partial" }], conversation, project).Task?.TaskId == taskId &&
-    RecoveredTaskContinuation.Select([task with { State = "partial" }, task with { TaskId = nextId, State = "partial" }],
-        conversation, project).IsAmbiguous &&
-    RecoveredTaskContinuation.Select([task with { State = "completed" }], conversation, project).Task is null,
-    "Explicit continuation selects one partial root only without live work; multiple partial roots still require a choice.");
 Check(transport.Path == $"/api/tasks?conversationId={conversation:D}" && transport.Body is null,
     "Automatic observation reads only this chat and sends no prompt or control body.");
 Check(RunningTaskObservation.Select(runningPage.Tasks, conversation, project)?.TaskId == taskId,
@@ -77,18 +59,18 @@ await Reject(() => api.ListConversationAsync(conversation, project));
 // A fresh page has no process-local pause map; only the bounded formal lookup can restore its identity.
 // 新页面没有进程内暂停映射；只能从有界正式查询恢复身份，不能猜选或另建任务。
 transport.Reply = _ => Reply(new TaskPausedResponse([]));
-var nonePaused = PausedTaskSelection.From(await api.PausedAsync(conversation, project));
-Check(nonePaused.TaskId is null && !nonePaused.IsAmbiguous, "No paused checkpoint permits a new ordinary request.");
+var nonePaused = await api.PausedAsync(conversation, project);
+Check(nonePaused.Tasks.Length == 0, "No paused checkpoint is reported without inventing a task.");
 Check(transport.Path == $"/api/tasks/paused?conversationId={conversation:D}&projectId={project:D}",
     "Pause recovery is scoped to one saved chat rather than the whole project's task pages.");
 transport.Reply = _ => Reply(new TaskPausedResponse([task]));
-var restored = PausedTaskSelection.From(await api.PausedAsync(conversation, project));
-Check(restored.TaskId == taskId && !restored.IsAmbiguous,
-    "A fresh client restores the unique durable paused task without any previous in-memory identity.");
+var restored = await api.PausedAsync(conversation, project);
+Check(restored.Tasks.Single().TaskId == taskId,
+    "A fresh client reads the durable paused identity without resuming it.");
 transport.Reply = _ => Reply(new TaskPausedResponse([task, task with { TaskId = nextId }]));
-var ambiguous = PausedTaskSelection.From(await api.PausedAsync(conversation, project));
-Check(ambiguous.IsAmbiguous && ambiguous.TaskId is null,
-    "Multiple paused roots require explicit task selection and cannot silently start a new task.");
+var ambiguous = await api.PausedAsync(conversation, project);
+Check(ambiguous.Tasks.Length == 2 && ambiguous.Tasks.Select(item => item.TaskId).Distinct().Count() == 2,
+    "Multiple paused roots remain read-only records and never block an ordinary prompt.");
 Check(PausedTaskSelection.CanResumeInContext(task, conversation, project, false, null, false) &&
     PausedTaskSelection.CanResumeInContext(task, conversation, project, true, taskId, true),
     "An explicit selection can resume in its original chat with no reply or its confirmed paused observer.");

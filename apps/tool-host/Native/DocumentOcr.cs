@@ -24,8 +24,8 @@ internal sealed class DocumentOcrException(string code, string message) : Except
 }
 
 /// <summary>
-/// Recognize caller-authorized document/image bytes; this offline service never reads paths or controls windows.
-/// 识别调用方已授权的文档或图像字节；离线服务不接文件路径，也不操作桌面窗口。
+/// Recognize authorized bytes offline, without reading paths or controlling windows.
+/// 离线识别已授权的文档或图像字节，不接收路径或操作窗口。
 /// </summary>
 internal static class DocumentOcr
 {

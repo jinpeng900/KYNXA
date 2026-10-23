@@ -186,8 +186,8 @@ public partial class App
 
     private async Task CheckBlockCopyFailureAndNavigationAsync(Guid chat, ConversationMessageViewModel answer)
     {
-        // Deliberately intercept one request to simulate a failed host result; this is not an OS clipboard-failure claim.
-        // 主动截住一次请求来模拟宿主失败回执；此检查不声称制造或验证了操作系统剪贴板故障。
+        // Intercept one request to simulate host failure, not an OS clipboard failure.
+        // 拦截一次请求模拟宿主失败，不代表制造或验证了系统剪贴板故障。
         await EvalAsync<bool>("(() => { window.__blockPost=chrome.webview.postMessage.bind(chrome.webview); chrome.webview.postMessage=value => { if(value.type==='copy') window.__blockRequest=value; else __blockPost(value); }; document.querySelector('.copy-block').click(); return true; })()");
         var request = await EvalAsync<JsonElement>("window.__blockRequest");
         Check(await EvalAsync<bool>("!document.querySelector('.copy-block').dataset.copyState"), "request alone cannot show a copy-success icon");

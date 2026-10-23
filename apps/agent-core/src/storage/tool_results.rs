@@ -350,7 +350,8 @@ fn apply_service(operation: &str, arguments: &Value) -> ContractResult {
                 end = source.len().min(end + 2);
             }
             return Ok(
-                json!({"offset": offset, "end": end, "totalCharacters": source.len(), "truncated": end < source.len()}),
+                json!({"offset": offset, "end": end, "totalCharacters": source.len(),
+                    "hasMore": end < source.len(), "truncated": end < source.len()}),
             );
         }
         "storage.toolResults.preview" => {

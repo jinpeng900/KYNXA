@@ -208,8 +208,8 @@ fn vector_status(connection: &Connection, scopes: &[Value]) -> ContractResult {
     )
 }
 
-/// Scoped SQL reads and reference freshness execute in one native snapshot before any original body is exposed.
-/// 范围 SQL 读取与引用新鲜度在同一原生快照执行，授权完成前不暴露原文。
+/// Authorize scoped SQL and reference freshness in one snapshot before exposing text.
+/// 同一快照内核验范围与引用新鲜度，授权后才返回原文。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if [
         "storage.index.vectorCacheStats",

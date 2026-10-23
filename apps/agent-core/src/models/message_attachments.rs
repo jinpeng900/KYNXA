@@ -106,8 +106,8 @@ pub(crate) fn remove_images(history: &mut [Value]) -> bool {
     removed
 }
 
-/// Apply known owned-model capabilities only to a request projection; unknown API capabilities remain unchanged.
-/// 已知自管模型能力仅作用于本次请求投影；API或未知能力保持原合同，正式附件与历史不变。
+/// Adapt only this request to verified local capabilities; preserve API contracts, attachments and history.
+/// 仅按已核验本地能力调整请求；保留 API 合同、正式附件和历史。
 pub(crate) fn project_text_only_model(connection: &Value, history: &mut [Value]) -> bool {
     let managed = connection["providerId"]
         .as_str()

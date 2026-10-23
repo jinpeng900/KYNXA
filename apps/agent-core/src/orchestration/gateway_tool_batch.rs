@@ -121,8 +121,8 @@ pub(crate) fn plan(calls: &[Value]) -> Vec<Range<usize>> {
     plan_with_catalog(calls, &[])
 }
 
-/// Only the gateway's current catalog supplies concurrency hints; model arguments cannot grant them.
-/// 并发提示只取网关当前目录，模型参数不能自行授予并发语义；权限仍由正常工具策略核验。
+/// Take concurrency hints from the current catalog; model arguments grant no permissions.
+/// 并发提示取自当前目录，模型参数不授予权限。
 pub(crate) fn plan_with_catalog(calls: &[Value], catalog: &[Value]) -> Vec<Range<usize>> {
     let mut batches = Vec::new();
     let mut start = 0;
@@ -172,8 +172,8 @@ struct BatchActivity {
 }
 
 impl BatchActivity {
-    /// Count the union of fully suspended intervals, never the sum of concurrent admission waits.
-    /// 只统计整个批次完全挂起的时间并集，不能相加并发准入等待，也不能抵扣其他调用的实际执行。
+    /// Count fully suspended interval unions, excluding overlapping waits and other active calls.
+    /// 仅计整个批次完全挂起的时间并集，不叠加等待或抵扣其他执行。
     fn transition(&mut self, previous: Option<CallPhase>, next: Option<CallPhase>, now: Instant) -> Duration {
         let suspended = self.suspended_since.take()
             .map_or(Duration::ZERO, |started| now.saturating_duration_since(started));
@@ -228,14 +228,14 @@ impl BatchCallActivity<'_, '_> {
 
 impl Drop for BatchCallActivity<'_, '_> {
     fn drop(&mut self) {
-        // Cancellation/drop closes the same interval without dispatching or replaying a queued call.
-        // 取消或丢弃 Future 时结算原等待区间，不派发或重放仍在排队的调用。
+        // Cancellation/drop closes waiting intervals without dispatch or replay.
+        // 取消或丢弃时结算等待区间，不派发或重放排队调用。
         self.batch.transition(Some(self.phase), None);
     }
 }
 
-/// Run one batch with bounded concurrency and return outputs in the original call order.
-/// 以有界并发运行一个批次，并按原调用顺序返回结果；完成先后不影响配对。
+/// Run bounded concurrent batches and return results in original order.
+/// 有界并发执行批次，按原调用顺序返回结果。
 ///
 /// The first call needs no extra admission. Each further call waits in the resource queue; a
 /// cancelled wait yields `rejected` without executing the call.
@@ -274,8 +274,8 @@ where
         .await
 }
 
-/// Reserve resource-service capacity for one extra concurrent read, waiting while capacity is short.
-/// 为一个额外并发读取预约资源服务额度；资源不足时排队等待，不记为执行失败。
+/// Reserve each extra read's capacity; queue shortages instead of reporting execution failure.
+/// 为额外读取预约资源，容量不足时排队，不报执行失败。
 ///
 /// Only an explicit stop ends the wait. Without a resource service, or when the service itself is
 /// unavailable, the call proceeds like the former serial path, which had no extra reservation.
@@ -394,8 +394,8 @@ pub(crate) fn finish_dispatch(
     Ok(())
 }
 
-/// Execute admitted batch calls concurrently; each receipt is archived and settled as soon as it completes.
-/// 并发执行已准入的批次调用；每个回执在完成时立即归档并结算，按原调用位置返回。
+/// Run admitted calls concurrently; archive/settle on completion and return in original order.
+/// 已准入调用并发执行，完成即归档结算，按原顺序返回。
 pub(crate) async fn execute(
     data_root: &Path,
     run: &RequestRun,
@@ -430,7 +430,7 @@ pub(crate) async fn execute(
                 }
                 prefetched.dispatched = true;
             }
-            let mut call_context = ctx.clone();
+            let mut call_context = context;
             call_context.config["activeToolCallId"] = call["id"].clone();
             call_context.config["activeOperationId"] = json!(operation_id);
             let dispatched_at = Instant::now();

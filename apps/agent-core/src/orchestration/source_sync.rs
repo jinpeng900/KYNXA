@@ -60,8 +60,8 @@ fn wire_with_fields(value: &Value, fields: &HashMap<String, String>) -> String {
     )
 }
 
-/// Source caches, inventory generations and notifications are native facts; fs.watch/decoder I/O stay external.
-/// 来源缓存、目录代次与通知由原生持有；fs.watch/解码 I/O 留在外部，失败清单不能证明文件删除。
+/// Track source caches, generations and notifications; failed scans do not prove deletion.
+/// 维护来源缓存、代次和通知，扫描失败不证明来源已删除。
 #[derive(Default)]
 pub struct SourceSyncState {
     closed: bool,

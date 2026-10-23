@@ -914,8 +914,8 @@ fn current_browser_intent(message: &str) -> Value {
         );
         local |= !remote;
     }
-    // Display location is separate from browser authority: website requests stay in the app unless a desktop browser is explicit.
-    // 展示位置与浏览器授权分开；普通网站请求留在软件内，明确桌面浏览器请求才使用外部应用。
+    // Keep website requests in-app unless a desktop browser is explicit; display hints do not grant authority.
+    // 网页默认在软件内打开，明确要求桌面浏览器才用外部应用；展示线索不授予权限。
     let mut intent = json!({"allowLocalBrowser":local,"explicitBrowserTask":explicit,
         "presentationTarget":browser_presentation(projection["activeText"].as_str().unwrap_or(""))});
     if !excluded.is_empty() {

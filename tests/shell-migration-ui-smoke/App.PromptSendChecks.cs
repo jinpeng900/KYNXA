@@ -12,28 +12,32 @@ namespace KYNXA_Desktop;
 
 public partial class App
 {
-    private async Task CheckPromptSendAsync()
+    private async Task CheckPromptSendAsync(bool queueOnly = false)
     {
         _gateway.EnablePromptSends = true;
-        _gateway.HoldPausedRecovery();
         Call("SetPrimaryMode", true, true);
         var chat = _shell.ViewModel.RecentConversations.Single(item => item.Id == _gateway.StandaloneChatId);
         Call("SelectStandaloneChat", chat);
-        await WaitAsync(() => _gateway.PausedReads > 0, "opening a saved chat prepares paused-task recovery in the background");
+        await WaitAsync(() => !(bool)Call("HasQueuedTaskActivity", chat.Id)!,
+            "background task observation confirms that the saved chat is idle");
         await SettleAsync();
+        if (queueOnly) { await CheckQueueWaitsForReplyAsync(); return; }
+        var firstReply = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _gateway.PromptReplyGate = firstReply;
         const string first = "Immediate click send";
         NativeUi.SetText(Prompt, first);
         var clicked = Stopwatch.StartNew();
         NativeUi.Invoke(Element<Button>("SendButton"));
         await WaitAsync(() => _shell.ActiveMessages.Any(row => row.Message.Role == "user" && row.Message.Content == first),
-            "the user message appears while paused-task recovery is still blocked");
-        Check(Prompt.Text == string.Empty && _gateway.StreamRequests == 0 && _gateway.Writes == 0,
-            "send clears the composer and presents the user before any storage or model request");
+            "the user message appears before the pending model reply");
+        Check(Prompt.Text == string.Empty && _gateway.PausedReads == 0,
+            "idle send clears the composer and presents the user without querying paused roots or selecting a task");
         var transcript = Element<ConversationTranscript>("ConversationMessages");
         await WaitForPromptDomAsync(transcript, first);
-        File.AppendAllText(ResultPath, $"Local message and DOM before recovery: {clicked.ElapsedMilliseconds} ms\n");
+        File.AppendAllText(ResultPath, $"Local message and DOM before model reply: {clicked.ElapsedMilliseconds} ms\n");
         NativeUi.SetText(Prompt, "Draft typed during connection preparation");
-        _gateway.ReleasePausedRecovery();
+        _gateway.PromptReplyGate = null;
+        firstReply.TrySetResult();
         await WaitAsync(() => _gateway.StreamRequests == 1 && LastAssistantIsComplete(), "the first synthetic reply completes");
         Check(Prompt.Text == "Draft typed during connection preparation",
             "finishing preparation does not erase a newer composer draft");
@@ -68,8 +72,8 @@ public partial class App
         }
         finally { Prompt.RemoveHandler(UIElement.PreviewKeyDownEvent, observeEnter); }
         Check(Prompt.Text == string.Empty && _shell.ActiveMessages.Count(row => row.Message.Role == "user"
-            && row.Message.Content == "Enter sends once") == 1 && _gateway.PausedReads == 1,
-            "Enter adds one message without a leftover newline or repeated paused-task query");
+            && row.Message.Content == "Enter sends once") == 1 && _gateway.PausedReads == 0,
+            "Enter adds one message without a leftover newline or obsolete paused-task query");
         await WaitForPromptDomAsync(transcript, "Fixture reply: Enter sends once");
 
         NativeUi.SetText(Prompt, "Shift retains newline");
@@ -96,6 +100,38 @@ public partial class App
             "the IME confirming Enter neither sends nor leaves a stray newline");
         NativeUi.SetText(Prompt, string.Empty);
         await CheckClipboardAttachmentSendAsync();
+        await CheckQueueWaitsForReplyAsync();
+    }
+
+    private async Task CheckQueueWaitsForReplyAsync()
+    {
+        int priorRequests = _gateway.StreamRequests;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _gateway.PromptReplyGate = gate;
+        try
+        {
+            NativeUi.SetText(Prompt, "PARENT_REPLY_HELD_FOR_QUEUE");
+            await WaitAsync(() => Element<Button>("SendButton").IsEnabled,
+                "the settled composer enables the next ordinary send");
+            NativeUi.Invoke(Element<Button>("SendButton"));
+            await WaitAsync(() => _gateway.StreamRequests == priorRequests + 1, "the parent reply is executing");
+            NativeUi.SetText(Prompt, "SEND_ONLY_AFTER_PARENT_COMPLETES");
+            NativeUi.Invoke(Element<Button>("SendButton"));
+            await Task.Delay(80);
+            Check(_gateway.StreamRequests == priorRequests + 1
+                && Element<ConversationPromptQueue>("PromptQueue").Visibility == Visibility.Visible
+                && !_shell.ActiveMessages.Any(row => row.Message.Content == "SEND_ONLY_AFTER_PARENT_COMPLETES"),
+                "queued input remains a card and makes no request while the current reply is running");
+            _gateway.PromptReplyGate = null;
+            gate.TrySetResult();
+            await WaitAsync(() => _gateway.StreamRequests == priorRequests + 2 && LastAssistantIsComplete(),
+                "the queued message dispatches after the parent reply actually completes");
+            Check(_shell.ActiveMessages.Count(row => row.Message.Role == "user"
+                && row.Message.Content == "SEND_ONLY_AFTER_PARENT_COMPLETES") == 1
+                && Element<ConversationPromptQueue>("PromptQueue").Visibility == Visibility.Collapsed,
+                "queue completion retains one user message and removes its sent card");
+        }
+        finally { _gateway.PromptReplyGate = null; gate.TrySetResult(); }
     }
 
     private async Task CheckClipboardAttachmentSendAsync()

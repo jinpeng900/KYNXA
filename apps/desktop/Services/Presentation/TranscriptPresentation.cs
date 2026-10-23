@@ -22,8 +22,8 @@ internal static class TranscriptPresentation
             .OrderBy(item => item.Order).Select(item => item.Tool).ToArray();
         if (status == "completed")
         {
-            // Delivery and task acceptance are separate: a settled answer remains readable when some work needs verification.
-            // 消息交付与任务验收分开；即使工作仍需核验，已经完成的最终正文也必须正常展示。
+            // Show delivered answers even when task acceptance still requires verification.
+            // 交付和验收分开；任务仍需核验时，已完成的正文也应正常展示。
             if (ordered.Length == 0 && !string.IsNullOrWhiteSpace(content))
                 return new("final", content, [], []);
 
@@ -34,8 +34,8 @@ internal static class TranscriptPresentation
                 int first = finalIndex;
                 while (first > 0 && ordered[first - 1] is { IsAnswerContinuation: true,
                     Phase: "commentary", Status: "completed" }) first--;
-                // Merge only explicitly continued answer chunks before rendering Markdown once; source records stay intact.
-                // 仅合并明确的正文续写段，完整 Markdown 一次渲染；正式分段记录不被改写，工具进展不混入答案。
+                // Merge explicit answer continuations for one Markdown render; preserve source records.
+                // 仅合并明确续写的正文后渲染 Markdown；保留原分段，工具进展不混入答案。
                 string answer = string.Join("\n\n", ordered[first..(finalIndex + 1)]
                     .Select(segment => segment.Content).Where(text => !string.IsNullOrWhiteSpace(text)));
                 var final = ordered[finalIndex] with { Content = answer };

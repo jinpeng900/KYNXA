@@ -326,8 +326,8 @@ pub fn partition(
     Ok(result)
 }
 
-/// Keyset reads and generation checks stay inside each native snapshot; SDK work holds no database cursor.
-/// 键集读取及范围版本检查位于每次原生快照内；SDK 计算不持有数据库游标。
+/// Check keysets and generations per snapshot; release cursors before external work.
+/// 每次快照内核对键集和范围版本，外部计算前释放游标。
 pub fn vector_page(connection: &Connection, arguments: &Value) -> ContractResult {
     let Some((sql, parameters)) = vector_page_query(connection, arguments)? else {
         return Ok(json!([]));
@@ -454,8 +454,8 @@ fn physical_identity_token(identity: (u64, u64)) -> String {
     format!("{:016x}:{:016x}", identity.0, identity.1)
 }
 
-/// Binary SDK pages retain the exact stored float bits; only offsets and identities use JSON.
-/// SDK 二进制分页保留已存浮点位模式，仅偏移及身份使用 JSON；数据库游标不跨异步 SDK 计算。
+/// Preserve stored float bits in binary pages; use JSON only for offsets and IDs.
+/// 二进制分页保留原浮点位，JSON 仅传偏移及身份。
 #[cfg(test)]
 pub(crate) fn vector_page_binary(arguments: &Value) -> (Value, Vec<u8>) {
     let boundary_before = super::sqlite_connections::boundary_counts();
@@ -632,8 +632,8 @@ pub fn extension_info(connection: &Connection, arguments: &Value) -> ContractRes
     Ok(json!({"version":version,"owner":"rust-sqlite"}))
 }
 
-/// Authorization, source freshness, cosine distance and Top-K remain within one native snapshot.
-/// 授权、来源新鲜度、余弦距离与 Top-K 均在同一个原生快照中完成，不向 Node 搬运整个向量库。
+/// Authorize and rank vectors in one SQLite snapshot without exporting the full vector store.
+/// 授权与向量排序在同一 SQLite 快照完成，不搬运整个向量库。
 pub fn exact_search(connection: &Connection, arguments: &Value) -> ContractResult {
     exact_search_in_snapshot(connection, arguments, false)
 }

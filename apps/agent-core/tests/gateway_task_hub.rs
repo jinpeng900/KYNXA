@@ -176,6 +176,30 @@ async fn paused_lookup_http_distinguishes_none_unique_ambiguous_and_rejects_wron
 }
 
 #[tokio::test]
+async fn cross_root_steering_rejection_preserves_formal_user_and_superseded_reply() {
+    let fixture = Fixture::new();
+    let repository = TaskRepository::open(&fixture.root).unwrap();
+    let first = repository.accept_task(&fixture.input(&uuid::Uuid::new_v4().to_string(), None)).unwrap();
+    let second = repository.accept_task(&fixture.input(&uuid::Uuid::new_v4().to_string(), None)).unwrap();
+    let message = uuid::Uuid::new_v4().to_string();
+    let original_reply = uuid::Uuid::new_v4().to_string();
+    repository.record_user_steering(&first.task_id, first.version, &message, "continue", &"d".repeat(64)).unwrap();
+    data::upsert_message(&fixture.root, &fixture.scope.conversation_id,
+        &json!({"Id":message,"Role":"user","Content":"Continue the original task","Status":"completed","ReplyMessageId":original_reply})).unwrap();
+    data::upsert_message(&fixture.root, &fixture.scope.conversation_id,
+        &json!({"Id":second.request_id,"Role":"assistant","Content":"Existing answer stays intact","Status":"completed"})).unwrap();
+    let read = || data::read_messages(&fixture.root, &fixture.scope.conversation_id, false).unwrap();
+    let before = read();
+    let error = fixture.runtime.tasks.steer(&second.task_id, second.version, &message,
+        Some(&uuid::Uuid::new_v4().to_string()), "Continue the original task", "continue", &json!([])).await.unwrap_err();
+    assert_eq!(error.code, "TASK_STEERING_TARGET_CONFLICT");
+    assert_eq!(error.details["boundTaskIds"], json!([first.task_id]));
+    assert_eq!(read(), before, "a rejected retarget cannot replace ReplyMessageId or mark an unrelated assistant interrupted");
+    assert_eq!(repository.load(&second.task_id).unwrap().version, second.version);
+    assert!(repository.user_steering(&second.task_id).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn root_pagination_does_not_let_children_shadow_roots_or_replay_controls() {
     let fixture = Fixture::new();
     let repository = TaskRepository::open(&fixture.root).unwrap();
@@ -264,11 +288,47 @@ async fn a_follow_up_inherits_the_unmet_minimum_duration_of_the_previous_task() 
     assert_eq!(follow_up.acceptance, first.acceptance);
     assert!(limits["maxDurationMs"].as_u64().unwrap() >= 3_600_000);
     // A cancelled task does not carry its minimum forward.
+    // 已取消任务不继承最低时长。
     let repository = TaskRepository::open(&fixture.root).unwrap();
     let current = repository.load(&follow_up.task_id).unwrap();
     repository.control(&current.task_id, current.version, kynxa_agent_core_native::storage::task_repository::TaskControl::Cancel).unwrap();
     let fresh = gateway_task_input::accept(&fixture.runtime.config, &message("你好"), None, &"c".repeat(64)).await.unwrap();
     assert!(persisted(&fresh).get("minActiveMs").is_none());
+}
+
+#[tokio::test]
+async fn a_follow_up_keeps_committed_requirement_revocations_and_never_revives_the_old_hour() {
+    use kynxa_agent_core_native::orchestration::gateway_task_input;
+    for (requirements, suspended) in [(Vec::<String>::new(), None), (vec!["保留金色穹顶并只调整彩窗".into()], None),
+        (Vec::new(), Some(vec!["继续制作已有的金色穹顶".to_owned()]))] {
+        let fixture = Fixture::new();
+        let message = |text: &str| json!({"conversationId":fixture.scope.conversation_id,"requestId":uuid::Uuid::new_v4().to_string(),
+            "message":text,"permissionMode":"smart"});
+        let read_input = |task: &TaskRecord| -> serde_json::Value {
+            let reference = task.input_reference.as_ref().unwrap();
+            serde_json::from_slice(&std::fs::read(fixture.root.join(reference["relativePath"].as_str().unwrap())).unwrap()).unwrap()
+        };
+        let previous = gateway_task_input::accept(&fixture.runtime.config, &message("至少工作一小时，精修教堂；增加雕像"), None, &"a".repeat(64)).await.unwrap();
+        let original = read_input(&previous);
+        let journal = TaskJournal::start_existing(&fixture.root, &previous, "directive-fixture", 60_000).unwrap();
+        let mut directive = json!({"userMessageId":uuid::Uuid::new_v4().to_string(),
+            "requirements":requirements,"minimumActiveMs":0,"stop":requirements.is_empty()});
+        if let Some(suspended) = &suspended { directive["suspendedRequirements"] = json!(suspended); }
+        journal.emit_control("task.user-directive", &directive).unwrap();
+        journal.flush().await.unwrap();
+        let current = journal.load_current().unwrap();
+        journal.repository().control(&previous.task_id, current.version, TaskControl::Pause).unwrap();
+        journal.finish(TaskState::Paused, Some("fixture-stopped")).await.unwrap();
+        let continued = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
+        let saved = read_input(&continued);
+        assert_eq!(saved["acceptanceRequirements"], json!(suspended.as_ref().unwrap_or(&requirements)));
+        assert_eq!(saved["resolvedRunLimits"]["minActiveMs"].as_u64().unwrap_or(0), 0);
+        assert!(saved["resolvedRunLimits"].get("minimumInheritedFrom").is_none());
+        assert!(!continued.goal.contains("一小时"));
+        assert!(!continued.goal.contains("雕像"));
+        assert_eq!(read_input(&previous), original, "the original accepted request stays immutable");
+        assert_eq!(journal.load_current().unwrap().state, TaskState::Paused);
+    }
 }
 
 #[tokio::test]
@@ -313,6 +373,105 @@ async fn long_acceptance_keeps_original_requirements_outside_the_small_task_row(
     let continued = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
     assert_eq!(read_input(&continued)["acceptanceRequirements"], saved["acceptanceRequirements"]);
     assert!(serde_json::to_vec(&continued.acceptance).unwrap().len() <= 8 * 1024);
+}
+
+#[tokio::test]
+async fn delegation_ids_isolate_parents_and_dispatches_while_retries_reuse_the_same_children() {
+    use kynxa_agent_core_native::orchestration::gateway_task_input;
+    let fixture = Fixture::new();
+    let mut parents = Vec::new();
+    for request in ["batch-parent-a", "batch-parent-b"] {
+        let input = json!({"conversationId":fixture.scope.conversation_id,"requestId":request,
+            "message":"Delegate independent read-only work.","provider":"unconfigured-fixture","model":"fixture","permissionMode":"smart"});
+        let root = gateway_task_input::accept(&fixture.runtime.config,&input,None,&"a".repeat(64)).await.unwrap();
+        let journal = TaskJournal::start_existing(&fixture.root,&root,"batch-fixture",60_000).unwrap();
+        let run = fixture.runtime.child_run(&root,journal.clone()).unwrap();
+        parents.push((root,journal,run));
+    }
+    let args = json!({"count":2,"goal":"Read the assigned reference.","writeTargets":[]});
+    let mut context = fixture.context();
+    context.config["activeOperationId"] = json!("round-1:delegate");
+    let first = fixture.runtime.tasks.tool(parents[0].2.clone(),context.clone(),"task.delegate",args.clone()).await.unwrap();
+    let repeated = fixture.runtime.tasks.tool(parents[0].2.clone(),context.clone(),"task.delegate",args.clone()).await.unwrap();
+    let second_parent = fixture.runtime.tasks.tool(parents[1].2.clone(),context.clone(),"task.delegate",args.clone()).await.unwrap();
+    for index in 0..2 {
+        assert_eq!(first["tasks"][index]["taskId"],repeated["tasks"][index]["taskId"]);
+        assert_ne!(first["tasks"][index]["taskId"],second_parent["tasks"][index]["taskId"]);
+        assert_eq!(first["tasks"][index]["parentTaskId"],parents[0].0.task_id);
+        assert_eq!(second_parent["tasks"][index]["parentTaskId"],parents[1].0.task_id);
+    }
+    context.config["activeOperationId"] = json!("round-2:delegate");
+    let independent = fixture.runtime.tasks.tool(parents[0].2.clone(),context.clone(),"task.delegate",args).await.unwrap();
+    assert_ne!(first["tasks"][0]["taskId"],independent["tasks"][0]["taskId"]);
+    let explicit = json!({"requestId":"client-request","goal":"Read the assigned reference.","writeTargets":[]});
+    let one = fixture.runtime.tasks.tool(parents[0].2.clone(),context.clone(),"task.delegate",explicit.clone()).await.unwrap();
+    let other = fixture.runtime.tasks.tool(parents[1].2.clone(),context.clone(),"task.delegate",explicit.clone()).await.unwrap();
+    context.config["activeOperationId"] = json!("round-3:delegate");
+    let retry = fixture.runtime.tasks.tool(parents[0].2.clone(),context,"task.delegate",explicit).await.unwrap();
+    assert_ne!(one["taskId"],other["taskId"]);
+    assert_eq!(one["taskId"],retry["taskId"]);
+    let repository = TaskRepository::open(&fixture.root).unwrap();
+    assert_eq!(repository.children(&parents[0].0.task_id).unwrap().len(),5);
+    assert_eq!(repository.children(&parents[1].0.task_id).unwrap().len(),3);
+    fixture.runtime.shutdown().await;
+    for (_,journal,_) in parents { journal.release("batch-fixture-finished").await.unwrap(); }
+}
+
+#[tokio::test]
+async fn legacy_batch_children_are_reused_only_by_their_original_parent_dispatch() {
+    legacy_batch_dispatch_recovery(false).await;
+}
+
+#[tokio::test]
+async fn legacy_child_worker_dispatch_reuses_its_children_with_the_original_digest() {
+    legacy_batch_dispatch_recovery(true).await;
+}
+
+async fn legacy_batch_dispatch_recovery(child_worker_digest: bool) {
+    use kynxa_agent_core_native::orchestration::gateway_task_input;
+    let fixture = Fixture::new();
+    let input = json!({"conversationId":fixture.scope.conversation_id,"requestId":"legacy-batch-parent",
+        "message":"Delegate read-only work.","provider":"unconfigured-fixture","model":"fixture","permissionMode":"smart"});
+    let root = gateway_task_input::accept(&fixture.runtime.config,&input,None,&"b".repeat(64)).await.unwrap();
+    let journal = TaskJournal::start_existing(&fixture.root,&root,"legacy-batch",60_000).unwrap();
+    let parent = fixture.runtime.child_run(&root,journal.clone()).unwrap();
+    let args = json!({"count":2,"goal":"Read the assigned reference.","writeTargets":[]});
+    let mut seed_args = args.clone(); seed_args["requestId"] = json!("seed-batch");
+    let seed = fixture.runtime.tasks.tool(parent.clone(),fixture.context(),"task.delegate",seed_args).await.unwrap();
+    let repository = TaskRepository::open(&fixture.root).unwrap();
+    let digest = kynxa_agent_core_native::retrieval::gateway_index::hash(&args.to_string());
+    let mut legacy_ids = Vec::new();
+    for index in 0..2 {
+        let template = repository.load(seed["tasks"][index]["taskId"].as_str().unwrap()).unwrap();
+        let legacy = repository.accept_task(&NewTask {
+            request_id:format!("child:{digest}:{index}"), goal:template.goal, acceptance:template.acceptance,
+            scope:template.scope, parent_task_id:template.parent_task_id, dependency_ids:template.dependency_ids,
+            budget:template.budget, input_reference:template.input_reference,
+        }).unwrap();
+        repository.control(&legacy.task_id,legacy.version,TaskControl::Pause).unwrap();
+        legacy_ids.push(legacy.task_id);
+    }
+    let dispatch_digest = if child_worker_digest {
+        kynxa_agent_core_native::retrieval::gateway_index::hash(&json!({"name":"task.delegate","arguments":args}).to_string())
+    } else { digest };
+    journal.record_operation(&OperationIntent {operation_id:"legacy-dispatch".into(),tool_call_id:"legacy-call".into(),
+        tool_name:"task.delegate".into(),input_sha256:dispatch_digest,input_reference:None,effect:OperationEffect::Irreversible}).unwrap();
+    journal.dispatch_operation("legacy-dispatch").unwrap();
+    let mut context = fixture.context(); context.config["activeOperationId"] = json!("legacy-dispatch");
+    for _ in 0..2 {
+        let resumed = fixture.runtime.tasks.tool(parent.clone(),context.clone(),"task.delegate",args.clone()).await.unwrap();
+        for index in 0..2 { assert_eq!(resumed["tasks"][index]["taskId"],legacy_ids[index]); }
+        assert_eq!(repository.children(&root.task_id).unwrap().len(),4);
+    }
+    let receipt = journal.save_blob("worker-log",&serde_json::to_vec(&json!({"tasks":legacy_ids})).unwrap()).await.unwrap();
+    journal.finish_operation("legacy-dispatch",OperationState::Succeeded,Some(receipt),None).unwrap();
+    context.config["activeOperationId"] = json!("new-independent-dispatch");
+    let new_batch = fixture.runtime.tasks.tool(parent.clone(),context,"task.delegate",args).await.unwrap();
+    assert!(new_batch["tasks"].as_array().unwrap().iter()
+        .all(|child| !legacy_ids.iter().any(|id|child["taskId"] == *id)));
+    assert_eq!(repository.children(&root.task_id).unwrap().len(),6);
+    fixture.runtime.shutdown().await;
+    journal.release("legacy-batch-finished").await.unwrap();
 }
 
 #[tokio::test]
@@ -529,6 +688,43 @@ async fn burst_controls_utf16_readback_and_elapsed_budget_keep_their_contracts()
             .code,
         "TASK_BUDGET_EXHAUSTED"
     );
+}
+
+#[tokio::test]
+async fn replayed_unknown_acknowledgements_do_not_resume_a_paused_task() {
+    let fixture = Fixture::new();
+    let journal = TaskJournal::begin(&fixture.root, &fixture.input("paused-unknown-ack", None), "fixture", 60_000).unwrap();
+    journal.reserve_model_request("unknown-cost").unwrap();
+    journal.record_operation(&OperationIntent { operation_id:"unknown-write".into(),tool_call_id:"unknown-call".into(),
+        tool_name:"file.write".into(),input_sha256:"a".repeat(64),input_reference:None,effect:OperationEffect::FileMutation }).unwrap();
+    journal.dispatch_operation("unknown-write").unwrap();
+    journal.release("fixture-process-exit").await.unwrap();
+    let repository = journal.repository();
+    let task = journal.load_current().unwrap();
+    let attempt = repository.start_attempt(&task.task_id, task.version, "fixture-reconcile", 60_000).unwrap();
+    repository.mark_verification_quiescent(&attempt.token, "fixture-known-quiescence").unwrap();
+    let costs = vec![ModelReservationIdentity { task_id:task.task_id.clone(),reservation_id:"unknown-cost".into() }];
+    let operations = vec![TaskOperationIdentity { task_id:task.task_id.clone(),operation_id:"unknown-write".into() }];
+    repository.acknowledge_unknown_model_reservations(&task.task_id, repository.load(&task.task_id).unwrap().version, &costs).unwrap();
+    repository.acknowledge_unknown_task_operations(&task.task_id, repository.load(&task.task_id).unwrap().version, &operations).unwrap();
+    repository.release_attempt(&attempt.token, "fixture-acknowledged-unknown").unwrap();
+    let paused = fixture.runtime.tasks.control(&task.task_id, repository.load(&task.task_id).unwrap().version, TaskControl::Pause).await.unwrap();
+    let version = paused["task"]["version"].as_u64().unwrap();
+    // A replay confirms the same uncertainty; it cannot override a later user pause.
+    // 重放只确认相同未知结果，不能覆盖用户随后作出的暂停。
+    let repeated_cost = fixture.runtime.tasks.acknowledge_unknown_costs(&task.task_id, task.version, costs).await.unwrap();
+    assert_eq!(repeated_cost["task"]["state"], "paused");
+    assert_eq!(repeated_cost["task"]["version"], version);
+    assert_eq!(repeated_cost["costUnknown"], true);
+    let repeated_operation = fixture.runtime.tasks.acknowledge_unknown_operations_scoped(&task.task_id, task.version, operations).await.unwrap();
+    assert_eq!(repeated_operation["task"]["state"], "paused");
+    assert_eq!(repeated_operation["task"]["version"], version);
+    assert_eq!(repository.current_attempt(&task.task_id).unwrap().unwrap().token, attempt.token);
+    assert_eq!(repository.load(&task.task_id).unwrap().usage.model_requests, 0);
+    let reservation = &repository.model_reservations(&task.task_id).unwrap()[0];
+    assert_eq!(reservation.state, ModelReservationState::Unknown);
+    assert!(reservation.is_unknown_acknowledged());
+    assert_eq!(repository.operations(&task.task_id).unwrap()[0].state, OperationState::Unknown);
 }
 
 #[tokio::test]

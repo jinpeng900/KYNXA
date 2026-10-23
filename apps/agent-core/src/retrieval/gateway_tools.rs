@@ -1,5 +1,5 @@
-//! Model-facing evidence actions reuse formal scopes, native version checks and the existing evidence ledger.
-//! 面向模型的证据动作复用正式作用域、原生版本检查与既有证据账本，检索结果不是执行授权。
+//! Evidence tools reuse scopes, version checks and the ledger; results grant no execution authority.
+//! 证据工具复用范围、版本核验及账本，结果不授予执行权限。
 
 use super::{evidence::EvidenceLedger, gateway_index};
 use crate::{
@@ -115,8 +115,8 @@ pub(crate) fn retire_memory_sources(context: &Value, invalid_sources: &Value) ->
     }
     Ok(json!({"retired":retired.len()}))
 }
-/// Removing a formal chat evicts only its derived task evidence; active holders still face final scope checks.
-/// 删除正式聊天仅撤出它的派生任务证据；已持有对象的调用仍必须通过最终范围核验。
+/// Remove only the chat's derived evidence; active callers must still pass final scope checks.
+/// 仅撤出该聊天的派生证据，活动调用仍须最终范围核验。
 pub(crate) fn release_conversation_tasks(conversation: &str) {
     if let Some(tasks) = TASKS.get() {
         if let Ok(mut tasks) = tasks.lock() {
@@ -463,8 +463,8 @@ fn read_current(config: &GatewayConfig, context: &Value, reference: &Value, scop
     Ok(json!({"text":text,"row":row,"chunk":receipt["chunk"],"locator":locator}))
 }
 
-/// Revalidate only an archived original-text window; the caller must first verify its formal archive identity.
-/// 仅复核正式归档中实际读过的原文窗口；调用端必须先验证归档 ID、哈希、字节数及所属范围。
+/// Revalidate read windows only after archive ID, hash, size and scope checks.
+/// 先核验归档 ID、哈希、大小及范围，再复核已读原文窗口。
 pub(crate) fn verify_saved_read(
     config: &GatewayConfig,
     context: &Value,
@@ -657,30 +657,60 @@ fn refinement_ticket(config:&GatewayConfig,context:&Value,input:&Value) -> Resul
     reserve_refinement(context,input,||load_refinement_receipts(config,context))
 }
 
+fn refinement_identity(context: &Value, input: &Value) -> Result<String, ContractError> {
+    let requirements = context["acceptanceRequirements"].as_array();
+    let Some(identity) = input["requirementId"].as_str().filter(|value| !value.is_empty()) else {
+        return Ok("original-user-question".into());
+    };
+    let valid = identity.strip_prefix("requirement-").and_then(|index| index.parse::<usize>().ok())
+        .is_some_and(|index| index > 0 && requirements.is_some_and(|items| {
+            items.get(index - 1).and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty())
+        }) && identity == format!("requirement-{index}"));
+    if !valid {
+        return Err(gateway::error("requirementId 必须对应本任务已有的验收要求；省略时共用原问题的补搜余量。", "INVALID_RETRIEVAL_INPUT", 400));
+    }
+    Ok(identity.to_owned())
+}
+
+fn refinement_key(context: &Value, identity: &str) -> String {
+    gateway_index::hash(&json!([context["requestId"],identity]).to_string())
+}
+
 fn reserve_refinement(
     context:&Value,input:&Value,load:impl FnOnce()->Result<Vec<Value>,ContractError>,
 )->Result<Value,ContractError> {
+    if crate::service_cancellation::is_cancelled() {
+        return Err(gateway::error("检索已取消，未消耗新的补搜机会。", "TOOL_CANCELLED", 409));
+    }
+    let gap_identity = refinement_identity(context, input)?;
     let task=task(context)?;
     let needs_restore={ !task.lock().unwrap().refinements_restored };
-    // Catalog and archive I/O must finish before taking the task mutex: memory revocation takes the opposite path.
-    // 正式目录与归档读取必须在任务锁外完成，避免撤销记忆的目录→任务锁路径发生锁逆序。
+    // Finish catalog/archive I/O before the task lock to match revocation lock order.
+    // 目录及归档 I/O 在任务锁外完成，遵守撤销记忆的锁顺序。
     let receipts=if needs_restore {Some(load()?)}else{None};
     let mut task=task.lock().unwrap();
     if let Some(receipts)=receipts {
         // Two loaders may finish concurrently; max-restore must preserve reservations made in between.
         // 两个恢复读取可并发完成；幂等max恢复不能覆盖其间已预留的次数。
-        for receipt in receipts {
+        for mut receipt in receipts {
+            // Legacy free-text gaps share the original allowance; only native requirement IDs split it.
+            // 旧版自由描述缺口归入原问题额度，仅原生已登记要求的身份可独立计数。
+            let identity = receipt["gapIdentity"].as_str()
+                .filter(|identity| identity.strip_prefix("requirement-")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .is_some_and(|index| index > 0 && *identity == format!("requirement-{index}")))
+                .unwrap_or("original-user-question").to_owned();
+            receipt["gapKey"] = json!(refinement_key(context, &identity));
             task.ledger.apply("retrieval.refinement-restore",&receipt)
                 .map_err(|_|gateway::error("检索进度回执无效。","INVALID_RETRIEVAL_EVIDENCE",500))?;
         }
         task.refinements_restored=true;
     }
-    // A stable explicit gap can be refined independently; changing only query text cannot create a new gap.
-    // 显式缺口可独立求证；仅改query不会创建新的缺口，也不限制其他工具或独立任务。
-    let gap=input["gap"].as_str().filter(|gap|!gap.trim().is_empty()).unwrap_or("original-user-question");
-    let gap_key=gateway_index::hash(&json!([context["requestId"],gap]).to_string());
+    // Descriptions and keywords are editable; budget belongs to the native task requirement.
+    // 描述和关键词允许改写，补搜余量绑定正式任务要求，不能由模型换句话重新申请。
+    let gap_key=refinement_key(context, &gap_identity);
     task.ledger.apply("retrieval.refinement-reserve",&json!({"gapKey":gap_key}))
-        .map(|receipt|receipt["result"].clone())
+        .map(|receipt| { let mut ticket = receipt["result"].clone(); ticket["gapIdentity"] = json!(gap_identity); ticket })
         .map_err(|_|gateway::error("检索进度无效。","INVALID_RETRIEVAL_EVIDENCE",500))
 }
 
@@ -690,20 +720,15 @@ pub fn handle_tool(
     context: &Value,
     config: &GatewayConfig,
 ) -> Option<ContractResult> {
-    let semantic=name=="knowledge.search" && !["path","symbol"].iter().any(|field|
-        input[*field].as_str().is_some_and(|value|!value.is_empty()));
-    if !semantic {return handle_tool_attempt(name,input,context,config,0);}
-    let ticket=match refinement_ticket(config,context,input) {Ok(ticket)=>ticket,Err(error)=>return Some(Err(error))};
-    if ticket["executed"]==false {
-        return Some(Ok(json!({"items":[],"refinement":ticket,"coverage":"unresolved",
-            "notice":"This evidence gap remains unresolved after the initial lookup and two refinements. State the missing evidence or use a different evidence type; the task and conversation remain active."})));
-    }
-    let mut result=handle_tool_attempt(name,input,context,config,0);
-    if let Some(Ok(value))=&mut result {
+    let mut ticket = None;
+    let mut result=handle_tool_attempt(name,input,context,config,0,&mut ticket);
+    if let Some(ticket) = ticket {
+      if let Some(Ok(value))=&mut result {
         let mut refinement=ticket;refinement["state"]=json!(if value["items"].as_array().is_some_and(|items|!items.is_empty()) {"evidence-available"}else{"unresolved"});
         value["refinement"]=refinement;
-    } else if let Ok(task)=task(context) {
+      } else if ticket["executed"] == true && let Ok(task)=task(context) {
         if let Ok(mut task)=task.lock(){let _=task.ledger.apply("retrieval.refinement-release",&ticket);}
+      }
     }
     result
 }
@@ -714,11 +739,12 @@ fn retry_changed_search_scope(
     context: &Value,
     config: &GatewayConfig,
     attempt: u8,
+    refinement: &mut Option<Value>,
 ) -> Option<ContractResult> {
     match authorized(config, context) {
         Ok(current) if current == *scopes => None,
         Ok(_) if attempt < 2 => {
-            handle_tool_attempt("knowledge.search", input, context, config, attempt + 1)
+            handle_tool_attempt("knowledge.search", input, context, config, attempt + 1, refinement)
         }
         Ok(_) => Some(Err(gateway::error(
             "检索范围正在更新，请使用最新范围重试。",
@@ -729,12 +755,46 @@ fn retry_changed_search_scope(
     }
 }
 
+fn fallback_directory(input: &Value, context: &Value) -> Option<String> {
+    let constraints = format!("{} {}", input["query"].as_str().unwrap_or(""),
+        context["acceptanceRequirements"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).collect::<Vec<_>>().join(" "));
+    if regex::Regex::new(r"(?i)仅(?:在|限|搜索|查找)|只(?:在|搜索|查找)|不得(?:跨|搜索)|不要搜索|\b(?:only\s+(?:in|under|within|search)|exclusively|do\s+not\s+search)\b")
+        .expect("static scope constraint").is_match(&constraints) {
+        return None;
+    }
+    let path = input["path"].as_str().unwrap_or("").replace('\\', "/");
+    let path = path.trim_start_matches("./").trim_end_matches('/');
+    if path.is_empty() { return Some(String::new()); }
+    let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+    // A filename is a locator clue; its containing directory remains the fallback boundary.
+    // 文件名是定位线索；补充召回仍限于原目录，不将目录限定放宽为整个工作区。
+    Some(if name.contains('.') { parent } else { path }.to_lowercase())
+}
+
+fn restrict_fallback_directory(result: &mut Value, directory: &str) {
+    if directory.is_empty() { return; }
+    let directory = directory.trim_matches('/');
+    if let Some(items) = result["items"].as_array_mut() {
+        items.retain(|item| {
+            let path = item["locator"]["relativePath"].as_str()
+                .or_else(|| item["locator"]["path"].as_str())
+                .or_else(|| item["exactPath"].as_str()).unwrap_or("")
+                .replace('\\', "/").to_lowercase();
+            let path = path.trim_start_matches("./");
+            path == directory || path.starts_with(&format!("{directory}/"))
+                || path.contains(&format!("/{directory}/"))
+        });
+    }
+}
+
 fn handle_tool_attempt(
     name: &str,
     input: &Value,
     context: &Value,
     config: &GatewayConfig,
     scope_attempt: u8,
+    refinement: &mut Option<Value>,
 ) -> Option<ContractResult> {
     if name.starts_with("conversation.history.") {
         return Some(super::gateway_history::handle(config, name, input, context));
@@ -776,7 +836,8 @@ fn handle_tool_attempt(
                 query["scopeKeys"] = scopes.clone();
                 query["channelCandidates"] = budget["channelCandidates"].clone();
                 query["limit"] = budget["fusedCandidates"].clone();
-                query["retrievalIntent"] = json!({"domain":input["domain"].as_str().filter(|domain|*domain!="mixed"),"symbol":input["symbol"],"path":input["path"]});
+                query["retrievalIntent"] = json!({"domain":input["domain"].as_str().filter(|domain|*domain!="mixed"),
+                    "symbol":input["symbol"],"path":input["path"].as_str().map(storage::retrieval::normalize_path)});
                 let settings = super::gateway::effective(
                     config,
                     gateway::context_scopes(
@@ -793,8 +854,8 @@ fn handle_tool_attempt(
                     "scopeKeys":scopes,"conversationId":context["conversationId"],
                     "permissionMode":context["permissionMode"]
                 });
-                // Exact locators use lexical/structure lookup and current-source validation without embedding inference.
-                // 明确路径和符号使用词法／结构定位并核验当前原文，不触发嵌入推理。
+                // Prefer current exact evidence; missing or stale locators may use one scoped semantic lookup.
+                // 优先当前有效的精确证据；定位缺失或来源过期时，允许一次受限语义召回。
                 let targeted = ["path", "symbol"].iter().any(|field| input[*field].as_str().is_some_and(|value| !value.is_empty()));
                 let preliminary = if targeted {
                     let mut result = gateway_index::search(config, &query)?;
@@ -814,7 +875,22 @@ fn handle_tool_attempt(
                         }
                     }
                 }
-                if !targeted && settings["local"]["semantic"] != "off" {
+                let exact_current = preliminary.as_ref().is_some_and(|result| result["items"]
+                    .as_array().into_iter().flatten().any(|item| {
+                        super::query::exact_target(item, &query["retrievalIntent"])
+                            && resolve_reference(config, context, item["sourceRef"].as_str().unwrap_or(""))
+                                .is_ok_and(|reference| current_sources.get(&source_version(&reference)).is_some_and(Option::is_some))
+                    }));
+                let fallback = if targeted && !exact_current { fallback_directory(input, context) } else { None };
+                let use_semantic = !targeted || fallback.is_some();
+                if use_semantic {
+                    if refinement.is_none() { *refinement = Some(refinement_ticket(config,context,input)?); }
+                    if refinement.as_ref().is_some_and(|ticket| ticket["executed"] == false) {
+                        return Ok(json!({"items":[],"coverage":"unresolved",
+                            "notice":"The same requirement has used its initial lookup and two refinements. Read known evidence or use another evidence type; the task remains active."}));
+                    }
+                }
+                if use_semantic && settings["local"]["semantic"] != "off" {
                     let text = input["query"].as_str().unwrap_or("").to_string();
                     match super::gateway_embedding::embed_query_cached(
                         config,
@@ -838,16 +914,24 @@ fn handle_tool_attempt(
                         }
                     }
                 }
+                if crate::service_cancellation::is_cancelled() {
+                    return Err(gateway::error("检索已取消。", "TOOL_CANCELLED", 409));
+                }
                 // Scope changes during shared inference restart this lookup internally.
                 // 共享推理期间范围变化时，在内部按最新授权重查，不向模型交付旧范围内容。
-                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt, refinement) {
                     return retried;
                 }
                 let mut result = if query["queryVector"].is_null() && preliminary.is_some() {
                     preliminary.unwrap()
                 } else { gateway_index::search(config, &query)? };
                 restrict_candidates(context, &mut result);
-                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                if let Some(directory) = &fallback { restrict_fallback_directory(&mut result, directory); }
+                else if targeted && fallback_directory(input, context).is_none() {
+                    restrict_fallback_directory(&mut result,
+                        &input["path"].as_str().unwrap_or("").replace('\\', "/").to_lowercase());
+                }
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt, refinement) {
                     return retried;
                 }
                 let selected = select_evidence(&result["items"], input, &budget)?;
@@ -862,8 +946,8 @@ fn handle_tool_attempt(
                 for item in result["items"].as_array_mut().unwrap() {
                     let mut reference =
                         resolve_reference(config, context, item["sourceRef"].as_str().unwrap())?;
-                    // Complete indexed fragments can be used directly after a current-source read; search headings alone cannot.
-                    // 经过当前来源复核的完整索引片段可直接使用；仅命中标题不能冒充已读正文。
+                    // Use complete fragments after current-source checks; headings alone do not prove reading.
+                    // 完整片段通过当前来源核验后可用，仅标题命中不代表已读正文。
                     let version = source_version(&reference);
                     if !current_sources.contains_key(&version) {
                         let mut source = reference.clone();
@@ -913,9 +997,10 @@ fn handle_tool_attempt(
                 result["budgetAudit"] = budget["audit"].clone();
                 result["budgetAudit"]["actual"] = json!({"limit":result["items"].as_array().unwrap().len(),"usedTokens":result["selection"]["usedTokens"]});
                 result["semanticDiagnostic"] = query["semanticDiagnostic"].clone();
-                result["retrievalStrategy"] = json!(if targeted { "exact-locator" }
+                result["retrievalStrategy"] = json!(if targeted && fallback.is_some() { "scoped-locator-fallback" }
+                    else if targeted { "exact-locator" }
                     else if query["queryVector"].is_array() { "hybrid" } else { "lexical-structure" });
-                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt, refinement) {
                     return retried;
                 }
                 Ok(result)
@@ -1100,8 +1185,8 @@ fn evidence_window_cost(item: &Value) -> Result<u64, ContractError> {
     Ok(crate::models::protocol::estimate_tokens(&record.to_string()) + 1)
 }
 
-/// Expand only already-authorized current text; both explicit and automatic reads use the same task ledger.
-/// 仅扩展已授权且已核验版本的当前原文；显式读取与自动扩读共用任务已读范围及回执账本。
+/// Expand current authorized text only; explicit and automatic reads share the task ledger.
+/// 仅扩读当前已授权原文，显式与自动读取共用任务账本。
 fn expand_evidence_window(
     context: &Value,
     reference: &mut Value,
@@ -1616,10 +1701,66 @@ mod gateway_tests {
         assert_eq!(recovered["remainingSupplementalSearches"],0);
         let exhausted=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"fourth rewrite"})).unwrap();
         assert_eq!(exhausted["state"],"unresolved"); assert_eq!(exhausted["executed"],false);
-        let independent=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"different fact","gap":"new independent fact"})).unwrap();
+        let renamed=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"different words","gap":" new wording  "})).unwrap();
+        assert_eq!(renamed["executed"],false,"editable wording cannot mint a new allowance");
+        let mut registered = workspace.context.clone();
+        registered["acceptanceRequirements"] = json!(["Read the source", "Find an independent fact"]);
+        let independent=refinement_ticket(&workspace.config,&registered,&json!({"query":"different fact","gap":"new independent fact","requirementId":"requirement-2"})).unwrap();
         assert_eq!(independent["attempt"],1);
         let continuing=gateway::read_model_messages(&workspace.config.data_root,chat).unwrap();
         assert_eq!(continuing.iter().find(|message|message["Id"]==request).unwrap()["Status"],"streaming");
+    }
+
+    #[test]
+    fn registered_refinement_identity_survives_wording_restart_and_rejects_invented_ids() {
+        let chat = gateway::new_id(); let request = gateway::new_id();
+        let context = json!({"conversationId":chat,"requestId":request,
+            "acceptanceRequirements":["Read A", "Read B"]});
+        let first = reserve_refinement(&context, &json!({"requirementId":"requirement-1","gap":"missing A"}), ||Ok(vec![])).unwrap();
+        let second = reserve_refinement(&context, &json!({"requirementId":"requirement-1","gap":"  rewritten A  ","query":"new keywords"}), ||panic!("already restored")).unwrap();
+        assert_eq!(second["attempt"],2); assert_eq!(first["gapKey"],second["gapKey"]);
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-3"}), ||panic!("invalid before I/O")).unwrap_err().code(), "INVALID_RETRIEVAL_INPUT");
+        release_task(&chat,&request);
+        let third = reserve_refinement(&context, &json!({"requirementId":"requirement-1","gap":"another label"}), ||Ok(vec![second])).unwrap();
+        assert_eq!(third["attempt"],3);
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-2"}), ||panic!("already restored")).unwrap()["attempt"],1);
+        let owner = task(&context).unwrap();
+        owner.lock().unwrap().ledger.apply("retrieval.refinement-release",&third).unwrap();
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-1"}), ||panic!("already restored")).unwrap()["attempt"],3);
+        let lease = crate::service_cancellation::CancellationLease::acquire(&gateway::new_id()).unwrap();
+        let scope = lease.enter();
+        lease.token.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(reserve_refinement(&context,&json!({"requirementId":"requirement-2"}),||panic!("cancelled before I/O")).unwrap_err().code(),"TOOL_CANCELLED");
+        drop(scope);
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-2"}), ||panic!("already restored")).unwrap()["attempt"],2);
+        release_task(&chat,&request);
+    }
+
+    #[test]
+    fn locator_fallback_keeps_directory_scope_and_exact_lookup_skips_refinement() {
+        assert_eq!(fallback_directory(&json!({"path":"src\\indexre.rs"}),&json!({})),Some("src".into()));
+        assert_eq!(fallback_directory(&json!({"path":"src/config/"}),&json!({})),Some("src/config".into()));
+        assert!(fallback_directory(&json!({"path":"src/typo.rs","query":"only under src/typo.rs"}),&json!({})).is_none());
+        assert!(fallback_directory(&json!({"path":"src/typo.rs"}),&json!({"acceptanceRequirements":["仅在 src/typo.rs 查找"]})).is_none());
+        let mut result = json!({"items":[{"locator":{"relativePath":"src/indexer.rs"}},
+            {"locator":{"relativePath":"src/private/next.rs"}},{"locator":{"relativePath":"src2/secret.rs"}}]});
+        restrict_fallback_directory(&mut result,"src");
+        assert_eq!(result["items"].as_array().unwrap().len(),2);
+        let workspace = ReadWorkspace::new();
+        let mut settings = storage::settings::apply("storage.settings.defaults",&json!({})).unwrap();
+        settings["local"]["semantic"] = json!("off");
+        std::fs::create_dir_all(workspace.config.data_root.join("Retrieval")).unwrap();
+        std::fs::write(workspace.config.data_root.join("Retrieval/settings.json"),settings.to_string()).unwrap();
+        let exact = handle_tool("knowledge.search",&json!({"query":"原文","path":"original.txt"}),&workspace.context,&workspace.config).unwrap().unwrap();
+        assert_eq!(exact["retrievalStrategy"],"exact-locator");
+        assert!(exact.get("refinement").is_none(),"a current exact match must not reserve semantic work");
+        let miss = handle_tool("knowledge.search",&json!({"query":"原文","path":"originla.txt"}),&workspace.context,&workspace.config).unwrap().unwrap();
+        assert_eq!(miss["retrievalStrategy"],"scoped-locator-fallback");
+        assert_eq!(miss["refinement"]["attempt"],1);
+        assert!(!miss["items"].as_array().unwrap().is_empty());
+        let restricted = handle_tool("knowledge.search",&json!({"query":"只在 originla.txt 搜索原文","path":"originla.txt"}),&workspace.context,&workspace.config).unwrap().unwrap();
+        assert!(restricted["items"].as_array().unwrap().is_empty());
+        assert!(restricted.get("refinement").is_none());
     }
 
     #[test]

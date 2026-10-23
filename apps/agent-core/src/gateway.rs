@@ -63,8 +63,8 @@ fn reply_response(result: Result<Value, GatewayError>) -> Response {
     }))
 }
 
-/// Resolve the current conversation binding before every preview or embedded browser action.
-/// 每次文件预览或内嵌浏览器操作都解析当前会话归属，复用正式授权而非界面缓存。
+/// Check the current chat binding before each preview or browser action.
+/// 每次预览或浏览器操作前，核对当前聊天绑定与权限。
 pub(crate) async fn workspace_tool_context(
     runtime: &GatewayRuntime,
     conversation: &str,
@@ -82,8 +82,8 @@ pub(crate) async fn workspace_tool_context(
         .await
 }
 
-/// Workspace views need current scope, without rebuilding model/tool/retrieval configuration.
-/// 工作区展示只复核当前范围，不重建模型、工具及检索配置；聊天删除后仍允许关闭自有网页。
+/// Workspace views refresh scope without rebuilding model, tool or retrieval settings.
+/// 工作区刷新当前范围，不重建模型、工具和检索配置。
 async fn workspace_view_context(
     runtime: &GatewayRuntime,
     conversation: &str,
@@ -194,8 +194,8 @@ fn binary_content_response(bytes: Vec<u8>, mime_type: &str, version: &str, heade
         );
     }
     if mime_type.starts_with("text/html") {
-        // Self-contained chart scripts run in an opaque sandbox, without network access or the native bridge.
-        // 自包含图表脚本仅在不透明来源沙箱运行，不开放网络访问和原生消息桥。
+        // Chart scripts run in an opaque sandbox without network or native-bridge access.
+        // 图表脚本在隔离沙箱内运行，禁用网络和原生桥接。
         builder = builder.header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'");
     } else if mime_type == "image/svg+xml" {
         builder = builder.header("Content-Security-Policy", "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:");
@@ -287,22 +287,26 @@ impl RequestEventStream {
         // 先订阅再取得原子快照，确保快照之后的事件仍能读取。
         let receiver = run.events.subscribe();
         let recovery = run.recovery(0).await?;
+        let mut pending = recovery.events;
+        pending.retain(|event| event["type"] != "started");
+        pending.push_front(run.stream_started().await);
         Ok(Self {
             run,
             receiver,
-            pending: recovery.events,
+            pending,
             checkpoint: Some(recovery.through),
             delivered: 0,
             ended: false,
         })
     }
     async fn recover(&mut self) -> bool {
-        // Subscribe before reading the replacement snapshot; its watermark covers the old lagged cursor.
-        // 读取替换快照前重新订阅；快照水位覆盖旧落后游标，后续增量仍由新订阅接收。
+        // Resubscribe before reading the replacement snapshot; its watermark covers missed events.
+        // 先重新订阅，再读替换快照；快照水位覆盖已错过的事件。
         self.receiver = self.run.events.subscribe();
         match self.run.recovery(self.delivered).await {
             Ok(recovery) => {
                 self.pending = recovery.events;
+                self.pending.retain(|event| event["type"] != "started");
                 self.checkpoint = Some(recovery.through);
                 true
             }
@@ -321,8 +325,8 @@ impl RequestEventStream {
                 self.ended = terminal_event(&event);
                 return Some(event);
             }
-            // Replacement snapshots and required controls are applied before skipping their covered deltas.
-            // 替换快照及必要控制事件全部应用后，才跳过该水位已包含的旧增量。
+            // Apply the replacement snapshot and controls before skipping covered deltas.
+            // 先应用替换快照和控制事件，再跳过已覆盖的增量。
             if let Some(through) = self.checkpoint.take() {
                 self.delivered = through;
             }
@@ -364,6 +368,9 @@ impl RequestEventStream {
                 continue;
             }
             self.delivered = sequence;
+            // The connection already emitted its handshake; delayed execution starts are not new replies.
+            // 当前连接已发送握手；延迟到达的执行开始事件不能让同一回复重复开始。
+            if event["type"] == "started" { continue; }
             self.ended = terminal_event(&event);
             return Some(event);
         }
@@ -401,8 +408,8 @@ async fn handle(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
-    // Browser-origin traffic cannot inherit the native desktop's authority even on loopback.
-    // 即便请求来自回环地址，带浏览器 Origin 的流量也不能继承桌面端的本机权限。
+    // Loopback browser requests cannot inherit desktop authority.
+    // 来自浏览器的请求即使走回环地址，也不能继承桌面权限。
     if headers.contains_key(header::ORIGIN) {
         return response(Err(GatewayError::new(
             "BROWSER_ORIGIN_FORBIDDEN",
@@ -430,13 +437,13 @@ async fn handle(
         Ok(admitted) => admitted,
         Err(error) => return response(Err(error)),
     };
-    // The admitted task owns its writes even if the HTTP caller disconnects during blocking I/O.
-    // 即使 HTTP 调用方在阻塞读写期间断开，已准入任务仍持有计数直到真实操作完成。
+    // Keep admitted writes alive until I/O settles, even if HTTP disconnects.
+    // HTTP 断开后，已准入写入仍等到 I/O 结束再结算。
     tokio::spawn(async move {
         let result = handle_request(runtime, method, uri, headers, bytes).await;
         let (parts, body) = result.into_parts();
-        // SSE may still read its durable journal after the run has reached a terminal state.
-        // SSE 在任务终态后仍可能读取持久事件；准入所有权保持到响应体发送结束或连接关闭。
+        // Keep admission ownership until SSE finishes or disconnects, including terminal journal reads.
+        // SSE 发完或断开后才释放准入所有权，任务结束后的日志读取也一样。
         let source = stream::unfold(
             (body.into_data_stream(), admission),
             |(mut body, admission)| async move {
@@ -490,8 +497,8 @@ async fn handle_request(
         .into_owned()
         .collect::<Vec<_>>();
     if method == Method::GET && ["/api/chat/status", "/api/chat/stream"].contains(&path) {
-        // Recovery reads attach by both stable IDs; GET never repeats the accepted user request.
-        // 恢复读取按两个稳定 ID 重新连接；GET 不重新提交已接受的用户请求。
+        // Attach recovery with both stable IDs; GET never resubmits work.
+        // 恢复时按两个稳定 ID 接回；GET 不重新提交任务。
         let identifier = |name| {
             crate::orchestration::gateway_runtime::checked_id(
                 &json!(crate::storage::gateway::query_value(&query, name).unwrap_or("")),
@@ -774,8 +781,8 @@ async fn handle_request(
                 .await
                 {
                     if let Err(error) = runtime.tasks.reconcile_deleted_chats(&catalog).await {
-                        // The catalog commit is already authoritative; expose task retirement failure without repeating it.
-                        // 目录提交已经生效；报告任务撤销失败，不再次提交目录或重复操作。
+                        // Report task retirement failure without replaying the committed catalog update.
+                        // 目录更新已生效，任务退出失败时报告错误，不重复提交。
                         eprintln!(
                             "{}",
                             json!({"code":error.code,"message":error.message,"taskRetirement":"pending"})
@@ -996,8 +1003,8 @@ pub fn initialize_storage(target: &str) -> Result<Value, GatewayError> {
     Ok(json!({"layoutVersion":1,"projects":projects,"chats":chats}))
 }
 
-/// An OS-owned lock expires with the process; stale PID files never authorize a second writer.
-/// 所有者锁由操作系统随进程释放，过期 PID 文件不能授权第二个正式数据写入者。
+/// The OS lock ends with its process; stale PID files cannot permit another writer.
+/// 进程退出即释放系统锁；旧 PID 文件不能授权第二个写入者。
 pub(crate) fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, GatewayError> {
     // Only trusted application configuration selects this root; validate and prepare every missing ancestor.
     // 此根目录仅由可信应用配置选定；逐层核验并准备缺失祖先，不能只假设最终一层存在。
@@ -1029,8 +1036,8 @@ pub(crate) fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, Gat
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(0).custom_flags(0x00200000);
     }
-    // Acquire before inspecting the file handle: a second reader would conflict with this exclusive Windows lock.
-    // 先取得锁再核验文件句柄；额外读取句柄本身会与 Windows 独占锁冲突。
+    // Acquire the exclusive Windows lock before inspecting the handle.
+    // 先取得 Windows 独占锁，再核对句柄，避免第二次打开冲突。
     let lock = options.open(&path).map_err(|error| {
         if matches!(error.raw_os_error(), Some(32 | 33)) {
             GatewayError::new(
@@ -1118,6 +1125,64 @@ mod transport_tests {
 
     fn tool(status: &str) -> Value {
         json!({"toolCallId":"call-1","name":"filesystem.read","arguments":{},"status":status,"summary":"temporary fixture","round":1,"order":2})
+    }
+
+    #[tokio::test]
+    async fn new_stream_handshake_precedes_nonzero_empty_replay_and_delayed_start() {
+        let run = RequestRun::test_run_at_sequence(8, 41);
+        let mut stream = RequestEventStream::new(run.clone()).await.unwrap();
+        let first = stream.next().await.unwrap();
+        assert_eq!(first["type"], "started");
+        assert_eq!(first["conversationId"], run.conversation_id);
+        assert_eq!(first["requestId"], run.request_id);
+        assert_eq!(first["replyMessageId"], run.request_id);
+        assert!(first["createdAt"].is_string());
+        let snapshot = stream.next().await.unwrap();
+        assert_eq!(snapshot["type"], "content_snapshot");
+        assert_eq!(snapshot["replayThrough"], 41);
+        assert_eq!(snapshot["content"], "");
+        run.emit(json!({"type":"started","status":"queued"})).await;
+        run.emit(json!({"type":"text_delta","delta":"preserved after startup"})).await;
+        let next = stream.next().await.unwrap();
+        assert_eq!(next["type"], "text_delta");
+        assert_eq!(next["delta"], "preserved after startup");
+        assert!(next["eventSequence"].as_u64().unwrap() > 41);
+        run.finish(json!({"type":"completed","content":"preserved after startup","reasoning":""})).await;
+        assert_eq!(stream.next().await.unwrap()["type"], "completed");
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_stream_after_reply_anchor_has_one_handshake_and_owned_complete_snapshot() {
+        let run = RequestRun::test_run(2);
+        run.emit(json!({"type":"started"})).await;
+        run.emit(json!({"type":"text_delta","delta":"previous reply"})).await;
+        let reply = crate::gateway_contract::new_id();
+        let user = crate::gateway_contract::new_id();
+        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":user})).await;
+        run.emit(json!({"type":"text_delta","delta":"current reply"})).await;
+        let mut stream = RequestEventStream::new(run.clone()).await.unwrap();
+        assert_eq!(stream.next().await.unwrap()["type"], "started");
+        let anchor = stream.next().await.unwrap();
+        assert_eq!(anchor["type"], "reply_anchor");
+        assert_eq!(anchor["replyMessageId"], reply);
+        assert_eq!(anchor["userMessageId"], user);
+        let snapshot = stream.next().await.unwrap();
+        assert_eq!(snapshot["type"], "content_snapshot");
+        assert_eq!(snapshot["content"], "current reply");
+        assert_eq!(snapshot["replyMessageId"], reply);
+        run.emit(json!({"type":"text_delta","delta":" continued"})).await;
+        assert_eq!(stream.next().await.unwrap()["delta"], " continued");
+        run.finish(json!({"type":"completed","content":"current reply continued","reasoning":""})).await;
+        let mut reconnect = RequestEventStream::new(run.clone()).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = reconnect.next().await { events.push(event); }
+        assert_eq!(events[0]["type"], "started");
+        assert_eq!(events.iter().filter(|event| event["type"] == "started").count(), 1);
+        assert_eq!(events.iter().find(|event| event["type"] == "content_snapshot").unwrap()["content"], "current reply continued");
+        assert_eq!(events.last().unwrap()["type"], "completed");
+        assert!(events.iter().all(|event| event["conversationId"] == run.conversation_id
+            && event["requestId"] == run.request_id && event["replyMessageId"] == reply));
     }
 
     #[tokio::test]

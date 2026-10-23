@@ -57,6 +57,7 @@ public sealed partial class ShellPage
         if (SendButton is null) return;
         RefreshUsageSummaryScope();
         bool active = ActiveChatId is Guid id && _pendingReplies.ContainsKey(id);
+        bool queued = ActiveChatId is Guid queueChat && HasQueuedTaskActivity(queueChat);
         bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text) || HasAttachmentDrafts;
         SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
             && hasInput);
@@ -66,16 +67,16 @@ public sealed partial class ShellPage
         bool pause = active && !hasInput;
         SendArrow.Visibility = pause ? Visibility.Collapsed : Visibility.Visible;
         StopReplyIcon.Visibility = pause ? Visibility.Visible : Visibility.Collapsed;
-        string caption = pause ? "暂停并保存进度" : active ? "加入等待队列" : "发送";
+        string caption = pause ? "暂停并保存进度" : queued ? "加入等待队列" : "发送";
         AutomationProperties.SetName(SendButton, UiText.Get(caption));
         ToolTipService.SetToolTip(SendButton, UiText.Get(caption));
     }
 
-    private PendingChatReply BeginPendingReply(Guid chatId, string question, string? provider, string? model, string? permissionMode = null, Guid? requestId = null)
+    private PendingChatReply BeginPendingReply(Guid chatId, string question, string? provider, string? model, string? permissionMode = null, Guid? requestId = null, Guid? userMessageId = null)
     {
         var (chat, _) = FindChat(chatId);
         if (chat is null || _pendingReplies.ContainsKey(chatId)) throw new InvalidOperationException(UiText.Get("当前聊天正在生成回复。"));
-        var user = chat.Messages.LastOrDefault(message => message.Role == "user")
+        var user = chat.Messages.LastOrDefault(message => message.Role == "user" && (userMessageId is null || message.Id == userMessageId))
             ?? throw new InvalidOperationException(UiText.Get("找不到要回复的用户消息。"));
         var pending = new PendingChatReply(chatId, user.Id, question, provider, model, permissionMode ?? _layout.PermissionMode);
         if (requestId is Guid existingId) pending.Message.Id = existingId;
@@ -147,7 +148,6 @@ public sealed partial class ShellPage
                     // 用户消息与等待占位已显示后再准备正式提交与连接；失败保留本轮稳定身份供重试。
                     if (!isPrepared)
                     {
-                        if (await QueueRecoveredPausedPromptAsync(pending)) return;
                         await SavePendingUserMessageAsync(pending);
                         isPrepared = true;
                     }
@@ -193,6 +193,9 @@ public sealed partial class ShellPage
                             case "started":
                                 pending.Started = true;
                                 pending.TaskId = update.RootRequestTaskId ?? update.TaskId ?? pending.TaskId;
+                                if (pending.TaskId is Guid registered && _queuedPrompts.TryGetValue(pending.ConversationId, out var waiting))
+                                    foreach (var guidance in waiting.Where(item => item.TargetRequestId == pending.StreamRequestId))
+                                        guidance.TargetTaskId ??= registered;
                                 pending.TaskRegistered.TrySetResult(pending.TaskId);
                                 if (update.TaskId is not null) TaskPanel.NotifyChanged(pending.ConversationId);
                                 if (pending.StopRequested) await StopPendingReplyAsync(pending);
@@ -226,7 +229,7 @@ public sealed partial class ShellPage
                                 break;
                             case "terminal_output":
                                 continue; // Command output stays in the formal tool receipt; it has no sidebar projection.
-                                // 命令输出保留在正式工具回执中，不生成侧栏展示投影。
+                                // 命令输出保留在正式工具回执中，不生成侧栏投影。
                             case "workspace_terminal_open":
                                 AcceptWorkspaceTerminal(pending.ConversationId, update);
                                 continue;
@@ -281,10 +284,9 @@ public sealed partial class ShellPage
                                 pending.Message.Error = update.Error ?? string.Empty;
                                 pending.Message.DurationMs = update.DurationMs;
                                 pending.Message.TaskCompletionState = ChatMessageState.ReadTaskCompletion(update.TaskCompletion);
-                                if (update.Code == "TASK_PAUSED" && pending.TaskId is Guid pausedTaskId)
+                                if (update.Code == "TASK_PAUSED" && pending.TaskId is not null)
                                 {
                                     pending.PauseConfirmed = true;
-                                    _pausedTaskIds[pending.ConversationId] = pausedTaskId;
                                     pending.Message.Error = string.Empty;
                                 }
                                 MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
@@ -305,8 +307,8 @@ public sealed partial class ShellPage
                     && error is not GatewayApiException && error is (IOException or UnauthorizedAccessException or
                         InvalidOperationException or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException))
                 {
-                    // A failed presentation is not a failed execution; observe the same request again after yielding the UI thread.
-                    // 展示投影失败不等于执行失败；释放界面线程后只重附原请求，不提交用户消息或重复工具操作。
+                    // Yield the UI thread, then observe the same request after a presentation failure.
+                    // 展示失败不等于执行失败；让出界面线程后重接原请求，不重发消息或操作。
                     pending.Dirty = true;
                     observedTaskId = null;
                     int delayMs = projectionRecoveryAttempt++ switch { 0 => 100, 1 => 500, 2 => 1000, _ => 5000 };
@@ -365,6 +367,7 @@ public sealed partial class ShellPage
                 if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
                 if (!_chatClosing)
                 {
+                    ReleaseTaskReplyObservation(pending);
                     UpdateSendButtonState();
                     RenderProjects();
                     RefreshPromptQueue();
@@ -385,8 +388,8 @@ public sealed partial class ShellPage
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException
             or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException)
         {
-            // The gateway has already committed the reply; optional display caches cannot change that durable outcome.
-            // 网关已正式提交回复；可选展示缓存失败不能改写正式结果，也不能中断后续队列。
+            // Display-cache failures must not alter committed replies or stop the queue.
+            // 展示缓存失败不改已提交回复，也不阻断后续队列。
             Debug.WriteLine($"Reply presentation cache deferred: {error.GetType().Name}");
         }
     }
@@ -422,8 +425,8 @@ public sealed partial class ShellPage
 
     private static void StartReplyTimer(PendingChatReply pending)
     {
-        // The first model segment follows preparation; transport acceptance and later rounds do not restart the clock.
-        // 首个模型消息段表示准备已完成；传输接受事件不开始计时，后续轮次也不重置计时。
+        // Start timing at the first model segment, not transport acceptance or later rounds.
+        // 首个模型段开始计时；接受传输不启表，后续轮次不重置。
         pending.Message.StartGenerationTiming();
     }
 

@@ -27,7 +27,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private int _localModelReads, _memoryReads;
     private int _retrievalSettingsReads, _retrievalProvidersReads, _retrievalSourcesReads, _retrievalStatusReads;
 
-    private TaskCompletionSource? _pausedRecoveryGate;
     private int _pausedReads, _streamRequests;
     private int _chromeOpenRequests;
     private int _activationRequests;
@@ -55,6 +54,13 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int ChromeOpenRequests => Volatile.Read(ref _chromeOpenRequests);
     public int ActivationRequests => Volatile.Read(ref _activationRequests);
     public bool EnablePromptSends { get; set; }
+    public TaskCompletionSource? PromptReplyGate { get; set; }
+    public TaskDetailResponse? SteeringDetail { get; set; }
+    public TaskSteeringRequest? LastSteeringReplay { get; private set; }
+    public List<TaskSteeringRequest> SteeringAttempts { get; } = [];
+    public int SteeringDetailReads { get; private set; }
+    public bool ConflictNextSteering { get; set; }
+    public TaskCompletionSource? SteeringAcknowledgementGate { get; set; }
     public bool EnableAttachmentImports { get; set; }
     public int AttachmentImports { get; private set; }
     public Guid? AttachmentMessageId { get; private set; }
@@ -108,9 +114,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     {
         lock (_sync) _initialCatalogGate?.TrySetResult();
     }
-
-    public void HoldPausedRecovery() => _pausedRecoveryGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public void ReleasePausedRecovery() => _pausedRecoveryGate?.TrySetResult();
 
     public ToolResultReference SetScreenshotArchive(string png)
     {
@@ -197,6 +200,38 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         {
             object result;
             string path = context.Request.Url!.AbsolutePath;
+            if (context.Request.HttpMethod == "GET" && SteeringDetail is { } steering
+                && path == $"/api/tasks/{steering.Task.TaskId:D}"
+                && context.Request.QueryString["conversationId"] == steering.Task.Scope.ConversationId.ToString("D"))
+            {
+                SteeringDetailReads++;
+                context.Response.ContentType = "application/json";
+                await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(steering,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)), _shutdown.Token);
+                return;
+            }
+            if (context.Request.HttpMethod == "POST" && SteeringDetail is { } completedSteering
+                && path == $"/api/tasks/{completedSteering.Task.TaskId:D}/steer")
+            {
+                LastSteeringReplay = await JsonSerializer.DeserializeAsync<TaskSteeringRequest>(context.Request.InputStream,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web), _shutdown.Token);
+                SteeringAttempts.Add(LastSteeringReplay!);
+                context.Response.ContentType = "application/json";
+                if (SteeringAcknowledgementGate is { } gate) await gate.Task.WaitAsync(_shutdown.Token);
+                if (ConflictNextSteering)
+                {
+                    ConflictNextSteering = false;
+                    SteeringDetail = completedSteering with { Task = completedSteering.Task with { Version = completedSteering.Task.Version + 1 } };
+                    context.Response.StatusCode = (int)HttpStatusCode.Conflict;
+                    await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(
+                        new { code = "TASK_CONFLICT", error = "Fixture task version changed before steering." }), _shutdown.Token);
+                    return;
+                }
+                await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(
+                    new TaskControlResponse(completedSteering.Task, [completedSteering.Task.TaskId],
+                        ReplyMessageId: LastSteeringReplay!.ReplyMessageId), new JsonSerializerOptions(JsonSerializerDefaults.Web)), _shutdown.Token);
+                return;
+            }
             if (context.Request.HttpMethod == "POST" && path == "/api/retrieval/activate")
             {
                 await ActivateRetrievalAsync(context);
@@ -278,7 +313,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             else if (path == "/api/tasks/paused" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
             {
                 Interlocked.Increment(ref _pausedReads);
-                if (_pausedRecoveryGate is { } pausedGate) await pausedGate.Task.WaitAsync(_shutdown.Token);
                 result = new TaskPausedResponse([]);
             }
             else if (EnableWorkspaceOpens && path == $"/api/conversations/{WorkChatId:D}/messages")
@@ -459,8 +493,8 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             Interlocked.Increment(ref _writes);
             throw;
         }
-        // Activation is a scoped scheduling hint, not a catalog/chat mutation; this fixture never starts an index or model.
-        // 激活是带范围的调度提示，不是目录或聊天写入；夹具只确认接收，不启动索引或模型。
+        // Acknowledge scoped activation without mutating chats or starting indexes/models.
+        // 夹具只确认范围化激活，不修改目录或聊天，不启动索引或模型。
         Interlocked.Increment(ref _activationRequests);
         context.Response.StatusCode = 202;
         context.Response.ContentType = "application/json";
@@ -480,6 +514,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             throw new InvalidDataException("Screenshot reached the model before reception or lost its stable IDs.");
         Interlocked.Increment(ref _writes);
         Interlocked.Increment(ref _streamRequests);
+        if (PromptReplyGate is { } replyGate) await replyGate.Task.WaitAsync(_shutdown.Token);
         context.Response.ContentType = "text/event-stream";
         context.Response.SendChunked = true;
         string answer = "Fixture reply: " + request.Message;
@@ -536,7 +571,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     {
         _shutdown.Cancel();
         ReleaseInitialCatalog();
-        ReleasePausedRecovery();
         _listener.Stop();
         await _listening;
         Task[] responses;

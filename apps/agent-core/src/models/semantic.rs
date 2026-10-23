@@ -421,8 +421,8 @@ fn request(plan: &Value, source_json: Option<String>, state_json: Option<String>
     json!({"system": SUMMARY_SYSTEM, "messages": [{"role": "user", "content": content}], "maxOutputTokens": plan["maxOutputTokens"]})
 }
 
-/// The complete semantic checkpoint service owns source completeness, planning, citations and finalization.
-/// 完整语义检查点服务统一拥有来源完整性、请求计划、出处校验和终态验收；不执行模型或正式写入。
+/// Plan and validate semantic checkpoints, sources and citations; do not execute models or formal writes.
+/// 规划并校验语义检查点、来源和引用，不执行模型或正式写入。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     if operation == "models.semantic.request" {
         return Ok(request(&args["plan"], None, None));

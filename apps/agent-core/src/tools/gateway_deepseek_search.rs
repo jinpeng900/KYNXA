@@ -90,8 +90,8 @@ pub(super) async fn search(
     let key = api_key(ctx).await.ok_or_else(|| {
         failure("WEB_SEARCH_CREDENTIAL_MISSING", "DeepSeek 官方连接未保存 API Key。", 401)
     })?;
-    // The service accepts at most 128 characters; keep the leading terms and operators instead of failing the search.
-    // 服务只接受最多 128 个字符；保留前部关键词与搜索运算符，而不是让整次搜索失败。
+    // Keep the leading query terms and operators within the service's 128-character limit.
+    // 按服务的 128 字符上限保留前部关键词和运算符。
     let query = query.trim().chars().take(MAX_QUERY_CHARACTERS).collect::<String>();
     let url = url::Url::parse(SEARCH_ENDPOINT).expect("fixed search endpoint");
     let transport = super::gateway_web_proxy::client(&url, Duration::from_secs(30)).await?;

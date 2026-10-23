@@ -24,8 +24,8 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// A source remains bound to its own mount; adding an unrelated mount does not revoke existing evidence.
-/// 来源只核验自身挂载；新增其他挂载不会使已有证据或向量整体失效，旧无mountId定位继续兼容。
+/// Validate each source's own mount; unrelated mounts preserve evidence and legacy locators.
+/// 仅核验来源自身挂载，其他挂载变更不撤销证据或旧定位。
 pub(crate) fn mounted_root(relation: &Value, locator: &Value) -> Result<String, ContractError> {
     let mounts = relation["mounts"].as_array();
     let found = mounts.into_iter().flatten().find(|mount| {
@@ -404,8 +404,8 @@ fn source_matches_hash(state: &Value, source: &Value, digest: &str) -> bool {
         && state["chunker_version"] == super::gateway_structure::CHUNKER_VERSION
         && state["embedding_input_version"] == "source-context-v1"
 }
-/// Complete vectors are reusable only with the same published source identity, revision and derivation inputs.
-/// 只有发布来源的身份、版本及派生输入一致，才复用完整向量；无正文的队列条目使用已核验内容哈希。
+/// Reuse vectors only for matching source identity, revision and derivation inputs.
+/// 来源身份、版本和派生输入均匹配时才复用向量。
 pub(crate) fn reuse_semantic(
     config: &GatewayConfig,
     source: &Value,
@@ -718,14 +718,14 @@ pub fn remove(
     })
 }
 
-/// The catalog deletion witness is rechecked under its lock, so an undo cannot be cleared by an old cleanup.
-/// 在正式目录锁内重核删除见证，避免旧清理误伤撤销恢复；仅清理聊天派生数据，Trash及共享原文保留。
+/// Recheck deletion under the catalog lock; preserve undo, Trash and shared originals.
+/// 目录锁内重核删除状态，保留撤销恢复、Trash 和共享原文。
 pub(crate) fn retire_deleted_chat(
     config: &GatewayConfig,
     deleted: &Value,
 ) -> Result<Value, ContractError> {
-    // Bootstrap admission can wait independently; never hold the formal catalog while waiting for it.
-    // 索引初始化准入可独立等待，不能在等待期间持有正式目录锁而堵住前台聊天。
+    // Release the catalog lock before waiting for index initialization admission.
+    // 等待索引初始化准入前释放目录锁。
     if storage::managed_files::inspect(&config.data_root, &database(config), false, true, u64::MAX)?
     {
         initialize(config)?;
@@ -809,8 +809,8 @@ pub(crate) fn retire_deleted_chat(
                 graphs.retain(|key, _| !keys.contains(key));
                 keys
             };
-            // Never hold the resident-map lock while acquiring LRU; queries acquire them in the other order.
-            // 获取LRU前释放驻留表锁，避免与查询的相反锁顺序形成死锁；活动查询的Arc仍持有真实资源额度。
+            // Release the resident-map lock before acquiring LRU to preserve query lock order.
+            // 取 LRU 锁前释放驻留表锁，遵守查询锁顺序。
             if let Some(lru) = LRU.get() {
                 let mut lru = lru.lock().unwrap();
                 lru.shards.retain(|(key, _)| !retired.contains(key));
@@ -837,8 +837,8 @@ struct Graph {
     identity: String,
     generation: u64,
     count: usize,
-    // The index drops before its lease; active query clones retain both until real native use finishes.
-    // 图对象先析构再归还租约；活跃查询持有同一个图与额度，不能提前释放驻留账目。
+    // Drop the index before its lease; active queries retain both until use ends.
+    // 先释放图对象再归还租约，活动查询持续持有两者。
     _lease: crate::resources::gateway::ResourceLease,
 }
 static GRAPHS: OnceLock<Mutex<HashMap<String, Arc<Graph>>>> = OnceLock::new();
@@ -850,8 +850,8 @@ struct GraphWorkspace {
     scope: String,
 }
 
-/// Foreground demand owns the workspace LRU; each demanded workspace has its own shard allowance.
-/// 工作区常驻由前台需求驱动；每个工作区独立计量分片，不能把四个工作区误当四片图。
+/// Drive workspace LRU by foreground demand and budget shards per workspace.
+/// 按前台需求维护工作区 LRU，每个工作区单独计分片额度。
 #[derive(Default)]
 struct GraphResidency {
     workspaces: VecDeque<GraphWorkspace>,
@@ -894,8 +894,8 @@ fn request_graph_workspace(database: PathBuf, scope: &str) {
 }
 
 fn remember_graph(key: &str, graph: &Arc<Graph>, options: &Value) {
-    // Always acquire LRU before the map; eviction releases only the cache's Arc, never an active query lease.
-    // 始终先锁 LRU 再锁图表；淘汰仅释放缓存的 Arc，活动查询及其真实租约继续存活。
+    // Lock LRU before the map; eviction drops only the cache Arc, not active query leases.
+    // 先锁 LRU 再锁图表；淘汰只释放缓存 Arc，不释放活动查询租约。
     let mut lru = LRU.get_or_init(Default::default).lock().unwrap();
     let maximum = options["maxCachedShards"].as_u64().unwrap_or(4).clamp(1, 16) as usize;
     let workspace = GraphWorkspace { database: graph.database.clone(), scope: graph.scope.clone() };
@@ -910,8 +910,8 @@ static ANN_BACKGROUND: OnceLock<Mutex<HashMap<PathBuf, super::ann_queue::AnnSess
 static ANN_PARTITIONS: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
 
 fn graph_identity(descriptor: &Value, identity: &Value, epoch: &Value, options: &Value) -> Value {
-    // Older keys did not record graph quality and cannot prove their construction parameters.
-    // 旧键未记录构图质量，不能证明所用参数；新图明确绑定参数后才跨重启复用。
+    // Reuse graphs across restarts only when keys include construction parameters.
+    // 图键包含构建参数后才跨重启复用，旧键无法证明参数。
     json!({"version":"rust-gateway-v2","databaseIdentity":identity,"epoch":epoch,"scopeKey":descriptor["scope_key"],"descriptor":descriptor,
         "buildParameters":{"metric":"cos","quantization":"f32","connectivity":options["connectivity"],"expansionAdd":options["expansionAdd"],"expansionSearch":options["expansionSearch"]}})
 }
@@ -937,8 +937,8 @@ pub(crate) fn ann_background_pending(config: &GatewayConfig) -> bool {
     background_operation(config, "shouldSchedule", json!({})).ok() == Some(json!(true))
 }
 
-/// One maintenance owner consumes the existing queue; request cancellation never owns the graph build.
-/// 由既有维护线程消费原有队列，图构建不继承首次查询的取消令牌；停机及迁移仍等待同一线程。
+/// Maintenance owns queued graph builds; shutdown/migration joins it, not request cancellation.
+/// 维护线程负责队列构图，停机或迁移等待该线程，不随单次查询取消。
 pub(crate) fn maintain_ann(config: &GatewayConfig, stop: &Arc<std::sync::atomic::AtomicBool>) -> Result<(), ContractError> {
     let job = background_operation(config, "start", json!({}))?;
     if job.is_null() { return Ok(()); }
@@ -1033,8 +1033,8 @@ fn enqueue_ann_descriptor(config: &GatewayConfig, descriptor: &Value, scopes: &V
     Ok(())
 }
 
-/// Queue after vector publication rather than making the first foreground search discover every cold graph.
-/// 向量发布后主动合并建图请求；首个前台搜索不再独自承担缺图发现，参数和原有后台准入保持不变。
+/// Queue graph builds after vector publication, using existing parameters and admission.
+/// 向量发布后合并构图请求，沿用参数及准入，减轻首次查询负担。
 pub(crate) fn prepare_scope_ann(config: &GatewayConfig, scope: &str, local: &Value) -> Result<u64, ContractError> {
     let options = storage::settings::apply("storage.settings.ann", &json!({"value":local["ann"]}))?;
     if options["mode"] != "auto" { return Ok(0); }
@@ -1223,8 +1223,8 @@ fn ann(
                     loop {
                         storage::sqlite_store::cancelled()?;
                         if background {
-                            // SQL pages retain a bounded deadline; native graph progress renews the next page's budget.
-                            // 每页SQL保留有限执行期限；原生建图取得进展后为下一页续期，不共享前台总等待时间。
+                            // Bound each SQL page; graph progress renews the next page's deadline.
+                            // SQL 每页有期限，构图取得进展后为下一页续期。
                             let page_started = std::time::Instant::now();
                             connection.progress_handler(1000, Some(move || graph_page_interrupted(page_started)))
                                 .map_err(storage::sqlite_store::failure)?;
@@ -1333,8 +1333,8 @@ fn ann(
             409,
         ));
     }
-    // Background publication may prepare a cold workspace on disk without making it resident.
-    // 后台发布可以把冷工作区图写入磁盘；仅被前台请求过的工作区才保留驻留图。
+    // Publish cold graphs to disk; retain residency only for foreground-used workspaces.
+    // 冷图可后台写盘，仅前台使用过的工作区保留驻留。
     remember_graph(&key, &graph, options);
     let matches = if limit > 0 {
         Some(graph.index.search(vector, limit)
@@ -1349,8 +1349,8 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         "storage.retrieval.scopes",
         &json!({"value":input["scopeKeys"]}),
     )?;
-    // Optional candidate memory is admitted before entering the SQLite read snapshot.
-    // 可选候选缓存的内存准入在 SQLite 读快照之前完成，不阻塞聊天等待资源。
+    // Admit optional cache memory before opening the SQLite snapshot, without delaying chat.
+    // 进入 SQLite 快照前准入可选缓存内存，不阻塞聊天。
     let candidate_bytes = super::gateway_embedding::cache_memory_limit(
         "retrieval-candidates", super::cache_candidates::DEFAULT_BYTES, super::cache_candidates::reclaim,
     );
@@ -1366,16 +1366,16 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
     let query = input["query"].as_str().unwrap_or("");
     let expression=crate::retrieval::lexical::apply("retrieval.match-expression",&json!({"text":query,"normalizedText":query.nfkc().collect::<String>(),"domain":input["retrievalIntent"]["domain"]}))
         .map_err(|_|gateway::error("查询格式无效。","INVALID_RETRIEVAL_INPUT",400))?;
-    // Ordinary language uses FTS plus vectors; reserve the unindexed literal fallback for explicit targets or untokenizable input.
-    // 自然语言走 FTS 与向量；仅显式目标或无法分词的输入保留无索引子串回退，明确传入的 literalQuery 继续兼容。
+    // Use FTS/vectors for language; literal scans only for explicit targets or untokenizable input.
+    // 自然语言走 FTS 与向量，仅显式目标或无法分词时回退字面扫描。
     let has_explicit_target = ["path", "symbol"].iter().any(|field| {
         input["retrievalIntent"][*field].as_str().is_some_and(|value| !value.trim().is_empty())
     });
     let literal_query = input["literalQuery"].as_str().unwrap_or_else(|| {
         if has_explicit_target || expression.as_str().is_none_or(str::is_empty) { query } else { "" }
     });
-    // Stable database ownership enables the bounded descriptor cache; storage still checks physical identity, epochs and authorized scopes.
-    // 稳定数据库身份接通有界描述符缓存；存储仍核验物理身份、版本及授权范围，不能按请求随机生成。
+    // Use stable database IDs for cached descriptors; recheck file identity, epochs and scope.
+    // 描述符缓存使用稳定数据库 ID，仍核验文件身份、版本和范围。
     let descriptor_cache_id = format!("native-index:{}", hash(&database(config).to_string_lossy()));
     let options = storage::settings::apply(
         "storage.settings.ann",
@@ -1432,8 +1432,8 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                                 Ok(rows) => { matches.extend(rows); semantic = Some("ann"); }
                                 Err(error) if ann_readiness_error(error.code()) => {
                                     ann_pending = true;
-                                    // Cold or resource-limited ANN keeps the semantic channel through the same bounded exact scan.
-                                    // 图未就绪或资源不足时保留语义通道；精确回退仍共用本次查询的扫描上限。
+                                    // Use bounded exact search when ANN is cold or resource-limited.
+                                    // ANN 未就绪或资源不足时，沿用有界精确检索。
                                     if admit_exact_descriptor(descriptor, &mut exact_remaining) {
                                         exact.push(descriptor.clone());
                                         semantic = Some("exact");
@@ -1568,9 +1568,15 @@ fn public_chunk(row: &Value) -> Result<Value, ContractError> {
     let source = json!({"sourceId":row["source_id"],"scopeKey":row["scope_key"],"contentHash":row["content_hash"],
         "sourceRevision":serde_json::from_str::<Value>(row["source_revision"].as_str().unwrap_or("null")).unwrap_or(Value::Null),"derivationSignature":row["derivation_signature"]});
     let chunk = json!({"chunkId":row["chunk_id"],"chunkHash":row["chunk_hash"]});
+    let locator = serde_json::from_str::<Value>(row["locator"].as_str().unwrap_or("{}"))
+        .unwrap_or(json!({}));
+    let exact_path = storage::retrieval::normalize_path(locator["relativePath"].as_str()
+        .or_else(||locator["path"].as_str()).unwrap_or(""));
+    // Keep native locator facts through projection so exact evidence does not trigger extra inference.
+    // 原生定位事实随投影保留，避免有效精确证据因字段丢失触发额外推理。
     Ok(
         json!({"sourceId":source["sourceId"],"scopeKey":source["scopeKey"],"sourceType":row["source_type"],"title":row["title"],
-        "locator":serde_json::from_str::<Value>(row["locator"].as_str().unwrap_or("{}")).unwrap_or(json!({})),"excerpt":row["text"],
+        "locator":locator,"exactPath":exact_path,"exactTargetMatch":row["exact_target_match"]==true,"excerpt":row["text"],
         "contentHash":source["contentHash"],"sourceRevision":source["sourceRevision"],"derivationSignature":row["derivation_signature"],"chunkId":row["chunk_id"],"chunkHash":row["chunk_hash"],
         "startOffset":row["start_offset"],"endOffset":row["end_offset"],"startLine":row["start_line"],"endLine":row["end_line"],"score":row["score"],"distance":row["distance"],"structure":serde_json::from_str::<Value>(row["structure_json"].as_str().unwrap_or("null")).unwrap_or(Value::Null),"sourceRef":reference(&source,Some(&chunk))}),
     )
@@ -1694,16 +1700,18 @@ mod native_query_route_tests {
             assert!(scanned_sentinel.load(Ordering::SeqCst) > 0,
                 "Explicit path/symbol intent retains the compatible literal channel.");
         }
-        scanned_sentinel.store(0, Ordering::SeqCst);
         let untokenizable = search(&fixture.config,
             &json!({"query":"???","scopeKeys":["project:query-route"]})).unwrap();
         assert_eq!(untokenizable["items"][0]["sourceId"], "matching");
-        assert!(scanned_sentinel.load(Ordering::SeqCst) > 0);
-        scanned_sentinel.store(0, Ordering::SeqCst);
+        assert_eq!(untokenizable["items"].as_array().unwrap().len(),1);
+        // Candidate reuse and connection pooling may skip the instrumented lower(); results prove the fallback.
+        // 候选复用及连接池可能跳过被计数的 lower()，以只有字面回退才能找到的结果验证行为。
         let mut explicit_literal = query.clone();
+        explicit_literal["query"] = json!("unmatched_natural_query");
         explicit_literal["literalQuery"] = json!("needle");
-        search(&fixture.config, &explicit_literal).unwrap();
-        assert!(scanned_sentinel.load(Ordering::SeqCst) > 0);
+        let explicit_result = search(&fixture.config, &explicit_literal).unwrap();
+        assert_eq!(explicit_result["items"][0]["sourceId"], "matching");
+        assert_eq!(explicit_result["items"].as_array().unwrap().len(),1);
     }
 
     #[test]

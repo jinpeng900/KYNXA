@@ -25,10 +25,10 @@ async function listFiles(directory, excludedNames = [], includedDirectories = []
   return files.sort();
 }
 
-// Read only code tokens: quoted prompts, comments and complete templates cannot become imports.
-// 只读取代码 token：引号中的提示词、注释和完整模板不得被识别为导入。
-// This is a bounded lexer for current syntax, not a JavaScript parser; computed references stay out of scope.
-// 这是针对当前语法的限定词法扫描器，并非 JavaScript 解析器；计算引用不在覆盖范围内。
+// Ignore strings, comments and templates when finding imports.
+// 查找导入时跳过字符串、注释和模板。
+// This limited scanner does not resolve computed references.
+// 此扫描器只处理当前静态语法，不解析动态计算的引用。
 function codeTokens(source) {
   const tokens = [];
   let offset = 0;

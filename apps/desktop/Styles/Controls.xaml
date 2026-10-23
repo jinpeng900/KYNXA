@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:controls="using:KYNXA_Desktop.Controls" xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives">
-    <!-- Use the Latin UI face first so mixed labels keep Segoe for English and YaHei UI for Chinese.
-         拉丁界面字体放在前面，使混排标签中的英文使用 Segoe，中文回退到微软雅黑 UI。
+    <!-- Prefer the Latin UI font; Chinese falls back to YaHei UI.
+         优先拉丁界面字体，英文使用 Segoe，中文回退到微软雅黑 UI。
     -->
     <FontFamily x:Key="KynxaUIFont">Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, Microsoft YaHei</FontFamily>
     <FontFamily x:Key="ContentControlThemeFontFamily">Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, Microsoft YaHei</FontFamily>
@@ -41,8 +41,8 @@
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
     </Style>
-    <!-- Inherit modern SDK templates so rounded backplates, selection indicators and keyboard behavior stay together.
-         继承现代 SDK 模板，使圆角背景、选中指示和键盘行为保持一致。
+    <!-- Keep SDK templates for rounded backgrounds, selection and keyboard behavior.
+         沿用 SDK 模板的圆角背景、选中指示和键盘行为。
     -->
     <Style x:Key="KynxaComboBoxItemStyle" TargetType="ComboBoxItem" BasedOn="{StaticResource DefaultComboBoxItemStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
@@ -102,8 +102,8 @@
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
     </Style>
-    <!-- Set tracking on the text itself at creation; inherited button tracking can keep WinUI's fast text path.
-         创建文字时直接设置字间距；仅从按钮继承时，WinUI 可能仍沿用忽略字距的快速排版路径。
+    <!-- Set text tracking directly; inherited button tracking may be ignored.
+         创建文字时直接设置字间距，避免 WinUI 快速排版忽略按钮继承值。
     -->
     <DataTemplate x:Key="KynxaDialogAcknowledgementTemplate">
         <TextBlock Text="{Binding}" CharacterSpacing="{StaticResource KynxaDialogAcknowledgementCharacterSpacing}" HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -203,8 +203,8 @@
                                       HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                                       VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
                                       AutomationProperties.AccessibilityView="Raw" Control.IsTemplateFocusTarget="True">
-                        <!-- Apply feedback directly so transparent-white interpolation cannot flash on dark backgrounds.
-                             直接切换反馈画刷，避免透明白色参与插值时在深色背景上产生亮色闪帧。 -->
+                        <!-- Switch feedback brushes directly to avoid white flashes on dark backgrounds.
+                             直接切换反馈画刷，避免透明白色插值在深色背景上闪亮。 -->
                         <VisualStateManager.VisualStateGroups>
                             <VisualStateGroup x:Name="CommonStates">
                                 <VisualState x:Name="Normal" />
@@ -255,8 +255,8 @@
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="Background" Value="{StaticResource KynxaSendBrush}" />
         <Setter Property="Foreground" Value="{StaticResource KynxaOnAccentBrush}" />
-        <!-- Paint a true circle in every state while keeping the native Button input and focus behavior.
-             所有状态直接绘制正圆底板，保留原生 Button 的输入与焦点行为。
+        <!-- Paint circular backgrounds while retaining native Button input and focus.
+             各状态使用正圆背景，保留原生 Button 的输入和焦点行为。
         -->
         <Setter Property="Template">
             <Setter.Value>

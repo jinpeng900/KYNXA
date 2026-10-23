@@ -21,8 +21,8 @@ public partial class App
     private async Task CheckSidebarControlsAsync()
     {
         if (ActiveId is null) await SearchAndSelectAsync(_gateway.WorkChatId, "Work fixture");
-        // Wait for the legitimate latest-history read before taking the immutable row snapshot used by all sidebar checks.
-        // 所有侧栏检查共用的原始行快照，必须在合法的最近历史读取完成之后取得。
+        // Wait for latest-history loading before taking the shared immutable sidebar snapshot.
+        // 最近历史读取完成后，再取得侧栏检查共用的不可变行快照。
         await WaitAsync(() =>
         {
             if (_gateway.Failure is not null) throw new InvalidOperationException("Sidebar fixture history failed before native control checks.", _gateway.Failure);
@@ -397,8 +397,8 @@ public partial class App
             var elapsed = Stopwatch.StartNew();
             movePointer();
             frames.Add(ReadPixel(elapsed));
-            // Yield to XAML between screen reads; no settle delay or composition flush can hide the first transition frames.
-            // 屏幕读取之间让出 UI 线程；不先等待稳定或刷新合成，避免跳过最早的过渡帧。
+            // Yield between screen reads without waiting or flushing away the first transition frames.
+            // 读取间让出界面线程，不等待稳定或刷新合成，保留最早过渡帧。
             while (elapsed.Elapsed.TotalMilliseconds < 600 &&
                 (elapsed.Elapsed.TotalMilliseconds < 200 || frames.Count < 8 ||
                  !frames.TakeLast(3).All(frame => SidebarNavigationPixelDifference(frame, frames[^1]) <= 3)))

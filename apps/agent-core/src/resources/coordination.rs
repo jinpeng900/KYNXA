@@ -32,8 +32,8 @@ fn bounded_put(
     }
 }
 
-/// A gateway's quarantine, feedback and admission order survive monitor restarts; OS/IPC receipts stay external.
-/// 单网关的隔离预约、反馈和准入顺序跨监控重启保留；操作系统和 IPC 回执仍由适配器提供。
+/// Preserve reservations, feedback and admission order across restarts; callers supply OS/IPC receipts.
+/// 监控重启后保留隔离预约、反馈和准入顺序；系统与 IPC 回执由调用方提供。
 pub struct CoordinationState {
     leases: BTreeMap<String, Value>,
     claims: BTreeMap<String, Value>,

@@ -86,8 +86,8 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
             _directory.Text = snapshot.InstallDirectory;
             RenderStorageSpace();
             _ = RefreshStorageSpaceAsync(snapshot.InstallDirectory);
-            // Retain the user's pending choice while saving, then reconcile with the authoritative snapshot on success or failure.
-            // 保存期间保留用户当前选择，完成后以正式快照确认或回滚，不在网络等待时来回跳动。
+            // Keep the pending choice during save; reconcile with the authoritative result afterward.
+            // 保存期间保留当前选择，结束后按正式快照确认或回滚，避免等待时跳动。
             _policy.SelectedKey = _pendingLoadPolicy ?? snapshot.LoadPolicy;
             _policyHint.Text = UiText.Get((_pendingLoadPolicy ?? snapshot.LoadPolicy) switch
             {
@@ -166,8 +166,8 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
         _storageDirectory = directory;
         _storageRefreshAt = DateTimeOffset.UtcNow;
         if (changed) _storageAvailableBytes = null;
-        // Read one drive value off the UI thread; model sizes come from the existing snapshot, never a directory scan.
-        // 仅在后台读取磁盘可用量；模型占用复用已有快照，不递归扫描目录。
+        // Read free disk space off the UI thread; reuse model-size snapshots without scanning.
+        // 后台读取磁盘可用量，模型占用复用快照，不递归扫描目录。
         long? available = await Task.Run(() =>
         {
             try { return (long?)new DriveInfo(Path.GetPathRoot(directory) ?? directory).AvailableFreeSpace; }

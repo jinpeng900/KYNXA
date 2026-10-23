@@ -185,6 +185,7 @@ async fn execute(
             let action = match body["action"].as_str() {
                 Some("pause") => TaskControl::Pause,
                 Some("resume") => TaskControl::Resume,
+                Some("revise") => TaskControl::Revise,
                 Some("cancel") => TaskControl::Cancel,
                 _ => {
                     return Err(GatewayError::new(

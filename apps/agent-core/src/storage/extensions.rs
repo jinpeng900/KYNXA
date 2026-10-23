@@ -223,8 +223,8 @@ fn layout(root: &Path) -> ContractResult {
     Ok(document.unwrap_or(Value::Null))
 }
 
-/// A staged receipt exposes the callback fence without transferring file ownership to Node.
-/// 暂存回执暴露应用回调栅栏，但文件创建、身份核验及发布所有权仍留在原生服务。
+/// Staged receipts expose the callback boundary; storage retains file ownership and publication.
+/// 暂存回执提供回调边界，文件所有权及发布仍归存储服务。
 fn stage(root: &Path) -> ContractResult {
     layout(root)?;
     let path = root.join("extension-layout.json");

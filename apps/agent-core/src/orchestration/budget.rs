@@ -20,6 +20,14 @@ const MAX_EXPLICIT_DURATION_MS: u64 = 9_007_199_254_740_991 / 4;
 /// 用户要求的最低时长之后预留的收尾余量，保证核验与交付仍在额度内。
 const MINIMUM_ACTIVE_MARGIN_MS: u64 = 1_800_000;
 
+/// Leave room for evidence IDs and reasoning; repair attempts may grow within negotiated output.
+/// 为证据 ID 和思考留足输出；验收重试可增额，始终遵守实际协商上限。
+pub(super) fn review_output_limit(requirements: usize, attempts: u64, available: u64) -> u64 {
+    let requirements = u64::try_from(requirements).unwrap_or(u64::MAX);
+    2048_u64.saturating_add(requirements.saturating_mul(128))
+        .saturating_add(attempts.saturating_mul(1024)).min(available)
+}
+
 /// Budget operations are pure; caller-owned timing and cancellation remain at actual I/O boundaries.
 /// 预算操作是纯计算；计时与取消仍由调用方在真实 I/O 边界负责。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
@@ -94,8 +102,8 @@ fn allocation_maximum(values: &[f64]) -> f64 {
     }
 }
 
-/// Allocation ceilings are policies, not measured consumption; mandatory input and safety remain reserved.
-/// 分配上限属于策略，不能作为实际消耗；必须继续预留必要输入与安全额度。
+/// Ceilings are policy limits, not usage; reserve mandatory input and safety margins.
+/// 分配上限不是实际用量；仍须预留必要输入和安全余量。
 fn context_allocation(args: &Value) -> Value {
     let input = allocation_maximum(&[0.0, projected_number(args, "inputBudgetTokens").floor()]);
     let research = args["taskType"] == "research" || args["taskType"] == "complex";
@@ -133,8 +141,8 @@ fn context_allocation(args: &Value) -> Value {
         "schemaCeilingTokens":allocation_minimum(&[24000.0,(input * schema_fraction).floor()]),"safetyTokens":512})
 }
 
-/// Preserve every existing audit field, including the caller's effective schema allowance and clipping details.
-/// 保留全部既有审计字段，包括调用方实际生效的工具额度与截断细节。
+/// Preserve audit fields, including effective schema limits and truncation details.
+/// 保留审计字段，包括生效的工具定义额度和截断信息。
 fn context_allocation_audit(args: &Value) -> Value {
     let allocation = &args["allocation"];
     let options = &args["options"];
@@ -220,8 +228,8 @@ fn limits(input: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
-/// Resolve transport overrides before accepting work; malformed limits never change the user goal.
-/// 接受任务前归一化传输层执行额度；参数异常不能改变用户目标或中断已接受的任务。
+/// Normalize limits before acceptance; invalid values cannot change the goal or stop accepted work.
+/// 接受前归一化额度；异常值不能改变目标或中断已接受任务。
 pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     let object = input.as_object();
     let mut resolved = json!({});
@@ -232,8 +240,8 @@ pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     for (name, default, minimum, maximum) in LIMITS {
         let requested = object.and_then(|object| object.get(name));
         let number = requested.and_then(Value::as_u64);
-        // An over-large request keeps the user's intent at the supported maximum instead of shrinking to the default.
-        // 超出上限的请求按支持的最大值执行，不能反而缩回默认值。
+        // Clamp oversized requests to the supported maximum, not the default.
+        // 超限请求取支持的最大值，不退回默认值。
         let valid = number.map(|value| value.min(maximum)).filter(|value| *value >= minimum);
         if requested.is_some_and(|value| !value.is_null()) && valid.is_none() {
             corrections.push(json!({"field":name,"reason":"invalid-limit-using-default","effective":default}));
@@ -250,15 +258,15 @@ pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     json!({"limits":resolved,"corrections":corrections})
 }
 
-/// Resolve limits for one accepted request: transport overrides plus an explicit minimum duration in the message.
-/// 解析一次已接受请求的额度：传输层设置，加上用户消息中明确写出的最低工作时长。
+/// Combine transport limits with the user's explicit minimum work duration.
+/// 合并传输额度与用户明确要求的最低工作时长。
 pub(crate) fn resolve_input_limits(input: &Value) -> Value {
     let mut resolved = resolve_request_limits(input.get("runLimits").unwrap_or(&Value::Null));
     let message = input["message"].as_str().unwrap_or("");
     if let Some(minimum) = requested_minimum_ms(message) {
         if is_finite_response_request(message) {
-            // A finite literal response is complete when delivered; never idle or repeat merely to fill hours.
-            // 有限字面回复交付后即完成，不能为凑足小时数空等或无限重复。
+            // Do not idle or repeat a finite answer to satisfy an artificial duration.
+            // 有限回复交付后即完成，不为空凑时长等待或重复。
             resolved["corrections"].as_array_mut().expect("correction array").push(json!({
                 "field":"minActiveMs","reason":"finite-response-does-not-require-time-filling",
                 "requested":minimum
@@ -270,8 +278,8 @@ pub(crate) fn resolve_input_limits(input: &Value) -> Value {
     resolved
 }
 
-/// Record a minimum effective duration and widen the duration budget so it plus a finishing margin fits.
-/// 记录最低有效时长，并放宽时长额度，保证该时长加收尾余量仍在额度内。
+/// Reserve the minimum effective duration plus a finishing margin.
+/// 为最低有效工作时长和收尾预留足够额度。
 pub(crate) fn apply_minimum_active(resolved: &mut Value, minimum: u64) {
     let minimum = minimum.min(MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS);
     let current = resolved["limits"]["maxDurationMs"].as_u64().unwrap_or(1_800_000);
@@ -282,8 +290,22 @@ pub(crate) fn apply_minimum_active(resolved: &mut Value, minimum: u64) {
     }
 }
 
-/// Model request allowance for the task tree, scaled with the duration budget instead of a fixed 256.
-/// 任务树的模型请求额度随时长预算扩展，不再固定为 256；按每 10 秒一次估算，最少 256。
+/// User steering may replace or revoke a minimum; omitted changes retain the accepted value.
+/// 用户引导可替换或撤销最低时长；未提及时保留原值，不重置累计工作时间。
+pub(super) fn revised_minimum_active(current: u64, requested: Option<&Value>, stopped: bool) -> Result<u64, String> {
+    let requested = requested.map(|value| value.as_u64()
+        .filter(|minimum| *minimum <= MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS)
+        .ok_or_else(|| "INVALID_STEERING_MINIMUM_ACTIVE".to_owned())).transpose()?;
+    if stopped {
+        if requested.is_some_and(|minimum| minimum > 0) { return Err("INVALID_STEERING_MINIMUM_ACTIVE".into()); }
+        Ok(0)
+    } else {
+        Ok(requested.unwrap_or(current))
+    }
+}
+
+/// Scale tree-wide model requests at one per 10 seconds, with a minimum of 256.
+/// 任务树按每 10 秒一次估算模型额度，最少 256 次。
 pub(crate) fn model_request_allowance(max_duration_ms: u64) -> u64 {
     (max_duration_ms / 10_000).max(256)
 }
@@ -292,8 +314,8 @@ pub(crate) fn model_request_allowance(max_duration_ms: u64) -> u64 {
 /// 只识别“至少／不少于 N 分钟／小时”等明确的最低时长要求，普通时间描述不计入。
 fn minimum_duration_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    // A short verb phrase may sit between the qualifier and the amount, e.g. 至少要再认真工作一个半小时.
-    // 限定词与数量之间允许一小段动词短语，例如“至少要再认真工作一个半小时”；数量可为阿拉伯或中文数字。
+    // Allow short verbs before Arabic or Chinese duration values, e.g. 至少工作一个半小时.
+    // 限定词与时长之间允许短动词，支持阿拉伯及中文数字，如“至少工作一个半小时”。
     PATTERN.get_or_init(|| {
         Regex::new(concat!(
             r"(?i)(?:至少|最少|不少于|不低于|起码|at\s+least|no\s+less\s+than|a\s+minimum\s+of)",
@@ -323,8 +345,8 @@ fn requested_minimum_ms(message: &str) -> Option<u64> {
     (minutes.is_finite() && minutes >= 1.0).then(|| (minutes * 60_000.0) as u64)
 }
 
-/// Exclude only clearly finite greetings/literal repetition, not unknown or substantial long work.
-/// 仅排除明确有限的问候／字面重复，不使用任务关键词白名单限制未知或实质性长任务。
+/// Exclude only finite greetings or literal repetition, not substantial or unknown tasks.
+/// 仅排除有限问候或字面重复，不限制实质性或尚未明确的任务。
 pub(crate) fn is_finite_response_request(message: &str) -> bool {
     static FINITE: OnceLock<Regex> = OnceLock::new();
     static QUALIFIER: OnceLock<Regex> = OnceLock::new();
@@ -436,6 +458,31 @@ fn remove_overlap<'a>(previous: &str, text: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_requirement_review_has_room_beyond_the_old_640_token_ceiling() {
+        assert!(review_output_limit(1, 0, 8192) >= 2048);
+        assert!(review_output_limit(1, 0, 8192) > 640);
+        assert!(review_output_limit(8, 0, 8192) > review_output_limit(1, 0, 8192));
+    }
+
+    #[test]
+    fn review_repairs_expand_output_without_exceeding_the_negotiated_budget() {
+        let first = review_output_limit(1, 0, 8192);
+        let retry = review_output_limit(1, 1, 8192);
+        assert!(retry > first);
+        assert!(review_output_limit(1, 2, 8192) > retry);
+        assert_eq!(review_output_limit(1, 100, 8192), 8192);
+    }
+
+    #[test]
+    fn review_output_respects_small_windows_and_extreme_counters_without_overflow() {
+        for available in [0, 1, 640, 2048] {
+            assert_eq!(review_output_limit(1, 0, available), available);
+            assert_eq!(review_output_limit(usize::MAX, u64::MAX, available), available);
+        }
+        assert_eq!(review_output_limit(usize::MAX, u64::MAX, u64::MAX), u64::MAX);
+    }
 
     #[test]
     fn request_limits_repair_invalid_overrides_without_adding_task_tree_ceilings() {

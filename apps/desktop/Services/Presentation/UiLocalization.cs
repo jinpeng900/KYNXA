@@ -24,8 +24,8 @@ public static class UiLocalization
         ArgumentNullException.ThrowIfNull(property);
         ArgumentNullException.ThrowIfNull(key);
         var source = new LocalizedTextValue(key, target.DispatcherQueue);
-        // Native binding owns the value source for the target's lifetime, even after its managed wrapper is collected.
-        // 原生绑定按目标生命周期持有值源；托管控件包装对象被回收后，界面仍能更新文字。
+        // Native bindings retain their value source after the managed wrapper is collected.
+        // 原生绑定持有值源，托管包装对象回收后仍能更新文字。
         BindingOperations.SetBinding(target, property, new Binding
         {
             Source = source, Path = new PropertyPath(nameof(LocalizedTextValue.Value)), Mode = BindingMode.OneWay
@@ -126,8 +126,8 @@ public static class UiLocalization
 }
 
 /// <summary>
-/// Native binding value with no reference to a control or window; the global registry holds only weak sources.
-/// 原生绑定值不引用控件或窗口，全局注册仅弱持有值源，关闭窗口后可随绑定释放。
+/// A binding value with no control reference; the global registry holds it weakly.
+/// 绑定值不引用控件或窗口，全局仅保留弱引用，可随绑定释放。
 /// </summary>
 [Microsoft.UI.Xaml.Data.Bindable]
 public sealed class LocalizedTextValue : INotifyPropertyChanged

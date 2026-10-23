@@ -42,8 +42,8 @@ public partial class App
 
     private void RecordShortcutPopupObservation(string stage, Button search)
     {
-        // ToolTip may own an internal Presenter as its Popup child; observe actual visible text without assuming its type.
-        // ToolTip 的 Popup 子节点可能是内部 Presenter；观察真实可见文本，不假设子节点必须是 ToolTip 类型。
+        // Observe visible tooltip text without assuming the Popup child's presenter type.
+        // Popup 子节点可能是内部 Presenter；只观察可见文本，不假定必须是 ToolTip。
         _shortcutPopupObservations.Add(new
         {
             Stage = stage,
@@ -300,8 +300,8 @@ public partial class App
         composition.SetValue(_shell, true);
         try
         {
-            // Exercise the real native guards with a controlled composition state; do not synthesize an operating-system IME.
-            // 用受控输入法组合状态执行真实原生守卫，不伪称模拟了操作系统输入法。
+            // Test native guards with controlled composition state, not a simulated OS IME.
+            // 用受控组合状态验证原生检查，不声称模拟了系统输入法。
             Call("TranscriptSearchShortcut_Invoked", null, null);
             Call("SearchShortcut_Invoked", null, null);
             await SettleAsync();
@@ -439,8 +439,8 @@ public partial class App
         bool wasAlwaysOnTop = presenter.IsAlwaysOnTop;
         try
         {
-            // The desktop can cover a background test with an always-on-top window. Raise only this owned fixture while activating it.
-            // 桌面置顶窗口可能遮挡后台夹具；激活期间仅临时提升本夹具，并在 finally 恢复原设置。
+            // Temporarily raise only this fixture to avoid unrelated topmost windows.
+            // 仅临时提升本夹具以避开其他置顶窗口，finally 中恢复设置。
             presenter.IsAlwaysOnTop = true;
             Window.AppWindow.MoveInZOrderAtTop();
             await SettleAsync();

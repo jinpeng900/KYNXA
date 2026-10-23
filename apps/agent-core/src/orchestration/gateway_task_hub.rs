@@ -255,7 +255,8 @@ impl TaskHub {
     ) -> Result<Value> {
         let repository = self.repository().await?;
         let task = repository.load(id)?;
-        if action == TaskControl::Resume {
+        let continuing = matches!(action, TaskControl::Resume | TaskControl::Revise);
+        if continuing {
             self.validate_binding(&task).await?;
             let runtime = self
                 .runtime
@@ -293,7 +294,7 @@ impl TaskHub {
             index += 1;
         }
         let mut recovery = Value::Null;
-        if action != TaskControl::Resume {
+        if !continuing {
             if let Ok(runners) = self.runners.lock() {
                 for id in &affected {
                     if let Some(runner) = runners.get(id) {
@@ -307,6 +308,10 @@ impl TaskHub {
                 }
             }
         } else {
+            if changed.parent_task_id.is_none() {
+                self.runtime.upgrade().ok_or_else(|| failure("TASK_RUNTIME_UNAVAILABLE"))?
+                    .retire_revised_projection(&changed).await?;
+            }
             recovery = self.reconcile_recovery_tree(&changed).await?;
             changed = repository.load(id)?;
             if recovery["pending"].as_array().is_none_or(Vec::is_empty)
@@ -357,7 +362,12 @@ impl TaskHub {
         self.validate_binding(&task).await?;
         let owned = id.to_owned();
         let acknowledged = self.store(move |repository| repository.acknowledge_unknown_model_reservations(&owned, version, &identities)).await?;
-        let mut result = if let Some(result) = self.wake_verification_waiter(&acknowledged) { result }
+        let mut result = if acknowledged.state != TaskState::WaitingVerification {
+            // Retrying an acknowledgement cannot resume work the user has since paused.
+            // 确认回执重试不能恢复用户随后暂停的任务。
+            self.changes.notify_waiters();
+            json!({"task":acknowledged,"affectedTaskIds":[id],"recovery":Value::Null})
+        } else if let Some(result) = self.wake_verification_waiter(&acknowledged) { result }
             else { self.control(id, acknowledged.version, TaskControl::Resume).await? };
         result["costUnknown"] = json!(true);
         Ok(result)
@@ -371,7 +381,10 @@ impl TaskHub {
         self.validate_binding(&task).await?;
         let owned = id.to_owned();
         let acknowledged = self.store(move |repository| repository.acknowledge_unknown_task_operations(&owned, version, &identities)).await?;
-        if let Some(result) = self.wake_verification_waiter(&acknowledged) { Ok(result) }
+        if acknowledged.state != TaskState::WaitingVerification {
+            self.changes.notify_waiters();
+            Ok(json!({"task":acknowledged,"affectedTaskIds":[id],"recovery":Value::Null}))
+        } else if let Some(result) = self.wake_verification_waiter(&acknowledged) { Ok(result) }
         else { self.control(id, acknowledged.version, TaskControl::Resume).await }
     }
 
@@ -495,9 +508,19 @@ impl TaskHub {
             .runtime
             .upgrade()
             .ok_or_else(|| failure("TASK_RUNTIME_UNAVAILABLE"))?;
-        let gate = runtime.conversation_gate(&format!("steer:{id}")).await;
+        // Different roots share formal message identities within this conversation.
+        // 同一聊天的不同根任务共用正式消息身份，须先锁定聊天再写消息。
+        let gate = runtime.conversation_gate(&format!("steer-chat:{}", task.scope.conversation_id)).await;
         let _steering = gate.lock().await;
         let content_hash = steering_content_hash(message, &attachments);
+        let bound = repository.user_steering_roots(&task.scope.conversation_id, message_id)?;
+        if !bound.is_empty() && !bound.iter().any(|task_id| task_id == id) {
+            return Err(GatewayError::new(
+                "TASK_STEERING_TARGET_CONFLICT",
+                "这条引导已关联其他任务，请重连原任务。",
+                409,
+            ).with_details(json!({"boundTaskIds":bound,"userMessageId":message_id})));
+        }
         let existing = repository
             .user_steering(id)?
             .into_iter()
@@ -521,8 +544,9 @@ impl TaskHub {
                 let read = crate::storage::conversation_history::read_latest(&root, &json!({"Id":conversation,"ProjectId":project}), Some(&ids), false)?;
                 Ok::<_, ContractError>(read.messages.first().and_then(|raw| serde_json::from_str::<Value>(&crate::storage::raw_json::scalar_projection(raw)).ok()))
             }).await.map_err(|_|failure("TASK_STEERING_MESSAGE_FAILED"))??;
+            let reconnect = self.wake_queued_steering(&current).await?;
             return Ok(
-                json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":saved.as_ref().map(|message|&message["ReplyMessageId"]),"reused":true,"reconnectRequired":current.state==TaskState::Paused,"resumeRequired":current.state==TaskState::Paused}),
+                json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":saved.as_ref().map(|message|&message["ReplyMessageId"]),"reused":true,"reconnectRequired":reconnect || current.state==TaskState::Paused,"resumeRequired":current.state==TaskState::Paused}),
             );
         }
         let task = repository.load(id)?;
@@ -590,7 +614,8 @@ impl TaskHub {
         if changed.state != TaskState::Paused {
             // Cancel obsolete model generation, while letting already dispatched tools settle their real receipts.
             // 取消过时模型生成；已经派发的工具继续结算真实回执，不重放成功操作。
-            return Ok(json!({"task":changed,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":false,"resumeRequired":false}));
+            let reconnect = self.wake_queued_steering(&changed).await?;
+            return Ok(json!({"task":changed,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":reconnect,"resumeRequired":false}));
         }
         match tokio::time::timeout(Duration::from_secs(35), async {
             self.wait_existing_lease(id, None).await?;
@@ -621,6 +646,22 @@ impl TaskHub {
         response["replyMessageId"] = json!(reply_message_id);
         response["reconnectRequired"] = json!(true);
         Ok(response)
+    }
+    async fn wake_queued_steering(self: &Arc<Self>, task: &TaskRecord) -> Result<bool> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| failure("TASK_RUNTIME_UNAVAILABLE"))?;
+        if task.state != TaskState::Queued || runtime.live_task_run(&task.task_id).is_some() {
+            return Ok(false);
+        }
+        // Retire only settled transport projections; leases and operation receipts remain authoritative.
+        // 仅退掉已结算的传输投影，租约及操作回执仍是正式依据。
+        runtime.wait_task_delivery_boundary(&task.task_id).await;
+        let current = self.repository().await?.load(&task.task_id)?;
+        if current.state != TaskState::Queued || runtime.live_task_run(&task.task_id).is_some() {
+            return Ok(false);
+        }
+        runtime.retire_revised_projection(&current).await?;
+        self.schedule_root_recovery(&current, false).await?;
+        Ok(true)
     }
     pub async fn tool(
         self: &Arc<Self>,
@@ -775,6 +816,31 @@ impl TaskHub {
     ) -> Result<Value> {
         let count = args["assignments"].as_array().map(Vec::len).unwrap_or(args["count"].as_u64().unwrap_or(1) as usize);
         if count == 0 || count > 4096 { return Err(failure("INVALID_TASK_DELEGATION_BATCH")); }
+        let journal = parent.journal.as_ref().ok_or_else(||failure("TASK_JOURNAL_UNAVAILABLE"))?;
+        let owner = journal.check_dispatch_fence()?;
+        let repository = self.repository().await?;
+        let argument_hash = crate::retrieval::gateway_index::hash(&args.to_string());
+        let child_argument_hash = crate::retrieval::gateway_index::hash(
+            &json!({"name":"task.delegate","arguments":args}).to_string());
+        let matches_legacy_input = |digest: &str| digest == argument_hash || digest == child_argument_hash;
+        let operation = context.config["activeOperationId"].as_str().filter(|id|!id.is_empty());
+        let call = context.config["activeToolCallId"].as_str().filter(|id|!id.is_empty());
+        let explicit = args["requestId"].as_str().filter(|id|!id.is_empty());
+        let source = if let Some(id) = explicit { json!(["request",id]) }
+            else if let Some(id) = operation { json!(["operation",id]) }
+            else if let Some(id) = call { json!(["call",context.config["operationNamespace"],id]) }
+            else { json!(["arguments",argument_hash]) };
+        let namespace = crate::retrieval::gateway_index::hash(&json!([owner.task_id,source]).to_string());
+        // Old batches lacked a dispatch namespace; reuse them only within the original proven owner.
+        // 旧批次没有派发命名空间，只在能核对原归属时复用，不能串到别的父任务或独立委派。
+        let legacy_allowed = explicit.is_some() || operation.is_none() && call.is_none()
+            || if let Some(operation) = operation {
+                let operations = repository.operations(&owner.task_id)?;
+                operations.iter().any(|saved| saved.intent.operation_id == operation
+                    && saved.intent.tool_name == "task.delegate" && matches_legacy_input(&saved.intent.input_sha256))
+                    && !operations.iter().any(|saved| saved.intent.operation_id != operation
+                        && saved.intent.tool_name == "task.delegate" && matches_legacy_input(&saved.intent.input_sha256))
+            } else { false };
         let mut children = Vec::new();
         for index in 0..count {
             let mut assignment = args.clone();
@@ -786,8 +852,22 @@ impl TaskHub {
             if count > 1 {
                 let goal = assignment["goal"].as_str().ok_or_else(||failure("INVALID_TASK_GOAL"))?;
                 assignment["goal"] = json!(format!("{goal}\nAssignment {}/{}: work on your distinct part; retain the original requirements. / 第 {}/{} 份独立分工。",index+1,count,index+1,count));
-                assignment["requestId"] = json!(format!("{}:{index}",crate::retrieval::gateway_index::hash(&args.to_string())));
             }
+            let legacy_request = if count > 1 { format!("{argument_hash}:{index}") }
+                else { assignment["requestId"].as_str().map(str::to_owned).unwrap_or_else(||
+                    crate::retrieval::gateway_index::hash(&json!([owner.task_id,assignment]).to_string())) };
+            let item_request = args["assignments"].as_array().and_then(|items|items.get(index))
+                .and_then(|item|item["requestId"].as_str()).filter(|id|!id.is_empty());
+            let request = if let Some(item_request) = item_request {
+                crate::retrieval::gateway_index::hash(&json!([namespace,"assignment",item_request,index]).to_string())
+            } else { format!("{namespace}:{index}") };
+            let existing = repository.find_by_request_id(&owner.scope.conversation_id,&format!("child:{request}"))?;
+            let legacy = if existing.is_none() && legacy_allowed {
+                repository.find_by_request_id(&owner.scope.conversation_id,&format!("child:{legacy_request}"))?
+                    .filter(|saved| saved.parent_task_id.as_deref() == Some(owner.task_id.as_str())
+                        && saved.scope.project_id == owner.scope.project_id)
+            } else { None };
+            assignment["requestId"] = json!(if legacy.is_some() {legacy_request} else {request});
             children.push(self.delegate_one(parent.clone(),context.clone(),assignment).await?);
         }
         if count == 1 { return Ok(children.remove(0)); }

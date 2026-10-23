@@ -45,8 +45,8 @@ fn canonical(value: &Value) -> Value {
     }
 }
 
-/// Only native UTF-8 overwrite can vary its body; the live writer still enforces every hash precondition.
-/// 仅内置 UTF-8 覆盖允许正文变化；expectedHash 是每次实际写入仍须核验的前提，不是可绕过的权限。
+/// Only native UTF-8 overwrite may vary the body; every write still checks expectedHash.
+/// 仅内置 UTF-8 覆盖可变更正文；每次写入仍须核验 expectedHash。
 pub(crate) fn fingerprint(
     name: &str,
     arguments: &Value,
@@ -78,8 +78,8 @@ pub(crate) fn fingerprint(
     )
 }
 
-/// This is bounded live authorization within GatewayRuntime, never a second persistent task ledger.
-/// 这里只保留 GatewayRuntime 内有界的活动授权，不创建第二套持久任务账本；进程重启后必须重新批准。
+/// Keep bounded authorization in GatewayRuntime; restart requires approval again.
+/// 授权仅有界保存在 GatewayRuntime 中，重启后须重新批准。
 #[derive(Default)]
 pub(crate) struct TaskApprovalGrants {
     task_id: Option<String>,

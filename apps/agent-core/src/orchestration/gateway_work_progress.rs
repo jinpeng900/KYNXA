@@ -2,9 +2,223 @@
 //! 从真实工作回执派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式账本。
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 const STAGNANT_ROUNDS_BEFORE_CORRECTION: u64 = 3;
 const INITIAL_DISCOVERY_ROUNDS: u64 = 2;
+const IDENTICAL_FAILURE_ATTEMPTS: u64 = 2;
+
+/// Failure fingerprints travel in the existing task checkpoint, never in a second effect ledger.
+/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果核验账本。
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeterministicFailures {
+    actions: BTreeMap<String, BTreeMap<String, FailedAction>>,
+    observed_conditions: BTreeMap<String, String>,
+    observed_failures: BTreeSet<String>,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct FailedAction {
+    attempts: u64,
+    code: String,
+}
+
+impl DeterministicFailures {
+    /// Suppress only the unchanged failed action; callers still settle a paired tool result.
+    /// 只抑制条件未变的失败动作；调用端仍配对工具回执，任务和其他操作继续。
+    pub fn before_dispatch(&self, call: &Value, definition: &Value, environment: &Value) -> Option<Value> {
+        let (key, class, failure) = ["invalid-arguments", "capability-unavailable", "target-unavailable"].into_iter().find_map(|class| {
+            let key = self.failure_key(call, definition, environment, class);
+            self.actions.get(&key)?.get(class).filter(|failure| failure.attempts >= IDENTICAL_FAILURE_ATTEMPTS)
+                .map(|failure| (key, class, failure))
+        })?;
+        Some(json!({"status":"error","isError":true,"executed":false,
+            "requestDispatched":false,"recoverable":true,"code":"TOOL_ACTION_REQUIRES_CORRECTION",
+            "content":{"code":"TOOL_ACTION_REQUIRES_CORRECTION","originalCode":failure.code,
+                "failureClass":class,"failureFingerprint":key,"executed":false,"requestDispatched":false,
+                "notice":"This unchanged action already failed deterministically. Continue the same task: correct its parameters using the real schema, use an alternative capability, or observe the relevant target/configuration change before retrying. Preserve successful output and receipts; an unknown write must be verified, never replayed. Do not repeat this unchanged call or end the task because this action was suppressed. / 相同条件下该动作已确定失败；在原任务内修正参数、换可用能力或核实相关条件变化后再试，保留成果和成功回执，未知写入先核验。"}}))
+    }
+
+    pub fn observe(&mut self, call: &Value, definition: &Value, environment: &Value, receipt: &Value) {
+        if receipt["code"] == "TOOL_ACTION_REQUIRES_CORRECTION"
+            || receipt["reused"] == true && !receipt["resultRef"].is_object() {
+            return;
+        }
+        if let Some((class, code)) = deterministic_failure(receipt) {
+            let key = self.failure_key(call, definition, environment, class);
+            let receipt_identity = fingerprint(&json!([key, class,
+                environment.get("operationIdentity").unwrap_or(&call["id"])]));
+            if !self.observed_failures.insert(receipt_identity) { return; }
+            let failure = self.actions.entry(key).or_default().entry(class.into()).or_default();
+            failure.attempts = failure.attempts.saturating_add(1);
+            failure.code = code;
+        } else if receipt["reused"] != true && settled_success(receipt) {
+            for class in ["invalid-arguments", "capability-unavailable", "target-unavailable"] {
+                let key = self.failure_key(call, definition, environment, class);
+                self.actions.remove(&key);
+            }
+            // Only native receipt state changes conditions; call IDs, reasons and archive IDs do not.
+            // 条件只取真实回执状态；调用 ID、说明和归档 ID 变化不能重置保护。
+            if let Some(condition) = observed_condition(receipt) {
+                for target in action_targets(call) {
+                    self.observed_conditions.insert(condition_key(environment, &target), condition.clone());
+                }
+            }
+        }
+    }
+
+    pub fn action_key(&self, call: &Value, definition: &Value, environment: &Value) -> String {
+        self.scoped_action_key(call, definition, environment, true)
+    }
+
+    fn failure_key(&self, call: &Value, definition: &Value, environment: &Value, class: &str) -> String {
+        self.scoped_action_key(call, definition, environment, class != "invalid-arguments")
+    }
+
+    fn scoped_action_key(&self, call: &Value, definition: &Value, environment: &Value, condition_sensitive: bool) -> String {
+        let arguments = call.get("arguments").or_else(|| call.get("input")).unwrap_or(&Value::Null);
+        let mut arguments = arguments.clone();
+        if let Some(fields) = arguments.as_object_mut() {
+            for explanation in ["reason", "explanation", "rationale"] { fields.remove(explanation); }
+        }
+        let mut conditions = action_targets(call).into_iter().filter(|_| condition_sensitive).map(|target| {
+            let observed = self.observed_conditions.get(&condition_key(environment, &target));
+            json!([target, observed])
+        }).collect::<Vec<_>>();
+        if call["name"] == "knowledge.search" && arguments["requirementId"].is_string() {
+            // Bind only the selected native requirement; unrelated additions cannot renew failed actions.
+            // 只绑定当前引用的原生要求；新增无关要求不能重置其他失败动作的次数。
+            let identity = arguments["requirementId"].as_str().unwrap_or("");
+            let requirement = identity.strip_prefix("requirement-").and_then(|index| index.parse::<usize>().ok())
+                .filter(|index| *index > 0 && identity == format!("requirement-{index}"))
+                .and_then(|index| environment["configuration"]["acceptanceRequirements"].as_array()?.get(index - 1))
+                .and_then(Value::as_str).filter(|text| !text.trim().is_empty());
+            conditions.push(json!({"nativeRequirement":requirement}));
+        }
+        let mut environment = stable_environment(environment);
+        if !condition_sensitive && let Some(fields) = environment.as_object_mut() {
+            fields.remove("version"); fields.remove("mutationRevision");
+        }
+        fingerprint(&json!([call["name"], definition, arguments, environment, conditions]))
+    }
+}
+
+fn stable_environment(environment: &Value) -> Value {
+    let mut stable = environment.clone();
+    if let Some(fields) = stable.as_object_mut() { fields.remove("operationIdentity"); }
+    if let Some(configuration) = stable.get_mut("configuration").and_then(Value::as_object_mut) {
+        for field in ["activeToolCallId", "activeOperationId", "activeRequestId", "activeAssistantMessageId",
+            "nativeCancellationId", "approvedInvocation", "operationNamespace", "attachmentContextChars",
+            "activeSteeringSequence", "renewOperationalExecutionBudget", "acceptanceRequirements"] {
+            configuration.remove(field);
+        }
+    }
+    stable
+}
+
+fn fingerprint(value: &Value) -> String {
+    fn ordered(value: &Value) -> Value {
+        match value {
+            Value::Object(fields) => {
+                let fields = fields.iter().map(|(key, value)| (key.clone(), ordered(value))).collect::<BTreeMap<_, _>>();
+                serde_json::to_value(fields).unwrap_or(Value::Null)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(ordered).collect()),
+            value => value.clone(),
+        }
+    }
+    format!("{:x}", Sha256::digest(ordered(value).to_string().as_bytes()))
+}
+
+fn action_targets(call: &Value) -> Vec<Value> {
+    let arguments = call.get("arguments").or_else(|| call.get("input")).unwrap_or(&Value::Null);
+    let mut targets = Vec::new();
+    for arguments in [arguments, &arguments["arguments"]] {
+        for field in ["path", "filePath", "url", "uri", "sourceId", "sourceIdentity", "windowId", "processId", "tabId", "sessionId"] {
+            if let Some(value) = arguments.get(field).filter(|value| !value.is_null()) {
+                targets.push(json!([field, value]));
+            }
+        }
+    }
+    targets.sort_by_key(Value::to_string);
+    targets.dedup();
+    targets
+}
+
+fn condition_key(environment: &Value, target: &Value) -> String {
+    fingerprint(&json!([environment["workspace"], environment["permission"], target]))
+}
+
+fn receipt_nodes(receipt: &Value) -> Vec<&Value> {
+    let mut nodes = vec![receipt];
+    let mut cursor = 0;
+    while cursor < nodes.len() && nodes.len() < 32 {
+        let node = nodes[cursor];
+        for field in ["content", "structuredContent", "value", "result", "error", "details"] {
+            if let Some(value) = node.get(field).filter(|value| value.is_object()) { nodes.push(value); }
+        }
+        cursor += 1;
+    }
+    nodes
+}
+
+fn settled_success(receipt: &Value) -> bool {
+    receipt["executed"] != false && receipt["status"] == "completed"
+        && receipt_nodes(receipt).iter().all(|node| node["isError"] != true
+            && !matches!(node["status"].as_str(), Some("unknown" | "running" | "pending" | "queued" | "waiting" | "error" | "failed"))
+            && node["code"].as_str().is_none_or(str::is_empty)
+            && node["exitCode"].as_i64().is_none_or(|code| code == 0))
+}
+
+fn observed_condition(receipt: &Value) -> Option<String> {
+    let mut facts = Vec::new();
+    for node in receipt_nodes(receipt) {
+        let mut state = serde_json::Map::new();
+        for field in ["sha256", "contentHash", "sourceVersion", "sourceRevision", "bindingRevision", "version",
+            "exists", "isRunning", "state", "processId", "windowId", "lastModified", "modifiedAt"] {
+            if let Some(value) = node.get(field).filter(|value| !value.is_null()) { state.insert(field.into(), value.clone()); }
+        }
+        if !state.is_empty() { facts.push(Value::Object(state)); }
+    }
+    (!facts.is_empty()).then(|| fingerprint(&json!(facts)))
+}
+
+fn deterministic_failure(receipt: &Value) -> Option<(&'static str, String)> {
+    let nodes = receipt_nodes(receipt);
+    // Ambiguous execution and transient waits always win over an embedded validation code.
+    // 未知执行和暂时等待优先于嵌套参数错误；不能因此放行重放未知写入。
+    if nodes.iter().any(|node| node["outcomeUnknown"] == true || node["timedOut"] == true
+        || node["cancelled"] == true || node["retryable"] == true || node["requiresApproval"] == true
+        || node["retryAfterMs"].as_u64().is_some_and(|delay| delay > 0)
+        || node["httpStatus"].as_u64().is_some_and(|status| matches!(status, 408 | 429 | 500..=599))
+        || matches!(node["status"].as_str(), Some("unknown" | "running" | "pending" | "queued" | "waiting" | "waiting-network"))
+        || matches!(node["outcome"].as_str(), Some("unknown" | "running" | "pending"))
+        || node["code"].as_str().is_some_and(|code| ["UNKNOWN", "TIMEOUT", "NETWORK", "CONNECTION", "RATE_LIMIT", "QUEUE", "BUSY", "CANCEL", "UNCONFIRMED"].iter().any(|part| code.contains(part))
+            || matches!(code, "RESOURCE_UNAVAILABLE" | "RESOURCE_WAIT" | "RESOURCE_LIMIT"))) {
+        return None;
+    }
+    if !nodes.iter().any(|node| node["isError"] == true || matches!(node["status"].as_str(), Some("error" | "failed"))) { return None; }
+    if nodes.iter().any(|node| node["rpcCode"] == -32602) { return Some(("invalid-arguments", "MCP_INVALID_PARAMS".into())); }
+    if nodes.iter().any(|node| node["rpcCode"] == -32601) { return Some(("capability-unavailable", "MCP_METHOD_NOT_FOUND".into())); }
+    for node in nodes {
+        let Some(code) = node["code"].as_str() else { continue; };
+        let class = if code == "INVALID_TOOL_ARGUMENTS" || code == "INVALID_DOCUMENT_PROGRESS" || code == "INVALID_RETRIEVAL_INPUT"
+            || code.starts_with("INVALID_SKILL_") && code.ends_with("PAGINATION")
+            || matches!(code, "INVALID_TOOL_SEARCH_CURSOR" | "TOOL_SCHEMA_INVALID" | "TOOL_SCHEMA_REJECTED" | "INVALID_PARAMETERS" | "INVALID_PARAMS" | "INVALID_ARGUMENTS" | "MISSING_REQUIRED_ARGUMENT") {
+            "invalid-arguments"
+        } else if matches!(code, "UNSUPPORTED_TOOL_OPERATION" | "UNSUPPORTED_RUNTIME" | "UNSUPPORTED_FILE_TYPE" | "SKILL_RUNTIME_UNSUPPORTED" | "TOOL_NOT_DISCOVERED" | "TOOL_NOT_LOADED" | "TOOL_NOT_FOUND" | "MCP_TOOL_NOT_FOUND") {
+            "capability-unavailable"
+        } else if matches!(code, "FILE_NOT_FOUND" | "PATH_NOT_FOUND" | "SOURCE_NOT_FOUND" | "ELEMENT_NOT_FOUND" | "WINDOW_NOT_FOUND" | "INVALID_WINDOW" | "SELECTOR_NOT_FOUND" | "BROWSER_SESSION_NOT_FOUND" | "ENOENT" | "ENOTDIR") {
+            "target-unavailable"
+        } else { continue; };
+        return Some((class, code.to_owned()));
+    }
+    None
+}
 
 /// The caller supplies source/range changes after canonical receipt validation.
 /// 调用端在核对正式回执后提供来源与范围变化；调用理由、归档新 ID 或缓存命中不算新证据。
@@ -35,6 +249,7 @@ pub struct WorkProgress {
     repeated_reads: u64,
     initial_discovery_rounds: u64,
     work_started: bool,
+    deterministic_failures: DeterministicFailures,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +264,14 @@ pub struct WorkProgressPlan {
 }
 
 impl WorkProgress {
+    pub fn failed_actions(&self) -> &DeterministicFailures {
+        &self.deterministic_failures
+    }
+
+    pub fn failed_actions_mut(&mut self) -> &mut DeterministicFailures {
+        &mut self.deterministic_failures
+    }
+
     pub fn stagnant_rounds(&self) -> u64 {
         self.no_progress_rounds
     }
@@ -172,6 +395,132 @@ pub fn delivery_budget_plan(max_tool_calls: u64, used_tool_calls: u64) -> Delive
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bad_call(id: &str) -> Value {
+        json!({"id":id,"name":"filesystem.read","arguments":{"path":"notes.txt","offset":-1}})
+    }
+
+    fn failed(code: &str) -> Value {
+        json!({"status":"error","isError":true,"executed":false,"code":code})
+    }
+
+    #[test]
+    fn deterministic_failures_allow_one_retry_then_preserve_correction_across_checkpoint() {
+        let mut progress = WorkProgress::default();
+        let definition = json!({"name":"filesystem.read","inputSchema":{"offset":{"minimum":0}}});
+        let environment = json!({"workspace":"fixture","configuration":{"activeToolCallId":"one"}});
+        for id in ["one", "two"] {
+            let call = bad_call(id);
+            assert!(progress.failed_actions().before_dispatch(&call, &definition, &environment).is_none());
+            progress.failed_actions_mut().observe(&call, &definition, &environment, &failed("INVALID_TOOL_ARGUMENTS"));
+        }
+        let saved = serde_json::to_vec(&progress).unwrap();
+        let restored: WorkProgress = serde_json::from_slice(&saved).unwrap();
+        let mut call = bad_call("different-call-id");
+        call["arguments"]["reason"] = json!("another explanation");
+        let mut current = environment.clone();
+        current["configuration"]["activeToolCallId"] = json!("different-call-id");
+        let blocked = restored.failed_actions().before_dispatch(&call, &definition, &current).unwrap();
+        assert_eq!(blocked["executed"], false);
+        assert_eq!(blocked["recoverable"], true);
+        assert_eq!(blocked["content"]["originalCode"], "INVALID_TOOL_ARGUMENTS");
+        assert_eq!(restored.stagnant_rounds(), 0);
+        assert_eq!(restored.delivery_plan(100, 2).remaining_tool_calls, 98);
+        assert!(serde_json::from_value::<WorkProgress>(json!({"workStarted":true})).unwrap().work_started);
+    }
+
+    #[test]
+    fn corrected_parameters_new_definition_and_real_conditions_reopen_only_the_action() {
+        let mut failures = DeterministicFailures::default();
+        let call = bad_call("one");
+        let definition = json!({"schemaVersion":1});
+        let environment = json!({"workspace":"fixture","permission":"smart","mutationRevision":0});
+        failures.observe(&call, &definition, &environment, &failed("ENOENT"));
+        failures.observe(&bad_call("two"), &definition, &environment, &failed("ENOENT"));
+        assert!(failures.before_dispatch(&call, &definition, &environment).is_some());
+        let mut corrected = call.clone();
+        corrected["arguments"]["offset"] = json!(0);
+        assert!(failures.before_dispatch(&corrected, &definition, &environment).is_none());
+        assert!(failures.before_dispatch(&call, &json!({"schemaVersion":2}), &environment).is_none());
+        assert!(failures.before_dispatch(&call, &definition, &json!({"workspace":"fixture","permission":"smart","mutationRevision":1})).is_none());
+        let stat = json!({"id":"actual-stat","name":"filesystem.stat","arguments":{"path":"notes.txt"}});
+        failures.observe(&stat, &json!({}), &environment, &json!({"status":"completed","content":{"exists":true,"sha256":"a".repeat(64)}}));
+        assert!(failures.before_dispatch(&call, &definition, &environment).is_none());
+
+        let mut failures = DeterministicFailures::default();
+        let initial = json!({"configuration":{"acceptanceRequirements":["first requirement"]}});
+        let search = |id:&str|json!({"id":id,"name":"knowledge.search","arguments":{"query":"facts","requirementId":"requirement-3"}});
+        for id in ["one","two"] {
+            failures.observe(&search(id), &definition, &initial, &failed("INVALID_RETRIEVAL_INPUT"));
+            failures.observe(&bad_call(id), &definition, &initial, &failed("INVALID_TOOL_ARGUMENTS"));
+        }
+        assert!(failures.before_dispatch(&search("retry"), &definition, &initial).is_some());
+        let unrelated = json!({"configuration":{"acceptanceRequirements":["first requirement","second requirement"]}});
+        assert!(failures.before_dispatch(&search("retry"), &definition, &unrelated).is_some());
+        let now_valid = json!({"configuration":{"acceptanceRequirements":["first requirement","second requirement","new native third requirement"]}});
+        assert!(failures.before_dispatch(&search("retry"), &definition, &now_valid).is_none());
+        assert!(failures.before_dispatch(&bad_call("retry"), &definition, &now_valid).is_some());
+    }
+
+    #[test]
+    fn unrelated_state_observation_does_not_clear_a_failed_target() {
+        let mut failures = DeterministicFailures::default();
+        for id in ["one", "two"] { failures.observe(&bad_call(id), &json!({}), &json!({}), &failed("ENOENT")); }
+        failures.observe(&json!({"id":"other","name":"filesystem.stat","arguments":{"path":"other.txt"}}),
+            &json!({}), &json!({}), &json!({"status":"completed","content":{"exists":true,"sha256":"a".repeat(64)}}));
+        assert!(failures.before_dispatch(&bad_call("retry"), &json!({}), &json!({})).is_some());
+    }
+
+    #[test]
+    fn network_waits_polling_unknown_effects_and_generic_exits_never_enter_failure_suppression() {
+        for receipt in [
+            failed("MCP_CONNECTION_LOST"), failed("MCP_TIMEOUT"), failed("RESOURCE_BUSY"),
+            json!({"status":"queued","isError":true,"code":"INVALID_TOOL_ARGUMENTS"}),
+            json!({"status":"running","content":{"code":"INVALID_PARAMS"}}),
+            json!({"status":"unknown","isError":true,"content":{"code":"INVALID_PARAMS"}}),
+            json!({"status":"error","isError":true,"retryAfterMs":1000,"code":"INVALID_PARAMS"}),
+            json!({"status":"completed","content":{"exitCode":1,"stderr":"invalid arguments"}}),
+            json!({"status":"error","isError":true,"code":"MCP_RPC_ERROR","content":{"details":{"rpcCode":-32602,"httpStatus":503}}}),
+        ] {
+            let mut failures = DeterministicFailures::default();
+            for id in ["one", "two", "three"] { failures.observe(&bad_call(id), &json!({}), &json!({}), &receipt); }
+            assert!(failures.before_dispatch(&bad_call("retry"), &json!({}), &json!({})).is_none(), "{receipt}");
+        }
+    }
+
+    #[test]
+    fn rpc_invalid_params_and_resource_pagination_are_structured_deterministic_failures() {
+        for receipt in [failed("INVALID_SKILL_RESOURCE_PAGINATION"), failed("INVALID_RETRIEVAL_INPUT"),
+            json!({"status":"error","isError":true,"code":"MCP_RPC_ERROR","content":{"details":{"rpcCode":-32602}}})] {
+            let mut failures = DeterministicFailures::default();
+            for id in ["one", "two"] { failures.observe(&bad_call(id), &json!({}), &json!({}), &receipt); }
+            assert_eq!(failures.before_dispatch(&bad_call("retry"), &json!({}), &json!({})).unwrap()["content"]["failureClass"], "invalid-arguments");
+        }
+    }
+
+    #[test]
+    fn journal_recovery_counts_each_actual_failed_dispatch_once_even_with_reused_call_ids() {
+        let mut failures = DeterministicFailures::default();
+        let call = bad_call("provider-reused-id");
+        let receipt = json!({"status":"error","isError":true,"code":"INVALID_TOOL_ARGUMENTS","reused":true,
+            "resultRef":{"id":"owned-archive","sha256":"a".repeat(64)}});
+        let first = json!({"operationIdentity":"round-one"});
+        failures.observe(&call, &json!({}), &first, &receipt);
+        for _ in 0..5 { failures.observe(&call, &json!({}), &first, &receipt); }
+        assert!(failures.before_dispatch(&call, &json!({}), &first).is_none());
+        let mut restored: DeterministicFailures = serde_json::from_slice(&serde_json::to_vec(&failures).unwrap()).unwrap();
+        restored.observe(&call, &json!({}), &json!({"operationIdentity":"round-two"}), &receipt);
+        assert!(restored.before_dispatch(&call, &json!({}), &json!({"operationIdentity":"round-three"})).is_some());
+    }
+
+    #[test]
+    fn argument_order_and_dynamic_operation_identity_do_not_change_failure_identity() {
+        let failures = DeterministicFailures::default();
+        let left = json!({"id":"left","name":"tool","arguments":{"path":"a","options":{"limit":2,"offset":0}}});
+        let right: Value = serde_json::from_str(r#"{"id":"right","name":"tool","arguments":{"options":{"offset":0,"limit":2},"path":"a","reason":"new reason"}}"#).unwrap();
+        assert_eq!(failures.action_key(&left,&json!({}),&json!({"operationIdentity":"one"})),
+            failures.action_key(&right,&json!({}),&json!({"operationIdentity":"two"})));
+    }
 
     #[test]
     fn completion_prose_without_action_changes_strategy_without_ending_or_spending_tools() {

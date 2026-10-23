@@ -1,4 +1,5 @@
 # Preserve the original whitespace in vendored upstream skill examples.
+# 保留第三方技能示例的原始空白。
 apps/official-tools/Skills/** -text whitespace=cr-at-eol
 apps/official-tools/Skills/internal-comms/examples/** whitespace=-blank-at-eol,cr-at-eol
 apps/official-tools/LICENSE.txt -text whitespace=-blank-at-eol,cr-at-eol

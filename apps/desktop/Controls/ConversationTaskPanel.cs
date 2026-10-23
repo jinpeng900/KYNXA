@@ -12,8 +12,8 @@ namespace KYNXA_Desktop.Controls;
 public sealed record TaskArtifactRequest(Guid ConversationId, TaskArtifact Artifact);
 
 /// <summary>
-/// Lazy, virtualized task projections. Hiding or disposing this view cancels reads, never work.
-/// 延迟加载的虚拟任务投影；隐藏或释放视图只取消读取，绝不取消正式工作。
+/// Read-only, virtualized task projections. Hiding or disposing cancels reads, never work.
+/// 只读的虚拟任务投影；隐藏或释放只取消读取，绝不改变正式工作。
 /// </summary>
 public sealed class ConversationTaskPanel : Grid, IDisposable
 {
@@ -28,8 +28,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private readonly Dictionary<Guid, Expander> _realized = [];
     private readonly HashSet<Guid> _expanded = [];
     private readonly HashSet<Guid> _loadingDetails = [];
-    private readonly HashSet<Guid> _recoverableTaskIds = [], _resumingTaskIds = [];
-    private readonly Dictionary<Guid, string> _resumeMessages = [];
+    private readonly HashSet<Guid> _recoverableTaskIds = [];
     private CancellationTokenSource _reads = new();
     private ITasksApi? _api;
     private Guid? _conversationId, _projectId, _nextTaskId, _nextRecoverableTaskId;
@@ -45,7 +44,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     public event EventHandler? TasksChanged;
     public event EventHandler<TaskArtifactRequest>? ArtifactOpenRequested;
     public event EventHandler<TaskArtifactRequest[]>? ArtifactsChanged;
-    public event EventHandler<TaskRecord>? ResumeRequested;
 
     public ConversationTaskPanel()
     {
@@ -117,7 +115,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         if (_disposed || (_conversationId == conversationId && _projectId == projectId)) return;
         CancelReads(); _conversationId = conversationId; _projectId = projectId;
         _rows.Clear(); _realized.Clear(); _expanded.Clear(); _nextTaskId = null; _nextRecoverableTaskId = null;
-        _recoverableTaskIds.Clear(); _resumingTaskIds.Clear(); _resumeMessages.Clear();
+        _recoverableTaskIds.Clear();
         TasksChanged?.Invoke(this, EventArgs.Empty);
         _noticeKey = null; _notice.Text = ""; _section.IsEnabled = conversationId is not null;
         UpdatePolling();
@@ -188,8 +186,8 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
                     _rows.Remove(row);
                 _recoverableTaskIds.IntersectWith(currentRoots);
             }
-            // Recovery controls stay scoped to this chat and are available even for model-hidden root tasks.
-            // 恢复入口只面向当前聊天；模型隐藏的根任务仍能由用户明确选择，不混入同项目其他聊天。
+            // Recoverable roots remain visible in this chat without selecting or controlling execution.
+            // 当前聊天的可恢复根任务仍可查看，不选择执行目标，也不改变任务状态。
             int recoveryPosition = loadMore ? _rows.Count(row => _recoverableTaskIds.Contains(row.Record.TaskId)) : 0;
             foreach (var task in recoverable.Tasks)
             {
@@ -244,17 +242,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     }
 
     private bool Current(long generation) => CanRead && _generation == generation;
-
-    public void SetResumePending(TaskRecord task, bool pending, string? message = null)
-    {
-        if (_conversationId != task.Scope.ConversationId) return;
-        if (pending) _resumingTaskIds.Add(task.TaskId); else _resumingTaskIds.Remove(task.TaskId);
-        if (string.IsNullOrWhiteSpace(message)) _resumeMessages.Remove(task.TaskId); else _resumeMessages[task.TaskId] = message;
-        var row = _rows.FirstOrDefault(row => row.Record.TaskId == task.TaskId);
-        row?.Update(task);
-        if (row is not null && _realized.TryGetValue(task.TaskId, out var expander) && _expanded.Contains(task.TaskId))
-            _ = LoadDetailsAsync(row, expander);
-    }
 
     private void ContainerChanged(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
@@ -313,16 +300,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         body.Children.Clear();
         var task = detail.Task;
         var usage = task.Usage;
-        if (task.ParentTaskId is null && task.Scope.ConversationId == _conversationId && TaskStates.CanResume(task.State))
-        {
-            var resume = new Button { Name = "ResumeTaskButton", Tag = task.TaskId, Content = UiText.Get("继续任务"),
-                MinHeight = 28, Padding = new Thickness(8, 3, 8, 3), CornerRadius = new CornerRadius(6),
-                IsEnabled = !_resumingTaskIds.Contains(task.TaskId) };
-            if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var style) && style is Style quiet) resume.Style = quiet;
-            resume.Click += (_, _) => { if (Current(generation)) ResumeRequested?.Invoke(this, task); };
-            body.Children.Add(resume);
-        }
-        if (_resumeMessages.TryGetValue(task.TaskId, out string? resumeMessage)) body.Children.Add(Label(resumeMessage));
         body.Children.Add(Label(string.Format(UiText.Get("模型调用 {0} · 重试 {1} · 压缩 {2}"),
             usage.ModelRequests, usage.Retries, usage.Compactions)));
         body.Children.Add(Label(string.Format(UiText.Get("输入 {0} · 输出 {1} tokens · 未知用量 {2} 次"),

@@ -1,4 +1,5 @@
 pub mod budget;
+mod completion_evidence;
 pub mod context;
 pub mod embedding_policy;
 pub mod gateway_runtime;

@@ -114,9 +114,8 @@ try {
     Write-Host "Compiler: $compilerPath ($compilerVersion)"
     Write-Host "Artifacts: $runRoot"
     if ($SingleProcessor) {
-        # Children inherit this temporary scheduling mask; it is a local compatibility
-        # diagnostic, not a confirmed hardware diagnosis or a machine-wide setting.
-        # 子进程继承此临时调度掩码；它仅用于本机兼容诊断，不代表已确诊硬件或更改全机设置。
+        # Children inherit this diagnostic mask; it neither diagnoses hardware nor changes system settings.
+        # 子进程继承此诊断掩码，不代表硬件已确诊，也不改系统设置。
         # https://learn.microsoft.com/en-us/windows/win32/procthread/inheritance
         $runnerProcess = [Diagnostics.Process]::GetCurrentProcess()
         $runnerProcess.Refresh()

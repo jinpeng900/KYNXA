@@ -32,8 +32,8 @@ impl RecoveryWindow {
     }
 }
 
-/// SDK objects remain in Node; capacity, cache ordering and recovery windows belong to this session.
-/// SDK 对象留在 Node，会话拥有容量、缓存顺序和恢复时间窗，取消回执前不会释放已派发额度。
+/// Track capacity, cache order and recovery windows; hold dispatched capacity until cancellation settles.
+/// 维护容量、缓存顺序和恢复窗口，取消结算前保留已派发额度。
 #[derive(Default)]
 pub struct StructureState {
     cache: VecDeque<(String, u64)>,

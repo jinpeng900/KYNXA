@@ -370,8 +370,8 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
-/// One opaque owner manages previews, archive admission, caches, compaction and source tags.
-/// 一个不透明拥有者统一管理预览、归档准入、缓存、压缩与回源标签；不改写正式日志。
+/// Manage previews, archive admission, caches, compaction and source tags without rewriting formal logs.
+/// 统一管理预览、归档准入、缓存、压缩和回源标签，不改写正式日志。
 #[derive(Default)]
 pub struct HistoryProjectionState {
     records: Vec<Value>,
@@ -493,8 +493,8 @@ impl HistoryProjectionState {
         }
         for (round_index, round) in array(&record["rounds"]).iter().enumerate() {
             let start = messages.len();
-            // Only an origin-checked native projection may replay broker context before its original model turn.
-            // 仅完整来源已核验的原生投影可在对应模型轮之前恢复程序上下文，不能从正文猜测来源。
+            // Restore broker context before its original turn only after verifying its origin.
+            // 核验来源后才在原模型轮前恢复程序上下文，不从正文猜测来源。
             if round["runtimeReplayAllowed"] == true
                 && super::transcript::valid_context_before(&round["contextBefore"])
             {

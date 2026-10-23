@@ -48,6 +48,15 @@ struct Provider {
     buffered_cycle: Arc<std::sync::atomic::AtomicBool>,
     readback_gap_cycle: Arc<std::sync::atomic::AtomicBool>,
     readback_gap_step: Arc<AtomicUsize>,
+    annotated_evidence_cycle: Arc<std::sync::atomic::AtomicBool>,
+    resume_generation: Arc<AtomicUsize>,
+    resume_generation_gate: Arc<tokio::sync::Notify>,
+    hold_next_provider: Arc<std::sync::atomic::AtomicBool>,
+    native_stop_cycle: Arc<std::sync::atomic::AtomicBool>,
+    native_stop_emissions: Arc<AtomicUsize>,
+    dsml_review_cycle: Arc<std::sync::atomic::AtomicBool>,
+    native_review_cycle: Arc<std::sync::atomic::AtomicBool>,
+    dsml_review_emissions: Arc<AtomicUsize>,
     memory_approval_target: Arc<Mutex<Option<String>>>,
 }
 fn system_text(request: &Value) -> String {
@@ -62,20 +71,16 @@ fn system_text(request: &Value) -> String {
 }
 
 fn is_completion_review_request(request: &Value) -> bool {
-    // Retired assessment instructions remain in the append-only prefix; tools identify a live execution phase.
-    // 已退役的验收指令仍保留在追加式前缀中；本轮有工具声明时属于执行阶段，不能误作再次验收。
-    if request["tools"].as_array().is_some_and(|tools| !tools.is_empty()) {
-        return false;
-    }
+    // Reviews keep tools; the latest control revision identifies the current phase.
+    // 核验保留工具声明，当前阶段由最新控制提示及其撤销记录决定。
     request["messages"]
         .as_array()
         .into_iter()
         .flatten()
-        .any(|message| {
-            message["content"].as_str().is_some_and(|content| {
-                content.contains("Broker: compare the original requested work")
-            })
-        })
+        .rev().filter_map(|message| message["content"].as_str())
+        .find(|content| content.starts_with("Runtime control completionReviewNotice [")
+            || content.starts_with("Broker: compare the original requested work"))
+        .is_some_and(|content| content.contains("Broker: compare the original requested work"))
 }
 
 /// The mock reviews only the broker's actual checklist and verified receipts, without inventing evidence.
@@ -89,14 +94,52 @@ fn completion_review_reply(request: &Value, reason: &str) -> Value {
     let evidence: Value = serde_json::from_str(note.split("Verified completion evidence: ").nth(1).unwrap()
         .lines().next().unwrap()).unwrap();
     assert!(!evidence.as_array().unwrap().is_empty(), "a real effect needs a successful receipt");
-    // The footer accepts eight concise references per requirement; retain the latest real write/readback receipts.
-    // 尾部每项接受八条简短证据；取末段真实写入及读回回执，不把全部历史调用塞入单个验收项。
-    let evidence = evidence.as_array().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>();
     let met = requirements.as_array().unwrap().iter().map(|requirement| json!({
-        "requirementId":requirement["requirementId"],"item":"verified fixture output","evidence":evidence
+        "requirementId":requirement["requirementId"],"item":"verified fixture output",
+        "evidence":completion_review_evidence(request, requirement["item"].as_str().unwrap(), evidence.as_array().unwrap())
     })).collect::<Vec<_>>();
     json!({"role":"assistant","content":format!("<kynxa_task>{}</kynxa_task>",
         json!({"state":"complete","next":"","reason":reason,"unmet":[],"met":met}))})
+}
+
+fn completion_review_evidence(request: &Value, requirement: &str, verified: &[Value]) -> Vec<Value> {
+    let mut selected = Vec::new();
+    let mut retain = |reference: &Value| {
+        if selected.len() < 8 && !selected.contains(reference) { selected.push(reference.clone()); }
+    };
+    let requirement = requirement.to_lowercase();
+    // Prefer actual target receipts; compaction may remove earlier tool bodies but keeps verified identities.
+    // 优先选实际目标回执；压缩可能移除旧工具正文，但保留的真实身份仍可用于核验。
+    for (index, reference) in verified.iter().enumerate() {
+        let Some(path) = reference.as_str().filter(|path| path.contains(['/', '\\'])) else { continue; };
+        let name = path.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
+        if !name.is_empty() && requirement.contains(&name) {
+            retain(reference);
+            if let Some(next) = verified.get(index + 1) { retain(next); }
+            if index > 0 { retain(&verified[index - 1]); }
+        }
+    }
+    let mut targets = std::collections::HashSet::new();
+    for message in request["messages"].as_array().into_iter().flatten().rev()
+        .filter(|message| message["role"] == "tool") {
+        let id = &message["tool_call_id"];
+        if !verified.contains(id) { continue; }
+        let Some(body) = message["content"].as_str().and_then(|content| serde_json::from_str::<Value>(content).ok()) else { continue; };
+        let path = body["path"].as_str().or_else(|| body["locator"]["path"].as_str())
+            .or_else(|| body["sourceMetadata"]["path"].as_str());
+        let Some(path) = path else { continue; };
+        let name = path.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
+        if !name.is_empty() && requirement.contains(&name) && targets.insert(path.to_lowercase()) {
+            retain(id);
+        }
+    }
+    // Balance old source evidence with recent delivery receipts instead of discarding the first read.
+    // 兼顾早期来源与最近交付的证据，不因最后八条都是新调用而丢掉最初读取。
+    for (first, last) in verified.iter().zip(verified.iter().rev()) {
+        retain(first);
+        retain(last);
+    }
+    selected
 }
 
 /// Follow the actual broker navigation, so the fixture cannot invent a missing document identity.
@@ -133,6 +176,93 @@ fn saved_document(request: &Value, path_suffix: &str) -> Value {
 async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -> Response {
     state.calls.fetch_add(1, Ordering::SeqCst);
     state.requests.lock().await.push(body.clone());
+    if state.hold_next_provider.swap(false, Ordering::AcqRel) {
+        state.resume_generation_gate.notified().await;
+    }
+    if state.native_stop_cycle.load(Ordering::Acquire) {
+        let current_guidance = body["messages"].as_array().into_iter().flatten()
+            .filter_map(|message| message["content"].as_str())
+            .any(|content| content.contains("现在停止这个任务，取消剩余时长与要求"));
+        let first_acknowledgement = current_guidance
+            && state.native_stop_emissions.fetch_add(1, Ordering::AcqRel) == 0;
+        let content = if first_acknowledgement { "已停止，不再执行任何工具，保留原文件和成功回执。" }
+            else { "已停止。\n\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"用户停止\",\"unmet\":[],\"stop\":true}</kynxa_task>" };
+        return Json(json!({"choices":[{"index":0,"message":{"role":"assistant",
+            "content":content},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+    }
+    if state.annotated_evidence_cycle.load(Ordering::Acquire) || state.dsml_review_cycle.load(Ordering::Acquire)
+        || state.native_review_cycle.load(Ordering::Acquire) {
+        // A starved review cannot fit its structured evidence; retain the same completed effects.
+        // 验收预算过小时无法容纳结构化证据；截断不能让已经成功的操作重新执行。
+        if is_completion_review_request(&body) && body["max_tokens"].as_u64().unwrap_or(0) < 2048 {
+            return Json(json!({"choices":[{"index":0,"message":{"role":"assistant",
+                "content":"<kynxa_task>{\"state\":\"complete\",\"met\":["},"finish_reason":"length"}],
+                "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+        }
+        let has_receipt = |id: &str| body["messages"].as_array().into_iter().flatten()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == id);
+        let dsml_review = state.dsml_review_cycle.load(Ordering::Acquire);
+        let native_review = state.native_review_cycle.load(Ordering::Acquire);
+        let resume_generation = state.resume_generation.load(Ordering::Acquire);
+        let resumed_call_id = format!("resume-stat-{resume_generation}");
+        if resume_generation == 2 && !has_receipt(&resumed_call_id)
+            && !body["messages"].as_array().unwrap().iter().any(|message|
+                message["role"] == "user" && message["content"] == "继续核对原文件并保留全部成功回执。") {
+            // Keep one real provider request in flight so guidance exercises cancellation and re-dispatch.
+            // 留住一次真实供应商请求，让插话覆盖取消旧生成及重新派发的实际链路。
+            state.resume_generation_gate.notified().await;
+        }
+        let call = |id: &str, name: &str, arguments: Value| json!({"role":"assistant","content":"继续完成当前文件。",
+            "tool_calls":[{"id":id,"type":"function","function":{
+                "name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":arguments.to_string()}}]});
+        let message = if is_completion_review_request(&body) {
+            if native_review && !has_receipt("dsml-native-stat") {
+                let message = call("dsml-native-stat", "filesystem.stat", json!({"path":"annotated-result.txt"}));
+                return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":"tool_calls"}],
+                    "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+            }
+            if dsml_review && !has_receipt("dsml-native-stat") {
+                state.dsml_review_emissions.fetch_add(1, Ordering::AcqRel);
+                let name = kynxa_agent_core_native::models::protocol::wire_name("filesystem.stat");
+                return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":format!(
+                    "继续核对当前文件。\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"{name}\">\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">annotated-result.txt</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>")},"finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+            }
+            let mut reply = completion_review_reply(&body, "The original write and readback both have successful receipts");
+            let content = reply["content"].as_str().unwrap();
+            let mut assessment: Value = serde_json::from_str(content.strip_prefix("<kynxa_task>").unwrap()
+                .strip_suffix("</kynxa_task>").unwrap()).unwrap();
+            for item in assessment["met"].as_array_mut().unwrap() {
+                let references = item["evidence"].as_array().unwrap();
+                assert!(references.contains(&json!("annotated-write")) && references.contains(&json!("annotated-read")),
+                    "Annotations must refer to the broker's actual successful calls: {references:?}");
+                if dsml_review || native_review {
+                    assert!(references.contains(&json!("dsml-native-stat")), "The final review needs a real native receipt.");
+                }
+                item["evidence"] = json!(["annotated-write: 已成功写入当前文件", "annotated-read: 已回读相同文件内容"]);
+                if dsml_review || native_review {
+                    item["evidence"].as_array_mut().unwrap().push(json!("dsml-native-stat: 已核对当前文件元数据"));
+                }
+            }
+            reply["content"] = json!(format!("<kynxa_task>{assessment}</kynxa_task>"));
+            reply
+        } else if resume_generation > 0 && !has_receipt(&resumed_call_id) {
+            call(&resumed_call_id, "filesystem.stat", json!({"path":"annotated-result.txt"}))
+        } else if !has_receipt("annotated-write") {
+            call("annotated-write", "filesystem.write", json!({"path":"annotated-result.txt","content":"ANNOTATED_RECEIPT_BODY","expectedHash":null}))
+        } else if !has_receipt("annotated-read") {
+            call("annotated-read", "filesystem.read", json!({"path":"annotated-result.txt"}))
+        } else if dsml_review && !has_receipt("dsml-native-stat")
+            && state.dsml_review_emissions.load(Ordering::Acquire) > 0 {
+            call("dsml-native-stat", "filesystem.stat", json!({"path":"annotated-result.txt"}))
+        } else {
+            json!({"role":"assistant","content":"文件已写入并回读，内容为 ANNOTATED_RECEIPT_BODY。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"原写入和回读均完成\"}</kynxa_task>"})
+        };
+        let has_calls = message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"} else {"stop"}}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+    }
     if state.readback_gap_cycle.load(Ordering::Acquire) {
         let messages = body["messages"].as_array().unwrap();
         let context_followup = messages.iter().filter(|message| message["role"] == "user")
@@ -417,6 +547,7 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
             else {"第二段正文：续写已完成。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"两段正文完成\"}</kynxa_task>"}})
     } else if state.context_pressure.load(Ordering::Acquire) {
         // Real effects now end with a completion review; answer it with the same verified outcome.
+        // 真实操作后会核验完成情况，使用相同已核验结果作答。
         if is_completion_review_request(&body) {
             completion_review_reply(&body, "Output written and read back")
         } else if body["tools"].as_array().is_none_or(Vec::is_empty) {
@@ -590,6 +721,15 @@ impl Fixture {
             buffered_cycle: Default::default(),
             readback_gap_cycle: Default::default(),
             readback_gap_step: Default::default(),
+            annotated_evidence_cycle: Default::default(),
+            resume_generation: Default::default(),
+            resume_generation_gate: Default::default(),
+            hold_next_provider: Default::default(),
+            native_stop_cycle: Default::default(),
+            native_stop_emissions: Default::default(),
+            dsml_review_cycle: Default::default(),
+            native_review_cycle: Default::default(),
+            dsml_review_emissions: Default::default(),
             memory_approval_target: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2096,6 +2236,8 @@ async fn tool_cycle_streams_real_read_receipt_into_provider_and_formal_log() {
     }
     let mut buffer = text.as_bytes().to_vec();
     let events = event_values(&mut buffer);
+    assert_eq!(events.first().unwrap()["type"], "started");
+    assert_eq!(events.iter().filter(|event| event["type"] == "started").count(), 1);
     assert_settled_public_segments(&events);
     // The provider fallback emits a raw content snapshot; no public SSE event may expose its footer.
     // 供应商非流式回退发出原始正文快照；公开 SSE 事件不能泄露其内部任务尾部。
@@ -2145,6 +2287,33 @@ async fn tool_cycle_streams_real_read_receipt_into_provider_and_formal_log() {
         "{}",
         messages[1]
     );
+    for post_again in [false, true] {
+        let response = if post_again {
+            fixture.client.post(format!("{}/api/chat/stream", fixture.url)).json(&input).send().await.unwrap()
+        } else {
+            fixture.client.get(format!("{}/api/chat/stream?conversationId={}&requestId={}",
+                fixture.url, fixture.conversation, input["requestId"].as_str().unwrap()))
+                .send().await.unwrap()
+        };
+        assert!(response.status().is_success());
+        let text = response.text().await.unwrap();
+        let replay = event_values(&mut text.as_bytes().to_vec());
+        assert_eq!(replay.first().unwrap()["type"], "started");
+        assert_eq!(replay.iter().filter(|event| event["type"] == "started").count(), 1);
+        assert_eq!(replay.last().unwrap()["type"], "completed");
+        assert!(replay.iter().find(|event| event["type"] == "content_snapshot").unwrap()["content"]
+            .as_str().unwrap().contains("native-file-body"));
+        assert!(replay.iter().all(|event| event["conversationId"] == fixture.conversation
+            && event["requestId"] == input["requestId"]));
+        assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 3,
+            "observing or resubmitting the same completed request must not dispatch work");
+        if !post_again && let Some(path) = std::env::var_os("KYNXA_GATEWAY_RECONNECT_SSE_FIXTURE") {
+            let path = std::path::PathBuf::from(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &text).unwrap();
+        }
+    }
+    assert_eq!(fixture.messages().await.len(), 2);
     fixture.close().await;
 }
 
@@ -2251,6 +2420,555 @@ async fn acceptance_readback_gap_executes_real_missing_reads_without_repeating_w
         "context budgeting may compact history but must not start external work for this follow-up");
     assert!(messages.last().unwrap()["Content"].as_str().unwrap().contains("摘要："));
     fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn annotated_successful_evidence_finishes_without_archive_scans_or_repeating_writes() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.annotated_evidence_cycle.store(true, Ordering::Release);
+    let mut input = fixture.request("生成 annotated-result.txt 文件并回读当前内容，然后简短回复。");
+    input["userMessageId"] = json!(new_id());
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+        .json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let stream = response.text().await.unwrap();
+    let events = event_values(&mut stream.as_bytes().to_vec());
+    assert_settled_public_segments(&events);
+    assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))), "{stream}");
+    let completed = events.iter().find(|event| event["type"] == "completed").expect("annotated actual IDs must finish acceptance");
+    assert_eq!(completed["taskCompletion"]["completionState"], "completed", "{completed}");
+    let requests = fixture.provider.requests.lock().await.clone();
+    assert_eq!(requests.iter().filter(|request| is_completion_review_request(request)).count(), 1,
+        "valid annotated references need no repeated review or history scan");
+    assert!(requests.iter().filter(|request| is_completion_review_request(request))
+        .all(|request| request["max_tokens"].as_u64().is_some_and(|budget| budget >= 2048)),
+        "real completion reviews need enough output budget for their evidence footer");
+    let saved = fixture.messages().await.into_iter().find(|message| message["Id"] == input["requestId"]).unwrap();
+    let activities = saved["ToolActivities"].as_array().unwrap();
+    for name in ["filesystem.write", "filesystem.read"] {
+        assert_eq!(activities.iter().filter(|activity| activity["name"] == name && activity["status"] == "completed").count(), 1,
+            "acceptance must reuse the original settled {name} receipt");
+    }
+    assert!(!activities.iter().any(|activity| activity["name"] == "tool.result.read"),
+        "a reference annotation is not an unread archived result");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(task.state, kynxa_agent_core_native::storage::task_repository::TaskState::Completed);
+    // An HTTP reconnect must reuse this same completed task and its settled effects.
+    // HTTP 重连复用同一已完成任务及成功副作用，不触发新模型请求或再次写入。
+    let replay: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(replay["type"], "completed", "{replay}");
+    assert_eq!(replay["content"], completed["content"]);
+    assert_eq!(replay["eventSequence"], completed["eventSequence"]);
+    assert_eq!(fixture.provider.requests.lock().await.len(), requests.len());
+    assert_eq!(repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap().task_id, task.task_id);
+    let original_operations = repository.operations(&task.task_id).unwrap();
+    assert_eq!(original_operations.len(), 2);
+    assert!(original_operations.iter().all(|operation|
+        operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded));
+    // An explicit revision must retire only the cached delivery and continue this original task.
+    // 明确修订只退役缓存交付，仍沿原任务继续；不能复用旧完成结果或重做成功操作。
+    let control = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, task.task_id))
+        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":task.version,"action":"revise"}))
+        .send().await.unwrap();
+    assert!(control.status().is_success(), "{}", control.text().await.unwrap());
+    let changed: Value = control.json().await.unwrap();
+    assert_eq!(changed["task"]["taskId"], task.task_id);
+    assert_eq!(changed["task"]["requestId"], input["requestId"]);
+    let revised = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let current = repository.load(&task.task_id).unwrap();
+            if current.state == kynxa_agent_core_native::storage::task_repository::TaskState::Completed
+                && current.usage.model_requests > task.usage.model_requests { break current; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("Explicit revision must perform fresh model work and finish the same task.");
+    assert_eq!(revised.task_id, task.task_id);
+    assert_eq!(revised.request_id, input["requestId"].as_str().unwrap());
+    assert!(fixture.provider.requests.lock().await.len() > requests.len(),
+        "same-process completed delivery caching must not suppress explicit revision");
+    let operations = repository.operations(&task.task_id).unwrap();
+    for original in &original_operations {
+        let retained = operations.iter().find(|operation| operation.intent.operation_id == original.intent.operation_id)
+            .expect("Revision must retain each original operation identity.");
+        assert_eq!(retained.state, kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded);
+        assert_eq!(retained.intent.tool_name, original.intent.tool_name);
+    }
+    // Recovery may observe the current hash once; this is not a replay of the successful read or write.
+    // 恢复可核对一次当前哈希，不代表重做此前成功的读取或写入。
+    let added = operations.iter().filter(|operation| !original_operations.iter()
+        .any(|original| original.intent.operation_id == operation.intent.operation_id)).collect::<Vec<_>>();
+    assert!(added.len() <= 1 && added.iter().all(|operation| operation.intent.tool_name == "filesystem.stat"
+        && operation.intent.effect == kynxa_agent_core_native::storage::task_repository::OperationEffect::Observation
+        && operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded),
+        "Only a successful current-version metadata observation may be added: {added:?}");
+    for name in ["filesystem.write", "filesystem.read"] {
+        assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name
+            && operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded).count(), 1);
+    }
+    assert!(!operations.iter().any(|operation| operation.intent.tool_name == "tool.result.read"));
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_http_resume_reopens_the_same_task_twice_and_steers_without_replaying_successful_effects() {
+    use kynxa_agent_core_native::storage::task_repository::{OperationState, TaskRepository, TaskState};
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.annotated_evidence_cycle.store(true, Ordering::Release);
+    let mut input = fixture.request("生成 annotated-result.txt 文件并回读当前内容，然后简短回复。");
+    input["userMessageId"] = json!(new_id());
+    let first: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(first["type"], "completed", "{first}");
+    let repository = TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let original = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    let original_operations = repository.operations(&original.task_id).unwrap();
+    assert_eq!(original_operations.len(), 2);
+    assert!(original_operations.iter().all(|operation| operation.state == OperationState::Succeeded));
+    let saved = fixture.messages().await.into_iter().find(|message| message["Id"] == input["requestId"]).unwrap();
+    assert_eq!(saved["Status"], "completed");
+    let mut guided_reply_id = None;
+    let mut guided_user_message_id = None;
+    for generation in 1..=2 {
+        let previous = repository.load(&original.task_id).unwrap();
+        assert_eq!(previous.state, TaskState::Completed);
+        assert!(repository.current_attempt(&original.task_id).unwrap().unwrap().ended_at_ms.is_some());
+        // Reproduce a persisted legacy partial task with completed message transport and its finished run cache.
+        // 重现旧任务的正式 partial 状态、已完成消息传输及仍在进程中的旧运行缓存；完整操作和检查点均保留。
+        let mut partial = previous.clone();
+        partial.state = TaskState::Partial;
+        partial.version += 1;
+        partial.stop_reason = Some("fixture-legacy-partial".into());
+        let connection = rusqlite::Connection::open(fixture.root.join("Data/Agent/tasks.sqlite")).unwrap();
+        connection.execute("UPDATE tasks SET state='partial',version=?1,document=?2 WHERE task_id=?3",
+            rusqlite::params![partial.version, serde_json::to_string(&partial).unwrap(), partial.task_id]).unwrap();
+        drop(connection);
+        fixture.provider.resume_generation.store(generation, Ordering::Release);
+        let calls_before = fixture.provider.calls.load(Ordering::Acquire);
+        let control = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, original.task_id))
+            .json(&json!({"conversationId":fixture.conversation,"expectedVersion":partial.version,"action":"resume"}))
+            .send().await.unwrap();
+        let status = control.status();
+        let control: Value = control.json().await.unwrap();
+        assert!(status.is_success(), "{control}");
+        assert_eq!(control["task"]["taskId"], original.task_id);
+        assert_eq!(control["task"]["requestId"], input["requestId"]);
+        if generation == 2 {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while fixture.provider.calls.load(Ordering::Acquire) == calls_before {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("Second HTTP resume must dispatch a new provider request, not reuse finished delivery.");
+            let message_id = new_id();
+            let reply_id = new_id();
+            let steering = fixture.client.post(format!("{}/api/tasks/{}/steer", fixture.url, original.task_id))
+                .json(&json!({"conversationId":fixture.conversation,"expectedVersion":repository.load(&original.task_id).unwrap().version,
+                    "userMessageId":message_id,"replyMessageId":reply_id,"message":"继续核对原文件并保留全部成功回执。","action":"update"}))
+                .send().await.unwrap();
+            let status = steering.status();
+            let accepted: Value = steering.json().await.unwrap();
+            assert!(status.is_success(), "{accepted}");
+            assert_eq!(accepted["steeringAccepted"], true);
+            assert_eq!(accepted["task"]["taskId"], original.task_id);
+            assert_eq!(accepted["replyMessageId"], reply_id);
+            guided_reply_id = Some(reply_id);
+            guided_user_message_id = Some(message_id);
+            fixture.provider.resume_generation_gate.notify_waiters();
+        }
+        let resumed = tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let task = repository.load(&original.task_id).unwrap();
+                if task.state == TaskState::Completed && task.execution_version > previous.execution_version
+                    && repository.current_attempt(&original.task_id).unwrap().unwrap().ended_at_ms.is_some() { break task; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("HTTP resume must execute and settle the original task with its retained context.");
+        assert_eq!(resumed.task_id, original.task_id);
+        assert_eq!(resumed.request_id, original.request_id);
+        assert!(resumed.usage.model_requests > previous.usage.model_requests);
+        let requests = fixture.provider.requests.lock().await;
+        assert!(requests[calls_before..].iter().any(|request| request["messages"].as_array().unwrap().iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == "annotated-write")),
+            "Actual resumed requests must retain original successful write evidence.");
+        drop(requests);
+        let operations = repository.operations(&original.task_id).unwrap();
+        for original_operation in &original_operations {
+            let retained = operations.iter().find(|operation| operation.intent.operation_id == original_operation.intent.operation_id).unwrap();
+            assert_eq!(retained.state, OperationState::Succeeded);
+            assert_eq!(retained.intent.tool_name, original_operation.intent.tool_name);
+        }
+        for name in ["filesystem.write", "filesystem.read"] {
+            assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name).count(), 1,
+                "Resuming and steering must not replay the original {name}.");
+        }
+        assert!(operations.iter().any(|operation| operation.intent.tool_call_id == format!("resume-stat-{generation}")
+            && operation.state == OperationState::Succeeded), "Each resumed generation must really dispatch its new observation.");
+    }
+    let guided_reply_id = guided_reply_id.unwrap();
+    let messages = fixture.messages().await;
+    let guided = messages.iter().find(|message| message["Id"] == guided_reply_id).unwrap();
+    assert_eq!(guided["Status"], "completed");
+    assert_eq!(guided["RequestId"], input["requestId"]);
+    assert_eq!(guided["ReplyTo"], guided_user_message_id.unwrap());
+    assert!(!guided["Content"].as_str().unwrap().is_empty());
+    assert_eq!(repository.user_steering(&original.task_id).unwrap().len(), 1);
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
+    // A plain stop answer must reach directive review before any old acceptance readback is synthesized.
+    // 首轮只有停止正文时须先解释最新引导，不能按旧验收自动补读文件；下一轮正式停止后不再恢复。
+    let previous = repository.load(&original.task_id).unwrap();
+    let mut partial = previous.clone();
+    partial.state = TaskState::Partial;
+    partial.version += 1;
+    let connection = rusqlite::Connection::open(fixture.root.join("Data/Agent/tasks.sqlite")).unwrap();
+    connection.execute("UPDATE tasks SET state='partial',version=?1,document=?2 WHERE task_id=?3",
+        rusqlite::params![partial.version, serde_json::to_string(&partial).unwrap(), partial.task_id]).unwrap();
+    drop(connection);
+    let calls_before_stop_resume = fixture.provider.calls.load(Ordering::Acquire);
+    let operations_before_stop = repository.operations(&original.task_id).unwrap();
+    fixture.provider.hold_next_provider.store(true, Ordering::Release);
+    let resumed = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, original.task_id))
+        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":partial.version,"action":"resume"})).send().await.unwrap();
+    assert!(resumed.status().is_success());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.provider.calls.load(Ordering::Acquire) == calls_before_stop_resume {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("Resumed stop test needs a real in-flight provider request.");
+    fixture.provider.native_stop_cycle.store(true, Ordering::Release);
+    let stop_user = new_id();
+    let stop_reply = new_id();
+    let stopped = fixture.client.post(format!("{}/api/tasks/{}/steer", fixture.url, original.task_id))
+        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":repository.load(&original.task_id).unwrap().version,
+            "userMessageId":stop_user,"replyMessageId":stop_reply,"action":"update",
+            "message":"现在停止这个任务，取消剩余时长与要求，保留已有文件和成功回执。"})).send().await.unwrap();
+    assert!(stopped.status().is_success());
+    fixture.provider.resume_generation_gate.notify_waiters();
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let task = repository.load(&original.task_id).unwrap();
+            if task.state == TaskState::Paused {
+                if let Some(status) = fixture.runtime.run_status(&fixture.conversation, &original.request_id).await {
+                    if status["status"] == "completed" { break status["result"].clone(); }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("A valid stop must finish and durably pause without another recovery generation.");
+    assert_eq!(result["type"], "completed");
+    assert!(result["taskPauseError"].is_null());
+    assert_eq!(result["taskCompletion"]["userStopped"], true);
+    let stopped = fixture.messages().await.into_iter().find(|message| message["Id"] == stop_reply).unwrap();
+    assert_eq!(stopped["ReplyTo"], stop_user);
+    assert_eq!(stopped["UserTaskDirective"]["stop"], true);
+    assert_eq!(stopped["UserTaskDirective"]["minimumActiveMs"], 0);
+    let calls_after_stop = fixture.provider.calls.load(Ordering::Acquire);
+    assert_eq!(calls_after_stop, calls_before_stop_resume + 3,
+        "Only the superseded request, plain stop acknowledgement and directive review may run.");
+    assert_eq!(fixture.provider.native_stop_emissions.load(Ordering::Acquire), 2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), calls_after_stop, "Paused stop must never re-enter the model loop.");
+    let operations = repository.operations(&original.task_id).unwrap();
+    assert_eq!(operations.len(), operations_before_stop.len(),
+        "An unparsed stop acknowledgement must not trigger a broker stat/read against old acceptance requirements.");
+    for name in ["filesystem.write", "filesystem.read"] {
+        assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name).count(), 1);
+    }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Explicitly authorized live API validation; requires KYNXA_REAL_MODEL_HOME, KYNXA_REAL_PROVIDER and KYNXA_REAL_MODEL."]
+async fn authorized_live_model_preserves_paused_work_and_obeys_latest_user_stop() {
+    use kynxa_agent_core_native::{models::gateway_config::ModelConfigStore,
+        storage::task_repository::{OperationState, TaskRepository, TaskState}};
+    let source_home = PathBuf::from(std::env::var_os("KYNXA_REAL_MODEL_HOME").expect("Explicit model settings home is required."));
+    let provider = std::env::var("KYNXA_REAL_PROVIDER").expect("Explicit provider is required.");
+    let model = std::env::var("KYNXA_REAL_MODEL").expect("Explicit model is required.");
+    let stop_only = std::env::var_os("KYNXA_REAL_STOP_ONLY").is_some();
+    let mut fixture = Fixture::new(false, false).await;
+    let reuse_task = std::env::var("KYNXA_REAL_REUSE_TASK").ok();
+    if let Some(reuse_root) = std::env::var_os("KYNXA_REAL_REUSE_ROOT") {
+        let old_server = fixture.servers.pop().unwrap();
+        old_server.abort();
+        let _ = old_server.await;
+        fixture.runtime.shutdown().await;
+        fixture.root = PathBuf::from(reuse_root);
+        fixture.conversation = std::env::var("KYNXA_REAL_REUSE_CHAT").expect("Explicit isolated conversation is required.");
+        let mut configuration = fixture.runtime.config.clone();
+        configuration.data_home = fixture.root.join("Models");
+        configuration.data_root = fixture.root.join("Data");
+        configuration.extension_root = fixture.root.join("Extensions");
+        configuration.application_root = fixture.root.join("Application");
+        configuration.toolhost_exe = fixture.root.join("missing-toolhost.exe");
+        configuration.vector_extension = fixture.root.join("missing-vec0.dll");
+        configuration.inference_library = fixture.root.join("missing-onnxruntime.dll");
+        fixture.runtime = GatewayRuntime::new(configuration);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        fixture.url = format!("http://{}", listener.local_addr().unwrap());
+        let service = gateway::router(fixture.runtime.clone());
+        fixture.servers.push(tokio::spawn(async move { axum::serve(listener, service).await.unwrap(); }));
+    }
+    assert!(!fixture.root.starts_with(std::env::current_dir().unwrap()), "Live credentials must stay outside the repository.");
+    let mut connection = ModelConfigStore::new(&source_home).connection_for(&provider).await
+        .expect("Read-only selected connection lookup failed.").expect("Selected connection is unavailable.");
+    assert!(connection["apiKey"].as_str().is_some_and(|key| !key.is_empty()), "The authorized connection requires its saved credential.");
+    // Copy only the selected connection into isolated temporary settings; never log credentials or edit their source.
+    // 仅把所选连接写入隔离临时配置；不打印凭据，也不修改用户的原配置。
+    connection["maxOutputTokens"] = json!(8192);
+    ModelConfigStore::new(&fixture.runtime.config.data_home).save(connection).await.expect("Isolated model setup failed.");
+    fixture.client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(180)).build().unwrap();
+    std::fs::write(fixture.root.join("work/second.txt"), "SECOND_LIVE_SOURCE").unwrap();
+    let mut input = fixture.request("请至少持续工作1小时完善一份技术研究报告，最终报告覆盖恢复、回执、缓存三部分。第一步读取 fixture.txt，把全文原样写到 progress.txt（只写一次），再读回 progress.txt。先完成这一步，随后按我追加的指导展开，不为凑时间重复读写文件。");
+    input["userMessageId"] = json!(new_id());
+    input["provider"] = json!(provider);
+    input["model"] = json!(model);
+    let request = input["requestId"].as_str().unwrap().to_owned();
+    let started_at = std::time::Instant::now();
+    let response = if reuse_task.is_none() {
+        let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url)).json(&input).send().await.unwrap();
+        assert!(response.status().is_success(), "Live chat transport must start.");
+        Some(response)
+    } else { None };
+    let repository = TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let original = if let Some(task_id) = reuse_task { repository.load(&task_id).unwrap() } else { tokio::time::timeout(Duration::from_secs(75), async {
+        loop {
+            if let Some(task) = repository.find_by_request_id(&fixture.conversation, &request).unwrap() {
+                let operations = repository.operations(&task.task_id).unwrap();
+                if operations.iter().any(|operation| operation.intent.tool_name == "filesystem.write" && operation.state == OperationState::Succeeded)
+                    && operations.iter().filter(|operation| operation.intent.tool_name == "filesystem.read" && operation.state == OperationState::Succeeded).count() >= 2 { break task; }
+                assert!(!task.state.is_terminal(), "The initial live task must perform its requested writes and readbacks; state={:?}, code={:?}.", task.state, task.stop_reason);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("Live provider did not perform the initial authorized file operations in time.") };
+    let original_operations = repository.operations(&original.task_id).unwrap();
+    println!("{}", json!({"phase":"live-seed-verified","modelRequests":original.usage.model_requests,"elapsedMs":started_at.elapsed().as_millis()}));
+    let input_reference = original.input_reference.as_ref().unwrap();
+    let input_bytes = std::fs::read(fixture.root.join("Data").join(input_reference["relativePath"].as_str().unwrap())).unwrap();
+    assert_eq!(kynxa_agent_core_native::storage::managed_files::digest(&input_bytes), input_reference["sha256"]);
+    let original_input: Value = serde_json::from_slice(&input_bytes).unwrap();
+    assert_eq!(original_input["resolvedRunLimits"]["minActiveMs"], 3_600_000,
+        "The live task must really carry its original one-hour minimum before user revision.");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/progress.txt")).unwrap(), "native-file-body");
+    let paused = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, original.task_id))
+        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":repository.load(&original.task_id).unwrap().version,"action":"pause"}))
+        .send().await.unwrap();
+    assert!(paused.status().is_success(), "Live pause must preserve the current task.");
+    let paused: Value = paused.json().await.unwrap();
+    assert_eq!(paused["task"]["state"], "paused");
+    println!("{}", json!({"phase":"live-paused","elapsedMs":started_at.elapsed().as_millis()}));
+    let read_context = || {
+        let checkpoint = repository.latest_checkpoint(&original.task_id).unwrap().unwrap();
+        let reference = &checkpoint.context_reference["summaryReference"];
+        let relative = reference["relativePath"].as_str().expect("Paused work needs its durable context reference.");
+        let bytes = std::fs::read(fixture.root.join("Data").join(relative)).unwrap();
+        assert_eq!(kynxa_agent_core_native::storage::managed_files::digest(&bytes), reference["sha256"]);
+        serde_json::from_slice::<Value>(&bytes).unwrap()["context"].clone()
+    };
+    let original_requirements = if stop_only { original_input["acceptanceRequirements"].as_array().unwrap().clone() }
+        else { read_context()["acceptanceRequirements"].as_array().unwrap().clone() };
+    assert!(!original_requirements.is_empty());
+    if !stop_only {
+    let resumed = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, original.task_id))
+        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":repository.load(&original.task_id).unwrap().version,"action":"resume"}))
+        .send().await.unwrap();
+    assert!(resumed.status().is_success(), "Live resume must reuse the original task.");
+    println!("{}", json!({"phase":"live-resumed","elapsedMs":started_at.elapsed().as_millis()}));
+    }
+    if !stop_only {
+    let append_id = new_id();
+    submit_live_steering(&fixture, &repository, &original.task_id,
+        json!({"conversationId":fixture.conversation,
+            "userMessageId":append_id,"replyMessageId":new_id(),"action":"update",
+            "message":"追加一项：请读取 second.txt，并保留原先研究报告的三个章节要求及至少一小时安排；已经成功写入的 progress.txt 不要重写。"})).await;
+    tokio::time::timeout(Duration::from_secs(75), async {
+        loop {
+            let messages = match kynxa_agent_core_native::storage::gateway::read_messages(&fixture.root.join("Data"), &fixture.conversation, true) {
+                Ok(messages) => messages,
+                Err(error) if error.code() == "MEMORY_CONFLICT" => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(error) => panic!("Live observation failed: {}.", error.code()),
+            };
+            if messages.iter().flat_map(|message| message["ToolActivities"].as_array().into_iter().flatten())
+                .any(|activity| activity["name"] == "filesystem.read" && activity["status"] == "completed"
+                    && activity["arguments"]["path"].as_str().is_some_and(|path| path.ends_with("second.txt"))) { break; }
+            assert!(!repository.load(&original.task_id).unwrap().state.is_terminal(), "Append guidance must not discard unrevoked work.");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("Live append guidance did not execute its new read in time.");
+    println!("{}", json!({"phase":"live-append-read-verified","elapsedMs":started_at.elapsed().as_millis()}));
+    let appended_context = read_context();
+    let appended_requirements = appended_context["acceptanceRequirements"].as_array().unwrap();
+    assert!(original_requirements.iter().all(|requirement| appended_requirements.contains(requirement)),
+        "Ordinary append guidance must retain every unrevoked original requirement.");
+    }
+    let stop_id = new_id();
+    let stop_reply = new_id();
+    let stop_model_baseline = repository.load(&original.task_id).unwrap().usage.model_requests;
+    submit_live_steering(&fixture, &repository, &original.task_id,
+        json!({"conversationId":fixture.conversation,
+            "userMessageId":stop_id,"replyMessageId":stop_reply,"action":"update",
+            "message":"现在停止这个任务，取消原先至少一小时以及后续研究报告的所有未完成要求，不再继续执行工具；保留已成功的文件、上下文、进度和回执，只简短确认已停止。"})).await;
+    println!("{}", json!({"phase":"live-stop-accepted","elapsedMs":started_at.elapsed().as_millis()}));
+    let mut acknowledged_unknown_cost = false;
+    let settled = tokio::time::timeout(Duration::from_secs(75), async {
+        loop {
+            let task = repository.load(&original.task_id).unwrap();
+            if task.state == TaskState::Paused && repository.current_attempt(&task.task_id).unwrap()
+                .is_some_and(|attempt| attempt.ended_at_ms.is_some()) { break task; }
+            if task.state == TaskState::WaitingVerification && !acknowledged_unknown_cost {
+                let identities = repository.model_reservations(&task.task_id).unwrap().into_iter()
+                    .filter(|reservation| reservation.blocks_recovery())
+                    .map(|reservation| json!({"taskId":task.task_id,"reservationId":reservation.reservation_id})).collect::<Vec<_>>();
+                if !identities.is_empty() {
+                    let acknowledgement = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, task.task_id))
+                        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":task.version,
+                            "action":"acknowledge-unknown-costs","modelReservationIds":identities})).send().await.unwrap();
+                    assert!(acknowledgement.status().is_success(), "Authorized isolated validation must acknowledge real unknown costs without inventing usage.");
+                    let acknowledged: Value = acknowledgement.json().await.unwrap();
+                    assert_eq!(acknowledged["costUnknown"], true);
+                    acknowledged_unknown_cost = true;
+                    println!("{}", json!({"phase":"live-unknown-cost-acknowledged","costUnknown":true}));
+                }
+            }
+            let stop_is_settling = repository.latest_event(&task.task_id, "task.user-directive").unwrap()
+                .is_some_and(|event| event.payload["userMessageId"] == stop_id && event.payload["stop"] == true);
+            if task.usage.model_requests.saturating_sub(stop_model_baseline) >= 3 && task.state != TaskState::Paused && !stop_is_settling {
+                // Count reservations only as a cost guard, never as evidence that the response is ready.
+                // 预约数只用于测试费用护栏，不能当作模型回复已返回的证据。
+                let latest = repository.load(&task.task_id).unwrap();
+                let settling = repository.latest_event(&task.task_id, "task.user-directive").unwrap()
+                    .is_some_and(|event| event.payload["userMessageId"] == stop_id && event.payload["stop"] == true);
+                if latest.state == TaskState::Paused || settling { continue; }
+                let paused = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, task.task_id))
+                    .json(&json!({"conversationId":fixture.conversation,"expectedVersion":latest.version,"action":"pause"})).send().await.unwrap();
+                assert!(paused.status().is_success());
+                panic!("A third generation followed the stop guidance; isolated progress was paused and preserved.");
+            }
+            assert_ne!(task.state, TaskState::Completed, "A user stop must not certify unfinished report requirements.");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("Live stop must supersede the old minimum duration and settle the task promptly.");
+    assert_eq!(settled.task_id, original.task_id);
+    assert_eq!(settled.request_id, original.request_id);
+    let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = fixture.runtime.run_status(&fixture.conversation, &original.request_id).await {
+                if status["status"] == "completed" && status["result"].is_object() { break status["result"].clone(); }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("The stop acknowledgement must finish delivery after durable task pause.");
+    assert!(delivered["taskPauseError"].is_null(), "The actual tree pause must succeed, not only the assistant's acknowledgement.");
+    assert_eq!(delivered["type"], "completed");
+    let operations = repository.operations(&original.task_id).unwrap();
+    for original_operation in original_operations {
+        assert!(operations.iter().any(|operation| operation.intent.operation_id == original_operation.intent.operation_id
+            && operation.state == original_operation.state), "Pause, resume and stop must retain original receipts.");
+    }
+    let messages = fixture.messages().await;
+    let seed_write_call_ids = messages.iter().flat_map(|message| message["ToolActivities"].as_array().into_iter().flatten())
+        .filter(|activity| activity["name"] == "filesystem.write" && activity["arguments"]["path"].as_str()
+            .is_some_and(|path| path.ends_with("progress.txt")))
+        .filter_map(|activity| activity["toolCallId"].as_str()).collect::<std::collections::HashSet<_>>();
+    assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == "filesystem.write"
+        && seed_write_call_ids.contains(operation.intent.tool_call_id.as_str())).count(), 1,
+        "The original progress.txt write must never be repeated.");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/progress.txt")).unwrap(), "native-file-body");
+    let last = messages.iter().find(|message| message["Id"] == stop_reply).expect("The stop guidance needs its own public reply.");
+    assert_eq!(last["ReplyTo"], stop_id);
+    assert_eq!(last["Status"], "completed");
+    assert_eq!(last["UserTaskDirective"]["userMessageId"], stop_id);
+    assert_eq!(last["UserTaskDirective"]["minimumActiveMs"], 0);
+    assert_eq!(last["UserTaskDirective"]["stop"], true);
+    assert_eq!(last["ToolRun"]["taskCompletion"]["userStopped"], true);
+    assert_eq!(last["ToolRun"]["taskCompletion"]["completionState"], "partial");
+    assert!(original_requirements.iter().all(|requirement| last["UserTaskDirective"]["suspendedRequirements"]
+        .as_array().is_some_and(|suspended| suspended.contains(requirement))), "Stopped requirements remain resumable evidence, not deleted progress.");
+    assert!(!last["Content"].as_str().unwrap_or("").is_empty());
+    println!("{}", json!({"liveProvider":provider,"model":model,"state":settled.state,"modelRequests":settled.usage.model_requests,
+        "inputTokens":settled.usage.input_tokens,"outputTokens":settled.usage.output_tokens,"elapsedMs":started_at.elapsed().as_millis(),
+        "preservedOperations":operations.len(),"seedWrites":1,"pauseResume":true,"appendRead":!stop_only,"latestStop":true,
+        "newStopModelRequests":settled.usage.model_requests.saturating_sub(stop_model_baseline),"unknownTokenRequests":settled.usage.unknown_token_requests}));
+    drop(response);
+    fixture.close().await;
+}
+
+async fn submit_live_steering(fixture: &Fixture,
+    repository: &kynxa_agent_core_native::storage::task_repository::TaskRepository, task_id: &str, mut input: Value) {
+    // Match the desktop's optimistic concurrency retry while retaining the identical user/reply identities.
+    // 遵循桌面乐观并发重试；状态重读时保留相同用户消息与回复身份，不重复发送为新消息。
+    for attempt in 0..2 {
+        input["expectedVersion"] = json!(repository.load(task_id).unwrap().version);
+        let response = fixture.client.post(format!("{}/api/tasks/{task_id}/steer", fixture.url))
+            .json(&input).send().await.unwrap();
+        let status = response.status();
+        if status.is_success() { return; }
+        let error: Value = response.json().await.unwrap_or(Value::Null);
+        let task = repository.load(task_id).unwrap();
+        println!("{}", json!({"phase":"live-steering-retry","status":status.as_u16(),"code":error["code"],"state":task.state,"version":task.version}));
+        assert!(attempt == 0 && matches!(error["code"].as_str(), Some("TASK_VERSION_CONFLICT" | "TASK_CONFLICT"))
+            && task.version != input["expectedVersion"].as_u64().unwrap() && !task.state.is_terminal(),
+            "Live steering failed; status={}, code={}, state={:?}.", status.as_u16(), error["code"], task.state);
+    }
+    unreachable!();
+}
+
+async fn review_execution_preserves_successful_effects(literal: bool) {
+    let fixture = Fixture::new(false, false).await;
+    if literal { fixture.provider.dsml_review_cycle.store(true, Ordering::Release); }
+    else { fixture.provider.native_review_cycle.store(true, Ordering::Release); }
+    let mut input = fixture.request("生成 annotated-result.txt 文件并回读当前内容，然后简短回复。");
+    input["userMessageId"] = json!(new_id());
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+        .json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let stream = response.text().await.unwrap();
+    let events = event_values(&mut stream.as_bytes().to_vec());
+    assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))), "{stream}");
+    let completed = events.iter().find(|event| event["type"] == "completed").expect("Literal DSML must return to real execution before completion.");
+    assert_eq!(completed["taskCompletion"]["completionState"], "completed", "{completed}");
+    assert_eq!(fixture.provider.dsml_review_emissions.load(Ordering::Acquire), usize::from(literal));
+    let requests = fixture.provider.requests.lock().await.clone();
+    for review in requests.iter().filter(|request| is_completion_review_request(request)) {
+        assert!(review["tools"].as_array().is_some_and(|tools| !tools.is_empty()), "reviews retain the native tool channel");
+        assert_ne!(review["tool_choice"], "none");
+    }
+    assert_eq!(requests.iter().filter(|request| is_completion_review_request(request)).count(), 2,
+        "the final review follows one actual native action, not another assessment of the literal intent");
+    let first_review = requests.iter().position(is_completion_review_request).unwrap();
+    assert!(requests[first_review + 1..].iter().any(|request| !is_completion_review_request(request)
+        && request["tools"].as_array().is_some_and(|tools| !tools.is_empty())),
+        "review work must use the existing native execution protocol");
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(task.state, kynxa_agent_core_native::storage::task_repository::TaskState::Completed);
+    let operations = repository.operations(&task.task_id).unwrap();
+    assert_eq!(operations.len(), 3, "literal markup must never create an operation: {operations:?}");
+    for name in ["filesystem.write", "filesystem.read", "filesystem.stat"] {
+        assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name
+            && operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded).count(), 1);
+    }
+    let native = operations.iter().find(|operation| operation.intent.tool_name == "filesystem.stat").unwrap();
+    assert_eq!(native.intent.tool_call_id, "dsml-native-stat", "only the later real native call may execute");
+    assert!(!operations.iter().any(|operation| operation.intent.tool_name == "tool.result.read"));
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn literal_dsml_in_review_returns_to_native_tools_without_repeating_successful_effects() {
+    review_execution_preserves_successful_effects(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_calls_in_review_execute_once_without_dropping_the_tool_declarations() {
+    review_execution_preserves_successful_effects(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3272,10 +3990,12 @@ async fn context_pressure_keeps_loaded_tools_callable_and_normalizes_exact_wire_
             }),
         "Consolidation displaced the reader that was explicitly loaded for the next gap."
     );
-    // Real effects end with one tool-free completion review; the delivery request is the last one before it.
-    // 有真实操作的任务结束前多一次无工具的完成核对；交付请求是核对之前的最后一个请求。
+    // Summary requests may precede review; select the last executable request by its actual tool schemas.
+    // 验收前可能还有摘要请求；按实际工具声明选择最后一条主执行请求。
     assert!(requests.last().is_some_and(is_completion_review_request), "Effectful work must end with a completion review.");
-    let last_request = requests.iter().rev().find(|request| !is_completion_review_request(request)).unwrap();
+    let last_request = requests.iter().rev().find(|request| !is_completion_review_request(request)
+        && request["tools"].as_array().is_some_and(|tools| !tools.is_empty()))
+        .expect("The model must receive an executable delivery request after compaction.");
     let last = last_request.to_string();
     assert!(last.contains("SECOND_CURRENT_FILE"));
     assert!(!last.contains("TOOL_NOT_LOADED"));
@@ -3288,13 +4008,18 @@ async fn context_pressure_keeps_loaded_tools_callable_and_normalizes_exact_wire_
                 == kynxa_agent_core_native::models::protocol::wire_name("filesystem.write")),
         "The requested writer was displaced after compaction: {last_request}"
     );
-    // Callable schemas are the contract; a redundant prose name list is no longer required.
-    // 可调用 schema 才是能力合同；精简提示词后不再要求重复列出工具名的旧文案。
-    assert!(
-        last_request["tools"].as_array().unwrap().iter().any(|tool|
-            tool["function"]["name"] == kynxa_agent_core_native::models::protocol::wire_name("filesystem.read")),
-        "The already-loaded reader was lost during compaction: {last_request}"
-    );
+    // Delivery may trim an unused reader only while its real loading path remains discoverable.
+    // 交付时可裁剪暂不使用的读取声明，但必须保留真实可用的重新加载入口和已知名称。
+    let declares = |name: &str| last_request["tools"].as_array().unwrap().iter().any(|tool|
+        tool["function"]["name"] == kynxa_agent_core_native::models::protocol::wire_name(name));
+    let reader_navigation = last_request["messages"].as_array().into_iter().flatten()
+        .filter_map(|message| message["content"].as_str().and_then(|content| serde_json::from_str::<Value>(content).ok()))
+        .any(|checkpoint| checkpoint["contextCheckpoint"] == true
+            && checkpoint["capabilities"]["load"] == "tool.load"
+            && checkpoint["capabilities"]["loadableNames"].as_array().is_some_and(|names|
+                names.iter().any(|name| name == "filesystem.read")));
+    assert!(declares("filesystem.read") || declares("tool.load") && reader_navigation,
+        "A pressure-trimmed reader needs both the loader schema and explicit checkpoint navigation: {last_request}");
     // Actual read receipts, restored analysis and the final file above verify reentry and delivery.
     // 上面的真实读取回执、恢复分析及最终文件已验证接续交付，不依赖已移除的强制收尾提示文案。
     drop(requests);

@@ -13,7 +13,7 @@ use std::sync::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-pub(crate) use super::gateway_mcp::{foreground, reusable_catalog as reusable_mcp_catalog};
+pub(crate) use super::gateway_mcp::{explicit_tool_error, foreground, reusable_catalog as reusable_mcp_catalog};
 pub(crate) use super::gateway_tool_memory::rank_tool_hints;
 use super::service::ToolSession;
 use crate::gateway_contract::GatewayError;
@@ -150,8 +150,8 @@ pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch:
     }
 }
 
-/// Own the bridge for a blocking reader; dropping the caller cancels parsing and retires its monitor.
-/// 持有阻塞读取的取消桥；调用方退出时停止解析并释放监听任务，不能只在正常返回后清理。
+/// Cancel parsing and release the blocking reader's monitor when its caller drops.
+/// 调用方退出时取消解析并释放阻塞读取的监听任务。
 pub(super) struct WorkerCancellation {
     pub signal: Arc<AtomicBool>,
     monitor: tokio::task::JoinHandle<()>,
@@ -245,8 +245,8 @@ pub(crate) async fn native(
 fn cancellation_lease(
     ctx: &GatewayToolContext,
 ) -> Result<crate::service_cancellation::CancellationLease, GatewayError> {
-    // Only enter cancellation TLS on its blocking worker; a Tokio thread can run unrelated requests between awaits.
-    // 取消 TLS 仅在对应阻塞 worker 内进入；Tokio 线程在 await 之间可能执行其他请求。
+    // Set cancellation TLS only on the blocking worker; Tokio threads can switch requests at await.
+    // 取消 TLS 仅设在阻塞 worker 内；Tokio 线程在 await 时可能切换请求。
     let id = ctx.config["nativeCancellationId"]
         .as_str()
         .map(str::to_owned)
@@ -923,8 +923,8 @@ async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, Gatew
     let Some(execute) = &ctx.external_execute else {
         return Err(failure("TOOL_NOT_IMPLEMENTED", "工作关联服务未接线。", 503));
     };
-    // Binding is a persistent relationship change; this turn retains its original authorized roots.
-    // 关联只变更持久工作关系，本轮仍保持原授权根，不通过绑定偷偷扩大文件权限。
+    // Binding changes the saved relationship, not this turn's authorized roots.
+    // 关联只改变持久关系，不扩大本轮授权根目录。
     let mut normalized = args;
     normalized["path"] = json!(path);
     execute("work.folder.bind".into(), normalized).await
@@ -1191,8 +1191,8 @@ fn execution_environment(
 ) -> Result<Value, GatewayError> {
     let descriptor =
         json!({"name":tool_name,"source":if tool_name.starts_with("mcp."){"mcp"}else{"builtin"}});
-    // Only native browser/search adapters produce trusted top-level provenance; an MCP result cannot choose its host.
-    // 仅原生浏览器和搜索适配器产生可信顶层来源；外部 MCP 的结果不能自行选择执行主机。
+    // Trust provenance only from native browser/search adapters; MCP results cannot select a host.
+    // 仅信任原生浏览器和搜索来源信息；MCP 结果不能选择执行主机。
     if (tool_name.starts_with("browser.") || tool_name == "web.search")
         && result["executionEnvironment"].is_object()
     {
@@ -1383,8 +1383,8 @@ pub async fn execute(
     };
     let ctx = checked.as_ref().unwrap_or(ctx);
     let approval_arguments = args.clone();
-    // A decision cannot silently move to another canonical target or a changed configuration while waiting.
-    // 等待期间目标或配置改变时，旧决定不能静默授权新绑定；原生执行仍会再次做完整安全校验。
+    // Invalidate approval if its target or configuration changes while waiting; execution checks again.
+    // 等待时目标或配置变化使旧审批失效；执行前再次核验。
     if ctx.approved && ctx.config["approvedInvocation"]["taskApproval"].is_object() {
         let binding = task_approval_binding(tool_name, &approval_arguments, ctx, &ctx.config["approvedInvocation"]).await?;
         if binding["fingerprint"] != ctx.config["approvedInvocation"]["taskApproval"]["fingerprint"] {
@@ -1891,8 +1891,8 @@ pub fn mcp_presets(ctx: &GatewayToolContext) -> Vec<Value> {
 }
 
 pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    // Resolve installed preset files off the async runtime, then initialize/read under one native lock acquisition.
-    // 随包工具文件检查移至阻塞线程；配置初始化与读取在同一次原生加锁中完成，避免重复排队。
+    // Inspect preset files on a blocking thread; initialize and read configuration under one lock.
+    // 在阻塞线程检查预设文件；一次加锁完成配置初始化和读取。
     let preset_context = ctx.clone();
     let presets = tokio::task::spawn_blocking(move || mcp_presets(&preset_context))
         .await
@@ -1944,8 +1944,8 @@ pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
     drop(loaded);
-    // This source uses the existing official model credential, never a copied key or a settings-time search request.
-    // 内置来源复用现有官方模型凭据，不复制密钥，也不因打开设置发出搜索请求。
+    // Reuse official model credentials without copying keys or searching when settings opens.
+    // 复用官方模型凭据，不复制密钥，也不因打开设置发起搜索。
     let builtin = super::gateway_deepseek_search::source(ctx).await;
     let has_credential = builtin.is_some();
     let cooling = builtin.as_ref().and_then(|source| ctx.runtime.web_search.cooling(source));

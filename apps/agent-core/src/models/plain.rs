@@ -59,8 +59,8 @@ impl PlainStreamState {
             .iter()
             .any(|event| event["type"] == "content_snapshot");
         if is_json || has_snapshot {
-            // A small final SSE frame can retain 8 Mi UTF-16 reasoning from earlier deltas; transport the snapshot once.
-            // 小型最终 SSE 帧仍可保留先前累积的 8 Mi UTF-16 思考内容；快照只传一份，避免重复转义突破传输额度。
+            // The final frame may reference 8 Mi UTF-16 of reasoning; send its snapshot once to stay within transport limits.
+            // 最终帧可能引用已累积的 8 Mi UTF-16 思考内容；快照只传一次，避免重复转义超限。
             if result.get("result").is_none() {
                 result["result"] = self.completed()["result"].clone();
             }

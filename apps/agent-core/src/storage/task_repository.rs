@@ -122,6 +122,14 @@ fn row_task(connection: &Connection, task_id: &str) -> Result<TaskRecord> {
         ContractError::new("Task was not found. / 任务不存在。", "TASK_NOT_FOUND", 404)
     })?)
 }
+fn steering_roots(connection: &Connection, conversation_id: &str, message_id: &str) -> Result<Vec<String>> {
+    let mut query = connection.prepare_cached(
+        "SELECT t.task_id FROM tasks t JOIN task_events e ON e.task_id=t.task_id WHERE t.conversation_id=? AND t.parent_task_id IS NULL AND e.event_id=? ORDER BY t.task_id",
+    ).map_err(|_| failure())?;
+    let rows = query.query_map(params![conversation_id, format!("steer:{message_id}")], |row| row.get::<_, String>(0))
+        .map_err(|_| failure())?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|_| failure())
+}
 fn save_task(connection: &Connection, task: &mut TaskRecord) -> Result<()> {
     task.updated_at_ms = now_ms();
     connection.execute("UPDATE tasks SET state=?,version=?,execution_version=?,current_attempt_id=?,event_sequence=?,document=? WHERE task_id=?", params![state_text(&task.state),task.version,task.execution_version,task.current_attempt_id,task.event_sequence,raw(task)?,task.task_id]).map_err(|_| failure())?;
@@ -248,8 +256,8 @@ fn append(
     Ok(event)
 }
 
-/// The caller supplies GatewayConfig.data_root; no personal path or second tool/body store is created.
-/// 调用者传入 GatewayConfig.data_root；不写死个人路径，不建立第二套工具正文或向量账本。
+/// Use GatewayConfig.data_root; do not hardcode paths or duplicate tool/body stores.
+/// 使用 GatewayConfig.data_root，不写死路径或另建工具正文存储。
 #[derive(Clone)]
 pub struct TaskRepository {
     root: PathBuf,
@@ -257,8 +265,8 @@ pub struct TaskRepository {
 }
 
 impl TaskRepository {
-    /// Migration validates an existing ledger without creating schemas or changing stored records.
-    /// 迁移核验已有账本时不创建结构、不改写任务记录，未来版本与损坏库均保留原文件并失败。
+    /// Validate ledgers without creating schemas or rewriting rows; preserve corrupt or future-version files.
+    /// 核验账本不建表或改行，损坏及未来版本文件保留原样并报错。
     pub fn validate_existing(root: &Path) -> Result<()> {
         let path = root.join("Agent/tasks.sqlite");
         if !managed_files::inspect(root, &path, false, true, u64::MAX)? {
@@ -371,8 +379,8 @@ impl TaskRepository {
         row_task(&connection, task_id)
     }
 
-    /// Let the owning model name and expose its existing task without creating another task or changing execution facts.
-    /// 当前执行模型为已有任务命名并选择列表展示，不创建新任务，不改写执行事实或用量。
+    /// Let the owner name and list its existing task without changing execution or usage.
+    /// 执行模型可为已有任务命名和展示，不改执行事实或用量。
     pub fn describe_task(
         &self,
         token: &AttemptToken,
@@ -499,8 +507,8 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
-    /// Read at most two paused roots in this exact chat/work scope; two is sufficient to detect ambiguity.
-    /// 精确查询此聊天及工作内最多两个暂停根任务；两个即可识别歧义，不扫描或分页全部任务。
+    /// Read at most two paused roots in the exact chat/work scope to detect ambiguity.
+    /// 在当前聊天和工作范围内最多查两个暂停根任务，足以识别歧义。
     pub fn paused_roots_for_conversation(
         &self,
         conversation_id: &str,
@@ -523,8 +531,8 @@ impl TaskRepository {
             .collect()
     }
 
-    /// Read the chat's most recent earlier roots, newest first, so a follow-up can keep the original goal.
-    /// 读取同一聊天中更早的最近根任务（新到旧），让后续消息能沿用原目标；结果固定于本任务创建时刻。
+    /// Read earlier roots newest-first, pinned to task creation time, to resolve continuation goals.
+    /// 按新到旧读取先前根任务，固定于本任务创建时刻，用于恢复续作目标。
     pub fn previous_roots_for_conversation(
         &self,
         conversation_id: &str,
@@ -713,8 +721,8 @@ impl TaskRepository {
         })
     }
 
-    /// Expired ownership fences internal writes, not external effects; takeover preserves uncertainty.
-    /// 执行权过期仅围栏内部写入，不能证明外部副作用停止；接管必须保留结果未知。
+    /// Expired ownership blocks internal writes but cannot prove external work stopped.
+    /// 执行权过期阻止内部写入，不证明外部操作已停止，接管仍保留未知。
     pub fn start_attempt(
         &self,
         task_id: &str,
@@ -855,10 +863,10 @@ impl TaskRepository {
                 return Err(blocked("Verification must settle or explicitly acknowledge unknown outcomes before execution continues. / 须先结算或显式确认未知结果，才能继续执行。"));
             }
             if state==TaskState::Completed {
-                // An unrelated interrupted observation keeps its Unknown receipt state without becoming a write barrier.
-                // 无关只读观察中断后仍保留 Unknown；任务完成不伪造只读回执，也不把它当成写入屏障。
-                // A user-acknowledged unknown stays unknown in the ledger but no longer blocks completion.
-                // 用户确认的未知结果在账本中仍为未知，但不再阻止任务完成；完成判定仍不把它当作成功。
+                // Keep interrupted observations Unknown without making unrelated reads a write barrier.
+                // 中断观察保持 Unknown，不把无关读取当作写入屏障。
+                // Acknowledged Unknown no longer blocks completion, but never becomes success.
+                // 用户确认的 Unknown 不再阻止完成，但不改记成功。
                 if read_operations(connection,&task.task_id)?.iter().any(TaskOperation::blocks_recovery) {return Err(blocked("Unknown effects prevent verified completion. / 结果未知的副作用阻止核验完成。"));}
                 if blocking_model_reservations(connection,&task.task_id)?>0 {return Err(blocked("Unsettled model requests prevent verified completion. / 未结算模型请求阻止核验完成。"));}
                 if tree_has_unknown_mutation(connection,&task)? { return Err(blocked("Unknown delegated effects still require verification after a plan update. / 更新方案后，子任务未知副作用仍须核验。")); }
@@ -871,8 +879,8 @@ impl TaskRepository {
         })
     }
 
-    /// The executor calls this only after its I/O futures settle; durable in-flight records must settle first.
-    /// 执行者仅在I/O结束后调用；账本中仍在派发的操作和预约必须先结算，租约与原始Unknown保持不变。
+    /// Require settled I/O and dispatch records; retain leases and original Unknown outcomes.
+    /// 须先结束 I/O 并结算在途记录，保留租约及原始 Unknown 结果。
     pub fn mark_verification_quiescent(&self, token: &AttemptToken, reason: &str) -> Result<TaskRecord> {
         identifier(reason)?;
         self.write(|connection| {
@@ -906,12 +914,19 @@ impl TaskRepository {
             if replayed {return Ok(task);}
             if task.version!=expected_version {return Err(conflict("Task changed before user control. / 用户控制前任务已变化。"));}
             let resume_partial = control==TaskControl::Resume && task.state==TaskState::Partial;
-            if resume_partial && task.current_attempt_id.as_ref().is_some_and(|id| {
+            // A user-requested revision reopens only this settled root; ordinary resume stays unchanged.
+            // 用户明确要求修订时只重开已结算的原根任务，普通继续规则保持不变。
+            let revise_root = control==TaskControl::Revise && task.parent_task_id.is_none()
+                && matches!(task.state,TaskState::Completed|TaskState::Partial);
+            if control==TaskControl::Revise && !revise_root { return Err(blocked("Only settled root work can be revised. / 仅已结算的根任务可按要求修订。")); }
+            let resume_settled = resume_partial || revise_root;
+            let continuing = control==TaskControl::Resume || revise_root;
+            if resume_settled && task.current_attempt_id.as_ref().is_some_and(|id| {
                 connection.query_row("SELECT ended=0 AND lease_expires_at_ms>? FROM task_attempts WHERE attempt_id=?",params![now_ms(),id],|row|row.get::<_,bool>(0)).unwrap_or(true)
             }) { return Err(blocked("The previous partial attempt is still settling. / 上次部分完成的尝试仍在结算。")); }
-            if task.state.is_terminal() && !resume_partial {return if control==TaskControl::Cancel && task.state==TaskState::Cancelled {Ok(task)} else {Err(blocked("Ended tasks cannot be resumed. / 已结束的任务不能继续。"))};}
-            if control==TaskControl::Resume && !matches!(task.state,TaskState::Partial|TaskState::Paused|TaskState::WaitingNetwork|TaskState::WaitingConfig|TaskState::WaitingApproval|TaskState::WaitingVerification|TaskState::WaitingChildren) {return Err(blocked("Task is not waiting or paused. / 任务并非等待或暂停状态。"));}
-            if control==TaskControl::Resume && ancestors(connection,&task)?.iter().skip(1).any(|ancestor|ancestor.state.is_terminal() || ancestor.state==TaskState::Paused) {return Err(blocked("The parent remains paused or ended. / 父任务仍然暂停或已经结束。"));}
+            if task.state.is_terminal() && !resume_settled {return if control==TaskControl::Cancel && task.state==TaskState::Cancelled {Ok(task)} else {Err(blocked("Ended tasks cannot be resumed. / 已结束的任务不能继续。"))};}
+            if continuing && !revise_root && !matches!(task.state,TaskState::Partial|TaskState::Paused|TaskState::WaitingNetwork|TaskState::WaitingConfig|TaskState::WaitingApproval|TaskState::WaitingVerification|TaskState::WaitingChildren) {return Err(blocked("Task is not waiting or paused. / 任务并非等待或暂停状态。"));}
+            if continuing && ancestors(connection,&task)?.iter().skip(1).any(|ancestor|ancestor.state.is_terminal() || ancestor.state==TaskState::Paused) {return Err(blocked("The parent remains paused or ended. / 父任务仍然暂停或已经结束。"));}
             let mut ids=vec![task_id.to_owned()];
             {
                 let mut query=connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;
@@ -919,12 +934,12 @@ impl TaskRepository {
             }
             for id in ids {
                 let mut child=row_task(connection,&id)?;
-                if child.state.is_terminal() && !(resume_partial && child.task_id==task_id) {continue;}
-                if control==TaskControl::Resume && child.task_id!=task_id && (child.state!=TaskState::Paused || child.paused_by_task_id.as_deref()!=Some(task_id)) {continue;}
+                if child.state.is_terminal() && !(resume_settled && child.task_id==task_id) {continue;}
+                if continuing && child.task_id!=task_id && (child.state!=TaskState::Paused || child.paused_by_task_id.as_deref()!=Some(task_id)) {continue;}
                 if control==TaskControl::Pause && child.state==TaskState::Paused && child.task_id!=task_id {continue;}
-                child.state=match control {TaskControl::Pause=>TaskState::Paused,TaskControl::Resume=>TaskState::Queued,TaskControl::Cancel=>TaskState::Cancelled};
+                child.state=match control {TaskControl::Pause=>TaskState::Paused,TaskControl::Resume|TaskControl::Revise=>TaskState::Queued,TaskControl::Cancel=>TaskState::Cancelled};
                 child.paused_by_task_id=if control==TaskControl::Pause {Some(task_id.to_owned())} else {None};
-                child.version+=1;child.stop_reason=Some(match control{TaskControl::Pause=>"user-paused",TaskControl::Resume=>"user-resumed",TaskControl::Cancel=>"user-cancelled"}.into());
+                child.version+=1;child.stop_reason=Some(match control{TaskControl::Pause=>"user-paused",TaskControl::Resume=>"user-resumed",TaskControl::Revise=>"user-requested-revision",TaskControl::Cancel=>"user-cancelled"}.into());
                 let payload=json!({"state":child.state,"reason":child.stop_reason});
                 append(connection,&mut child,&event_id,"task.control",&payload)?;
             }
@@ -932,8 +947,8 @@ impl TaskRepository {
         })
     }
 
-    /// Parent acceptance checks the settled child and writes its version-pinned decision in one transaction.
-    /// 父验收在同一事务核对子任务已结算、当前版本与产物，再写入绑定版本的正式接纳结论。
+    /// Verify child settlement, version and outputs, then save parent acceptance in one transaction.
+    /// 同一事务核对子任务结算、版本和产物，再保存父级验收。
     pub fn accept_child_output(&self, parent_token: &AttemptToken, child_id: &str, expected_version: u64,
         reason: &str, output_ref: &Value) -> Result<TaskRecord> {
         identifier(child_id)?;
@@ -966,8 +981,8 @@ impl TaskRepository {
         })
     }
 
-    /// Only the live direct parent may return the exact current child output for revision.
-    /// 仅有效直属父执行者可按当前产物版本退回子任务；这不是允许普通Resume复活已完成任务。
+    /// Only the active direct parent may return current child output for revision; ordinary resume cannot.
+    /// 仅活动直属父任务可退回当前子产物修订，普通恢复不具备此权限。
     pub fn request_child_revision(
         &self,
         parent_token: &AttemptToken,
@@ -1019,8 +1034,8 @@ impl TaskRepository {
         })
     }
 
-    /// Record the user's confirmation that listed effects stay unknown; they are never settled or replayed.
-    /// 记录用户确认所列副作用结果保持未知；操作不会改记成功，也不会被重放，只是不再阻塞恢复。
+    /// Record acknowledged unknown effects without marking success or replaying them; unblock recovery only.
+    /// 记录用户确认的未知操作，不改记成功或重放，仅解除恢复阻塞。
     pub fn acknowledge_unknown_operations(
         &self,
         root_task_id: &str,
@@ -1030,8 +1045,8 @@ impl TaskRepository {
         self.acknowledge_unknown_operation_selection(root_task_id, expected_version, operation_ids, None)
     }
 
-    /// Task-qualified identities prevent two delegated calls with the same local ID from being confused.
-    /// 携带任务身份，避免不同子任务使用相同局部操作ID时确认了错误对象；旧裸ID仅兼容无歧义选择。
+    /// Qualify operation IDs by task; accept legacy bare IDs only when unambiguous.
+    /// 操作 ID 带任务身份，旧裸 ID 仅在无歧义时兼容。
     pub fn acknowledge_unknown_task_operations(
         &self,
         root_task_id: &str,
@@ -1115,8 +1130,8 @@ impl TaskRepository {
             Ok(root)
         })
     }
-    /// Accept explicitly listed unknown model costs without inventing dispatch or billed usage.
-    /// 显式确认指定的未知模型成本，不捏造是否派发或已计费量；预约仍保留，真实回执可随后核验。
+    /// Acknowledge listed unknown costs without inventing dispatch/usage; retain reservations for later proof.
+    /// 确认指定未知成本，不推测派发或用量，保留预约供后续核验。
     pub fn acknowledge_unknown_model_reservations(
         &self,
         root_task_id: &str,
@@ -1186,8 +1201,8 @@ impl TaskRepository {
             append(connection, &mut task, event_id, kind, payload)
         })
     }
-    /// User steering references formal messages; it never grants new tool scope or replaces the original goal.
-    /// 用户插话引用正式消息，不授予新工具范围，也不替换原始目标；运行中登记不撤销执行尝试。
+    /// Steering uses formal messages without changing scope, goal or the active attempt.
+    /// 插话引用正式消息，不改变范围、原目标或活动尝试。
     pub fn record_user_steering(
         &self,
         task_id: &str,
@@ -1212,14 +1227,21 @@ impl TaskRepository {
                 if event.payload != payload { return Err(conflict("Steering identity was reused. / 插话身份不能复用于其他内容。")); }
                 return Ok(task);
             }
-            if task.version != expected_version { return Err(conflict("Task changed before steering. / 保存插话前任务已变化。")); }
+            // Preserve legacy receipts, but never bind the same chat message to another root.
+            // 保留旧回执；同一聊天的同条消息不得新增绑定到另一根任务。
+            if !steering_roots(connection, &task.scope.conversation_id, message_id)?.is_empty() {
+                return Err(ContractError::new("Steering is already bound to another task. / 这条引导已关联其他任务，请重连原任务。", "TASK_STEERING_TARGET_CONFLICT", 409));
+            }
+            if task.version != expected_version {
+                return Err(ContractError::new("Task changed before steering. / 保存插话前任务已变化。", "TASK_VERSION_CONFLICT", 409));
+            }
             if task.parent_task_id.is_some() || task.state.is_terminal() { return Err(blocked("Steering requires an unfinished root task. / 插话须关联未结束的根任务。")); }
             task.version += 1;
             if task.state == TaskState::Paused { task.stop_reason = Some(event_id.clone()); }
             append(connection, &mut task, &event_id, "task.user-steering", &payload)?;
             if action == "update" && task.state == TaskState::Paused {
-                // A changed plan cannot silently restart old delegates; their effects and receipts remain recorded.
-                // 更新方案不静默重启旧委派；旧操作与回执仍保留，未知副作用继续阻止未经核验的修改。
+                // Plan changes retain old delegate receipts and cannot silently restart unknown effects.
+                // 方案变更保留旧委派回执，不能静默重启未知操作。
                 let mut query = connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;
                 let ids = query.query_map([task_id], |row|row.get::<_,String>(0)).map_err(|_|failure())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|_|failure())?;
                 drop(query);
@@ -1236,6 +1258,14 @@ impl TaskRepository {
             }
             Ok(task)
         })
+    }
+    /// Read immutable steering ownership before changing formal messages.
+    /// 修改正式消息前查询原有引导归属，事务写入仍会再次核验。
+    pub fn user_steering_roots(&self, conversation_id: &str, message_id: &str) -> Result<Vec<String>> {
+        identifier(conversation_id)?;
+        super::identity(&json!(message_id))?;
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
+        steering_roots(&connection, conversation_id, message_id)
     }
     pub fn user_steering(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
@@ -1281,8 +1311,8 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
-    /// Read a committed display suffix after the formal message's saved stream watermark.
-    /// 从正式消息已保存水位之后回读已提交展示增量；不结算模型、不复做工具，也不改变正式上下文。
+    /// Read committed display deltas after the message watermark without model settlement or tool replay.
+    /// 从消息水位后读取已提交展示增量，不结算模型或重放工具。
     pub fn stream_projection(&self, task_id: &str, request_id: &str, reply_id: &str, after_stream_sequence: u64) -> Result<Value> {
         identifier(task_id)?; identifier(request_id)?; identifier(reply_id)?;
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
@@ -1298,8 +1328,8 @@ impl TaskRepository {
         Ok(projection.finish())
     }
 
-    /// Page original committed display events by the task keyset, without rebuilding or retaining the old prefix.
-    /// 按任务键集分页读原始已提交展示事件；不在仓储重建或累计整段旧前缀，由调用端逐页核对和保存水位。
+    /// Page committed events by task keyset; callers verify pages and persist watermarks.
+    /// 按任务键集分页读取已提交事件，调用方逐页核验并保存水位。
     pub fn stream_projection_page(&self, task_id: &str, request_id: &str, reply_id: &str,
         after_task_sequence: u64, through_task_sequence: Option<u64>, maximum_events: usize,
         maximum_bytes: usize) -> Result<Value> {
@@ -1329,8 +1359,8 @@ impl TaskRepository {
             let owned = event.payload["conversationId"] == task.scope.conversation_id
                 && event.payload["requestId"] == request_id && event.payload["replyMessageId"] == reply_id;
             let size = if owned {raw(&event)?.len()} else {0};
-            // A valid event is indivisible; one oversized event is bounded by the existing 64-KiB record contract.
-            // 有效事件不可拆分；单条大于页预算时单独返回，仍受既有64KiB记录合同约束，不截UTF8或分段元数据。
+            // Return oversized events intact within the 64-KiB record cap; do not split UTF-8 or metadata.
+            // 大事件在 64 KiB 记录限额内完整返回，不拆 UTF-8 或元数据。
             if owned && !events.is_empty() && bytes.saturating_add(size)>byte_limit {has_more=true;break;}
             visited+=1; cursor=sequence;
             if owned {
@@ -1347,8 +1377,8 @@ impl TaskRepository {
             "evidence":"committed-display-only; no execution or completion proof"}))
     }
 
-    /// Recover a reply shadow from bounded committed pages; publish only after every prefix/overlap check succeeds.
-    /// 使用有界已提交页面恢复回复影子副本；全部前缀及重叠核对通过后才返回可发布正文，取消或冲突不推进原水位。
+    /// Publish restored pages only after prefix/overlap checks; cancellation or conflict preserves the watermark.
+    /// 分页恢复须通过前缀及重叠核验，取消或冲突不推进水位。
     pub fn recover_stream(&self, task_id:&str, request_id:&str, reply_id:&str, after_stream_sequence:u64,
         baseline:Value, cancelled:impl FnMut()->bool) -> Result<Value> {
         self.recover_stream_with_limits(task_id,request_id,reply_id,after_stream_sequence,baseline,256,1024*1024,cancelled)
@@ -1388,8 +1418,8 @@ impl TaskRepository {
         find_operation(&connection, task_id, operation_id)
     }
 
-    /// Read the latest event of one kind, such as the settled task.final outcome, without paging the stream.
-    /// 读取某一类型的最新事件（例如已结算的 task.final 结果），不分页读取整段事件流。
+    /// Read the latest event of one kind without paging the full stream.
+    /// 直接读取指定类型的最新事件，不分页遍历整段流。
     pub fn latest_event(&self, task_id: &str, kind: &str) -> Result<Option<TaskEvent>> {
         identifier(kind)?;
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
@@ -1406,8 +1436,8 @@ impl TaskRepository {
             .transpose()
     }
 
-    /// Read only native receipt/dispatch evidence, without replaying the task's token stream.
-    /// 仅查询原生回执与派发证据，不为核验重放整段任务 token 事件。
+    /// Read dispatch/receipt evidence without replaying token events.
+    /// 仅查派发及回执证据，不重放 token 事件。
     pub fn recovery_receipts(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         row_task(&connection, task_id)?;
@@ -1480,8 +1510,8 @@ impl TaskRepository {
             append(connection,&mut task,&uuid::Uuid::new_v4().to_string(),"task.operation.result",&json!({"operationId":operation_id,"state":operation.state,"resultReference":operation.result_reference,"verificationReference":operation.verification_reference}))?;Ok(operation)
         })
     }
-    /// Extend executor operating segments monotonically; token budgets and ancestors remain unchanged.
-    /// 单调扩展执行分段额度并记录审计；不修改token上限或祖先预算，是否扩展由调用方依据原用户授权决定。
+    /// Extend authorized operating segments monotonically; audit changes and preserve token/ancestor caps.
+    /// 按授权单调扩展执行段并记审计，保留 token 及祖先上限。
     pub fn extend_operational_budget(
         &self,
         token: &AttemptToken,
@@ -1494,8 +1524,8 @@ impl TaskRepository {
             let mut task = verify_fence(connection, token, false)?;
             let previous = task.budget.clone();
             task.budget.max_model_requests = task.budget.max_model_requests.max(u64::from(min_model_requests));
-            // None already means no execution-time cap; introducing one would shrink the existing grant.
-            // None已表示没有执行时长上限，不能通过“扩展”反而新增更小的限制。
+            // None means unlimited execution time; do not replace it with a smaller cap.
+            // None 已表示无执行时长上限，不能改成更小限额。
             task.budget.max_execution_ms = task.budget.max_execution_ms.map(|limit|limit.max(min_execution_ms));
             if task.budget == previous { return Ok(task); }
             task.version += 1;
@@ -1506,8 +1536,8 @@ impl TaskRepository {
         })
     }
 
-    /// Persist an attempt's cumulative effective wall time without counting parallel descendants twice.
-    /// 保存本次尝试累计有效墙钟；按高水位只加新增部分，不把并行后代耗时相加到根任务。
+    /// Add only new effective wall time above the high-water mark, excluding parallel child totals.
+    /// 仅累计高水位以上新增有效墙钟，不叠加并行子任务耗时。
     pub fn record_active_duration(&self, token: &AttemptToken, cumulative_attempt_ms: u64) -> Result<TaskRecord> {
         self.write(|connection| {
             let mut task = verify_fence(connection, token, true)?;
@@ -1526,8 +1556,8 @@ impl TaskRepository {
         })
     }
 
-    /// Meter actual attempts exactly once and include descendant failures, retries and compactions.
-    /// 真实调用按计量 ID 只结算一次；后代失败、重试、压缩纳入祖先总账，未知 token 单独计数。
+    /// Settle each usage ID once, including child failures/retries/compactions; track unknown tokens separately.
+    /// 每个计量 ID 仅结算一次，含子任务失败、重试及压缩；未知 token 单独统计。
     pub fn record_usage(
         &self,
         token: &AttemptToken,
@@ -1573,8 +1603,8 @@ impl TaskRepository {
             row_task(connection, &token.task_id)
         })
     }
-    /// Admission counts both paid/dispatched attempts and outstanding descendant reservations.
-    /// 准入同时核对实际派发次数与后代未兑现预约；重启或拆分不能重置父预算。
+    /// Count dispatched requests and outstanding child reservations; recovery cannot reset the parent budget.
+    /// 同时计入已派发请求与子任务未兑现预约，恢复不重置父预算。
     pub fn reserve_model_request(
         &self,
         token: &AttemptToken,
@@ -1609,8 +1639,8 @@ impl TaskRepository {
     ) -> Result<ModelRequestReservation> {
         self.settle_reservation(token, reservation_id, dispatched, usage, provider_usage, None)
     }
-    /// Called after model I/O has ended without a durable dispatch/cost receipt; no usage is invented.
-    /// 仅在模型I/O已结束但派发和成本回执无法持久化后调用；保持未知，不推测派发或计费用量。
+    /// After model I/O ends without a durable receipt, retain unknown dispatch and cost.
+    /// 模型 I/O 结束但回执未落盘时，派发及成本保持未知。
     pub fn mark_model_request_unknown(&self, token: &AttemptToken, reservation_id: &str, reason: &str) -> Result<ModelRequestReservation> {
         identifier(reservation_id)?;
         identifier(reason)?;
@@ -1694,8 +1724,8 @@ impl TaskRepository {
                 return Err(invalid("Provider usage must match its actual request receipt. / 供应商用量必须匹配本次真实回执。"));
             }
         }
-        // Older settlements keep their original fingerprint; optional provider facts are part of new receipt identity.
-        // 旧结算沿用原指纹；新增供应商事实属于新回执身份，不能用同一预约覆盖不同缓存计量。
+        // Keep legacy settlement fingerprints; new provider facts form part of new receipt IDs.
+        // 旧结算沿用原指纹，新供应商事实计入新回执身份。
         let digest = fingerprint(&if provider_usage.is_some() { json!([dispatched, delta, provider_usage]) } else { json!([dispatched, delta]) })?;
         self.write(|connection| {
             let task=verify_fence(connection,token,true)?;
@@ -1711,8 +1741,8 @@ impl TaskRepository {
             Ok(reservation)
         })
     }
-    /// Project each reservation once; ancestor task totals already include children and must not be summed again.
-    /// 每个预约仅投影一次；父任务用量已包含子任务，不能再次累加父子总数。
+    /// Count each reservation once; parent totals already include descendants.
+    /// 每个预约只统计一次，父任务总量已包含后代。
     pub fn usage_summary(&self, conversation_id: Option<&str>, project_id: Option<&str>) -> Result<Value> {
         if conversation_id.is_none() && project_id.is_none() {
             return Err(invalid("Usage needs an explicit chat or work scope. / 用量须限定聊天或工作范围。"));
@@ -1763,8 +1793,8 @@ impl TaskRepository {
                 else { unknown = unknown.saturating_add(1); }
             } else { unknown = unknown.saturating_add(1); }
             if let Some(provider) = &reservation.provider_usage {
-                // Client prefix estimates are diagnostic coverage, never provider cache-hit receipts.
-                // 客户端前缀估算只统计诊断覆盖，不能混成供应商实际缓存命中回执。
+                // Treat client prefix estimates as diagnostics, not actual provider cache hits.
+                // 客户端前缀估算仅作诊断，不算供应商实际缓存命中。
                 if let Some(prefix) = provider.client_metrics.as_ref()
                     .and_then(|metrics| metrics.cache_policy.as_ref()).and_then(|policy| policy.get("prefix"))
                     .filter(|prefix| prefix["schemaVersion"] == 1 && prefix["scope"] == "main-request")
@@ -1886,8 +1916,8 @@ impl TaskRepository {
         document.map(decode).transpose()
     }
 
-    /// Read one child's latest parent acceptance decision without projecting unrelated task events.
-    /// 直接读取该子任务最新父级核对结论，不扫描或投影其他子任务的完整事件历史。
+    /// Read the child's latest parent acceptance without scanning unrelated event history.
+    /// 直接读取子任务最新父级验收，不扫描无关事件历史。
     pub fn latest_child_review(&self, parent_id: &str, child_id: &str) -> Result<Option<TaskEvent>> {
         identifier(parent_id)?; identifier(child_id)?;
         let connection=sqlite_connections::acquire(&self.root,&self.path,30_000)?;
@@ -1895,8 +1925,8 @@ impl TaskRepository {
         document.map(decode).transpose()
     }
 
-    /// Recover revision instructions from the formal event instead of an in-memory child input overlay.
-    /// 从正式退回事件恢复修订要求，不依赖只存在内存中的子任务输入覆盖层。
+    /// Restore revision instructions from formal events, not in-memory overlays.
+    /// 从正式事件恢复修订要求，不依赖内存覆盖层。
     pub fn latest_child_return(&self, child_id: &str) -> Result<Option<TaskEvent>> {
         self.latest_event(child_id, "task.child.review-return")
     }

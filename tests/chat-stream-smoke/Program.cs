@@ -222,8 +222,8 @@ var resumedAnchorEvents = await Read(Frame(Event("started") with { ReplyMessageI
         AssistantSegments = [anchoredFinal], ToolStreamProtocol = 3 }));
 Check(resumedAnchorEvents[2].Content == "接续已有资料" && resumedAnchorEvents[^1].Content == anchoredFinal.Content,
     "Resumed steering failed to route its snapshot and final reply to the current anchor.");
-// The continuation marker can be finalized after the completed round; it does not create another stream event.
-// 续写标记可在已完成轮次之后于终态确定；不重复发送已完成段，也不改变分段身份。
+// Finalize continuation after round completion without emitting another event.
+// 轮次结束后可确定续写标记，不重发完成段或改变分段身份。
 var continuedFirst = firstCompleted with { IsAnswerContinuation = true };
 var continuedTerminal = finalSegmentEvent with { Content = firstCompleted.Content + "\n\n" + finalSegment.Content,
     AssistantSegments = [continuedFirst, finalSegment] };
@@ -243,8 +243,8 @@ await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(f
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(continuedTerminal with
     { AssistantSegments = [continuedFirst, finalSegment with { IsAnswerContinuation = true }] })),
     "The final phase was incorrectly accepted as another continuation");
-// A completed round can be classified after task verification, with idempotent replays and a stable public body.
-// 已完成轮次可在任务核验后补定阶段；重复关闭事件幂等，公开正文和摘要保持不变。
+// Classify completed rounds after verification; replays preserve body and summary.
+// 核验后可补定已完成轮次的阶段；重复关闭幂等，正文和摘要不变。
 var promotedFinal = firstCompleted with { Phase = "final_answer", ReasoningDurationMs = 1200 };
 var promotedTerminal = Event("completed", content: promotedFinal.Content) with
 { AssistantSegments = [promotedFinal], ToolStreamProtocol = 3 };

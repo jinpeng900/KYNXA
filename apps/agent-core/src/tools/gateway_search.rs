@@ -33,8 +33,8 @@ struct SearchWaiter(Arc<PendingSearch>);
 
 impl Drop for SearchWaiter {
     fn drop(&mut self) {
-        // A cancelled caller leaves the shared read alive for other waiters; the last waiter cancels its owned network task.
-        // 单个调用取消不影响其他等待者；最后一个等待者离开才取消该自有网络任务。
+        // Keep shared reads for remaining waiters; the last waiter cancels the network task.
+        // 仍有等待者就保留共享读取；最后一位离开时取消网络任务。
         if self.0.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
             let _ = self.0.cancel.send(true);
         }
@@ -244,8 +244,8 @@ fn tool_failure(value: &Value) -> Option<GatewayError> {
         && !has_error(value) && !has_error(&value["structuredContent"]) {
         return None;
     }
-    // MCP reports a timed-out or dropped call as an unknown-result value; a read-only search can safely retry it.
-    // MCP 把超时或断线的调用包装成“结果未知”的返回值；只读搜索可以安全重试，不能当作不可重试的工具失败。
+    // MCP timeouts and disconnects return unknown results; read-only search may safely retry.
+    // MCP 超时或断线返回未知结果；只读搜索可安全重试。
     if value["code"] == "MCP_EXECUTION_UNKNOWN"
         && matches!(value["causeCode"].as_str(), Some("MCP_TIMEOUT" | "MCP_CONNECTION_LOST" | "MCP_CONNECTION_CLOSED"))
     {
@@ -285,8 +285,8 @@ fn cacheable(value: &Value) -> bool {
             Ok(())
         }
     }
-    // Measure the serialized bound without allocating another full remote result string.
-    // 流式核算序列化上界，不为判断能否缓存再分配一份完整远端结果字符串。
+    // Measure serialized size without copying the full result.
+    // 计算序列化大小，不复制完整结果。
     serde_json::to_writer(LimitedSize(0), value).is_ok()
 }
 
@@ -507,8 +507,8 @@ async fn search_sources_for(selected: &str, ctx: &GatewayToolContext) -> Vec<Val
                 .then_some(server)
         })
         .collect::<Vec<_>>();
-    // A configured official DeepSeek connection adds its hosted search last, used only after earlier sources fail or cool down.
-    // 已配置官方 DeepSeek 连接时将其托管搜索排在最后，只有前面的来源失败、限流或额度耗尽才会使用。
+    // Use configured official DeepSeek search last, after other sources fail, cool down or exhaust quota.
+    // 官方 DeepSeek 搜索放在最后，仅当前序来源失败、冷却或额度耗尽时使用。
     if selected == "auto" || selected == super::gateway_deepseek_search::SOURCE_ID {
         if let Some(source) = super::gateway_deepseek_search::source(ctx).await {
             servers.truncate(MAX_SEARCH_SOURCES - 1);

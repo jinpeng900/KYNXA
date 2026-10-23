@@ -126,8 +126,8 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
     if !timeout.is_finite() || timeout.fract() != 0.0 || !(1000.0..=120000.0).contains(&timeout) {
         return Err(invalid());
     }
-    // Per-call execution deadline, separate from startup; long renders or builds can raise it up to six hours.
-    // 单次调用的执行期限，与启动期限分开；长时间渲染或构建可放宽到六小时，缺省时使用网关默认的 10 分钟。
+    // Execution and startup deadlines are separate; calls default to 10 minutes and allow up to six hours.
+    // 执行期限与启动期限分开；单次调用默认 10 分钟，最长六小时。
     let execution_timeout = match server.get("timeoutMs").filter(|value| !value.is_null()) {
         None => None,
         Some(value) => Some(

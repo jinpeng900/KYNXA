@@ -322,6 +322,22 @@ fn public_message(mut message: Value) -> Value {
     }
     message
 }
+
+/// Omit private history at the raw field boundary without decoding its entire transcript twice.
+/// 在原始字段边界移除私有历史，避免重复解码整份模型转录。
+fn public_message_raw(raw: &str) -> Result<String, ContractError> {
+    if let Ok(mut fields) = serde_json::from_str::<std::collections::BTreeMap<String, &serde_json::value::RawValue>>(raw) {
+        fields.remove("ModelTranscript");
+        return Ok(format!("{{{}}}", fields.iter().map(|(key, value)|
+            format!("{}:{}", json!(key), value.get())).collect::<Vec<_>>().join(",")));
+    }
+    // Retain scalar-repair compatibility for legacy keys containing isolated UTF-16 escapes.
+    // 旧键名含孤立 UTF-16 转义时保留原有标量修复兼容。
+    let value = serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
+        .map_err(|_| error("历史消息损坏。", "CORRUPT_CONVERSATION", 500))?;
+    Ok(encode_preserving(&public_message(value), &[raw]))
+}
+
 pub(crate) fn read_messages_at(root: &Path, location: &Value) -> Result<Vec<Value>, ContractError> {
     let mut read = read_raw_snapshot(root, location)?;
     let messages = read
@@ -445,8 +461,8 @@ pub fn read_messages(root: &Path, id: &str, public: bool) -> Result<Vec<Value>, 
     })
 }
 
-/// Check only the identities actually used by a long read; unrelated catalog edits do not invalidate it.
-/// 长读取结束只复核实际涉及的聊天归属，无关目录编辑不使它失效；移动、归档、删除仍会拒绝旧结果。
+/// Recheck used chat ownership after long reads; reject moves, archives or deletion, not unrelated edits.
+/// 长读取后重核所用聊天归属；移动、归档或删除拒绝旧结果，无关修改不影响。
 pub(crate) fn verify_catalog_sources(
     before: &Value,
     after: &Value,
@@ -660,8 +676,8 @@ pub(crate) fn commit_catalog(
     Ok(receipt)
 }
 
-/// Both the byte-preserving HTTP route and internal writers reconcile against the current formal catalog.
-/// 保留原始字节的 HTTP 路径与内部写入都须对照正式目录校正挂载版本。
+/// Reconcile mount versions with the catalog for both HTTP and internal writes.
+/// HTTP 与内部写入均按正式目录校正挂载版本。
 fn preserve_mount_versions(next: &mut Value, previous: &Value) -> Result<(), ContractError> {
     for project in next["Projects"].as_array_mut().unwrap() {
         if let Some(old) = previous["Projects"].as_array().into_iter().flatten()
@@ -672,8 +688,8 @@ fn preserve_mount_versions(next: &mut Value, previous: &Value) -> Result<(), Con
     Ok(())
 }
 
-/// Re-encode only changed fields while retaining exact raw strings from their original object positions.
-/// 仅重新编码发生变化的字段；原对象同位置的字符串继续保留精确 JSON 编码和孤立 UTF-16 单元。
+/// Re-encode changed fields only; preserve original JSON strings and isolated UTF-16 units.
+/// 仅重编码变化字段，保留原 JSON 字符串及孤立 UTF-16 单元。
 pub fn encode_preserving(value: &Value, originals: &[&str]) -> String {
     use serde_json::value::RawValue;
     for raw in originals {
@@ -923,8 +939,8 @@ fn initialize(root: &Path) -> Result<(Value, Option<String>), ContractError> {
     Ok((document, hash))
 }
 
-/// Cached values are derived from a checked file identity and change stamp, never a writable catalog authority.
-/// 缓存仅来自已核验文件身份与变更时间，不成为独立可写目录；外部替换和原地修改会重新读取校验。
+/// Cache checked file identities/change stamps, not catalog authority; reread changed files.
+/// 缓存文件身份及变更时间，不缓存目录权威；文件变化后重读。
 pub(crate) fn read_catalog_snapshot(root: &Path) -> Result<(Option<Value>, Option<String>), ContractError> {
     use std::io::Read;
     let path = root.join("catalog.json");
@@ -1198,8 +1214,8 @@ pub(crate) fn with_catalog<T>(
     operation(&document, hash.as_deref())
 }
 
-/// Reuse only completed preparation for unchanged layout inputs, never scope or filesystem authorization.
-/// 仅复用布局输入未变时已完成的准备工作，范围与文件系统授权每次重新核对。
+/// Reuse completed layout preparation only; recheck scope and file permissions each time.
+/// 仅复用未变布局的已完成准备，每次重核范围和文件权限。
 fn prepared_conversation_catalog(
     root: &Path,
     conversation_id: &str,
@@ -1419,8 +1435,8 @@ fn upsert_message_internal(
         read.append_message(&raw_message, unchanged)
     })?;
     if input["Role"] == "user" {
-        // This cheap preflight grants no scope authority; the helper rereads the saved source and actual catalog.
-        // 便宜预筛不授予范围权限；正式 helper 重新核对已保存用户原话及真实目录，普通消息无需再读取历史。
+        // Preflight grants no authority; final checks reread the saved user source and catalog.
+        // 预筛不授予权限，最终仍重核已保存用户原文和目录。
         let instruction = super::memory::apply(
             "storage.memory.instruction",
             &json!({"message":input["Content"],"hasProject":true}),
@@ -1431,8 +1447,8 @@ fn upsert_message_internal(
                 id,
                 input["Id"].as_str().unwrap_or(""),
             );
-            // The user message is already durable; a separate memory failure must not turn it into a failed send.
-            // 用户消息已正式保存；独立记忆失败不能把这次发送误报成未保存，也不能声称记忆已经生效。
+            // Memory failure cannot undo a saved message or falsely claim memory took effect.
+            // 记忆失败不影响已保存消息，也不能声称记忆已生效。
             result["memoryInstruction"] = match receipt {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -1511,8 +1527,8 @@ fn normalize_environment(value: Option<&Value>) -> ContractResult {
     .map_err(|_| error("工具执行环境格式无效。", "INVALID_TOOL_RESULT", 400))
 }
 
-/// Canonical archives share the owning catalog lock, scope guard and create-only transaction.
-/// 正式工具归档共用所属目录锁、作用域检查和仅创建事务；模型私有续传不会进入公开投影。
+/// Archives use the owner lock, scope checks and create-only writes; private continuations stay private.
+/// 归档沿用所属目录锁、范围校验及仅创建写入，私有续传不公开。
 pub fn save_tool_result(
     root: &Path,
     conversation_id: &str,
@@ -1624,8 +1640,8 @@ pub fn load_private_tool_result(root: &Path, conversation_id: &str, id: &str) ->
     })
 }
 
-/// Recovery may locate a unique original receipt after dispatch, never infer execution from a working file.
-/// 恢复仅查找派发后的唯一原始回执，不通过工作文件的现状推断历史执行成功。
+/// Recover from unique original receipts after dispatch, not current workspace files.
+/// 根据派发后唯一原回执恢复，不凭工作文件现状推断执行。
 pub(crate) fn find_recovery_tool_result(
     root: &Path,
     conversation_id: &str,
@@ -1749,7 +1765,7 @@ pub fn read_tool_result(
         let start = page["offset"].as_u64().unwrap() as usize;
         let end = page["end"].as_u64().unwrap() as usize;
         let mut value = json!({"id":document["id"],"text":String::from_utf16_lossy(&units[start..end]),"offset":start,"nextOffset":end,
-            "totalCharacters":page["totalCharacters"],"truncated":page["truncated"],"resultRef":reference,
+            "totalCharacters":page["totalCharacters"],"hasMore":page["hasMore"],"truncated":page["truncated"],"resultRef":reference,
             "projection":"public","sourceTool":document["toolName"],"offsetUnit":"utf16-code-units","resultRefBasis":"canonical-archive"});
         if !document["executionEnvironment"].is_null() {
             value["executionEnvironment"] = document["executionEnvironment"].clone();
@@ -1785,8 +1801,8 @@ pub fn model_media(
     )
 }
 
-/// A semantic checkpoint commits only against the current formal turn and tool-receipt projection.
-/// 语义检查点仅在当前正式轮次与工具回执投影匹配时提交，模型不能自行批准来源新鲜度。
+/// Commit semantic checkpoints only when formal turn and receipt versions match.
+/// 正式轮次及回执版本匹配时才提交语义检查点。
 pub fn save_model_summary(
     root: &Path,
     conversation_id: &str,
@@ -1902,12 +1918,7 @@ pub fn handle_text(
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|raw| {
-                    let raw = raw.as_str().unwrap();
-                    let value = serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
-                        .map_err(|_| error("历史消息损坏。", "CORRUPT_CONVERSATION", 500))?;
-                    Ok(encode_preserving(&public_message(value), &[raw]))
-                })
+                .map(|raw| public_message_raw(raw.as_str().unwrap()))
                 .collect::<Result<Vec<_>, ContractError>>()?;
             page.as_object_mut().unwrap().remove("rawMessages");
             page["conversationId"] = location["Id"].clone();
@@ -2179,6 +2190,14 @@ mod gateway_tests {
         .unwrap()
         .1;
         assert!(page.contains("\\ud800"));
+        let original = r#"{"Content":"正文\ud800","Reasoning":"公开推理\ud801","AssistantSegments":[{"content":"分段\ud802"}],"ToolActivities":[{"arguments":{"text":"参数\ud803"},"result":"完整回执\ud804"}],"ModelTranscript":{"rounds":[{"text":"PRIVATE_HISTORY_MUST_NOT_LEAK"}]}}"#;
+        let projected = public_message_raw(original).unwrap();
+        assert!(!projected.contains("ModelTranscript") && !projected.contains("PRIVATE_HISTORY_MUST_NOT_LEAK"));
+        for preserved in ["正文\\ud800", "公开推理\\ud801", "分段\\ud802", "参数\\ud803", "完整回执\\ud804"] {
+            assert!(projected.contains(preserved), "public history changed raw UTF-16 content: {preserved}");
+        }
+        assert_eq!(serde_json::from_str::<Value>(&raw_json::scalar_projection(&projected)).unwrap(),
+            public_message(serde_json::from_str::<Value>(&raw_json::scalar_projection(original)).unwrap()));
         assert!(upsert_message(&root,&chat,&json!({"Id":new_id(),"Role":"assistant","Content":"bad","ModelTranscript":{"version":1}})).is_err());
         assert_eq!(read_model_messages(&root, &chat).unwrap().len(), 1);
     }

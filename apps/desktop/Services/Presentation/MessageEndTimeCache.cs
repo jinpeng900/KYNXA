@@ -67,8 +67,8 @@ public sealed class MessageEndTimeCache
                 await JsonSerializer.SerializeAsync(output, stored, JsonOptions).ConfigureAwait(false);
                 await output.FlushAsync().ConfigureAwait(false);
             }
-            // A unique sibling and one root lock prevent partial reads and concurrent first-observation loss.
-            // 同目录唯一临时文件与根级写锁避免读取半条记录，并保留并发写入中的首次观测。
+            // Use a unique sibling file and root lock to preserve atomic first observations.
+            // 用同目录唯一临时文件和根级写锁，避免半条读取和首次观测丢失。
             File.Move(temporaryPath, path, overwrite: true);
             temporaryPath = null;
             return true;
@@ -101,8 +101,8 @@ public sealed class MessageEndTimeCache
                 return await RemoveFileAsync(FilePath(conversationId, singleMessageId), conversationId, singleMessageId).ConfigureAwait(false);
 
             bool removed = true;
-            // Only validated GUID-named message files belong to this cache; never recurse or delete other files.
-            // 缓存仅删除已验证的消息 GUID 文件，不递归删除目录或处理其他文件。
+            // Delete only validated GUID message files; never recurse or touch unrelated files.
+            // 只删除已验证的消息 GUID 文件，不递归或处理其他文件。
             foreach (string path in Directory.EnumerateFiles(folder, "*.json", SearchOption.TopDirectoryOnly))
             {
                 if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid identifier) || identifier == Guid.Empty)
@@ -184,8 +184,8 @@ public sealed class MessageEndTimeCache
             }
             catch (IOException) when (elapsed.Elapsed < LockTimeout)
             {
-                // Lock contention yields the thread and expires; it must never stall the conversation indefinitely.
-                // 写锁竞争通过异步等待让出线程，并在超时后结束，不能无限阻塞聊天。
+                // Yield while waiting for the write lock, with a bounded timeout.
+                // 异步等待写锁并设置超时，避免持续阻塞聊天。
                 await Task.Delay(TimeSpan.FromMilliseconds(40)).ConfigureAwait(false);
             }
             catch (Exception error) when (IsCacheFailure(error))

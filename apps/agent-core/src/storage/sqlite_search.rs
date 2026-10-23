@@ -405,8 +405,8 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
     )
 }
 
-/// Query contexts retain bounded identifiers, never body text or open transactions across SDK awaits.
-/// 查询上下文只保留有界标识；等待 SDK 时不保留正文、数据库游标或活动事务。
+/// Keep bounded query IDs only; hold no text, cursors or transactions across awaits.
+/// 查询上下文仅保留有界标识，异步等待不持正文、游标或事务。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.index.queryBegin" {
         return begin(arguments);

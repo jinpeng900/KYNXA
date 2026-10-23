@@ -1,5 +1,5 @@
-//! End-to-end model/tool loop; semantic decisions remain model-owned, execution receipts remain native-owned.
-//! 完整模型/工具循环；语义选择由模型提出，真实执行回执由原生账本维护。
+//! Model/tool loop: models choose actions; native ledgers own execution receipts.
+//! 模型选择动作，原生账本维护执行回执。
 
 use super::{
     budget,
@@ -24,11 +24,11 @@ use std::{
 };
 use tokio::sync::{Mutex, mpsc};
 
-/// Formal transcript and segment contracts cap one assistant reply at 512 model rounds.
-/// 正式 ModelTranscript 与回复分段合同限定一条助手回复最多 512 个模型轮次。
+/// Transcript and segment contracts allow 512 model rounds per reply.
+/// 转录与分段合同限制每条回复最多 512 个模型轮次。
 const MAX_MESSAGE_ROUNDS: u64 = crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64;
-// Reserve one full tool turn, one compaction activity and a delivery/fallback segment before dispatch.
-// 派发前为完整工具轮、一次压缩活动以及交付/回退段预留空间，不执行后才发现消息无法保存。
+// Reserve space for a tool turn, compaction and delivery before dispatch.
+// 派发前为工具轮、压缩和交付预留保存空间。
 const MESSAGE_SEGMENT_RESERVE: usize = 2;
 const MESSAGE_ORDER_RESERVE: u64 = crate::models::protocol::MAX_TURN_CALLS as u64 + 3;
 
@@ -39,8 +39,8 @@ fn message_capacity_exhausted(next_round: u64, calls: usize, segments: usize, or
         || segments.saturating_add(MESSAGE_SEGMENT_RESERVE) > super::segments::MAX_MESSAGE_SEGMENTS
         || order.saturating_add(MESSAGE_ORDER_RESERVE) > super::segments::MAX_SEGMENT_ORDER
 }
-/// Consecutive identical recoveries before waiting for a changed condition without losing the request.
-/// 同一错误连续恢复达到阈值后等待条件变化，不结束原任务或反复计费空转。
+/// After repeated identical failures, wait for changed conditions while retaining the request.
+/// 相同故障连续出现后，保留请求并等待条件变化。
 const MAX_REPEATED_RECOVERIES: u64 = 5;
 const REPEATED_READ_GUIDANCE: &str = "\nBroker read progress: repeated original pages added no information. Continue the original task by reading an unread source, a genuinely missing range, or performing the next validated operation using saved evidence. Do not reread completed pages merely to recover a checkpoint or discover tools again. Changed source versions and explicitly required rechecks remain valid. If evidence is insufficient, identify the specific gap without inventing completion.";
 
@@ -73,8 +73,8 @@ impl LiveMemoryProjection {
         })
     }
 
-    /// Recheck the used subset before dispatch and delivery; refresh is local and does not call a provider.
-    /// 派发及交付前只核验已用子集；刷新完全在本地完成，不增加供应商调用。
+    /// Recheck used memories locally before dispatch and delivery, without provider calls.
+    /// 派发和交付前在本地复核已用记忆，不调用供应商。
     pub(super) async fn refresh(
         &mut self,
         root: &std::path::Path,
@@ -96,8 +96,8 @@ impl LiveMemoryProjection {
             Ok::<_, crate::storage::ContractError>((status, context))
         }).await.map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "记忆版本核验任务退出。", 500))??;
         let (status, Some(context)) = updated else { return Ok(None); };
-        // The same withdrawn memory may also have entered automatic retrieval evidence.
-        // 同一记忆也可能进入自动检索；撤出该派生依赖，避免验收反复要求读取已撤回记忆。
+        // Remove withdrawn memory from derived retrieval evidence too.
+        // 撤回记忆时一并移除衍生检索证据。
         crate::retrieval::gateway::retire_memory_sources(
             &json!({"conversationId":conversation_id,"requestId":request_id}),&status["invalidSources"])?;
         let current = Self::prepare(&context, self.query.clone(), self.budget_tokens)?;
@@ -108,16 +108,18 @@ impl LiveMemoryProjection {
 }
 
 fn memory_refresh_notice(state: &mut LoopState, status: &Value) {
-    // Discard only the optional cached navigation, never formal history or execution receipts.
-    // 仅废弃可重新生成的摘要缓存，不改正式历史或执行回执。
+    // Discard cached navigation only; retain formal history and receipts.
+    // 仅丢弃导航缓存，保留正式历史和执行回执。
     state.previous_summary = Value::Null;
+    let unexecuted_intent = state.review_checkpoint["unexecutedToolIntent"].clone();
     state.review_checkpoint = Value::Null;
+    if !unexecuted_intent.is_null() { state.review_checkpoint = json!({"unexecutedToolIntent":unexecuted_intent}); }
     state.acceptance_review_revision = None;
     state.acceptance_reviewed = false;
     state.broker_note(&format!("Broker: confirmed memory was updated, withdrawn or moved out of scope. Its old interpretations in history, summaries and prior tool results are no longer memory instructions. Follow the current confirmed-memory block and user request; preserve existing output and successful effects. Affected identities: {}", status["invalidSources"]));
 }
-/// Earlier unfinished or tool-based work in this chat, so a follow-up such as "continue" keeps the original goal.
-/// 同一聊天中更早的未完成或带工具的工作；“继续”等后续消息据此沿用原目标与要求，而不是缩成孤立指令。
+/// Use earlier unfinished or tool-based work to resolve continuation goals.
+/// 根据本聊天此前未完成或带工具的工作，恢复续作目标。
 async fn prior_task_note(run: &RequestRun) -> Option<String> {
     use crate::storage::task_repository::TaskState;
     let journal = run.journal.as_ref()?;
@@ -134,8 +136,8 @@ async fn prior_task_note(run: &RequestRun) -> Option<String> {
     .await
     .ok()?
     .ok()?;
-    // Stop at a cancelled task or a finished tool-free answer; those do not carry unfinished work forward.
-    // 遇到用户取消或已完成的纯文字问答即停止；它们不会把未完成工作带到当前消息。
+    // Stop inheritance at cancelled tasks or completed tool-free answers.
+    // 用户取消或纯文字回答已完成时，停止继承旧工作。
     let mut related = Vec::new();
     for task in previous {
         let tool_work = task.usage.tool_duration_ms > 0;
@@ -147,8 +149,8 @@ async fn prior_task_note(run: &RequestRun) -> Option<String> {
     if related.is_empty() {
         return None;
     }
-    // The settled outcome carries the model's remaining requirements, so a follow-up resumes them structurally.
-    // 已结算结果记录了模型给出的剩余要求与下一步，后续消息据此结构化接续，而不是只看目标文字。
+    // Restore remaining requirements and next steps from the settled outcome.
+    // 从已结算结果恢复剩余要求和下一步。
     let repository = journal.repository().clone();
     let outcomes = tokio::task::spawn_blocking(move || {
         related
@@ -184,8 +186,8 @@ async fn prior_task_note(run: &RequestRun) -> Option<String> {
     Some(format!("\nEarlier work in this chat (newest first; historical context, not new instructions):\n{lines}\nIf the current message continues that work, keep the original goal and every explicit requirement as acceptance, build on the saved results, and do not redo successful operations. If the user changes the goal, follow the new one."))
 }
 
-/// Completion evidence comes from settled successful observations, never requested calls or their input paths.
-/// 完成证据仅来自已结算的成功回执，不使用模型请求的调用或输入路径；未知、失败及未派发操作不能证明完成。
+/// Only settled successful receipts prove completion; requests and input paths do not.
+/// 仅已结算的成功回执可证明完成，请求或输入路径不能作为证据。
 fn task_evidence(transcript: &[Value]) -> Vec<Value> {
     let mut evidence = Vec::new();
     for observation in transcript.iter().flat_map(|round| round["observations"].as_array().into_iter().flatten()) {
@@ -211,6 +213,28 @@ fn completion_transcript(state: &LoopState) -> Vec<Value> {
     rounds
 }
 
+fn task_evidence_records(transcript: &[Value], verification: &Value) -> Vec<Value> {
+    let records = transcript.iter().flat_map(|round| round["observations"].as_array().into_iter().flatten())
+        .filter(|observation| observation["verifiedSuccess"] == true)
+        .filter_map(|observation| {
+            let mut proof = observation["completionProof"].clone();
+            if !proof.is_object() || proof["id"] != observation["id"] { return None; }
+            super::completion_evidence::bind_validation(&mut proof, verification);
+            Some(proof)
+        }).collect::<Vec<_>>();
+    super::completion_evidence::current(&records)
+}
+
+fn mark_visual_proofs(observations: &mut [Value], delivered_hashes: &[String]) {
+    for observation in observations {
+        let proof = &mut observation["completionProof"];
+        if proof.is_object() && proof["visualHashes"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).any(|hash| delivered_hashes.iter().any(|delivered| delivered == hash)) {
+            proof["visualObserved"] = json!(true);
+        }
+    }
+}
+
 fn requires_task_verification(state: &LoopState) -> bool {
     state.acceptance_requirements.iter().any(|requirement| super::task::requires_execution_verification(requirement))
 }
@@ -221,23 +245,40 @@ fn has_task_readback(state: &LoopState) -> bool {
             && observation["mutationSequence"].as_u64().unwrap_or(0) == state.mutation_sequence)
 }
 
-/// A dispatched command still running, or one with a failed exit code, is not completed work.
-/// 已派发但仍在运行的命令，以及退出码非零的命令，都不能被当成已经完成的工作。
+/// Running commands and nonzero exits do not prove completion.
+/// 运行中的命令和非零退出码不能证明完成。
 fn successful_completion_receipt(receipt: &Value) -> bool {
     super::task::successful_completion_receipt(receipt)
 }
 
-/// Output paths are usable only when returned by the file writer with its real committed-content receipt.
-/// 仅当文件写入工具返回真实提交的内容回执时，才登记其输出路径；普通读取、命令参数及网页正文不产生输出证明。
+/// Reused legacy receipts use today's error semantics without rewriting their original content.
+/// 复用旧回执时按当前错误语义判断，原始正文保持不变。
+pub(super) fn normalize_reused_receipt(name: &str, receipt: &mut Value) {
+    if receipt["status"] == "completed" && tools::explicit_tool_error(name, &receipt["content"]) {
+        receipt["isError"] = json!(true);
+        receipt["status"] = json!("error");
+    }
+}
+
+/// Register output paths only from committed file-write receipts.
+/// 仅凭已提交的文件写入回执登记产物路径。
 fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> {
     super::task::completed_output_paths(name, receipt)
 }
 
-/// Older checkpoints carry archive references without completion-proof fields; verify original archives once.
-/// 旧断点仅有归档引用，缺少完成证据字段；恢复时核验原回执一次，不重放操作或凭旧状态猜测成功。
-async fn restore_completion_evidence(root: &std::path::Path, conversation: &str, request: &str, transcript: &mut Vec<Value>) {
+fn completion_evidence_needs_restore(observation: &Value) -> bool {
+    observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none()
+        || observation["completionProofVerification"] == "pending"
+        || observation["verifiedSuccess"] == true && observation["name"].as_str()
+            .and_then(|name| name.strip_prefix("mcp.")).and_then(|name| name.split_once('.'))
+            .is_some_and(|(_, tool)| tool == "execute_blender_code")
+}
+
+/// Recover legacy proofs and reject known false-success wrappers without replaying operations.
+/// 恢复旧证据并排除已知的假成功包装，不重放操作。
+pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversation: &str, request: &str, transcript: &mut Vec<Value>) {
     if !transcript.iter().flat_map(|round| round["observations"].as_array().into_iter().flatten())
-        .any(|observation| observation.get("verifiedSuccess").is_none()) {
+        .any(completion_evidence_needs_restore) {
         return;
     }
     let root = root.to_owned();
@@ -247,22 +288,48 @@ async fn restore_completion_evidence(root: &std::path::Path, conversation: &str,
     let restored = tokio::task::spawn_blocking(move || {
         for round in &mut restored_transcript {
             for observation in round["observations"].as_array_mut().into_iter().flatten()
-                .filter(|observation| observation.get("verifiedSuccess").is_none()) {
+                .filter(|observation| completion_evidence_needs_restore(observation)) {
                 if observation["status"] != "completed" { continue; }
+                let legacy = observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none();
+                if !legacy {
+                    // Unchecked old wrappers remain historical facts, not current acceptance evidence.
+                    // 未核验的旧包装保留历史事实，暂不参与当前验收。
+                    observation["verifiedSuccess"] = json!(false);
+                    observation["completionProofVerification"] = json!("pending");
+                }
                 let Some(id) = observation["ref"]["id"].as_str() else { continue; };
                 let Ok(archive) = data::load_private_tool_result(&root, &conversation, id) else { continue; };
-                // Unavailable storage leaves the reference retryable; only verified content receives proof fields.
-                // 存储暂不可读时保留引用以便恢复重验，只有读回并核验正文后才写入证据字段。
-                observation["verifiedSuccess"] = json!(false);
-                observation["completionEvidence"] = json!([]);
+                // Keep unavailable references retryable; add proof only after verifying content.
+                // 存储不可读时保留重试入口，核验正文后才补证据。
+                if legacy {
+                    observation["verifiedSuccess"] = json!(false);
+                    observation["completionEvidence"] = json!([]);
+                }
                 if archive["conversationId"] != conversation || archive["requestId"] != request
                     || archive["toolCallId"] != observation["id"] || archive["toolName"] != observation["name"]
                     || archive["sha256"] != observation["ref"]["sha256"] || archive["bytes"] != observation["ref"]["bytes"] {
                     continue;
                 }
-                let receipt = json!({"status":"completed","isError":false,"content":archive["canonical"]});
+                let failed = tools::explicit_tool_error(
+                    observation["name"].as_str().unwrap_or(""), &archive["canonical"]);
+                let receipt = json!({"status":"completed","isError":failed,"content":archive["canonical"],"resultRef":observation["ref"]});
+                if !legacy {
+                    observation.as_object_mut().unwrap().remove("completionProofVerification");
+                    let success = successful_completion_receipt(&receipt);
+                    observation["verifiedSuccess"] = json!(success);
+                    if !success {
+                        observation["verifiedSuccess"] = json!(false);
+                        observation["completionEvidence"] = json!([]);
+                        observation["completionProof"] = Value::Null;
+                    }
+                    continue;
+                }
                 observation["verifiedSuccess"] = json!(successful_completion_receipt(&receipt));
                 observation["completionEvidence"] = json!(completed_output_paths(observation["name"].as_str().unwrap_or(""), &receipt));
+                let call = json!({"id":observation["id"],"name":observation["name"]});
+                let mut proof = super::completion_evidence::from_receipt(&call, &receipt);
+                if proof.is_object() { proof["mutationSequence"] = observation["mutationSequence"].clone(); }
+                observation["completionProof"] = proof;
             }
         }
         restored_transcript
@@ -270,20 +337,142 @@ async fn restore_completion_evidence(root: &std::path::Path, conversation: &str,
     if let Ok(restored) = restored { *transcript = restored; }
 }
 
+/// Compare acceptance facts, not historical output, when restoring a delivery.
+/// 恢复交付时比较验收事实，不改历史输出。
+fn restored_completion_projection(state: &LoopState) -> Vec<Value> {
+    state.transcript.iter().flat_map(|round| round["observations"].as_array().into_iter().flatten())
+        .chain(state.retained_completion_observations.iter())
+        .map(|observation| json!({"id":observation["id"],"tool":observation["name"],"ref":observation["ref"],
+            "status":observation["status"],"verifiedSuccess":observation["verifiedSuccess"],
+            "completionProof":observation["completionProof"],"completionEvidence":observation["completionEvidence"],
+            "completionProofVerification":observation["completionProofVerification"]})).collect()
+}
+
+fn reconcile_restored_delivery(state: &mut LoopState, before: &[Value]) {
+    let after = restored_completion_projection(state);
+    let evidence_changed = before != after.as_slice();
+    let revising_delivery = state.assistant["Status"] == "completed";
+    if !evidence_changed && state.pending_delivery.is_empty() && !revising_delivery { return; }
+    let changed = after.iter().filter(|item| !before.contains(item)).map(|item| json!({"id":item["id"],
+        "tool":item["tool"],"verifiedSuccess":item["verifiedSuccess"],
+        "verificationPending":item["completionProofVerification"] == "pending"})).collect::<Vec<_>>();
+    let historical_failures = after.iter().filter(|item| item["verifiedSuccess"] == false)
+        .map(|item| json!({"id":item["id"],"tool":item["tool"],"status":item["status"],
+            "verificationPending":item["completionProofVerification"] == "pending"})).collect::<Vec<_>>();
+    let successes = after.iter().filter(|item| item["verifiedSuccess"] == true)
+        .map(|item| json!({"id":item["id"],"tool":item["tool"],"resultRef":item["ref"]})).collect::<Vec<_>>();
+    // Drafts lack an evidence revision; their immutable checkpoint keeps the original text.
+    // 草稿未绑定证据版本，原文仍保存在不可变检查点中。
+    let correction = json!({"evidenceChanged":evidence_changed,"changedReceipts":changed,
+        "requestedDeliveryRevision":revising_delivery,
+        "supersededDelivery":!state.pending_delivery.is_empty(),"sourceCheckpoint":state.work_context_reference,
+        "supersededDeliveryHash":crate::retrieval::gateway_index::hash(&state.pending_delivery)});
+    state.pending_delivery.clear();
+    state.delivery_continuing = false;
+    state.acceptance_reviewed = false;
+    state.acceptance_review_revision = None;
+    let unexecuted_intent = state.review_checkpoint["unexecutedToolIntent"].clone();
+    state.review_checkpoint = json!({"pending":false,"evidenceRequired":true,"attempts":0,
+        "restorationCorrection":correction});
+    if !unexecuted_intent.is_null() { state.review_checkpoint["unexecutedToolIntent"] = unexecuted_intent; }
+    let _ = state.task.apply("task.resumed", &json!({}));
+    state.broker_note(&format!("Broker recovery correction: the saved acceptance assessment and unpublished delivery draft are superseded. Generate a fresh public response from the current verified receipts and original requirements; do not reuse an old draft's failure or unmet-item claims. Earlier output and original checkpoints remain historical records. Historical unsuccessful or unverified receipts: {}. Verified successful receipts already present: {}. Corrected receipt assessments: {}. These records describe their original operations, not whether a connection is available now; an earlier connection failure does not invalidate a later successful operation. Preserve completed work and do not repeat successful effects or reread complete archives merely to regenerate the answer. In the updated public response, explicitly retract earlier public claims contradicted by these receipts. Reassess unfinished items against the original authorized scope and continue required work; completed operations alone do not certify every requested quality goal. Preserve prior output as history without presenting its superseded state claims as current.",
+        json!(historical_failures), json!(successes), state.review_checkpoint["restorationCorrection"]["changedReceipts"]));
+}
+
+pub(super) fn unresolved_check_summary(verification: &Value) -> Value {
+    let unresolved = verification["unresolvedChecks"].as_array();
+    let count = unresolved.map_or(0, Vec::len);
+    json!({"count":count,"checks":unresolved.into_iter().flatten().take(8).map(|check|
+        json!({"toolCallId":check["toolCallId"],"checkId":check["checkId"],
+            "category":check["category"],"resolution":check["resolution"]})).collect::<Vec<_>>(),
+        "remaining":count.saturating_sub(8)})
+}
+
 fn completion_review_instruction(state: &LoopState) -> String {
+    if unresolved_user_steering(state) {
+        return format!("Broker: resolve the latest real user steering BEFORE enforcing older acceptance checks or duration. Do not perform an old readback, stat or validation merely to keep the original task running. If the user stopped, acknowledge with <kynxa_task>{{\"state\":\"complete\",\"stop\":true}}</kynxa_task>; stopping does not claim the original work is finished and requires no completion evidence. Otherwise encode the requested requirement/duration changes in steeringRevision in the normal footer. If requirements are unchanged, include steeringRevision with the latest userMessageId and an exact quote only. Native tools remain available for work the current user actually requested.{}", steering_revision_instruction(state));
+    }
+    let max_references = super::task::MAX_COMPLETION_REFERENCES_PER_ITEM;
     let requirements = state.acceptance_requirements.iter().enumerate().map(|(index, requirement)|
         json!({"requirementId":format!("requirement-{}", index + 1),"item":requirement})).collect::<Vec<_>>();
     let verification = state.progress.verification();
-    format!("Broker: compare the original requested work with the saved complete output and actual receipts, checking each explicit requirement. Return only a standalone <kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[],\"met\":[{{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"a verified call ID or committed output path\"]}}]}}</kynxa_task>. Choose complete, continue or blocked. For complete, cover EVERY listed requirementId with genuine successful evidence (at most 8 concise references per item); never substitute failed, running, unknown, rejected or merely requested calls, or input paths. IDs establish receipt identity, not visual quality: inspect produced content before claiming its quality. If any requirement is unmet, choose continue and a concrete next action. Do useful work, never idle or repeat greetings to fill time. A finite answer is complete when delivered. blocked requires an actual user-input, authorization, external or resource blocker. No tools or repeated output in this review.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nBroker validation: {}", json!(requirements), json!(task_evidence(&completion_transcript(state))),
+    let instruction = format!("Broker: compare the original requested work with the saved complete output and actual receipts, checking each explicit requirement. Prefer a standalone <kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[],\"met\":[{{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"a verified call ID or committed output path\"]}}]}}</kynxa_task>. Choose complete, continue or blocked. For complete, cover EVERY listed requirementId with genuine successful evidence (at most {max_references} concise references per item); never substitute failed, running, unknown, rejected or merely requested calls, or input paths. Match evidence to each requirement's action, actual target, version and read range. A write proves existence, not content or visual quality; cite the matching observation or check. If any requirement is unmet, choose continue and a concrete next action, or use available native tools to resolve the actual gap now. Tool calls use the formal protocol; never simulate calls as ordinary DSML, XML or JSON text. Do useful work, never idle or repeat greetings to fill time. A finite answer is complete when delivered. blocked requires an actual user-input, authorization, external or resource blocker. Avoid repeating the public delivery during review.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nBroker validation: {}", json!(requirements), json!(task_evidence(&completion_transcript(state))),
         json!({"state":verification["state"],"pendingValidation":verification["pendingValidation"],
-            "latestCheck":verification["receipts"].as_array().and_then(|receipts|receipts.last())}))
+            "unresolvedChecks":unresolved_check_summary(&verification),
+            "latestCheck":verification["receipts"].as_array().and_then(|receipts|receipts.last())}));
+    let instruction = instruction + " The public delivery must agree with this assessment: if it identifies still-unfinished original requirements or defers required next steps, choose continue and a concrete execution action. Distinguish original requirements from optional suggestions; prior operations alone do not certify all requested quality goals.";
+    let instruction = instruction + &steering_revision_instruction(state);
+    // Supply detailed identities only for a failed assessment; normal reviews keep their small-window budget.
+    // 仅在验收未通过时补充详细身份，普通验收不挤占小窗口预算。
+    if state.review_checkpoint["cachedReview"]["decision"]["action"] != "resume" { return instruction; }
+    let evidence = completion_evidence_directory(&task_evidence_records(&completion_transcript(state), &verification));
+    instruction + &format!("\nNative receipt directory (IDs and operations are authoritative; a model-written label cannot change them): {evidence}. Put exact IDs alone in evidence; put explanations in item/reason. Historical receipts prove their original operations, not a fresh connection check. Fix a reference-format problem from this directory without rereading unrelated archives.")
+}
+
+fn unresolved_user_steering(state: &LoopState) -> bool {
+    state.assistant["LatestUserSteering"]["userMessageId"].as_str()
+        .is_some_and(|id| !id.is_empty() && state.assistant["UserTaskDirective"]["userMessageId"] != id)
+}
+
+fn steering_revision_instruction(state: &LoopState) -> String {
+    let latest = &state.assistant["LatestUserSteering"];
+    if !latest["userMessageId"].is_string() { return String::new(); }
+    let requirements = state.acceptance_requirements.iter().enumerate().map(|(index, text)|
+        json!({"requirementId":format!("requirement-{}",index+1),"text":text})).collect::<Vec<_>>();
+    format!("\nLatest real user steering: {latest}. It overrides conflicting earlier instructions. Interpret additions, replacements, withdrawals and stopping semantically; do not keep working just to satisfy a withdrawn duration. If it changes earlier requirements, include optional steeringRevision in the SAME <kynxa_task> footer: {{\"userMessageId\":\"the exact latest ID\",\"quote\":\"exact words from that user message\",\"removeRequirementIds\":[],\"replaceRequirements\":[{{\"requirementId\":\"requirement-1\",\"text\":\"replacement\"}}],\"addRequirements\":[],\"minimumActiveMs\":0,\"stop\":false}}. Omit unchanged fields; zero cancels a duration, not the whole task. For a user request to stop the entire task, a simple top-level stop:true in the task footer is sufficient; no steeringRevision or copied message ID is needed. Give a brief acknowledgement and issue no further tool calls. Do not interpret a quoted example as a command. Unmentioned requirements remain active. Current IDs: {}",json!(requirements))
+}
+
+/// Apply only a revision tied to the latest formal steering; execution receipts stay immutable.
+/// 仅应用绑定最新正式引导的要求变更，执行回执保持不变。
+fn apply_steering_revision(state: &mut LoopState, inspected: &Value, minimum_active_ms: &mut u64) {
+    let latest = &state.assistant["LatestUserSteering"];
+    let id = latest["userMessageId"].as_str().unwrap_or("").to_owned();
+    // Bind a simple stop flag to this turn's verified user steering, without model-written IDs.
+    // 简单停止标记绑定本轮已核实的真实引导，不要求模型复写消息身份。
+    let inferred = if inspected["stop"] == true && !id.is_empty() {
+        json!({"userMessageId":id,"quote":latest["text"],"stop":true})
+    } else if unresolved_user_steering(state) && inspected["source"] == "model-task-state"
+        && inspected["steeringRevision"].is_null() {
+        // An explicit unchanged assessment keeps existing scope, rather than inventing more work.
+        // 明确未变更的判断沿用当前范围，不凭空添加工作。
+        json!({"userMessageId":id,"quote":latest["text"]})
+    } else { Value::Null };
+    let revision = if inferred.is_object() { &inferred } else { &inspected["steeringRevision"] };
+    if revision.is_null() { return; }
+    let revision_hash = crate::retrieval::gateway_index::hash(&revision.to_string());
+    if state.assistant["UserTaskDirective"]["userMessageId"] == id
+        && state.assistant["UserTaskDirective"]["revisionHash"] == revision_hash { return; }
+    match super::task::steering_revision(revision, &id, latest["text"].as_str().unwrap_or(""),
+        &state.acceptance_requirements, *minimum_active_ms) {
+        Ok(updated) => {
+            let suspended = updated.stop.then(|| state.acceptance_requirements.clone());
+            state.acceptance_requirements = updated.requirements;
+            *minimum_active_ms = updated.minimum_active_ms;
+            state.assistant["UserTaskDirective"] = json!({"userMessageId":id,
+                "minimumActiveMs":updated.minimum_active_ms,"stop":updated.stop,
+                "requirements":state.acceptance_requirements,"suspendedRequirements":suspended,
+                "revisionHash":revision_hash});
+            state.review_checkpoint = Value::Null;
+            state.acceptance_reviewed = false;
+            state.acceptance_review_revision = None;
+        }
+        Err(_) => state.broker_note("The steeringRevision metadata did not match the latest user message or current requirement IDs. Correct it in the next normal reply; retain progress and successful receipts."),
+    }
+}
+
+pub(super) fn completion_evidence_directory(records: &[Value]) -> Value {
+    json!(records.iter().filter(|record| record["current"] == true && record["tool"] != "tool.result.read")
+        .map(|record| json!({"id":record["id"],"tool":record["tool"],"kinds":record["kinds"],
+            "targets":record["targets"],"visualObserved":record["visualObserved"],
+            "observationCurrent":record["observationCurrent"],"mutationSequence":record["mutationSequence"]})).collect::<Vec<_>>())
 }
 
 fn acceptance_revision(state: &LoopState) -> (u64, String) {
     let receipts = completion_transcript(state).iter().flat_map(|round| round["observations"].as_array().into_iter().flatten())
         .filter(|observation| observation["verifiedSuccess"] == true
             && super::task::is_completion_evidence_tool(observation["name"].as_str().unwrap_or("")))
-        .map(|observation| json!([observation["id"], observation["ref"], observation["mutationSequence"]]))
+        .map(|observation| json!([observation["id"], observation["ref"], observation["mutationSequence"], observation["completionProof"]]))
         .collect::<Vec<_>>();
     (state.mutation_sequence, crate::retrieval::gateway_index::hash(&json!([state.acceptance_requirements,
         state.runtime_snapshot.as_ref().map(|snapshot|&snapshot["source"]["authorityHash"]),
@@ -292,8 +481,8 @@ fn acceptance_revision(state: &LoopState) -> (u64, String) {
         state.progress.verification()["pendingValidation"]]).to_string()))
 }
 
-/// Reuse only a valid assessment of the exact evidence and authority revision, never its execution plan.
-/// 仅复用相同证据与权限版本的合法验收结论；执行计划仍按当前能力、来源与用户指引重新选择。
+/// Reuse assessments only for matching evidence and authority versions; replan execution.
+/// 仅复用证据和权限版本均匹配的验收结果，执行方案重新选择。
 fn cached_review_for_revision(checkpoint: &Value, revision: &(u64, String)) -> Option<Value> {
     let cached = &checkpoint["cachedReview"];
     (cached["revision"] == json!(revision) && cached["decision"]["reviewed"] == true)
@@ -311,8 +500,99 @@ fn checkpoint_completion_review(state: &mut LoopState, pending: bool, evidence: 
     state.review_checkpoint["attempts"] = json!(attempts);
 }
 
-/// A continuation imports only the prior task's formal output targets; current receipts must recheck them.
-/// 续作只导入原任务正式产物目标；当前版本与读取覆盖仍须由本任务真实回执重新核对。
+/// Textual call syntax is navigation only; resolution requires the formal dispatch pipeline.
+/// 调用语法文本仅作导航，须经正式派发核对结果，仍可复用相同操作的成功回执。
+fn retain_unexecuted_tool_intent(state: &mut LoopState, requested: &[String], catalog: &[Value], round: u64) -> bool {
+    let names = requested.iter().filter_map(|requested| catalog.iter().find(|tool|
+        tool["name"].as_str().is_some_and(|name| name == requested
+            || crate::models::protocol::wire_name(name) == *requested))
+        .and_then(|tool| tool["name"].as_str()).map(str::to_owned)).collect::<Vec<_>>();
+    if names.is_empty() { return false; }
+    if !state.review_checkpoint.is_object() { state.review_checkpoint = json!({}); }
+    let mut pending = state.review_checkpoint["unexecutedToolIntent"]["names"].as_array()
+        .cloned().unwrap_or_default();
+    for name in names { if !pending.contains(&json!(name)) { pending.push(json!(name)); } }
+    state.review_checkpoint["unexecutedToolIntent"] = json!({"names":pending,"round":round});
+    state.review_checkpoint["pending"] = json!(false);
+    state.review_checkpoint.as_object_mut().unwrap().remove("cachedReview");
+    state.acceptance_reviewed = false;
+    state.acceptance_review_revision = None;
+    state.pending_delivery.clear();
+    state.delivery_continuing = false;
+    true
+}
+
+pub(super) fn has_unexecuted_tool_intent(checkpoint: &Value) -> bool {
+    checkpoint["unexecutedToolIntent"]["names"].as_array().is_some_and(|names| !names.is_empty())
+}
+
+pub(super) fn settle_unexecuted_tool_intent(checkpoint: &mut Value, name: &str, receipt: &Value) {
+    if !has_unexecuted_tool_intent(checkpoint) || receipt["executed"] == false
+        || !successful_completion_receipt(receipt) { return; }
+    if let Some(names) = checkpoint["unexecutedToolIntent"]["names"].as_array_mut() {
+        names.retain(|pending| pending.as_str() != Some(name));
+    }
+}
+
+fn public_assistant_tool_intent(message: &Value) -> Vec<String> {
+    if message["role"] != "assistant" { return vec![]; }
+    if let Some(text) = message["content"].as_str() { return super::task::unexecuted_tool_names(text); }
+    message["content"].as_array().into_iter().flatten()
+        .filter(|part| matches!(part["type"].as_str(), Some("text" | "output_text")))
+        .filter_map(|part| part["text"].as_str()).flat_map(super::task::unexecuted_tool_names).collect()
+}
+
+/// Recover only a trailing legacy review's public intent; private reasoning never becomes work.
+/// 仅恢复旧版末尾核验的公开意图，私有思考不转为工作指令。
+async fn restore_legacy_review_intent(root: &std::path::Path, conversation: &str, request: &str,
+    state: &LoopState) -> Option<(Vec<String>, u64)> {
+    // An empty modern intent list means settlement; do not resurrect it from older history.
+    // 新版空意图列表表示已结算，不从更早历史复活。
+    if state.review_checkpoint.get("unexecutedToolIntent").is_some() { return None; }
+    let round = state.transcript.last().and_then(|value| value["round"].as_u64()).unwrap_or(0);
+    let assessment = &state.review_checkpoint["cachedReview"]["assessment"];
+    let names = assessment["unexecutedToolNames"].as_array().into_iter().flatten()
+        .filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+    if !names.is_empty() { return Some((names, round)); }
+    if let Some(text) = assessment["content"].as_str() {
+        let names = super::task::unexecuted_tool_names(text);
+        if !names.is_empty() { return Some((names, round)); }
+    }
+    for message in state.history.iter().rev() {
+        if message["role"] == "tool" || matches!(message["type"].as_str(), Some("function_call" | "function_call_output"))
+            || message["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty())
+            || message["content"].as_array().is_some_and(|parts| parts.iter().any(|part|
+                matches!(part["type"].as_str(), Some("tool_use" | "tool_result")))) { break; }
+        let names = public_assistant_tool_intent(message);
+        if !names.is_empty() { return Some((names, round)); }
+    }
+    if !matches!(state.assistant["Status"].as_str(), Some("completed" | "partial" | "error")) { return None; }
+    for round in state.transcript.iter().rev() {
+        if round["text"].as_str().is_none_or(|text| !text.trim().is_empty())
+            || round["calls"].as_array().is_none_or(|calls| !calls.is_empty()) { break; }
+        let reference = &round["nativeContinuationRef"];
+        let Some(id) = reference["id"].as_str() else { break; };
+        let Some(number) = round["round"].as_u64() else { break; };
+        let archive_root = root.to_owned();
+        let chat = conversation.to_owned();
+        let id = id.to_owned();
+        let Ok(Ok(archive)) = tokio::task::spawn_blocking(move ||
+            data::load_private_tool_result(&archive_root, &chat, &id)).await else { continue; };
+        let continuation = &archive["canonical"]["_meta"]["modelContinuation"];
+        if archive["conversationId"] != conversation || archive["requestId"] != request
+            || archive["id"] != reference["id"] || archive["toolName"] != "model.continuation"
+            || archive["sha256"] != reference["sha256"] || archive["bytes"] != reference["bytes"]
+            || !matches!(archive["toolCallId"].as_str(), Some(id) if id == format!("model-continuation-{number}") || id == format!("model-round-{number}"))
+            || continuation["round"] != number || continuation["origin"] != state.origin { continue; }
+        let names = continuation["continuation"].as_array().into_iter().flatten()
+            .flat_map(public_assistant_tool_intent).collect::<Vec<_>>();
+        if !names.is_empty() { return Some((names, number)); }
+    }
+    None
+}
+
+/// Import formal output targets only; recheck versions and read coverage with current receipts.
+/// 仅继承正式产物目标，凭当前回执重核版本和读取覆盖。
 async fn restore_continued_readback_targets(run: &RequestRun, limits: &Value, state: &mut LoopState) -> Result<(),GatewayError> {
     let Some(previous_id) = limits["continuedFromTaskId"].as_str().filter(|id| !id.is_empty()) else { return Ok(()); };
     let Some(journal) = &run.journal else { return Ok(()); };
@@ -330,8 +610,8 @@ async fn restore_continued_readback_targets(run: &RequestRun, limits: &Value, st
     Ok(())
 }
 
-/// Broker-owned read plans use ordinary paired protocol history and the same executor as model calls.
-/// 程序补读计划使用正常配对的协议历史，仍经模型调用相同的执行器核验、取消、归档与结算。
+/// Broker reads use paired protocol history and the ordinary tool executor.
+/// 程序补读使用成对协议历史和原工具执行器。
 fn planned_continuation(protocol: &str, calls: &[Value], original: &[Value]) -> Option<Vec<Value>> {
     let wire = calls.iter().map(|call| {
         let name = crate::models::protocol::wire_name(call["name"].as_str().unwrap_or(""));
@@ -363,8 +643,8 @@ fn current_effectful_work(state: &LoopState) -> bool {
     state.mutation_sequence > 0
 }
 
-/// A concrete alternative is consumed once per work revision; a new receipt ID alone cannot re-enable it.
-/// 明确的替代动作每个工作版本只消费一次；新增回执 ID 本身不能让相同失败动作再次派发。
+/// Consume an alternative once per work revision; new receipt IDs cannot reset it.
+/// 每个工作版本只执行一次替代动作，新回执 ID 不重置次数。
 fn replanned_action(checkpoint: &mut Value, selected: &[Value], proposed: &Value, revision: &Value) -> Option<Value> {
     if !proposed["arguments"].is_object() || !selected.iter().any(|tool|tool["name"]==proposed["name"]) { return None; }
     let identity = json!([proposed["name"],proposed["arguments"],revision]);
@@ -376,54 +656,39 @@ fn replanned_action(checkpoint: &mut Value, selected: &[Value], proposed: &Value
     Some(json!({"name":proposed["name"],"arguments":proposed["arguments"],"purpose":"execute-replanned-action"}))
 }
 
-/// A missing proof becomes a concrete safe read or capability lookup, rather than another assessment.
-/// 证据缺口转成真实安全补读或能力查找，不用新的验收调用反复询问同一状态。
+/// Resolve proof gaps with safe reads or capability lookup, not repeated assessments.
+/// 证据不足时执行安全补读或能力查找，不重复空验收。
 fn completion_progress_plan(state: &mut LoopState, targets: &Value, max_chars: u64, proposed: &Value) -> Option<Value> {
     if let Some(plan) = state.documents.missing_readback_plans(targets, max_chars).into_iter().next() {
         return Some(plan);
     }
     let decision = cached_completion_review(state)?;
     if decision["action"] != "resume" || decision["minimumActive"] == true { return None; }
-    let attempted = state.review_checkpoint["executionChecks"].as_array().cloned().unwrap_or_default();
-    // A stalled model may provide one explicit action in its private footer; dispatch it as a normal call.
-    // 停滞时允许模型在内部标记中给出一个明确动作；实际仍走原工具权限、参数、回执和副作用去重链。
-    if state.work_progress.needs_strategy_change() {
-        let progress = state.progress.summary();
-        let revision = json!([state.mutation_sequence,
-            progress["mutationRevision"], progress["checkedMutationRevision"]]);
-        if let Some(plan)=replanned_action(&mut state.review_checkpoint,&state.selected,proposed,&revision) {
-            return Some(plan);
-        }
-    }
-    let plan = state.result_sources.iter().rev().filter(|source| source["status"] == "completed"
-        && source["executed"] != false && source["name"] != "tool.result.read"
-        && super::task::is_completion_evidence_tool(source["name"].as_str().unwrap_or("")))
-        .filter_map(|source| source["resultRef"]["id"].as_str())
-        .map(|id| json!({"name":"tool.result.read","arguments":{"id":id,"offset":0,"limit":max_chars.min(16000)},"purpose":"inspect-saved-evidence"}))
-        .find(|plan| !attempted.contains(&json!([plan["name"],plan["arguments"]])));
-    let plan = plan.or_else(|| {
-        let names = state.review_checkpoint["executionCapabilities"].as_array().into_iter().flatten()
-            .filter(|name| !state.selected.iter().any(|tool| tool["name"] == **name)).cloned().collect::<Vec<_>>();
-        if names.is_empty() { return None; }
-        let plan = json!({"name":"tool.load","arguments":{"names":names},"purpose":"load-alternative-execution-capability"});
-        (!attempted.contains(&json!([plan["name"],plan["arguments"]]))).then_some(plan)
-    }).or_else(|| {
-        let query = decision["remaining"].as_array().into_iter().flatten().filter_map(Value::as_str)
-            .chain(state.acceptance_requirements.iter().map(String::as_str)).collect::<Vec<_>>().join(" ")
-            .chars().take(200).collect::<String>();
-        let plan = json!({"name":"tool.search","arguments":{"query":query,"limit":6,
-            "reason":"Find an alternative capability for the remaining verified task gap; preserve successful work."},"purpose":"change-execution-strategy"});
-        (!attempted.contains(&json!([plan["name"],plan["arguments"]]))).then_some(plan)
-    })?;
-    if !state.review_checkpoint.is_object() { state.review_checkpoint = json!({}); }
+    let progress = state.progress.summary();
+    let revision = json!([state.mutation_sequence,
+        progress["mutationRevision"], progress["checkedMutationRevision"]]);
+    completion_execution_plan(&mut state.review_checkpoint, &state.selected, proposed, &revision)
+}
+
+fn completion_execution_plan(checkpoint: &mut Value, selected: &[Value], proposed: &Value, revision: &Value) -> Option<Value> {
+    // A missing reference is metadata to repair, not permission to sweep every historical result.
+    // 引用错误应修正元数据，不能据此遍读全部旧回执；具体动作仍经原授权、去重和派发链。
+    if let Some(plan) = replanned_action(checkpoint, selected, proposed, revision) { return Some(plan); }
+    let attempted = checkpoint["executionChecks"].as_array().cloned().unwrap_or_default();
+    let names = checkpoint["executionCapabilities"].as_array().into_iter().flatten()
+        .filter(|name| !selected.iter().any(|tool| tool["name"] == **name)).cloned().collect::<Vec<_>>();
+    if names.is_empty() { return None; }
+    let plan = json!({"name":"tool.load","arguments":{"names":names},"purpose":"load-alternative-execution-capability"});
+    if attempted.contains(&json!([plan["name"],plan["arguments"]])) { return None; }
+    if !checkpoint.is_object() { *checkpoint = json!({}); }
     let mut attempted = attempted;
     attempted.push(json!([plan["name"],plan["arguments"]]));
-    state.review_checkpoint["executionChecks"] = json!(attempted);
+    checkpoint["executionChecks"] = json!(attempted);
     Some(plan)
 }
 
-/// Forced tool use is opt-in for known wire capabilities; thinking-mode compatibility is not inferred.
-/// 仅对已确认的协议能力要求真实调用，不从兼容接口名推断思考模式支持，避免制造400错误。
+/// Force tools only for verified protocol support; never infer thinking-mode compatibility.
+/// 确认协议支持后才强制调用工具，不推断思考模式兼容性。
 fn require_completion_action(connection: &Value, body: &mut Value) -> bool {
     if !body["tools"].as_array().is_some_and(|tools| !tools.is_empty()) { return false; }
     let Ok(endpoint) = url::Url::parse(connection["baseUrl"].as_str().unwrap_or("")) else { return false; };
@@ -439,14 +704,15 @@ fn require_completion_action(connection: &Value, body: &mut Value) -> bool {
     supported
 }
 
-/// Reminders are tail observations about proof gaps, never a new task, progress report or stop condition.
-/// 提醒只在尾部提示尚无证据的验收项，不成为新任务、阶段汇报或结束条件。
+/// Tail reminders describe proof gaps, not new goals or stop conditions.
+/// 尾部提醒仅说明证据缺口，不改变目标或结束条件。
 fn refresh_acceptance_reminder(state: &mut LoopState, round: u64) {
     if round.saturating_sub(state.last_acceptance_reminder_round) < 8 || !requires_task_verification(state) { return; }
     state.last_acceptance_reminder_round = round;
     let current = state.acceptance_review_revision.as_ref() == Some(&acceptance_revision(state));
     let gaps = state.task.acceptance_gaps(&state.acceptance_requirements,
-        &task_evidence(&completion_transcript(state)), current);
+        &task_evidence(&completion_transcript(state)), current,
+        Some(&task_evidence_records(&completion_transcript(state), &state.progress.verification())));
     if gaps.is_empty() { return; }
     let preview = gaps.iter().take(6).map(|gap| json!({"id":gap["requirementId"],
         "item":gap["item"].as_str().unwrap_or("").chars().take(160).collect::<String>()})).collect::<Vec<_>>();
@@ -456,8 +722,8 @@ fn refresh_acceptance_reminder(state: &mut LoopState, round: u64) {
     state.context_note(&notice, json!({"projectionOrigin":"broker-control","acceptanceGapNotice":true}));
 }
 
-/// Saved snapshots may already contain part of a later committed stream; merge only identical prefixes.
-/// 正式快照可能已包含稍后提交的部分流正文；仅沿完全一致的前缀合并，不能盲追加或截断。
+/// Merge restored streams only along identical prefixes; snapshots may already include later text.
+/// 恢复流仅按相同前缀合并，快照可能已包含后续正文。
 fn align_committed_text(saved: &str, base: &str, delta: &str, replace: bool) -> Option<String> {
     let committed = if replace { delta.to_owned() } else { format!("{base}{delta}") };
     if committed.starts_with(saved) { Some(committed) }
@@ -470,8 +736,8 @@ fn segment_display_text(segments: &[Value], field: &str, separator: &str) -> Str
         .collect::<Vec<_>>().join(separator)
 }
 
-/// Rebuild the formal paragraph layout only when every restored segment has a proved original boundary.
-/// 仅当各段原始边界均有证据时重建正式段落；未知基线不能被空字符串冒充，失败不改消息或水位。
+/// Rebuild only proved segment boundaries; unknown baselines leave text and watermarks unchanged.
+/// 仅按已证实的分段边界重建；基线未知时不改正文或水位。
 fn align_committed_segments(saved: &Value, original: &[Value], projection: &Value) -> Option<(String,String,Vec<Value>)> {
     let saved_content = saved["Content"].as_str().unwrap_or("");
     let saved_reasoning = saved["Reasoning"].as_str().unwrap_or("");
@@ -547,8 +813,8 @@ async fn restore_committed_stream(run: &RequestRun, state: &mut LoopState) {
     }
 }
 
-/// Effective wall time survives recovery and segments without summing overlapping child execution.
-/// 有效墙钟跨恢复及执行段累计，不叠加并行子任务工时；资源等待仍从当前尝试扣除。
+/// Carry effective wall time across recovery and segments; exclude waits and overlapping child time.
+/// 有效墙钟跨恢复和分段累计，扣除等待，不叠加并行子任务工时。
 fn effective_work_ms(run: &RequestRun, started: Instant) -> u64 {
     if run.journal.is_some() { run.effective_active_ms() }
     else { run.active_elapsed(started).as_millis() as u64 }
@@ -560,8 +826,8 @@ fn missing_public_answer(raw: &str, projected: &str, has_calls: bool) -> bool {
     !has_calls && !raw.trim().is_empty() && projected.trim().is_empty()
 }
 
-/// A withdrawn memory invalidates an undispatched plan without erasing completed effects.
-/// 记忆撤回仅使尚未派发的旧计划失效，不抹除已完成操作或历史上下文。
+/// Withdrawn memory invalidates pending plans, not completed effects or history.
+/// 记忆撤回使待执行方案失效，保留已完成操作和历史。
 pub(super) fn memory_replanning_result() -> Value {
     json!({"isError":true,"executed":false,"requestDispatched":false,"recoverable":true,
         "code":"TASK_MEMORY_UPDATED",
@@ -584,8 +850,8 @@ pub(super) fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Val
                 || error.details["outcome"] == "unknown";
             let parameter_error = error.code == "INVALID_TOOL_ARGUMENTS"
                 || error.code.starts_with("INVALID_SKILL_");
-            // Only trusted pre-dispatch validation may certify that no tool effect occurred.
-            // 只有内部派发前校验的明确回执能证明未产生工具副作用，未知结果不能被参数码覆盖。
+            // Only trusted pre-dispatch validation can prove no effect; error codes cannot replace unknown results.
+            // 只有可信的派发前校验能证明无副作用，错误码不能覆盖未知结果。
             let not_dispatched = !unknown && parameter_error
                 && error.details["executed"] == false
                 && error.details["requestDispatched"] == false;
@@ -602,14 +868,14 @@ pub(super) fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Val
 }
 
 pub(crate) fn is_read_only_tool(name: &str) -> bool {
-    // Execution policy owns read classification; discovery and context maintenance have no external effects.
-    // 执行策略统一维护只读分类；发现控制和上下文维护没有外部副作用。
+    // Execution policy classifies reads; discovery and context maintenance have no external effects.
+    // 执行策略统一判定只读操作；发现和上下文维护无外部副作用。
     crate::tools::policy::is_read_only(name)
         || matches!(name, "tool.load" | "task.document" | "context.compact")
 }
 
-/// A failed internal step may block the task without disconnecting its final progress answer.
-/// 内部步骤失败可以使任务受阻，但不能截断最终进展说明；外部连接和用户取消仍如实终止。
+/// Internal failures may block work, but must preserve final progress delivery.
+/// 内部故障可阻塞工作，但须保留最终进展交付；连接故障和用户取消另行处理。
 fn recoverable_step_failure(code: &str) -> bool {
     matches!(
         code,
@@ -640,8 +906,8 @@ fn recoverable_step_failure(code: &str) -> bool {
     )
 }
 
-/// Transport/account failures are distinct from an internal step that can retain its live request.
-/// 连接与账户故障不同于内部步骤故障；内部故障保留原请求，不冒充用户停止或任务完成。
+/// Retain live requests on internal failures; distinguish connection and account failures.
+/// 内部故障保留活动请求，另行区分连接与账户故障。
 fn internal_recovery_required(code: &str) -> bool {
     !code.is_empty()
         && !matches!(code,
@@ -655,8 +921,8 @@ fn internal_recovery_required(code: &str) -> bool {
         && !deterministic_stop(code)
 }
 
-/// Explicit account budgets and identity conflicts require a changed condition before retrying.
-/// 明确的账户预算与身份冲突需要条件改变；运行段的容量边界由续段处理。
+/// Retry account limits or identity conflicts only after conditions change; continue segment limits normally.
+/// 账户限额或身份冲突须等条件变化，执行分段边界按续段处理。
 fn deterministic_stop(code: &str) -> bool {
     matches!(code,
         "TASK_BUDGET_EXHAUSTED" | "CHAT_REQUEST_CONFLICT")
@@ -698,8 +964,8 @@ async fn wait_for_recovery_change(runtime: &GatewayRuntime, run: &RequestRun) ->
     resumed
 }
 
-/// Keep the same live request while native evidence or an explicit user acknowledgement resolves uncertainty.
-/// 等待原生证据或用户明确确认未知结果时保留同一活动请求，不重派原操作。
+/// Keep the request alive while awaiting evidence or user acknowledgement; never replay the operation.
+/// 等待证据或用户确认时保留请求，不重放原操作。
 async fn reconcile_live_recovery(runtime: &GatewayRuntime, run: &RequestRun, input: &Value) -> Result<bool, GatewayError> {
     use crate::storage::task_repository::{TaskState, OperationState, ModelReservationState};
     let Some(journal) = &run.journal else { return Ok(false); };
@@ -737,19 +1003,19 @@ pub(crate) fn descriptor(tool: &Value, name: &str) -> Value {
     json!({"name":name,"wireName":wire,"description":tool["description"],"inputSchema":tool["inputSchema"],
         "annotations":tool["annotations"],"execution":tool["execution"]})
 }
-/// Project one loaded catalog into the selected provider's existing tool schema.
-/// 将已加载目录投影为当前供应商的工具声明，保持工具身份及公开参数合同。
+/// Project loaded tools into provider schemas without changing IDs or parameters.
+/// 将已加载工具投影为供应商声明，保留身份和参数合同。
 pub(crate) fn model_tool_declarations(protocol_name: &str, catalog: &[Value]) -> Vec<Value> {
     model_tool_declarations_with_order(protocol_name, catalog,
         std::env::var("KYNXA_BENCHMARK_TOOL_ORDER").as_deref() != Ok("relevance"))
 }
 
 fn model_tool_declarations_with_order(protocol_name: &str, catalog: &[Value], stable: bool) -> Vec<Value> {
-    // Relevance controls selection and trimming; only the wire order is canonical and independent of ranking.
-    // 相关性负责选择与裁剪；仅发送顺序规范化，不因排名变动破坏相同集合的缓存前缀。
+    // Rank to select and trim tools; stabilize only their wire order.
+    // 按相关性选择和裁剪工具，仅稳定发送顺序。
     let mut ordered: Vec<_> = catalog.iter().collect();
-    // Only the explicit development benchmark changes sending order; loaded capabilities stay identical.
-    // 仅显式开发评测可切换发送顺序；不新增选能力调用，也不改变生产默认和已加载能力。
+    // Only explicit development benchmarks alter wire order, not loaded capabilities.
+    // 仅显式开发评测改变发送顺序，已加载能力不变。
     if stable {
         ordered.sort_by(|left, right| left["wireName"].as_str().unwrap_or("")
             .cmp(right["wireName"].as_str().unwrap_or("")));
@@ -788,8 +1054,8 @@ impl Drop for RequestToolGuard {
     }
 }
 
-/// Formal operations whose unknown outcome the user explicitly accepted before this resume.
-/// 本次续接前用户在正式任务账本中明确确认结果未知的操作；只读取账本，不采信模型文字。
+/// Read user-acknowledged unknown operations from the formal ledger, not model prose.
+/// 从正式账本读取用户已确认的未知操作，不采信模型自述。
 pub(crate) fn acknowledged_unknown_calls(run: &RequestRun) -> Result<Vec<Value>, GatewayError> {
     let Some(journal) = &run.journal else {
         return Ok(Vec::new());
@@ -803,15 +1069,15 @@ pub(crate) fn acknowledged_unknown_calls(run: &RequestRun) -> Result<Vec<Value>,
         .collect())
 }
 
-/// Tell the model these effects are neither successes nor failures and must be observed before acting.
-/// 告知模型这些操作既非成功也非失败，须先观察当前实际状态再决定，不能直接重放。
+/// Unknown effects require current-state observation before further action, never direct replay.
+/// 未知操作须先观察当前状态再决定，不能直接重放。
 pub(crate) fn unknown_outcome_note(calls: &[Value]) -> String {
     format!("Broker: the user confirmed that these earlier operations have unknown outcomes; their original executor stopped before a verifiable receipt. They were not verified, not replayed, and must not be treated as succeeded or failed: {}. Before deciding the next step, first observe the current actual state with read-only checks (for example process, file, page or service status). Repeat an operation only if that observation shows it is still needed and the original task requires it.",
         Value::Array(calls.to_vec()))
 }
 
-/// Bind specialist I/O to the broker's scope snapshot and per-attempt cancellation identity.
-/// 专用 I/O 绑定程序确认的范围快照与本次尝试的取消身份，模型参数不能扩大范围。
+/// Bind specialist I/O to the accepted scope and attempt cancellation token.
+/// 专用 I/O 绑定已确认范围和本次尝试的取消令牌。
 pub(crate) fn specialist_executor(
     runtime: &Arc<GatewayRuntime>,
     run: &Arc<RequestRun>,
@@ -822,16 +1088,18 @@ pub(crate) fn specialist_executor(
     let config = runtime.config.clone();
     let hub = runtime.tasks.clone();
     let parent = run.clone();
-    let tool_context = ctx.clone();
+    let mut tool_context = ctx.clone();
+    tool_context.external_execute = None;
     let key = run.cancellation_key.clone();
-    // tool_context derives project_id and bindingSnapshot from the same formal relationship, never model arguments.
-    // tool_context 从同一正式归属取得 project_id 与绑定快照；模型参数不能提供或扩大工作范围。
+    // Derive project_id and bindingSnapshot from the formal binding, never model arguments.
+    // project_id 和绑定快照取自正式归属，模型参数不能扩大范围。
     let context = json!({
         "conversationId": run.conversation_id,
         "projectId": ctx.project_id,
         "requestId": run.request_id,
         "permissionMode": permission,
         "trustedUserText": text,
+        "acceptanceRequirements": ctx.config["acceptanceRequirements"],
         "bindingSnapshot": ctx.config["bindingSnapshot"],
         "workspaceMounts": ctx.config["workspaceMounts"],
         "expectedProjectId": ctx.config["bindingSnapshot"]["projectId"],
@@ -853,8 +1121,8 @@ pub(crate) fn specialist_executor(
                     .map_err(|code| GatewayError::new(code, "取消状态无法读取。", 503))?;
                 let _scope = lease.enter();
                 if name == "tool.result.read" {
-                    // Read only the current formal chat's public archive; storage validates scope, digest and UTF-16 paging.
-                    // 仅回读当前正式聊天的公共归档；存储层核验范围、哈希与 UTF-16 分页，拒绝私有模型附件。
+                    // Read only current-chat public archives after scope, hash and UTF-16 page checks.
+                    // 核对范围、哈希及 UTF-16 分页后，仅回读当前聊天公共归档。
                     return data::read_tool_result(
                         &config.data_root,
                         context["conversationId"].as_str().unwrap_or(""),
@@ -880,8 +1148,8 @@ pub(crate) fn specialist_executor(
     })
 }
 
-/// Account admission waiting separately from active execution, including cancellation and early returns.
-/// 准入等待与实际执行分开计时，取消和提前返回也保留准确等待时长。
+/// Meter admission waits separately, including cancellation and early returns.
+/// 准入等待单独计时，取消或提前返回也不遗漏。
 struct ModelAdmissionWait<'a> {
     run: &'a RequestRun,
     started: Instant,
@@ -896,8 +1164,8 @@ impl Drop for ModelAdmissionWait<'_> {
     }
 }
 
-/// Bind model declarations to the files and tool template observed from the owned runtime.
-/// 工具声明绑定受管运行时实际观测的文件与模板，主聊天、恢复及子任务沿用同一判定。
+/// Bind model capabilities to observed runtime files and templates across chat, recovery and children.
+/// 聊天、恢复及子任务均按实际运行时文件和模板判定能力。
 pub(crate) async fn prepare_managed_connection(
     runtime: &GatewayRuntime,
     connection: &mut Value,
@@ -915,8 +1183,8 @@ pub(crate) async fn prepare_managed_connection(
     Ok(())
 }
 
-/// Admission coordinates owned background residency and forecasts only external pending growth.
-/// 准入协调本程序后台驻留，仅预测外部模型待增长资源；不卸载用户自行管理的模型。
+/// Manage owned background residency; forecast external growth without unloading user-managed models.
+/// 协调自有后台驻留，仅预测外部增长，不卸载用户自管模型。
 pub(crate) async fn request_model(
     runtime: &GatewayRuntime,
     run: &RequestRun,
@@ -939,15 +1207,15 @@ pub(crate) async fn request_model(
         let scope = json!([runtime.config.data_root.to_string_lossy(), ctx.project_id, run.conversation_id]).to_string();
         protocol::apply_summary_prompt_cache(connection, model_name, &mut body, &scope)
     }));
-    // Admission and a queued model slot are waiting, not execution time or a provider request.
-    // 资源准入和模型槽排队属于等待，不消耗执行时限，也不计作供应商调用。
+    // Resource and model-slot queues count as waiting, not execution or provider calls.
+    // 资源及模型槽排队计入等待，不计执行时长或供应商调用。
     let admission_wait = ModelAdmissionWait { run, started: Instant::now() };
     let steering_enabled = events.is_some();
     let mut steering = run.steering.subscribe();
     let steering_sequence = ctx.config["activeSteeringSequence"].as_u64()
         .unwrap_or_else(|| *steering.borrow_and_update());
-    // Join only this model's pending local preload; the accepted chat and other models remain independent.
-    // 仅复用当前模型的本地预载等待；聊天已被接受，其他模型的准备不会阻塞本次请求。
+    // Join this model's preload only; other model preparation cannot block the accepted chat.
+    // 仅等待当前模型预载，其他模型准备不阻塞已接受聊天。
     if !runtime
         .model_preparation
         .wait_model(
@@ -978,8 +1246,8 @@ pub(crate) async fn request_model(
         }
         let local_id = connection["providerId"].as_str().unwrap_or("").trim_start_matches("kynxa-local-");
         let observed = crate::models::gateway_local_engine::status(&runtime.config.data_home, local_id);
-        // A restored request body must not reuse catalog claims after the runtime or its template changed.
-        // 恢复的请求正文不能在运行时或模板变化后沿用目录能力；派发前再次核对缓存，不新增HTTP探测。
+        // Recheck capabilities before dispatch after runtime or template changes, without extra HTTP probes.
+        // 运行时或模板变化后，派发前重核能力，不增加 HTTP 探测。
         if body["tools"].as_array().is_some_and(|tools| !tools.is_empty())
             && (observed["modelIdentityVerified"] != true || observed["supportsTools"] != true)
         {
@@ -991,8 +1259,8 @@ pub(crate) async fn request_model(
             return (Err(model::ModelError::new(code, message, 409)), false, 0);
         }
     }
-    // Keep ownership through the entire HTTP stream; model settings must not remove active weights.
-    // 自管模型的使用保护贯穿完整 HTTP 流，设置变更不能删除仍在生成的权重。
+    // Hold model ownership through the HTTP stream to prevent active-weight deletion.
+    // HTTP 流结束前持有模型使用权，避免设置删除正在使用的权重。
     let _managed_generation = match crate::models::gateway_local_engine::request_guard(
         &runtime.config.data_home, connection, model_name,
     ) {
@@ -1127,8 +1395,8 @@ pub(crate) async fn request_model(
     };
     let reservation_id = new_id();
     if let Some(journal) = &run.journal {
-        // Implicit operating slices may grow; explicit wall-time and known-token caps remain authoritative.
-        // 隐式运行段可以续展；用户明确的墙钟与已知token限额继续生效，不扩展计费上限。
+        // Extend implicit segments only; preserve explicit time and token caps.
+        // 仅扩展隐式分段，保留用户明确的时长和 token 上限。
         let renewal = (|| -> Result<(), GatewayError> {
             for owner in runtime.budget_journals(run)? {
                 let task = owner.load_current()?;
@@ -1180,8 +1448,8 @@ pub(crate) async fn request_model(
                 if steering.changed().await.is_err() { std::future::pending::<()>().await; }
             }
         } => {
-            // The model owns its socket and reports actual dispatch on cancellation; no task or tool is cancelled.
-            // 模型关闭自身连接并报告真实派发状态；不取消任务和工具，也不执行残缺工具参数。
+            // Cancel the model socket only and report dispatch; retain tasks/tools and reject partial arguments.
+            // 仅取消模型连接并报告派发状态，保留任务和工具，不执行残缺参数。
             model_cancel.send_replace(true);
             let cancelled = operation.await;
             match cancelled {
@@ -1253,8 +1521,8 @@ pub(crate) async fn request_model(
             None => journal.settle_model_request(&reservation_id, dispatched, &usage),
         };
         if let Err(error) = settlement {
-            // A transmission may already have happened; retain its unknown reservation and do not silently retry.
-            // 传输可能已发生；保留未知预约，不能因计量失败静默再派发。
+            // Transmission may have occurred; keep the unknown reservation and do not redispatch.
+            // 请求可能已发出，保留未知预约，不重新派发。
             let mut uncertain = model::ModelError::new(&error.code, &error.message, error.status);
             uncertain.details = json!({"requestDispatched":dispatched,"reservationId":reservation_id,"settlementUnconfirmed":true});
             result = Err(uncertain);
@@ -1267,8 +1535,8 @@ pub(crate) async fn request_model(
     (result, dispatched, model_duration_ms)
 }
 
-/// Request-local transcript projection and native ledgers; persistence remains in storage APIs.
-/// 请求内的会话投影与原生账本；正式持久化始终经过存储 API。
+/// Request-local projections and ledgers persist through storage APIs.
+/// 请求内投影与账本统一经存储 API 持久化。
 struct LoopState {
     assistant: Value,
     history: Vec<Value>,
@@ -1322,8 +1590,21 @@ fn runtime_authority(ctx: &tools::GatewayToolContext, permission: &str, memory: 
     ]))
 }
 
-/// Retain real loaded definitions for later model rounds without changing provider call identity.
-/// 保留正式加载的定义供后续模型轮使用，不改变供应商调用身份。
+pub(super) fn tool_failure_environment(ctx: &tools::GatewayToolContext, version: &Value, mutation_revision: u64) -> Value {
+    json!({"workspace":ctx.workdir,"permission":ctx.permission_mode,"authorizedRoots":ctx.authorized_roots,
+        "configuration":ctx.config,"version":{"signature":version["signature"],"complete":version["complete"]},
+        "mutationRevision":mutation_revision})
+}
+
+pub(super) fn tool_failure_definition(call: &Value, catalog: &[Value], cached: &[Value]) -> Value {
+    cached.iter().chain(catalog.iter()).find(|definition| definition["name"] == call["name"])
+        .map(|definition| json!({"name":definition["name"],"inputSchema":definition["inputSchema"],
+            "parameters":definition["parameters"],"annotations":definition["annotations"],"execution":definition["execution"]}))
+        .unwrap_or_else(|| json!({"name":call["name"],"definitionAvailable":false}))
+}
+
+/// Keep loaded definitions across rounds without changing provider call IDs.
+/// 后续轮次沿用已加载定义，不改变供应商调用身份。
 fn select_loaded_tools(state: &mut LoopState, loaded: &Value, requested_names: &Value) {
     for tool in loaded["tools"]
         .as_array()
@@ -1337,8 +1618,8 @@ fn select_loaded_tools(state: &mut LoopState, loaded: &Value, requested_names: &
             state.selected.insert(2.min(state.selected.len()), named);
         }
     }
-    // Preserve the model's first requested capability instead of the loader's catalog order.
-    // 保留模型首先请求的能力，不由加载器的目录顺序反转工具优先级。
+    // Keep the model's requested capability order, not catalog order.
+    // 保留模型请求的能力顺序，不按目录重排。
     if let Some(index) = requested_names
         .as_array()
         .into_iter()
@@ -1355,21 +1636,20 @@ fn select_loaded_tools(state: &mut LoopState, loaded: &Value, requested_names: &
     }
 }
 
-/// Keep the current actual capability and its loader when small windows trim optional declarations.
-/// 小窗口裁剪可选声明时保留当前实际能力及加载入口，避免只剩发现工具而反复加载。
+/// Keep the current capability and loader when trimming small-window schemas.
+/// 小窗口裁剪声明时保留当前能力和加载入口。
 fn trim_optional_tool(declared: &mut Vec<Value>) -> bool {
     trim_optional_tool_preserving(declared, &[])
 }
 
-/// Addition-only providers retain callable declarations until a genuine hard-window rebuild is needed.
-/// 仅增工具协议保留仍可调用的声明；只在真实硬窗口不足时明确重建，不因软排序预算撤掉工具。
+/// For addition-only providers, retain callable tools until the hard window requires rebuilding.
+/// 仅增协议保留可调用工具，达到硬窗口限制才重建。
 fn trim_optional_tool_preserving(declared: &mut Vec<Value>, pinned: &[String]) -> bool {
     let primary = declared.iter().position(|tool| {
         !matches!(tool["name"].as_str(), Some("tool.search" | "tool.load"))
     });
-    // Discovery goes first: known names stay loadable through tool.load, while a loaded action that was
-    // just used cannot be rediscovered without spending another round.
-    // 先移除发现工具：已知名称仍可经 tool.load 加载；刚使用过的已加载动作若被挤掉，就要多花一轮重新加载。
+    // Trim discovery first: known names remain loadable; dropping active tools costs another round.
+    // 优先裁剪发现工具；已知名称仍可加载，移除当前工具则会多耗一轮。
     let removable = declared
         .iter()
         .position(|tool| tool["name"] == "tool.search")
@@ -1388,8 +1668,8 @@ fn trim_optional_tool_preserving(declared: &mut Vec<Value>, pinned: &[String]) -
     }
 }
 
-/// Apply new formal user messages only between complete model/tool turns.
-/// 仅在完整模型/工具轮次之间应用正式插话；保留调用事实，显示切到最新插话之后。
+/// Apply steering between complete model/tool turns, preserving calls and prior output.
+/// 完整模型/工具轮之间应用插话，保留调用事实和已有输出。
 async fn apply_user_steering(
     runtime: &Arc<GatewayRuntime>,
     run: &Arc<RequestRun>,
@@ -1460,6 +1740,13 @@ async fn apply_user_steering(
                 409,
             ));
         }
+        if state.assistant["UserTaskDirective"]["stop"] == true {
+            state.acceptance_requirements = serde_json::from_value(
+                state.assistant["UserTaskDirective"]["suspendedRequirements"].clone()).unwrap_or_default();
+            state.assistant["UserTaskDirective"]["stop"] = json!(false);
+        }
+        state.assistant["LatestUserSteering"] = json!({"userMessageId":saved["Id"],"text":text});
+        state.broker_note(&steering_revision_instruction(state));
         if saved["Attachments"].as_array().is_some_and(|items| !items.is_empty()) {
             let prepared = super::gateway_attachments::prepare_context(runtime, &run.conversation_id,
                 saved["Id"].as_str().unwrap(), context.config["attachmentContextChars"].as_u64().unwrap_or(4096) as usize, true,
@@ -1469,11 +1756,6 @@ async fn apply_user_steering(
                 select_loaded_tools(state, &json!({"tools":[tool]}), &json!(["attachment.read"]));
             }
         } else { state.history.push(json!({"role":"user","content":text})); }
-        for requirement in super::task::acceptance_requirements(text) {
-            if !state.acceptance_requirements.contains(&requirement) {
-                state.acceptance_requirements.push(requirement);
-            }
-        }
         state.applied_steering_ids.insert(saved["Id"].as_str().unwrap().to_owned());
         let trusted = context.config["trustedUserText"].as_str().unwrap_or("");
         context.config["trustedUserText"] = json!(format!("{trusted}\n{text}"));
@@ -1484,8 +1766,8 @@ async fn apply_user_steering(
     let prior_tool_attempts = count_tool_attempts(&state.assistant);
     state.assistant["SupersededByUserMessageId"] = latest["Id"].clone();
     state.save(runtime, run, "interrupted", None).await?;
-    // Only the display projection changes; working history, effects and task usage keep their original owner.
-    // 仅切换展示投影；工作上下文、副作用与任务用量继续归原请求，不重复派发已有操作。
+    // Switch display only; keep history, effects and usage with the original request.
+    // 仅切换展示，历史、副作用和用量仍归原请求。
     state.assistant.as_object_mut().unwrap().remove("SupersededByUserMessageId");
     state.assistant["OriginUserMessageId"] = state.assistant.get("OriginUserMessageId")
         .cloned().unwrap_or_else(||state.assistant["ReplyTo"].clone());
@@ -1506,13 +1788,13 @@ async fn apply_user_steering(
     state.save(runtime, run, "streaming", None).await?;
     run.emit(json!({"type":"reply_anchor","replyMessageId":reply_id,"userMessageId":latest["Id"],"supersededReplyMessageId":old_reply_id,"toolStreamProtocol":3})).await;
     context.config["activeSteeringSequence"] = json!(steering_sequence);
-    // The system header already defines steering behavior; keep the actual amendment as the latest user turn.
-    // 系统指引已规定插话接续；最后一条用户消息必须保留实际补充，避免小模型转而复述调度说明。
+    // Keep the actual steering text as the latest user message, not scheduler guidance.
+    // 最后一条用户消息保留真实插话，不替换为调度说明。
     Ok(pending.len())
 }
 
-/// Keep the live navigation compact; complete analyses and evidence stay in registered task artifacts.
-/// 当前导航仅投影逐文档结论和状态；完整分析与原件证据继续留在登记的任务产物中。
+/// Keep navigation compact; store full analyses and evidence in task artifacts.
+/// 导航保持简短，完整分析和证据保存在任务产物中。
 fn document_navigation(documents: &DocumentWorkRecords) -> Value {
     let directory = documents.compact_projection();
     let entries = directory["documents"]
@@ -1566,8 +1848,8 @@ fn analyzed_document_count(documents: &DocumentWorkRecords) -> u64 {
         })
 }
 
-/// Only model-facing repeated bodies shrink; the actual full receipt has already been archived.
-/// 仅缩小模型端重复正文；完整实际回执已先行归档，版本检查、读取入口与工具计量不变。
+/// Trim repeated model-facing text only; full receipts, read access and metering remain intact.
+/// 仅精简面向模型的重复正文，完整回执、读取入口和计量保持不变。
 fn should_project_repeated_source_read(tool: &str, document: &Value) -> bool {
     matches!(tool, "filesystem.read" | "document.read")
         && document["informationAdded"] == false
@@ -1622,14 +1904,13 @@ fn repeated_read_projection(
     projection
 }
 
-/// Admit the leading calls of a planned batch, announce them with their serial orders, then run them together.
-/// 准入计划批次的前导调用，按串行时相同的顺序号公布运行状态后一起执行；
-/// 复用回执、额度不足或工作目录无法选择时，从该调用起交回有序循环逐个处理。
+/// Admit and announce leading batch calls in original order, then run concurrently; reuse, limits or missing roots return to serial handling.
+/// 按原顺序准入并公布批次前导调用，再并发执行；复用回执、额度不足或缺少目录时转回串行处理。
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_tool_batch(
     state: &mut LoopState,
-    run: &RequestRun,
-    runtime: &GatewayRuntime,
+    run: &Arc<RequestRun>,
+    runtime: &Arc<GatewayRuntime>,
     ctx: &tools::GatewayToolContext,
     calls: &[Value],
     batch: std::ops::Range<usize>,
@@ -1638,6 +1919,7 @@ async fn prefetch_tool_batch(
 ) -> Result<HashMap<usize, gateway_tool_batch::Prefetched>, GatewayError> {
     let attempts = count_tool_attempts(&state.assistant);
     let mut admitted = Vec::new();
+    let mut action_keys = HashSet::new();
     for index in batch {
         let call = &calls[index];
         let name = call["name"].as_str().unwrap_or("");
@@ -1648,7 +1930,7 @@ async fn prefetch_tool_batch(
         if !saved.is_null() || attempts + admitted.len() as u64 >= max_tool_calls {
             break;
         }
-        let context = if tools::workspace_path_tool(name, &call["arguments"]) {
+        let mut context = if tools::workspace_path_tool(name, &call["arguments"]) {
             match tools::select_workspace_context(ctx, &call["arguments"]).await {
                 Ok(selected) => selected,
                 Err(_) => break,
@@ -1656,6 +1938,24 @@ async fn prefetch_tool_batch(
         } else {
             ctx.clone()
         };
+        context.config["activeToolCallId"] = call["id"].clone();
+        context.config["activeOperationId"] = json!(gateway_tool_batch::operation_id(&context, call, round));
+        context.config["acceptanceRequirements"] = json!(state.acceptance_requirements);
+        if name.starts_with("knowledge.") {
+            context.external_execute = Some(specialist_executor(runtime, run, &context, &context.permission_mode,
+                context.config["trustedUserText"].as_str().unwrap_or("")));
+        }
+        let cached = ctx.runtime.schemas.read().await;
+        let definition = tool_failure_definition(call, &tools::builtin_catalog(), &cached);
+        drop(cached);
+        let environment = tool_failure_environment(&context,
+            &state.progress.verification()["codeVersionCoverage"]["latestSnapshot"], state.mutation_sequence);
+        if state.work_progress.failed_actions().before_dispatch(call, &definition, &environment).is_some()
+            || !action_keys.insert(state.work_progress.failed_actions().action_key(call, &definition, &environment)) {
+            // Settle this call serially; a batch must not spend its correction opportunity concurrently.
+            // 此调用改回串行结算；不能在同批并发里耗尽或绕过单动作纠正机会。
+            break;
+        }
         admitted.push((index, call.clone(), context));
     }
     if admitted.len() < 2 {
@@ -1670,8 +1970,8 @@ async fn prefetch_tool_batch(
     Ok(gateway_tool_batch::execute(&runtime.config.data_root, run, ctx, admitted, round).await)
 }
 
-/// Context maintenance is metered as compaction/model work, never as another user tool attempt.
-/// 上下文维护另有压缩与模型计量，不重复占用用户工具额度；缓存、失败和未派发的实际调用仍计入。
+/// Meter context maintenance as model/compaction work, without duplicating tool counts.
+/// 上下文维护计入模型及压缩用量，不重复计算工具次数。
 fn count_tool_attempts(assistant: &Value) -> u64 {
     assistant["PriorToolAttemptCount"].as_u64().unwrap_or(0) + assistant["ToolActivities"]
         .as_array()
@@ -1798,8 +2098,8 @@ async fn document_tool(
     }
 }
 
-/// Supersede derived control notes by appending, preserving unchanged request-prefix messages.
-/// 派生控制提示通过追加取代，保留未变化的历史前缀；失效提示显式撤销，不让旧阶段继续限制工具。
+/// Append replacement control notes and revoke stale ones without rewriting the prefix.
+/// 追加替代控制提示并撤销旧提示，不改写已有前缀。
 fn control_notice_update(sources: &[Value], marker: &str, notice: Option<&str>) -> Option<(String, Value)> {
     let previous = sources.iter().rev().find(|source| source[marker] == true);
     if previous.is_none() && notice.is_none() { return None; }
@@ -1830,16 +2130,16 @@ fn document_notice(state: &LoopState) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
-    // The checkpoint already carries working facts; duplicating their directory each turn starves those facts.
-    // 检查点已有工作事实时只附目录状态和读取入口，避免每轮重复目录挤掉事实，再触发整篇回读。
+    // Once facts are checkpointed, append only directory status and read links.
+    // 事实已存检查点后，仅附目录状态和读取入口，避免重复占用上下文。
     if state.history_sources.iter().any(|source| {
         source["checkpointSemanticSummary"]["archive"]["verified"] == true
             && source["checkpointSemanticSummary"]["facts"]
                 .as_array()
                 .is_some_and(|facts| !facts.is_empty())
     }) {
-        // Receipt coverage belongs to the current document version; summary-window prose cannot undo it.
-        // 当前版本的实际读取覆盖由回执维护；摘要切片中的旧进度文字不能撤销已完成读取。
+        // Current-version receipts own read coverage; old summary prose cannot revoke it.
+        // 读取覆盖以当前版本回执为准，旧摘要文字不能撤销。
         let source_labels = entries
             .iter()
             .map(|entry| {
@@ -1881,8 +2181,8 @@ fn document_notice(state: &LoopState) -> Option<String> {
             "withSavedFindings":entries.iter().filter(|entry|entry["active"]==true&&entry["analysisState"]!="not-recorded").count(),
             "directory":{"tool":"task.document","arguments":{"action":"list","offset":0,"count":16}},
             "semanticCorrectnessCertified":false});
-        // Keep successful output locators visible even when compaction removes the old write message.
-        // 压缩移除旧写入消息后仍展示成功产物位置，避免模型把已写出的文件再次当成待创建项。
+        // Keep successful output paths visible after compaction removes write messages.
+        // 压缩移除写入消息后仍保留成功产物路径。
         let mut produced_artifacts = Vec::new();
         let mut seen_artifact_paths = HashSet::new();
         for source in state.result_sources.iter().rev().filter(|source| {
@@ -1942,8 +2242,8 @@ fn bounded_advisory_notice(notice: Option<String>, concise: &str, maximum_tokens
     })
 }
 
-/// Navigation is derived metadata; only its display list shrinks, never saved facts, actual effects or user goals.
-/// 导航属于派生元信息；仅缩小展示目录，不裁剪已存事实、真实操作、原始目标或实时插话。
+/// Trim navigation only; retain saved facts, effects, goals and steering.
+/// 仅裁剪导航，保留事实、副作用、目标和插话。
 fn compact_document_notice(directory: &Value, result_sources: &[Value], maximum_tokens: u64) -> String {
     let entries = directory["documents"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     let mut written = Vec::new();
@@ -1956,8 +2256,8 @@ fn compact_document_notice(directory: &Value, result_sources: &[Value], maximum_
         if let Some(path) = source["sourceMetadata"]["path"].as_str().or_else(|| source["arguments"]["path"].as_str()) {
             let identity = json!([source["arguments"]["mountId"], path]).to_string();
             if seen.insert(identity) && source["name"] != "filesystem.delete" {
-                // Prefer the actual relative argument when available; retain its mount to distinguish equal names.
-                // 有真实相对参数时使用该参数，并保留挂载标识，不能混淆不同根目录下的同名产物。
+                // Use actual relative paths with mount IDs to distinguish same-named outputs.
+                // 使用真实相对路径并保留挂载标识，区分同名产物。
                 written_locators.insert(path);
                 let label = source["arguments"]["path"].as_str()
                     .filter(|path| !std::path::Path::new(path).is_absolute()).unwrap_or(path);
@@ -1967,10 +2267,8 @@ fn compact_document_notice(directory: &Value, result_sources: &[Value], maximum_
             }
         }
     }
-    // task.document record/read need these identities; unfinished documents sort first and are trimmed last.
-    // Readbacks of written outputs are already listed above and are not source documents awaiting analysis.
-    // task.document 记录与读取依赖这些标识；未完成文档排在前面并最后裁剪，压缩后仍能继续当前文档。
-    // 已写产物的回读已在产物列表中展示，不属于待分析的来源文档，不重复占用导航额度。
+    // List unfinished documents first and trim them last; output readbacks have a separate list.
+    // 未完成文档标识排在前面、最后裁剪；产物回读另有列表，不重复计入。
     let active = entries
         .iter()
         .filter(|entry| entry["active"] == true && entry["sourceIdentity"].is_string()
@@ -1982,16 +2280,16 @@ fn compact_document_notice(directory: &Value, result_sources: &[Value], maximum_
             (entry, locator, label)
         })
         .collect::<Vec<_>>();
-    // A unique file name keeps the list small; equal names keep the full locator so identities stay distinct.
-    // 文件名唯一时使用短名称缩小导航；同名时保留完整位置，避免混淆不同文档标识。
+    // Use short names only when unique; retain full locators for duplicates.
+    // 名称唯一时缩短导航，同名时保留完整位置。
     let mut identities = active
         .iter()
         .map(|(entry, locator, label)| {
             let mut identity = json!({"sourceIdentity":entry["sourceIdentity"],
                 "source":if active.iter().filter(|(_, _, other)| other == label).count() == 1 { label } else { locator },
                 "readState":entry["readState"],"analysisState":entry["analysisState"]});
-            // Only record needs resultId; a recorded analysis is read back by sourceIdentity alone.
-            // 仅记录分析需要 resultId；已记录的分析只凭 sourceIdentity 读取，省去重复标识。
+            // Only recording needs resultId; sourceIdentity suffices for analysis readback.
+            // 仅记录需要 resultId，读回已有分析只需 sourceIdentity。
             if entry["analysisState"] == "not-recorded" {
                 identity["resultId"] = json!(entry["resultIds"].as_array().and_then(|ids| ids.last()));
             }
@@ -2008,8 +2306,8 @@ fn compact_document_notice(directory: &Value, result_sources: &[Value], maximum_
         if crate::models::protocol::tool_message_tokens(&[json!({"role":"user","content":notice})], "") <= maximum_tokens {
             return notice;
         }
-        // Trim finished identities, then older outputs, and unfinished identities only as a last resort.
-        // 依次裁剪已完成文档标识、较旧产物，最后才裁剪未完成文档标识；list 仍可找回被省略项。
+        // Trim finished documents, old outputs, then unfinished documents; list can recover omitted entries.
+        // 依次裁剪已完成文档、旧产物、未完成文档，省略项仍可通过 list 找回。
         let finished = navigation["documents"].as_array().unwrap().last().is_some_and(|entry|
             entry["readState"] == "complete" && entry["analysisState"] != "not-recorded");
         if !finished && !navigation["writtenOutputs"].as_array().unwrap().is_empty() {
@@ -2028,8 +2326,8 @@ fn bounded_loaded_tools_notice(selected: &[Value], declared: &[Value], maximum_t
         "Use the current tool schemas. Load a needed known logical name with tool.load; reuse settled receipts.", maximum_tokens)
 }
 
-/// Restore only a hash-verified private snapshot whose original sources still match the current authorized scope.
-/// 仅恢复已核验哈希的私有快照；原件、范围或正式消息变化时改走原文回读，不复用旧事实。
+/// Restore hash-verified snapshots only when sources, scope and formal messages still match.
+/// 仅恢复原件、范围及正式消息仍匹配的已核验快照，否则回读原文。
 async fn restore_root_work_context(
     runtime: &GatewayRuntime,
     run: &RequestRun,
@@ -2051,8 +2349,8 @@ async fn restore_root_work_context(
     };
     if let Some(recovered_sequence) = state.assistant["RecoveredReceiptVersion"].as_u64() {
         if journal.latest_checkpoint()?.is_none_or(|checkpoint| checkpoint.through_event_sequence < recovered_sequence) {
-            // Reconciliation may publish a receipt after the saved private projection; use the updated original log.
-            // 核验回执可能晚于私有工作快照，先回用已补齐回执的正式记录，不能让旧投影掩盖已执行事实。
+            // Prefer the updated formal log when receipts postdate the private snapshot.
+            // 回执晚于私有快照时优先使用更新后的正式记录。
             state.assistant["WorkContextRestore"] = json!({"restored":false,"reason":"recovered-receipt-newer-than-checkpoint","fallback":"formal-original-readback"});
             return Ok(false);
         }
@@ -2097,8 +2395,8 @@ async fn restore_root_work_context(
     {
         return Err(invalid());
     }
-    // Recover registered document work independently of the conversational projection.
-    // 逐文档成果独立于对话投影恢复；单个文件变化仅撤销对应成果，其他分析仍可续用。
+    // Restore document work independently; invalidate only changed files.
+    // 独立恢复逐文档成果，仅撤销已变化文件的成果。
     let mut checked_document_files = HashSet::new();
     let mut checked_document_knowledge = HashSet::new();
     let mut changed_document_count = 0;
@@ -2133,8 +2431,8 @@ async fn restore_root_work_context(
                 }
                 for observation in record["observations"].as_array().into_iter().flatten() {
                     let is_knowledge=observation["tool"]=="knowledge.read";
-                    // File checks certify live bytes; knowledge checks use the original read and current scope.
-                    // 文件核验实时字节；知识资料须核验原始读取及当前作用域，不能仅信任务产物中的旧版本。
+                    // Verify live file bytes; verify knowledge against its original read and current scope.
+                    // 文件核验当前字节，知识资料核验原始读取和当前范围。
                     if !is_knowledge && file_version.is_some() {continue;}
                     let expected=observation["resultRef"].clone();
                     let root=runtime.config.data_root.clone();
@@ -2174,8 +2472,8 @@ async fn restore_root_work_context(
                 changed_document_count += 1;
             }
         }
-        // Only verified document work survives a later conversational-snapshot fallback.
-        // 即使后续对话快照需回退，也只保留已逐项核验的文档成果；失效文档不能继续暴露为活动分析。
+        // Retain only verified document work when the conversation snapshot falls back.
+        // 对话快照回退时，仅保留已核验的文档成果。
         state.documents = restored_documents;
     }
     if changed_document_count > 0 {
@@ -2253,8 +2551,8 @@ async fn restore_root_work_context(
         let root = runtime.config.data_root.clone();
         let chat = run.conversation_id.clone();
         let id = reference["id"].as_str().unwrap().to_owned();
-        // Internal reads may validate native attachments, but no private body enters an HTTP/SSE result.
-        // 内部读取可核验原生附件；任何私有正文都不进入 HTTP/SSE 回执或公开工具归档。
+        // Verify private attachments internally; exclude their bodies from public results and archives.
+        // 私有附件仅内部核验，正文不进入公开结果和归档。
         let archive =
             tokio::task::spawn_blocking(move || data::load_private_tool_result(&root, &chat, &id))
                 .await
@@ -2268,8 +2566,8 @@ async fn restore_root_work_context(
         }
         if archive["toolName"] == "knowledge.read" {
             if let Some(source_ref) = archive["canonical"]["sourceRef"].as_str() {
-                // Only the verified original read may survive a derived-index replacement.
-                // 只有身份已核验的原始读回窗口可跨派生索引替换复用；旧结构关系和未读片段不升级。
+                // Only verified original reads survive index replacement, not stale structure or unread chunks.
+                // 索引替换后仅复用已核验原始读取，不沿用旧结构或未读片段。
                 let config = runtime.config.clone();
                 let context =
                     json!({"conversationId":run.conversation_id,"requestId":run.request_id});
@@ -2340,8 +2638,8 @@ async fn restore_root_work_context(
     let selected_names = context["selectedNames"].as_array().ok_or_else(invalid)?;
     let catalog = tools::builtin_catalog();
     let mut restored_selected = Vec::new();
-    // Preserve the saved model-selected order, including recent loads, before applying schema admission.
-    // 工具声明授额前先恢复模型保存的选择顺序，包括最近加载项，避免按目录顺序重排后再次挤掉。
+    // Restore model-selected order, including recent loads, before schema admission.
+    // 声明授额前恢复模型选择的顺序，包括最近加载项。
     for name in selected_names {
         if restored_selected
             .iter()
@@ -2365,8 +2663,8 @@ async fn restore_root_work_context(
         if message["deferredAttachmentImages"] != true { continue; }
         if *cancellation.borrow() { return Err(GatewayError::new("ABORT_ERR", "附件恢复已取消。", 499)); }
         let message_id = message["attachmentMessageId"].as_str().ok_or_else(invalid)?.to_owned();
-        // Restore only image payloads; existing extracted text and its coverage stay intact.
-        // 仅恢复图片载荷；已经提取的正文及覆盖范围保持原样，不重新解析文档。
+        // Restore images only; retain extracted text and read coverage.
+        // 仅恢复图片，保留已提取文本和读取覆盖。
         let prepared = super::gateway_attachments::prepare_context(runtime, &run.conversation_id, &message_id, 0, true,
             run.native_cancellation.token.clone()).await?;
         let mut parts = message["content"].as_array().cloned().unwrap_or_else(|| vec![json!({"type":"text","text":message["content"]})]);
@@ -2404,6 +2702,29 @@ async fn restore_root_work_context(
     if let Some(requirements) = context["acceptanceRequirements"].as_array() {
         state.acceptance_requirements = requirements.iter().filter_map(Value::as_str).map(str::to_owned).collect();
     }
+    let mut saved_progress = context["runProgress"].clone();
+    if !saved_progress.is_object() {
+        let completion = &state.assistant["ToolRun"]["taskCompletion"];
+        if completion["receipts"].as_array().is_some_and(|receipts| !receipts.is_empty()) {
+            saved_progress = json!({"validationReceipts":completion["receipts"]});
+            for field in ["mutationRevision", "checkedMutationRevision"] {
+                if let Some(value) = completion.get(field) { saved_progress[field] = value.clone(); }
+            }
+            for (field, source) in [("latestCodeVersion", "latestSnapshot"), ("validatedCodeVersion", "validatedSnapshot")] {
+                if let Some(value) = completion["codeVersionCoverage"].get(source) { saved_progress[field] = value.clone(); }
+            }
+        }
+    }
+    if saved_progress.is_object() {
+        // Restore checks from owned checkpoints or formal broker receipts, never model prose.
+        // 从自有检查点或正式执行回执恢复检查状态，不采信模型文字。
+        let legacy_calls = state.assistant["ToolActivities"].as_array().into_iter().flatten()
+            .filter(|activity| super::progress::validation_call(&json!({"name":activity["name"],"arguments":activity["arguments"]})))
+            .map(|activity| json!({"call":{"id":activity["toolCallId"],"name":activity["name"],"arguments":activity["arguments"]},
+                "output":activity["result"].as_str().and_then(|text|serde_json::from_str::<Value>(text).ok()).unwrap_or(Value::Null),
+                "validationScope":{"cwd":ctx.workdir}})).collect::<Vec<_>>();
+        native(state.progress.apply("progress.restoreValidation", &json!({"state":saved_progress,"legacyCalls":legacy_calls})))?;
+    }
     state.work_context_reference = reference;
     state.work_context_ready = true;
     state.assistant["WorkContextRestore"] = json!({"restored":true,"sourceArchivesVerified":seen.len(),"scopeVerified":true,"privateContentExposed":false});
@@ -2411,8 +2732,8 @@ async fn restore_root_work_context(
 }
 
 impl LoopState {
-    /// Append changed facts without mutating earlier text; keep pending provenance across failed dispatches.
-    /// 变化事实只追加，不重写旧正文；未形成响应轮的来源随既有检查点保存。
+    /// Append changed facts; checkpoint pending provenance without rewriting earlier text.
+    /// 变化事实只追加；未派发来源存入检查点，不改旧正文。
     fn refresh_runtime_snapshot(&mut self, authority_hash: &str, allowed_role: &str, strict_system_positions: bool) {
         let Some(mut snapshot) = self.runtime_snapshot.take() else { return; };
         snapshot["source"]["authorityHash"] = json!(authority_hash);
@@ -2421,8 +2742,8 @@ impl LoopState {
             && !self.pending_context_before.iter().any(|entry| entry == &snapshot) {
             self.pending_context_before.push(snapshot.clone());
         }
-        // A failed/quiet round or a later broker notice can invalidate a native system position.
-        // 失败/静默轮或后追加的调度提示可能改变原生 system 的合法位置；只降级事实，不重排回执。
+        // Failed/quiet rounds or later notices may invalidate system positions; downgrade facts, not receipts.
+        // 失败、静默轮或后续提示可使 system 位置失效；仅降级事实，不重排回执。
         for (original_hash, message) in crate::models::runtime_context::normalize_positions(
             &mut self.history, &mut self.history_sources, allowed_role, strict_system_positions,
         ) {
@@ -2454,8 +2775,8 @@ impl LoopState {
         message_capacity_exhausted(next_round, calls, self.segments.len(), self.timeline_order)
     }
 
-    /// Change only the formal reply projection; history, evidence and the task/attempt stay owned by this run.
-    /// 仅更换正式回复投影；历史、验收证据以及任务/尝试仍由本次运行持有。
+    /// Replace the reply projection only; retain this run's history, evidence and task identity.
+    /// 仅更换回复投影，保留本次运行的历史、证据和任务身份。
     fn continue_reply_projection(&mut self, reply_id: &str) -> Value {
         let previous_reply = self.assistant["Id"].clone();
         for observation in self.transcript.iter().flat_map(|round| round["observations"].as_array().into_iter().flatten()) {
@@ -2466,8 +2787,8 @@ impl LoopState {
         let prior_calls = count_tool_attempts(&self.assistant);
         self.assistant["Id"] = json!(reply_id);
         self.assistant["PreviousReplyMessageId"] = previous_reply.clone();
-        // A fresh namespace prevents restarted local round numbers from colliding with old dispatched operations.
-        // 新命名空间避免局部轮次从 1 重启后与已派发的旧操作冲突；旧回执及副作用保护保持原身份。
+        // Use a fresh round namespace to avoid old operation IDs; preserve receipt identities.
+        // 新轮次使用独立命名空间，避免旧操作 ID 冲突，回执身份不变。
         self.assistant["OperationNamespace"] = json!(reply_id);
         self.assistant["CreatedAt"] = json!(now_iso8601());
         for field in ["TaskContinues", "ContinuedByReplyMessageId", "ToolRun"] { self.assistant.as_object_mut().unwrap().remove(field); }
@@ -2481,16 +2802,16 @@ impl LoopState {
         previous_reply
     }
 
-    /// Operational guidance is derived context, never another authoritative user goal.
-    /// 程序操作指引是派生上下文，不是新的用户目标；来源与消息按位置同步，供后续压缩识别。
+    /// Treat operational guidance as derived context with synchronized provenance, not a new user goal.
+    /// 操作指引属于派生上下文，同步记录来源，不作为新用户目标。
     fn broker_note(&mut self, content: &str) {
         self.context_note(
             content,
             json!({"projectionOrigin":"broker-control","publicText":content}),
         );
     }
-    /// Only broker-created provenance separates contextual data from authoritative user messages.
-    /// 仅程序生成的来源侧车区分上下文资料与权威用户消息；不依据用户正文猜测来源。
+    /// Use broker provenance to classify context, never guesses from user text.
+    /// 根据程序记录的来源区分上下文，不猜测用户正文。
     fn context_note(&mut self, content: &str, source: Value) {
         self.history_sources.resize(self.history.len(), Value::Null);
         self.history.push(json!({"role":"user","content":content}));
@@ -2526,8 +2847,8 @@ impl LoopState {
             .await
             .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "回复保存失败。", 500))??;
         if let Some(journal) = &run.journal {
-            // Saving observed work is receipt settlement, never permission for another model/tool dispatch.
-            // 保存已观测工作属于回执结算，不授权继续模型或工具派发；过期尝试仍不能写入。
+            // Saving observed work settles receipts; it neither authorizes dispatch nor permits stale attempts.
+            // 保存已观测工作仅结算回执，不授权派发，也不允许过期尝试写入。
             if journal
                 .repository()
                 .check_receipt_attempt(journal.token())
@@ -2549,6 +2870,7 @@ impl LoopState {
                         "lastProgressMs":self.last_progress_ms,
                         "deliveryContinuing":self.delivery_continuing,
                         "documentDirectory":self.documents.directory(),"workProgress":self.work_progress,
+                        "runProgress":native(self.progress.apply("progress.state",&json!({})))?,
                         "documentReadbackTargets":native(self.progress.apply("progress.documentReadbackTargets",&json!({})))?,
                         "stopReason":error.map(|error|error.code.as_str()).unwrap_or(status)});
                     self.work_context_reference = journal
@@ -2633,8 +2955,8 @@ fn settle_cancelled_message(
     for segment in &mut segments {
         if segment["status"] == "streaming" { segment["status"] = json!("interrupted"); }
     }
-    // Patch status only; the formal store merges it while preserving original text, sources and tool receipts.
-    // 仅补结算状态；正式仓储合并时保留原文、来源及工具回执，不重做任何已派发操作。
+    // Patch status only; storage preserves text, sources and receipts without replay.
+    // 仅补状态，存储合并时保留正文、来源和回执，不重放操作。
     let mut settled = json!({"Id":expected_reply,"Status":"interrupted",
         "Error":reason,"AssistantSegments":segments});
     if let Some(duration_ms) = duration_ms {
@@ -2663,6 +2985,9 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             Ok(value) => value["code"].as_str().unwrap_or(""),
             Err(error) => error.code.as_str(),
         };
+        if result.as_ref().is_ok_and(|value| value["taskCompletion"]["userStopped"] == true) {
+            break result;
+        }
         if *run.cancellation.borrow() {
             break Err(GatewayError::new("ABORT_ERR", "任务已停止，已有进度保留。", 499));
         }
@@ -2671,21 +2996,21 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
         {
             break result;
         }
-        // The same failure with no new dispatched model request means retrying cannot change the outcome.
-        // 同一错误且没有新的模型请求，说明重试无法改变结果；第三次起让下一次执行如实收尾。
+        // Without new dispatch, repeated failures cannot improve; finish truthfully from the third attempt.
+        // 没有新派发时反复重试无效，第三次起让下一次执行如实收尾。
         let requests = run.journal.as_ref()
             .and_then(|journal| journal.load_current().ok())
             .map(|task| task.usage.model_requests).unwrap_or(0);
-        // A repeated timeout does dispatch new requests, so the same code is also bounded on its own.
-        // 重复超时每次都会发出新请求，因此同一错误本身也设连续次数上限，避免对缓慢供应商无限重发。
+        // Bound consecutive timeout retries because each may dispatch another paid request.
+        // 连续超时也须限制重试，因为每次都可能发出新的计费请求。
         let same_code = last_recovery.as_ref().is_some_and(|(previous, _)| previous == code);
         if last_recovery.as_ref().is_some_and(|(previous, count)| previous == code && *count == requests) {
             stalled_recoveries += 1;
         } else {
             stalled_recoveries = 0;
         }
-        // A segment boundary with new requests is normal progress, not a repeated failure.
-        // 有新请求的轮次段边界属于正常推进，不计入同一错误的重复次数。
+        // Segment boundaries with new requests are progress, not repeated failures.
+        // 有新请求的分段边界属于进展，不计重复故障。
         repeated_code = if same_code && !(["TOOL_RUN_ROUND_LIMIT", "TOOL_RUN_CALL_LIMIT", "TOOL_RUN_TIMEOUT", "TOOL_RUN_OUTPUT_LIMIT", "TOOL_RUN_MESSAGE_CAPACITY"].contains(&code) && stalled_recoveries == 0) {
             repeated_code + 1
         } else {
@@ -2713,8 +3038,8 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
                 break;
             }
             recovery_attempt = recovery_attempt.saturating_add(1);
-            // Reconcile the existing native witnesses before dispatch; a failed write is never permission to replay it.
-            // 派发前核验已有原生证据；写入失败或结果未知不能成为重新执行原操作的许可。
+            // Reconcile existing evidence before dispatch; failed or unknown writes cannot authorize replay.
+            // 派发前核验已有证据，失败或未知写入不授权重放。
             let ready = reconcile_live_recovery(&runtime, &run, &input).await.unwrap_or(false);
             if ready { break; }
             run.emit(json!({"type":"task_progress","phase":"waiting-verification","round":1,
@@ -2769,8 +3094,8 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
                     break;
                 }
                 _ => {
-                    // A user stop cancels execution, not the pending formal status transaction.
-                    // 用户停止取消执行，不取消尚未落盘的正式状态事务；结算前不公布回复终态。
+                    // User stop cancels execution, not status persistence; publish final state after settlement.
+                    // 用户停止取消执行，不取消状态落盘；结算后才公布终态。
                     run.emit(json!({"type":"task_progress","phase":"saving","round":1})).await;
                     tokio::time::sleep(retry_delay).await;
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
@@ -2788,8 +3113,30 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             value["code"] = json!("TASK_PAUSED");
             value["error"] = json!("任务已暂停，进度与回执已保存。继续时从断点恢复。");
         }
+        if value["taskCompletion"]["userStopped"] == true {
+            // User stopping applies to the whole tree, after dispatched work has kept its receipts.
+            // 用户停止作用于整棵任务树，已派发操作仍保留并结算原回执。
+            let paused: Result<(), GatewayError> = async {
+                for attempt in 0..2 {
+                    let current = journal.load_current()?;
+                    if current.state.is_terminal() || current.state == TaskState::Paused { return Ok(()); }
+                    match runtime.tasks.control(journal.task_id(), current.version,
+                        crate::storage::task_repository::TaskControl::Pause).await {
+                        Ok(_) => return Ok(()),
+                        Err(error) if attempt == 0 && matches!(error.code.as_str(), "TASK_VERSION_CONFLICT" | "TASK_CONFLICT") => {},
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(())
+            }.await;
+            if let Err(error) = paused {
+                value["taskPauseError"] = json!({"code":error.code,"message":error.message});
+            }
+        }
         let code = value["code"].as_str().unwrap_or("");
-        let state = if run.suspending.load(std::sync::atomic::Ordering::Acquire) {
+        let state = if value["taskCompletion"]["userStopped"] == true {
+            TaskState::Paused
+        } else if run.suspending.load(std::sync::atomic::Ordering::Acquire) {
             TaskState::WaitingNetwork
         } else if matches!(code, "MODEL_NOT_CONFIGURED" | "INVALID_MODEL_CONNECTION")
             || code.starts_with("RESOURCE_") || code.starts_with("LOCAL_MODEL_RESOURCE_")
@@ -2817,7 +3164,9 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             TaskState::Partial
         };
         let _ = journal.emit_control("task.final", &json!({"conversationId":run.conversation_id,"requestId":run.request_id,"assistantMessageId":value.get("replyMessageId").unwrap_or(&json!(run.request_id)),"completion":value["taskCompletion"],"code":value["code"]}));
-        let reason = if run.suspending.load(std::sync::atomic::Ordering::Acquire) {
+        let reason = if value["taskCompletion"]["userStopped"] == true {
+            Some("user-steering-stopped".to_owned())
+        } else if run.suspending.load(std::sync::atomic::Ordering::Acquire) {
             Some("gateway-shutdown".to_owned())
         } else {
             (!code.is_empty()).then(|| code.to_owned())
@@ -2837,8 +3186,8 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
                         value["error"] = json!("任务已停止，已有进度保留。");
                         break;
                     }
-                    // Final persistence is waiting, never permission to certify success or disconnect a live request.
-                    // 最终落盘尚未成功时继续等待，不伪报成功，也不因此断开仍在工作的会话。
+                    // Wait for final persistence without claiming success or disconnecting the request.
+                    // 最终落盘未成功时继续等待，不报成功或断开请求。
                     run.emit(json!({"type":"task_progress","phase":"saving","round":1,
                         "recoveryAttempt":persistence_attempt+1})).await;
                     if !wait_for_internal_recovery(&run, persistence_attempt).await {
@@ -2856,8 +3205,8 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
     run.finish(value).await;
 }
 
-/// Join independent preparations without detached workers; each branch reports its own elapsed time.
-/// 独立准备共用一次等待，不创建无主任务；各分支分别记录实际耗时。
+/// Join owned preparations together; meter each branch separately.
+/// 合并等待独立准备分支，各自计时，不创建无主任务。
 async fn prepare_in_parallel<L, R>(
     left: L,
     right: R,
@@ -2897,8 +3246,8 @@ async fn execute(
         .chars()
         .take(80)
         .collect::<String>();
-    // Desktop messages already belong to a saved conversation; initialize only the legacy direct-call case.
-    // 桌面消息已归属正式聊天，仅兼容旧直连接口时补建，避免每次再执行一遍完整目录准备。
+    // Create chats only for legacy direct calls; desktop submissions already have one.
+    // 仅旧直连接口补建聊天，桌面提交已有正式归属。
     let formal = tokio::task::spawn_blocking(move || {
         match data::read_model_messages(&root, &conversation) {
             Err(error) if error.code() == "CONVERSATION_NOT_FOUND" => {
@@ -2911,8 +3260,24 @@ async fn execute(
     .await
     .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "聊天读取失败。", 500))??;
     preparation_stages["historyReadMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
-    // A persisted request identity is an execution witness after restart, never permission to replay.
-    // 重启后已持久化的请求身份是执行见证，绝不能据此重复派发副作用。
+    let continuing_settled = match &run.journal {
+        Some(journal) => {
+            let control = journal.repository().latest_event(journal.task_id(), "task.control")?;
+            let directive = journal.repository().latest_event(journal.task_id(), "task.user-directive")?;
+            control.is_some_and(|event| matches!(event.payload["reason"].as_str(),
+                Some("user-resumed" | "user-requested-revision"))
+                // An earlier resume cannot revoke a later user stop during internal recovery.
+                // 内部恢复时，较早的恢复控制不能撤销较新的用户停止。
+                && directive.is_none_or(|directive| directive.payload["stop"] != true
+                    || event.sequence > directive.sequence))
+        }
+        None => false,
+    };
+    // Explicit continuation restores the checkpoint even when the previous reply completed in transport.
+    // 明确续作须恢复检查点；旧答复传输完成不代表原任务已经完成。
+    let is_recovery = is_recovery || continuing_settled;
+    // Persisted request IDs prove prior execution, never permission to replay after restart.
+    // 持久化请求 ID 是旧执行证据，不授权重启后重放。
     let resumed = formal
         .iter().rev()
         .find(|message| {
@@ -2942,6 +3307,12 @@ async fn execute(
                 json!({"type":"completed","replyMessageId":saved["Id"],"content":saved["Content"],"reasoning":saved["Reasoning"],"assistantSegments":saved["AssistantSegments"],"durationMs":saved["DurationMs"],"taskCompletion":saved["ToolRun"]["taskCompletion"],"toolStreamProtocol":3,"reused":true}),
             );
         }
+    }
+    if run.journal.is_none() {
+        // A formal terminal record is read-only recovery, never authorization to rerun the model.
+        // 正式终态记录只允许恢复读取，答复缺失不能变成重新派发模型的授权。
+        return Err(GatewayError::new("CHAT_COMPLETED_REPLY_UNAVAILABLE",
+            "The completed task reply is temporarily unavailable; retain its saved state and verify storage before reconnecting. / 已完成任务的正式答复暂不可读，原状态保留，请核验存储后重连。", 503));
     }
     let saved_user = formal
         .iter()
@@ -2974,11 +3345,11 @@ async fn execute(
             400,
         ));
     }
-    // Keep formal acceptance mandatory while overlapping independent reads within this request's lifetime.
-    // 正式接收仍是执行前提；独立读取共用本次请求生命周期并行准备，不跳过数据 Owner 的范围核验。
+    // Prepare independent reads concurrently, retaining formal acceptance and scope checks.
+    // 并行准备独立读取，仍须正式接收和范围核验。
     let commit_user = async {
-        // A verified desktop submission is already authoritative; do not repeat its storage transaction.
-        // 桌面已提交并通过校验的消息就是正式来源，不重复写入其存储事务。
+        // Reuse verified desktop submissions without repeating storage writes.
+        // 复用已核验的桌面提交，不重复存储事务。
         if saved_user.is_none() {
             let root = runtime.config.data_root.clone();
             let conversation = run.conversation_id.clone();
@@ -3031,8 +3402,8 @@ async fn execute(
         prepare_managed_connection(&runtime, &mut connection, requested, cancellation.clone(),
             !run.is_background_recovery.load(std::sync::atomic::Ordering::Acquire)).await?;
     }
-    // The route is chosen once here and kept for every request of this run, including summaries.
-    // 路线在此一次选定，本次运行的每个请求（含摘要）都沿用，执行中不改道。
+    // Choose the route once per run and reuse it for summaries too.
+    // 每次运行只选一次路线，摘要也沿用。
     let routed_model = input["model"].as_str().filter(|value| !value.is_empty())
         .or_else(|| connection["models"][0].as_str()).unwrap_or("").to_owned();
     crate::models::provider_routes::project_connection(&mut connection, &routed_model);
@@ -3071,8 +3442,8 @@ async fn execute(
     ctx.events = Some(tool_sender);
     preparation_stages["connectionAndToolsMs"] = json!(connection_ms + preparation_stage_started.elapsed().as_millis() as u64);
     preparation_stage_started = Instant::now();
-    // A previous chat's verified MCP definitions remain candidates, never permissions or live session handles.
-    // 其他聊天已核验的MCP定义可继续参与候选排序，不复用审批或浏览器动态句柄。
+    // Reuse verified MCP definitions as candidates only, not permissions or live handles.
+    // 已核验 MCP 定义仅作候选，不复用权限或活动句柄。
     let mut available = tools::builtin_catalog();
     available.extend(tools::reusable_mcp_catalog(&ctx));
     let mut all = available
@@ -3086,10 +3457,10 @@ async fn execute(
     let mut names = HashSet::from([
         "tool.search".to_owned(),
         "tool.load".to_owned(),
-        // Keep discovery immediately available; other definitions are selected by task hints or tool.load.
-        // 能力发现始终可用；其他完整定义由任务线索或 tool.load 按需加入，减少无关声明的预填开销。
-        // Lightweight web reads are discoverable without guessing capability words from a topic.
-        // 轻量网页检索与读取直接可发现，不要求从问题主题猜出工具能力词；浏览器仍按需加载。
+        // Keep discovery available; load other definitions by task hints or tool.load.
+        // 保留能力发现入口，其他定义按任务线索或 tool.load 加载。
+        // Expose lightweight web search/read directly; load browser tools on demand.
+        // 直接提供轻量网页搜索和读取，浏览器工具按需加载。
         "web.search".to_owned(),
         "web.fetch".to_owned(),
     ]);
@@ -3111,13 +3482,13 @@ async fn execute(
     .as_array()
     .cloned()
     .unwrap_or_default();
-    // Experience breaks relevance ties among existing matches; it never adds tools to ordinary chat.
-    // 经验仅对已有相关候选作同分排序，普通聊天不会因此增加工具或外部准备调用。
+    // Use experience only to break relevance ties; ordinary chat gains no extra tools or calls.
+    // 经验仅用于相关候选同分排序，不给普通聊天增加工具或调用。
     if !hints.is_empty() {
         tools::rank_tool_hints(&ctx, &all, &mut hints);
     }
-    // Skill headers are configuration metadata, read only for tool-relevant work; plain chat adds no scan.
-    // 技能头属于软件配置元信息；只在工具相关任务读取，普通聊天不增加目录扫描或模型调用。
+    // Read skill headers only for tool-related work; plain chat adds no scan or model call.
+    // 仅工具相关工作读取技能头，普通聊天不增加扫描或模型调用。
     let skill_headers = if supports_tools && !hints.is_empty() {
         tools::relevant_skill_headers(&ctx, input["message"].as_str().unwrap_or("")).await.unwrap_or_default()
     } else {
@@ -3253,8 +3624,8 @@ async fn execute(
     preparation_stages["toolSelectionAndHistoryProjectionMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
     preparation_stage_started = Instant::now();
     if let Ok(Ok(summary)) = summary {
-        // A saved summary is only a candidate; the model context layer verifies its source identity again.
-        // 已保存摘要仅是候选，上下文层仍须重新核对来源身份、覆盖范围和内容摘要。
+        // Recheck saved summaries against source identity, coverage and content hash.
+        // 复用摘要前重核来源身份、覆盖范围和内容哈希。
         state.previous_summary = summary;
     }
     let resuming = resumed.is_some();
@@ -3273,8 +3644,8 @@ async fn execute(
         }
         for activity in formal.iter().filter(|message|message["Role"]=="assistant" && (message["Id"]==run.request_id || message["RequestId"]==run.request_id))
             .flat_map(|message|message["ToolActivities"].as_array().into_iter().flatten()) {
-            // Restore only external effects; internal compaction activities have no dispatch receipt to verify.
-            // 仅恢复外部副作用；内部压缩活动没有工具派发回执，不能因该回执不存在制造未知副作用。
+            // Restore external effects only; compaction has no tool-dispatch receipt.
+            // 仅恢复外部副作用，内部压缩不要求工具派发回执。
             if is_read_only_tool(activity["name"].as_str().unwrap_or("")) {
                 continue;
             }
@@ -3379,13 +3750,34 @@ async fn execute(
         false
     };
     if resuming {
+        if continuing_settled && state.assistant["UserTaskDirective"]["stop"] == true {
+            state.acceptance_requirements = serde_json::from_value(
+                state.assistant["UserTaskDirective"]["suspendedRequirements"].clone()).unwrap_or_default();
+            state.assistant["UserTaskDirective"]["stop"] = json!(false);
+            state.assistant["LatestUserSteering"] = Value::Null;
+            state.broker_note("The user explicitly resumed this paused task. Continue its saved unfinished requirements; the earlier stop is historical, and its withdrawn minimum duration stays withdrawn. Preserve successful effects.");
+        }
+        if let Some((names, round)) = restore_legacy_review_intent(&runtime.config.data_root,
+            &run.conversation_id, &run.request_id, &state).await {
+            if retain_unexecuted_tool_intent(&mut state, &names, &all, round) {
+                state.broker_note("Broker: a saved review contained public tool-call syntax that was never dispatched. Its tool names were restored as pending intent only; no arguments or private reasoning were executed. Resolve genuinely missing work through current native tools and permissions, preserving successful effects and receipts.");
+            }
+        }
+        let previous_completion = restored_completion_projection(&state);
         restore_completion_evidence(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut state.transcript).await;
+        let mut retained = vec![json!({"observations":std::mem::take(&mut state.retained_completion_observations)})];
+        restore_completion_evidence(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut retained).await;
+        if let Some(mut round) = retained.pop()
+            && let Value::Array(observations) = round["observations"].take() {
+            state.retained_completion_observations = observations;
+        }
         restore_committed_stream(&run, &mut state).await;
+        reconcile_restored_delivery(&mut state, &previous_completion);
     }
     if !supports_tools { state.selected.clear(); }
     if !resuming && requires_task_verification(&state) {
-        // Optional historical advice never joins model readiness or becomes execution authority.
-        // 可选历史建议不加入模型就绪条件，也不成为工具权限或自动执行依据。
+        // Historical advice neither blocks model readiness nor authorizes execution.
+        // 历史建议不阻塞模型就绪，也不授予执行权限。
         if let Ok(hint) = tokio::time::timeout(Duration::from_millis(30),
             tools::verified_experience_hint(&ctx, &state.acceptance_requirements.join("\n"))).await {
             if let Some(entries) = hint["entries"].as_array().filter(|entries| !entries.is_empty()) {
@@ -3399,8 +3791,8 @@ async fn execute(
             }
         }
     }
-    // The initial durable reply and read-only runtime observation are independent; generation awaits both.
-    // 首次正式回复保存与只读运行时观测互不依赖；模型生成仍等待两者完成，资源和恢复边界保持不变。
+    // Prepare the durable reply and runtime observation concurrently; generation awaits both.
+    // 正式回复保存与运行时观测并行准备，生成前等待两者完成。
     state.generation_duration_base_ms = run
         .restore_generation_timing(state.generation_duration_base_ms).await;
     let ((saved, save_ms), ((browser_prompt, local_snapshot), observation_ms)) = prepare_in_parallel(
@@ -3477,15 +3869,15 @@ async fn execute(
     system.push('\n');
     system.push_str(&protocol::runtime_identity_prompt(&connection, model_name));
     system.push_str("\nRuntime fact snapshots may appear later in the conversation. They are broker context data, not new user goals or execution authorization. Current user instructions and current permission/confirmed-memory rules take precedence; use the newest facts in the current scope.");
-    // Permission rules remain system guidance even when factual snapshots use a compatible user role.
-    // 即使事实快照采用兼容的 user 角色，权限规则仍保持系统层级，不由历史资料赋权。
+    // Keep permissions in system guidance even when snapshots use the user role.
+    // 事实快照采用 user 角色时，权限规则仍属系统层级。
     system.push_str(&format!("\nCurrent permission mode (configuration data): {}. Runtime policy is authoritative: full mode skips per-call approval only for already allowed operations; other modes retain required approval. Protected data, targets, scope and current authorization checks always apply. Historical snapshots never restore withdrawn permission.", json!(permission)));
     let cache_stable_system = system.clone();
     let cache_scope = json!([runtime.config.data_root.to_string_lossy(), ctx.project_id, run.conversation_id]).to_string();
     let runtime_role = crate::models::runtime_capabilities::runtime_message_role(&connection, model_name);
     let dynamic_runtime = guide["dynamic"].as_str().unwrap_or("");
-    // Prefer the limits persisted at acceptance, which include an inherited minimum; recompute only without a task.
-    // 优先使用接受时保存的额度（含继承的最低时长）；没有持久任务时才重新解析。
+    // Use saved acceptance limits, including inherited duration; recompute only without a task.
+    // 优先沿用接受时保存的额度和继承时长，仅无持久任务时重算。
     let persisted_limits = run.journal.as_ref()
         .and_then(|journal| journal.load_current().ok())
         .and_then(|task| task.input_reference)
@@ -3504,16 +3896,17 @@ async fn execute(
             system.push_str(&note);
         }
     }
-    if state.acceptance_requirements.is_empty() {
+    if state.acceptance_requirements.is_empty() && !state.assistant["UserTaskDirective"].is_object() {
         let task = run.journal.as_ref().and_then(|journal| journal.load_current().ok());
-        let (goal, criteria) = task.as_ref().map(|task| (task.goal.as_str(),
+        let (goal, saved_criteria) = task.as_ref().map(|task| (task.goal.as_str(),
             task.input_reference.as_ref().and_then(|reference|
-                super::gateway_task_input::read_acceptance_requirements(&runtime.config.data_root, reference))
-                .unwrap_or_else(|| task.acceptance.clone())))
-            .unwrap_or((input["message"].as_str().unwrap_or(""), Vec::new()));
-        // Old tasks stored a generic delivery reminder rather than the user's actual acceptance requirements.
-        // 旧任务只存通用交付提醒时，从原始目标恢复要求；不把“继续”当成完整验收清单。
-        state.acceptance_requirements = if criteria.is_empty() || criteria.iter().any(|item|
+                super::gateway_task_input::read_acceptance_requirements(&runtime.config.data_root, reference))))
+            .unwrap_or((input["message"].as_str().unwrap_or(""), None));
+        let explicit_criteria = saved_criteria.is_some();
+        let criteria = saved_criteria.unwrap_or_else(|| task.as_ref().map(|task|task.acceptance.clone()).unwrap_or_default());
+        // Recover legacy acceptance from the original goal, not a bare continuation message.
+        // 旧验收记录不完整时从原目标恢复要求，不以“继续”代替。
+        state.acceptance_requirements = if criteria.is_empty() && !explicit_criteria || criteria.iter().any(|item|
             item.starts_with("Return the requested result with actual execution")) {
             super::task::acceptance_requirements(goal)
         } else { criteria };
@@ -3531,8 +3924,8 @@ async fn execute(
     // 当前记忆保留为可替换的后部块；撤销不能复用失效快照。
     let base_system = system.clone();
     let initial_runtime_authority = runtime_authority(&ctx, permission, &live_memory.block);
-    // Resume the recorded observation verbatim instead of inventing a new historical timestamp.
-    // 恢复时复用记录中的观测原文；仅路由、授权范围变化或缺少旧快照时生成新观测。
+    // Reuse recorded observations; refresh only for changed routes/scopes or missing snapshots.
+    // 复用观测原文，仅路线、范围变化或快照缺失时刷新。
     if !work_context_restored || state.runtime_snapshot.as_ref().is_none_or(|snapshot|
         snapshot["source"]["authorityHash"] != initial_runtime_authority
             || (snapshot["message"]["role"] != runtime_role && snapshot["message"]["role"] != "user"))
@@ -3555,8 +3948,8 @@ async fn execute(
                 + 1024,
         )
         .min(context_window / 5);
-    // A restored working context already owns its evidence; repeated preparation grows the same checkpoint.
-    // 恢复的工作上下文已持有原证据；不能每次内部重试重新检索并把同一检查点不断放大。
+    // Reuse restored evidence rather than retrieving it again on each internal retry.
+    // 恢复后沿用原证据，不在每次内部重试时重复检索。
     let retrieval_needed = if evidence_budget > 0 && !work_context_restored {
         crate::retrieval::gateway::should_prepare_request(input["message"].as_str().unwrap())
     } else {
@@ -3600,8 +3993,8 @@ async fn execute(
         };
         Ok::<_, GatewayError>((projected, attachments))
     };
-    // Evidence and history/attachments retain their inputs, budgets and ordering in the final model request.
-    // 检索与历史/附件准备并行；最终请求的证据、预算及消息顺序保持原有约定。
+    // Prepare evidence and history/attachments concurrently, preserving final budgets and order.
+    // 并行准备证据与历史/附件，保留最终请求的预算和顺序。
     let ((evidence, evidence_ms), (prepared_context, context_ms)) =
         prepare_in_parallel(evidence_future, context_future).await;
     let evidence_system_length = system.len();
@@ -3610,13 +4003,13 @@ async fn execute(
             Ok(Ok(value))=>{
                 if let Some(reference)=value.get("resultRef").filter(|value|!value.is_null()){
                     state.assistant["RetrievalResultRef"]=reference.clone();
-                    // Publish the owning receipt before a model can read a short evidence reference.
-                    // 模型读取短证据引用之前先持久化所属回执，恢复及压缩不能依赖未保存的引用。
+                    // Persist receipts before exposing their short evidence references to the model.
+                    // 先保存回执，再向模型提供证据短引用。
                     state.save(&runtime,&run,"streaming",None).await?;
                 }
                 if let Some(notice)=value["systemNotice"].as_str().filter(|text|!text.is_empty()){
-                    // Retrieved snippets share the reclaimable working budget, not immutable system guidance.
-                    // 检索片段使用可回收工作预算，不混入不可压缩的系统指导；真实原归档仍可回读。
+                    // Keep snippets in reclaimable working context; retain original archives for readback.
+                    // 检索片段计入可回收工作上下文，原归档保留回读入口。
                     automatic_evidence_note=Some((notice.to_owned(),value["resultRef"].clone()));
                 }
             },
@@ -3635,8 +4028,8 @@ async fn execute(
     }
     let (mut projected, prepared_attachments) = prepared_context?;
     if system.len() != evidence_system_length {
-        // Error notices change the signed prefix; recheck continuation against the final system only on that path.
-        // 检索失败说明会改变签名前缀；仅此分支按最终 system 重新核对私有续传，不能复用旧前缀。
+        // Retrieval error notices change the prefix; recheck continuation against the final system.
+        // 检索错误提示改变前缀后，按最终 system 重核续传。
         projected = protocol::history_projection_verified(&connection, model_name, &historical, &tool_names,
             &runtime.config.data_root, &run.conversation_id, &system, &declarations).await?;
     }
@@ -3659,15 +4052,15 @@ async fn execute(
                 input["message"].as_str().unwrap(), input["userMessageId"].as_str().unwrap(), &prepared);
         }
     }
-    // Keep a compact readback directory for follow-up questions without reinserting old document bodies.
-    // 后续追问携带精简附件目录供按需回读，不反复塞入旧文档全文。
+    // Keep compact attachment links for follow-ups, not repeated full bodies.
+    // 追问仅携带精简附件回读入口，不重复附入全文。
     let attachment_directory = formal.iter().rev().take(64).flat_map(|message| {
         message["Attachments"].as_array().into_iter().flatten().map(move |attachment|
             json!({"messageId":message["Id"],"attachmentId":attachment["Id"],"name":attachment["Name"]}))
     }).take(64).collect::<Vec<_>>();
     if !attachment_directory.is_empty() && !work_context_restored {
-        // The attachment directory is an observation too: persist its original position instead of repeating a loose notice.
-        // 附件目录同属运行观测：持久化原位置，避免恢复时重复追加游离提示或跨消息回放丢失它。
+        // Persist attachment navigation at its original observation position.
+        // 附件导航按原观测位置保存，避免恢复时重复或丢失。
         state.runtime_snapshot = crate::models::runtime_context::snapshot(runtime_role,
             &format!("{dynamic_runtime}\nSaved attachments in this conversation (read originals with attachment.read only when needed): {}", json!(attachment_directory)),
             &initial_runtime_authority);
@@ -3680,8 +4073,8 @@ async fn execute(
     state.refresh_runtime_snapshot(&initial_runtime_authority, runtime_role, protocol::protocol(&connection) == "anthropic-messages");
     if resuming {
         state.broker_note("Continue from the restored working checkpoint using its facts, original references and already loaded tool definitions. Read only missing details or unread files; do not reconstruct the inventory or rediscover available tools merely because execution resumed. Completed effects remain protected; verify unknown outcomes before mutation.");
-        // Added after the rebuilt history so the model actually receives the user's confirmation.
-        // 在重建后的历史之后加入，确保模型实际收到用户对未知结果的确认说明。
+        // Append user confirmation after rebuilding history so the model receives it.
+        // 重建历史后再加入用户确认，确保模型收到。
         if !acknowledged_unknown.is_empty() {
             state.broker_note(&unknown_outcome_note(&acknowledged_unknown));
         }
@@ -3694,8 +4087,8 @@ async fn execute(
         run.emit(json!({"type":"content_snapshot","content":state.assistant["Content"],
             "reasoning":state.assistant["Reasoning"]})).await;
     }
-    // Reconnection replays the saved commentary identities before introducing new phases.
-    // 重连先恢复已保存的过程段身份，再引入新阶段；回执与正式数据保持同一时间线。
+    // Restore saved commentary IDs before starting new phases.
+    // 重连先恢复已有过程段身份，再开启新阶段。
     state.timeline_order = state
         .segments
         .iter()
@@ -3743,9 +4136,10 @@ async fn execute(
     let mut retry_next_request = false;
     let mut empty_control_recoveries = 0;
     let mut history_echo_recoveries = 0;
-    let minimum_active_ms = limits["minActiveMs"].as_u64().unwrap_or(0);
-    // Keep each formal message bounded without imposing that storage boundary on its owning task.
-    // 每条正式消息保留有界存储，达到边界时自动续段，不把消息边界当作任务结束。
+    let mut minimum_active_ms = state.assistant["UserTaskDirective"]["minimumActiveMs"]
+        .as_u64().unwrap_or_else(|| limits["minActiveMs"].as_u64().unwrap_or(0));
+    // Roll over bounded messages without ending their owning task.
+    // 消息达到存储边界时续段，不结束所属任务。
     if state.needs_message_continuation(first_round) {
         let previous_reply = state.assistant["Id"].clone();
         let reply_id = new_id();
@@ -3777,6 +4171,13 @@ async fn execute(
             review_pending = false;
             ctx.config["activeAssistantMessageId"] = state.assistant["Id"].clone();
             let _ = state.task.apply("task.resumed", &json!({}));
+        }
+        if state.assistant["UserTaskDirective"]["stop"] == true {
+            // Recovery saves an already accepted stop without another paid model request.
+            // 恢复只保存已接受的停止，不再发起计费模型请求。
+            final_received = true;
+            task_status = json!({"state":"blocked","source":"user-steering","reason":"user-requested-stop"});
+            break;
         }
         if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
             memory_refresh_notice(&mut state, &status);
@@ -3822,8 +4223,14 @@ async fn execute(
             ));
             break;
         }
-        // Active acceptance is mandatory control data, not historical prose to summarize away.
-        // 当前验收要求是必须保留的控制信息，不能作为旧对话被压缩吞掉；先计入预算再附回。
+        // Reserve active acceptance before compaction; never summarize it away.
+        // 压缩前预留当前验收要求，不能把它当作旧对话删掉。
+        let pending_tool_intent = has_unexecuted_tool_intent(&state.review_checkpoint);
+        if pending_tool_intent { review_pending = false; }
+        let protocol_notice = pending_tool_intent.then(|| format!(
+            "Broker: an earlier response wrote tool-call syntax as ordinary text; no call was dispatched. These intended tools still require a formal result: {}. Use the currently declared native tool protocol, or a valid continue.action with the exact authorized logical tool name and arguments. Do not emit DSML/XML calls as text, reinterpret the pending step as optional, or cite earlier unrelated receipts to settle it. Check actual state and preserve completed effects; normal identity-based receipt reuse remains available. If the action is no longer appropriate, explain the genuine scope change or blocker rather than claim it ran.",
+            state.review_checkpoint["unexecutedToolIntent"]["names"]));
+        append_control_notice(&mut state, "nativeToolProtocolNotice", protocol_notice.as_deref());
         if !review_pending { refresh_acceptance_reminder(&mut state, round); }
         let review_notice = review_pending.then(|| completion_review_instruction(&state));
         let used_calls = count_tool_attempts(&state.assistant);
@@ -3842,9 +4249,10 @@ async fn execute(
         let delivery_version = json!({"revision":verification["mutationRevision"],
             "signature":verification["codeVersionCoverage"]["latestSnapshot"]["signature"]})
         .to_string();
-        // A verified output gets one full-answer turn without schemas; the model may still identify remaining work.
-        // 已核验产物先获得一轮无工具定义的完整答复空间；模型仍可指出剩余工作并继续执行。
+        // Prefer delivery after verification while retaining the native tool channel for real gaps.
+        // 核验后优先交付，仍保留原生工具通道处理真实缺口。
         let synthesize_delivery = !review_pending
+            && !pending_tool_intent
             && cached_completion_review(&state).is_none_or(|review| review["action"] != "resume")
             && has_output
             && verification["pendingValidation"] == false
@@ -3858,16 +4266,16 @@ async fn execute(
         if synthesize_delivery {
             synthesized_version = Some(delivery_version);
         }
-        // Tool exhaustion closes dispatch, while the normal answer keeps the full current context and output grant.
-        // 工具额度耗尽只关闭派发；正常答复继续使用完整当前上下文和实际输出授额。
+        // Tool limits stop dispatch only; answers retain context and the negotiated output budget.
+        // 工具限额只停止派发，答复保留上下文和已协商输出额度。
         let tools_closed = delivery.tools_exhausted;
-        let declarations_disabled = !supports_tools || review_pending || tools_closed || synthesize_delivery;
+        let declarations_disabled = !supports_tools || tools_closed;
         let mut delivery_notice = (!review_pending && (delivery.deprioritize_discovery_and_search || synthesize_delivery)).then(|| {
             format!(
             "Delivery phase: {}. Reuse successful outputs, saved findings and actual validation receipts. Finish the final answer and report the artifact and actual result. {}",
                 serde_json::to_value(&delivery).unwrap_or(Value::Null),
                 if tools_closed { "No tools are callable in this response. Do not simulate tool calls using DSML, XML or JSON. Give the user-readable final answer from current evidence and completed outputs; state any genuinely unfinished requirement." }
-                else if synthesize_delivery { "No tools are callable in this response. Do not simulate tool calls using DSML, XML or JSON. Recorded output readback or execution checks are available. Compare them with the original user goal. Write the user-readable final answer and requested values if the goal is met, using actual outputs and receipts. If a specific requirement remains, identify it in words and return state=continue; tools become available again on the next turn." }
+                else if synthesize_delivery { "Recorded output readback or execution checks are available. Compare them with the original user goal and prefer a concise final answer when it is met. Native tools remain available for a genuinely missing action or validation; use the formal protocol rather than simulating DSML, XML or JSON calls as text. An unfinished requirement remains work in the original task." }
                 else { "Complete missing delivery steps with current tools; combine compatible authorized actions." }
             )
         });
@@ -3912,8 +4320,8 @@ async fn execute(
         if let Some(snapshot) = &state.runtime_snapshot {
             mandatory_messages.push(snapshot["message"].clone());
         }
-        // Repeated guidance shares one bounded allowance before schema admission and history compaction.
-        // 重复派生提示在工具授额和历史压缩之前共用有界额度，不能耗尽原始目标与工作事实的空间。
+        // Bound repeated guidance before schema admission and compaction to protect working context.
+        // 声明授额和压缩前限制重复指导，保留目标与工作事实空间。
         let mut essential_tools = if declarations_disabled { vec![] } else { state.selected.clone() };
         while trim_optional_tool(&mut essential_tools) {}
         let essential_schema_tokens = crate::models::protocol::estimate_tokens(
@@ -3936,10 +4344,10 @@ async fn execute(
             advisory_budget / 4);
         strategy_notice = bounded_advisory_notice(strategy_notice,
             "Repeated work added no progress. Reuse saved findings; perform the next unfinished step or deliver the final answer.", advisory_budget / 8);
-        // History is compacted below; size declarations against mandatory guidance, not the uncompressed old history.
-        // 历史在后续统一压缩；工具声明按必要指导授额，不能因待压缩历史过大卸载刚加载的工具。
-        // Schema admission includes the same mandatory messages later sent to the model, not only the system prompt.
-        // 工具定义准入计入随后实际发送的必需消息，而非只计算系统提示；工作事实的额度不能再次被实时指引挤占。
+        // Budget schemas against mandatory guidance; compact old history afterward.
+        // 工具声明按必要指导授额，旧历史随后压缩。
+        // Include all mandatory request messages in schema admission, not just system text.
+        // 声明准入计入实际发送的全部必需消息，不只计算 system。
         for notice in [
             &document_progress_notice,
             &delivery_notice,
@@ -3951,8 +4359,8 @@ async fn execute(
             mandatory_messages.push(json!({"role":"user","content":notice}));
         }
         let occupied = crate::models::protocol::tool_message_tokens(&mandatory_messages, &system);
-        // Retain saved-work discovery without overriding the next capability explicitly loaded by the model.
-        // 保留工作成果入口，但不覆盖模型刚加载的下一步能力；读完后才能切换到写入与验证。
+        // Keep saved-work discovery without replacing the model's newly loaded capability.
+        // 保留成果发现入口，不替换模型刚加载的下一步能力。
         if !state.documents.directory()["documents"]
             .as_array()
             .is_none_or(|entries| entries.is_empty())
@@ -3977,8 +4385,8 @@ async fn execute(
                 state.selected.push(tool.clone());
             }
         }
-        // Delivery advice cannot override the exact next capability the model just loaded.
-        // 综合建议不能覆盖模型刚加载的下一步能力，否则缺口读取会被永久裁掉并反复加载。
+        // Delivery advice must not displace the newly loaded capability.
+        // 交付建议不能挤掉模型刚加载的能力。
         let mut declared_tools = state.selected.clone();
         let mut pinned_tool_names = state.tool_series.required_tool_names(&connection);
         let mut schemas = if declarations_disabled {
@@ -4006,6 +4414,9 @@ async fn execute(
         // A smaller declared catalog reclaims unused context without hiding discovery capability.
         // 缩小已声明目录以回收上下文，保留完整能力发现入口。
         loop {
+            // Review/delivery turns stay tool-free even when the reserved schema budget is zero.
+            // 核验及无工具交付轮次即使声明预算为零，也不能在裁剪时重新装回工具。
+            if declarations_disabled { break; }
             let loaded_notice_tokens = if declarations_disabled {
                 0
             } else {
@@ -4111,8 +4522,8 @@ async fn execute(
         let summary_context = ctx.clone();
         let summary_connection = connection.clone();
         let summary_model = model_name.to_owned();
-        // Observe actual dispatches even if compaction exits through cancellation or a rejected projection.
-        // 即使压缩取消或投影未采用，也保留真实派发观察；正式成本仍只由既有任务账本结算。
+        // Track actual compaction dispatches even after cancellation or rejected projections.
+        // 压缩取消或投影未采用时，仍记录真实派发。
         let summary_observations = Arc::new(Mutex::new(Vec::<u64>::new()));
         let summary_observer = summary_observations.clone();
         let summary_executor: crate::models::gateway_context::SummaryExecutor =
@@ -4145,9 +4556,8 @@ async fn execute(
                     result
                 })
             });
-        // Measure changed controls once in the actual history. Identical controls neither move nor
-        // repeat, keeping the existing 90% compaction threshold tied to the real request size.
-        // 变化的控制只进入真实历史一次；相同提示不挪位、不重复，既有90%压缩触发按真实请求计量。
+        // Append changed controls once; stable controls stay put. Measure the 90% trigger on real input.
+        // 变化控制只追加一次，相同提示不移动或重复；90% 压缩阈值按实际输入计量。
         let live_notices = [
             ("documentProgressNotice", document_progress_notice),
             ("loadedToolNotice", loaded_tool_notice),
@@ -4163,8 +4573,8 @@ async fn execute(
             let projected_tokens = crate::models::protocol::tool_message_tokens(&state.history, &system)
                 .saturating_add(crate::models::protocol::estimate_tokens(&json!(schemas).to_string()));
             if projected_tokens > conversational_input_budget {
-                // Only a required compaction may move the latest facts; reserve their tokens before shortening history.
-                // 仅必要压缩可移动当前事实；缩短历史前先预留它的额度，避免重新附入导致超窗。
+                // Only required compaction may move current facts; reserve their tokens first.
+                // 仅必要压缩可移动当前事实，先预留其 token 额度。
                 crate::models::runtime_context::detach_snapshot(&mut state.history, &mut state.history_sources,
                     &snapshot["source"]["snapshotHash"]);
                 let snapshot_tokens = crate::models::protocol::tool_message_tokens(&[snapshot["message"].clone()], "");
@@ -4233,8 +4643,8 @@ async fn execute(
                     state.selected = declared_tools;
                     continue;
                 }
-                // Keep the formal history and prior effects available to the no-tool progress answer.
-                // 正式历史和先前副作用仍可回查；整理失败进入无工具进展答复，不跳出持久化链路。
+                // On compaction failure, retain history/effects for a persisted no-tool progress answer.
+                // 整理失败时保留历史和副作用，通过持久化链路交付无工具进展答复。
                 stopped = Some(error.into());
                 break;
             }
@@ -4246,8 +4656,8 @@ async fn execute(
         state.history_sources = compact.history_sources;
         system = compact.system;
         for (marker, notice) in &live_notices {
-            // A real compaction may remove the current note; restore only what is missing.
-            // 真正压缩可能移除当前提示；仅补回缺失的最新状态，不重写仍在的历史。
+            // After compaction, restore missing current notes only.
+            // 压缩后仅补回缺失的当前提示。
             append_control_notice(&mut state, marker, notice.as_deref());
         }
         state.refresh_runtime_snapshot(&runtime_authority(&ctx, permission, &live_memory.block), runtime_role, protocol::protocol(&connection) == "anthropic-messages");
@@ -4267,8 +4677,8 @@ async fn execute(
             }
         }
         if compact.budget_exceeded {
-            // Keep the verified projection and shrink optional schemas before reloading the whole executor.
-            // 保留已核验投影，先收缩可选工具声明；不重载整个执行器，也不重新检索或重做已完成操作。
+            // Keep verified context and trim optional schemas; avoid executor reload or repeated work.
+            // 保留已核验上下文，先裁可选声明，避免重载执行器或重复操作。
             if !declarations_disabled && trim_optional_tool(&mut declared_tools) {
                 state.tool_series.reset();
                 state.selected = declared_tools;
@@ -4281,28 +4691,28 @@ async fn execute(
             ));
             break;
         }
-        // Compaction adds its own timeline activity; check again before the actual model/tool turn.
-        // 压缩会增加自身时间线活动；真实模型/工具轮派发前再核容量，不能丢弃已发生的压缩计费与成果。
+        // Recheck timeline capacity after compaction without losing its usage or results.
+        // 压缩后重核时间线容量，保留压缩用量和成果。
         if state.needs_message_continuation(round) {
             stopped = Some(GatewayError::new("TOOL_RUN_MESSAGE_CAPACITY",
                 "回复消息已到容量边界，原任务保留上下文与已完成操作自动续接。", 409));
             break;
         }
-        // Compaction can await a provider; recheck memory again before the prepared request is dispatched.
-        // 压缩可能等待供应商；请求派发前再次核验等待期间是否发生了记忆撤销。
+        // Recheck memory revocation after compaction waits, before dispatch.
+        // 压缩等待结束后、派发前重核记忆撤回。
         if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
             memory_refresh_notice(&mut state, &status);
             review_pending = false;
             continue;
         }
-        // Resource admission may wait longer than a lease window; persist the exact next step first.
-        // 资源准入可能等待多个租约窗口；等待前保存当前准确步骤和回执，不把资源等待变成任务终态。
+        // Checkpoint the next step and receipts before admission waits; waiting is not terminal.
+        // 准入等待前保存下一步和回执，等待不作为任务终态。
         checkpoint_completion_review(&mut state, review_pending, review_evidence_required, review_attempts);
         state.save(&runtime, &run, "streaming", None).await?;
         let segment = new_id();
         let current = Arc::new(Mutex::new((String::new(), String::new())));
-        // Buffered turns are private until a settled progress update or final answer can be published.
-        // 缓冲轮次先保持私有；只在能发布已结束的进度或最终答复时创建可见分段，避免遗留空生成段。
+        // Create visible segments only for settled buffered progress or final answers.
+        // 缓冲进度或最终答复可发布时才建可见分段，避免空生成段。
         let buffered_delivery = requires_task_verification(&state);
         if !review_pending && !buffered_delivery {
             let phase = state.begin_segment(round, &segment);
@@ -4313,19 +4723,19 @@ async fn execute(
         let relay_run = run.clone();
         let relay_current = current.clone();
         let relay_segment = segment.clone();
-        let reviewing = review_pending;
+        let mut reviewing = review_pending;
         let relay = tokio::spawn(async move {
             let mut projection = TaskTextProjection::default();
-            // Echoed internal history records are withheld before the first delta reaches the desktop.
-            // 复述的内部历史记录在第一个增量送达桌面之前就被扣留，界面不会先显示再消失。
+            // Filter echoed internal history before sending the first desktop delta.
+            // 首个增量发送前过滤复述的内部历史。
             let mut history_filter = super::task::HistoryEchoFilter::default();
             let mut ready_event = None;
             while let Some(mut event) = match ready_event.take() {
                 Some(event) => Some(event),
                 None => receiver.recv().await,
             } {
-                // Combine only already-ready adjacent deltas; persistence acknowledgement adds no timer delay.
-                // 仅合并当前已就绪的相邻同类增量，不添加定时等待；保留其他事件及元数据的原顺序。
+                // Merge ready adjacent deltas without timer delays or reordering other events.
+                // 仅合并已就绪的相邻增量，不加定时等待，不重排其他事件。
                 if matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta")) {
                     let mut identity = event.clone();
                     identity.as_object_mut().unwrap().remove("delta");
@@ -4403,10 +4813,10 @@ async fn execute(
             &state.history,
             &system,
             if reviewing {
-                // Verification grows with the real checklist, while retaining this request's negotiated output budget.
-                // 核验输出随真实要求数量增长，仍受本次已协商输出额度约束，不能固定 512 tokens 截掉后面的要求。
-                Some((512_u64.saturating_add(state.acceptance_requirements.len() as u64 * 128))
-                    .min(output["maxOutputTokens"].as_u64().unwrap_or(context_window / 2)))
+                // Scale review output with checklist size within the negotiated budget; avoid a fixed 512-token cut.
+                // 核验输出随清单增大且不超协商额度，不用固定 512 token 截断。
+                Some(budget::review_output_limit(state.acceptance_requirements.len(), review_attempts,
+                    output["maxOutputTokens"].as_u64().unwrap_or(context_window / 2)))
             } else {
                 output["maxOutputTokens"].as_u64()
             },
@@ -4456,13 +4866,23 @@ async fn execute(
         )
         .await;
         if dispatched { state.prefix_diagnostics.commit(prefix_observation); }
+        if dispatched && result.is_ok() && !visual_hashes.is_empty() {
+            // Only bytes present in a successful model request count as visual observation.
+            // 仅成功模型请求中实际包含的图像字节计入视觉观察。
+            mark_visual_proofs(&mut state.retained_completion_observations, &visual_hashes);
+            for round in &mut state.transcript {
+                if let Some(observations) = round["observations"].as_array_mut() {
+                    mark_visual_proofs(observations, &visual_hashes);
+                }
+            }
+        }
         if dispatched && result.is_ok() && visual_observation_in_request && state.pending_visual_readback {
             state.visual_readback_delivered = true;
             state.pending_visual_readback = false;
             state.pending_visual_hashes.clear();
         }
-        // Count failed provider attempts too; diagnostics must match actual transmitted requests.
-        // 失败的供应商请求同样计量；诊断调用次数应与真实发送一致。
+        // Count failed provider requests too, matching actual transmissions.
+        // 失败请求同样计量，与真实发送次数一致。
         if dispatched {
             let _ = state.progress.apply(
                 "progress.recordModel",
@@ -4540,8 +4960,8 @@ async fn execute(
                     if grammar_recoveries == 2 {
                         while trim_optional_tool(&mut state.selected) {}
                     }
-                    // Change the rejected declaration before retrying; execution validates the original schema.
-                    // 重试前必须改变被拒声明；正式执行仍校验原始 schema，不能重发相同失败请求。
+                    // Fix rejected declarations before retry; execution still validates the original schema.
+                    // 重试前修正被拒声明，执行时仍校验原 schema。
                     let _ = state
                         .effects
                         .apply("effects.protect", &json!({"includeCurrent":true}));
@@ -4572,8 +4992,23 @@ async fn execute(
                 break;
             }
         };
-        // A successful step starts a fresh recovery allowance; long tasks must not exhaust it once for their lifetime.
-        // 成功步骤重置恢复次数；长期任务不能因先前两次上下文调整而失去后续继续整理的机会。
+        // A review may discover work; native calls retain the ordinary authorization and receipt path.
+        // 核验发现缺口时，正式调用仍走原授权与回执链，不当作无效核验丢弃。
+        if reviewing && !response.calls.is_empty() {
+            reviewing = false;
+            review_pending = false;
+            state.acceptance_reviewed = false;
+            state.acceptance_review_revision = None;
+            state.pending_delivery.clear();
+            state.delivery_continuing = false;
+            checkpoint_completion_review(&mut state, false, review_evidence_required, review_attempts);
+            if !buffered_delivery {
+                let phase = state.begin_segment(round, &segment);
+                run.emit(json!({"type":"assistant_segment","segment":phase,"toolStreamProtocol":3})).await;
+            }
+        }
+        // Successful steps reset recovery allowance for later failures.
+        // 成功步骤重置恢复次数，供后续故障继续使用。
         context_recoveries = 0;
         state.generated += response.usage["completion_tokens"]
             .as_u64()
@@ -4585,9 +5020,39 @@ async fn execute(
                 .apply("task.inspect", &json!({"text":response.content})),
         )?;
         task_status = inspected.clone();
+        let prior_directive = state.assistant["UserTaskDirective"].clone();
+        apply_steering_revision(&mut state, &inspected, &mut minimum_active_ms);
+        if prior_directive != state.assistant["UserTaskDirective"] {
+            if let Some(journal) = &run.journal {
+                journal.emit_control("task.user-directive", &state.assistant["UserTaskDirective"])?;
+            }
+        }
+        if state.assistant["UserTaskDirective"]["stop"] == true {
+            // The user withdrew further work; acknowledge without dispatching proposed new calls.
+            // 用户已撤销后续工作，确认停止，不再派发本轮提出的新调用。
+            let acknowledgement = inspected["content"].as_str().filter(|text| !text.trim().is_empty())
+                .unwrap_or("已停止，已有进度和成功回执已保留。");
+            state.append(acknowledgement, "", round, &segment);
+            run.emit(json!({"type":"assistant_segment","segment":state.segment(&segment),"toolStreamProtocol":3})).await;
+            state.history.push(json!({"role":"assistant","content":acknowledgement}));
+            state.push_transcript_round(json!({"round":round,"text":acknowledgement,"calls":[],
+                "userStopped":true,"unexecutedCallCount":response.calls.len()}));
+            task_status = json!({"state":"blocked","source":"user-steering","reason":"user-requested-stop"});
+            // A user stop is a settled response, not an exhausted round that should recover.
+            // 用户停止已完成本次答复，不应误报轮次耗尽再恢复执行。
+            final_received = true;
+            break;
+        }
+        if response.calls.is_empty() && has_unexecuted_tool_intent(&state.review_checkpoint)
+            && task_status["state"] != "blocked" {
+            // Prose cannot silently cancel a recorded, unexecuted action.
+            // 普通措辞不能悄悄撤销已记录但尚未执行的步骤。
+            task_status["state"] = json!("continue");
+            task_status["next"] = json!("Resolve the saved unexecuted tool intent through the formal dispatch pipeline, preserving prior successful effects.");
+        }
         let text = inspected["content"].as_str().unwrap_or(&response.content);
-        // An echoed internal history record is removed from public text and never settles the task.
-        // 模型复述的内部历史调用记录从公开正文移除，也不能据此结算任务。
+        // Remove echoed internal history from public text; it cannot settle the task.
+        // 内部历史复述从公开正文移除，不能据此结算任务。
         let echo_stripped = (!reviewing && super::task::contains_history_record(text))
             .then(|| super::task::strip_history_records(text));
         let text: &str = echo_stripped.as_deref().unwrap_or(text);
@@ -4609,8 +5074,8 @@ async fn execute(
                         state.append(&brief, "", round, &segment);
                         state.last_progress_ms = active_ms;
                     } else {
-                        // Tools still need a completed commentary anchor in their own round, without extra prose.
-                        // 工具仍需同轮已结束的过程锚点；静默进度不增加正文，也不能留下生成中的锚点。
+                        // Quiet tool rounds still need a completed same-round commentary anchor.
+                        // 静默工具轮仍需同轮已完成的过程锚点。
                         state.append("", "", round, &segment);
                     }
                 }
@@ -4640,8 +5105,8 @@ async fn execute(
         })
         .await
         .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "模型续接回执保存失败。", 500))??;
-        // Streaming output remains recorded, but stale-memory calls never reach effect dispatch or final delivery.
-        // 流式输出继续保留；依赖失效记忆的调用不能进入副作用派发或最终交付。
+        // Retain streamed text, but block stale-memory calls from effects and delivery.
+        // 保留流式正文，失效记忆相关调用不得派发副作用或交付。
         if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
             state.push_transcript_round(json!({"round":round,"text":text,"calls":[],
                 "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint,
@@ -4651,13 +5116,27 @@ async fn execute(
             state.save(&runtime, &run, "streaming", None).await?;
             continue;
         }
+        if response.calls.is_empty() && inspected["source"] == "unexecuted-tool-intent" {
+            let requested = super::task::unexecuted_tool_names(&response.content);
+            if retain_unexecuted_tool_intent(&mut state, &requested, &all, round) {
+                state.push_transcript_round(json!({"round":round,"text":text,"calls":[],
+                    "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint,
+                    "unexecutedToolIntent":state.review_checkpoint["unexecutedToolIntent"]}));
+                state.history = protocol::append_results(&protocol_name, &state.history, &response, &[])?;
+                review_pending = false;
+                let _ = state.task.apply("task.resumed", &json!({}));
+                state.broker_note("Broker: the preceding tool syntax was plain text and nothing ran. Resume the original task through the native tools; do not turn another unexecuted intention into a completion review. Preserve original context, outputs and successful receipts.");
+                state.save(&runtime, &run, "streaming", None).await?;
+                continue;
+            }
+        }
         if echo_stripped.is_some() && response.calls.is_empty() {
             state.push_transcript_round(json!({"round":round,"text":text,"calls":[],
                 "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
             if history_echo_recoveries < 2 {
                 history_echo_recoveries += 1;
-                // The echo is not added to provider history, so the model is not primed to repeat it.
-                // 复述内容不进入供应商历史，避免模型继续模仿；原输出仍保存在正式记录中。
+                // Exclude echoes from provider history; retain originals in formal storage.
+                // 复述内容不进供应商历史，原输出仍留正式存储。
                 state.broker_note("Broker: the previous output repeated an internal historical tool-call record. Those calls ran earlier and were NOT executed now, and the record is not an answer. Discover and load the tools you need, check the current state, and perform the next real step of the original task, or answer truthfully in plain text.");
                 state.save(&runtime, &run, "streaming", None).await?;
                 retry_next_request = true;
@@ -4672,8 +5151,8 @@ async fn execute(
             && state.selected.iter().any(|tool|tool["name"]==task_status["action"]["name"])
             && cached_completion_review(&state).is_some_and(|review|review["action"]=="resume");
         if !reviewing && !has_replanned_action && missing_public_answer(&response.content, text, !response.calls.is_empty()) {
-            // A control marker alone is not an answer, even if its state looks completed.
-            // 只有控制标记不算回答，即使状态看似完成；保留真实调用回执，仅补一次正文请求。
+            // Control markers alone are not answers; retain receipts and request text once.
+            // 仅有控制标记不算回答，保留回执并补一次正文请求。
             state.push_transcript_round(json!({"round":round,"text":"","calls":[],
                 "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
             if empty_control_recoveries == 0 {
@@ -4686,6 +5165,18 @@ async fn execute(
             }
             stopped = Some(GatewayError::new("MODEL_RESPONSE_EMPTY", "模型未返回可见正文，请重试。", 502));
             break;
+        }
+        if response.calls.is_empty() && unresolved_user_steering(&state) && !response.output_truncated {
+            // Resolve new steering before inherited checks, child acceptance or automatic readback.
+            // 新引导先于旧验收、子任务核对和自动回读生效。
+            state.history = protocol::append_results(&protocol_name, &state.history, &response, &[])?;
+            state.push_transcript_round(json!({"round":round,"text":text,"calls":[],
+                "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
+            review_pending = true;
+            let notice = completion_review_instruction(&state);
+            append_control_notice(&mut state, "completionReviewNotice", Some(&notice));
+            state.save(&runtime, &run, "streaming", None).await?;
+            continue;
         }
         if response.calls.is_empty() && let Some(journal) = &run.journal {
             let children = runtime.tasks.children_acceptance(journal.task_id()).await?;
@@ -4701,8 +5192,8 @@ async fn execute(
                 continue;
             }
         }
-        // Check version-bound proof before either a review or an inline completion can settle the task.
-        // 独立验收与内联完成都先复核绑定版本，不能离开循环后才发现过期核验。
+        // Recheck evidence versions before review or inline completion settles the task.
+        // 独立核验或内联完成结算前，均须重核证据版本。
         if (reviewing || response.calls.is_empty() && task_status["state"] == "complete")
             && !state.progress.verification()["codeVersionCoverage"]["validatedSnapshot"].is_null() {
             let snapshot = tools::capture_code_version(&ctx).await?;
@@ -4728,7 +5219,7 @@ async fn execute(
                 "hasReadback":has_task_readback(&state),
                 "requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
                 "hasVisualReadback":state.visual_readback_delivered,
-                "expectedRequirements":state.acceptance_requirements,"validEvidence":task_evidence(&completion_transcript(&state))})))?;
+                "expectedRequirements":state.acceptance_requirements,"validEvidence":task_evidence(&completion_transcript(&state)),"evidenceRecords":task_evidence_records(&completion_transcript(&state), &state.progress.verification())})))?;
             state.push_transcript_round(json!({"round":round,"text":"","calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
             match decision["action"].as_str() {
                 Some("retry-review") => {
@@ -4816,10 +5307,11 @@ async fn execute(
                 }
             }
         }
-        // Close deterministic readback gaps through the original dispatch path, without another model review.
-        // 可确定的补读缺口走原工具派发链，不再用新的模型验收替代实际操作。
+        // Fill deterministic read gaps through normal dispatch, not another model review.
+        // 可确定的读取缺口走原派发链，不再调用模型验收。
         let mut broker_planned_call = Value::Null;
         if response.calls.is_empty() && !response.output_truncated && requires_task_verification(&state)
+            && !unresolved_user_steering(&state)
             && supports_tools && !tools_closed && planned_continuation(&protocol_name, &[], &[]).is_some() {
             let targets = native(state.progress.apply("progress.documentReadbackTargets", &json!({})))?;
             if let Some(plan) = completion_progress_plan(&mut state, &targets,
@@ -4835,8 +5327,8 @@ async fn execute(
             }
         }
         if response.calls.is_empty() {
-            // A correction received while streaming must reach the next model turn before completion.
-            // 流式生成期间收到的调整先交给下一轮模型，不能以旧要求的最终答复直接结束。
+            // Apply streaming-time corrections in the next model turn before completion.
+            // 流式期间收到的调整须先交下一轮模型，再判定完成。
             state.history =
                 protocol::append_results(&protocol_name, &state.history, &response, &[])?;
             if apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0 {
@@ -4863,8 +5355,8 @@ async fn execute(
                             json!({"taskIds":pending,"timeoutMs":30000}),
                         )
                         .await?;
-                    // Keep waiting within the program when nothing changed, without spending model calls.
-                    // 尚无变化时由程序继续等待，不消耗模型调用来轮询。
+                    // Wait locally for changes without model polling.
+                    // 本地等待条件变化，不用模型调用轮询。
                     let mut child_results = child_results;
                     while child_results["timedOut"] == true && !*cancellation.borrow() {
                         child_results = runtime
@@ -4891,15 +5383,15 @@ async fn execute(
                 "remainingRounds":last_round.saturating_sub(round)})))?;
             if matches!(decision["action"].as_str(), Some("review" | "resume"))
                 && cached_completion_review(&state).is_some_and(|cached| cached["action"] == "resume" && cached["minimumActive"] != true) {
-                // Inline proof corrections are checked locally; a stale review never schedules another review call.
-                // 本轮内联证据修正直接由本地规则核对；旧验收结论不再排入新的验收模型调用。
+                // Check inline proof fixes locally; stale reviews cannot schedule another review.
+                // 本地核对内联证据修正，旧验收不再触发新验收。
                 let inline = native(state.task.apply("task.decide", &json!({"reply":task_status,"isReview":true,
                     "requiresVerification":requires_task_verification(&state),"evidenceRequired":true,
                     "verification":state.progress.verification(),
                     "requiresReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_result_readback(goal)),
                     "hasReadback":has_task_readback(&state),"requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
                     "hasVisualReadback":state.visual_readback_delivered,"expectedRequirements":state.acceptance_requirements,
-                    "validEvidence":task_evidence(&completion_transcript(&state))})))?;
+                    "validEvidence":task_evidence(&completion_transcript(&state)),"evidenceRecords":task_evidence_records(&completion_transcript(&state), &state.progress.verification())})))?;
                 if inline["action"] == "final" {
                     state.acceptance_reviewed = true;
                     let _ = state.task.apply("task.reviewResult", &json!({"value":task_status}));
@@ -4926,8 +5418,8 @@ async fn execute(
                 let _ = state.task.apply("task.resumed", &json!({}));
                 output_continuations += 1;
                 if response.output_truncated {
-                    // Only a provider-confirmed pure-text continuation belongs to the delivered answer body.
-                    // 仅供应商确认达到输出上限的纯正文段标记为续写，不能把工具说明或普通进展混入最终正文。
+                    // Only provider-confirmed output-limit prose is answer continuation, not tool commentary or progress.
+                    // 仅供应商确认达到输出上限的正文标为续写，工具说明和进度不算。
                     if let Some(continued_segment) = state.segments.last_mut().filter(|item| item["id"] == segment) {
                         continued_segment["isAnswerContinuation"] = json!(true);
                     }
@@ -4939,8 +5431,8 @@ async fn execute(
             if decision["action"] == "review" {
                 review_pending = true;
                 review_attempts = 0;
-                // Evidence is required only when the review was triggered by real external effects.
-                // 仅当核对由真实外部操作触发时才要求逐项证据；插话或续写触发的核对保持原规则。
+                // Require evidence for effect-triggered reviews only; keep steering/continuation rules unchanged.
+                // 仅外部操作触发的核验要求证据，插话和续写沿用原规则。
                 review_evidence_required = current_effectful_work(&state) || requires_task_verification(&state);
                 let _ = state.task.apply("task.reviewStarted", &json!({}));
                 let review_instruction = completion_review_instruction(&state);
@@ -5002,8 +5494,8 @@ async fn execute(
             final_received = true;
             break;
         }
-        // Resolve only exact known identities before classifying effects; loading still follows admission.
-        // 先按已知目录精确归一化身份再分类副作用；定义加载仍须经过本轮额度与执行准入。
+        // Normalize known tool IDs before effect classification; keep loading under admission.
+        // 先归一化已知工具身份再分类副作用，加载仍须准入。
         {
             let cached = ctx.runtime.schemas.read().await;
             for call in &mut response.calls {
@@ -5031,8 +5523,8 @@ async fn execute(
             evidence_changed: summarized_work_changed,
             ..Default::default()
         };
-        // Independent reads run as bounded batches; receipts below still settle in the original call order.
-        // 独立读取按有界批次执行；下方仍按原调用顺序写回回执、模型历史与正式归档。
+        // Batch independent reads; settle receipts, history and archives in original call order.
+        // 独立读取批量执行，回执、历史及归档仍按原调用顺序结算。
         let batch_catalog = ctx.runtime.schemas.read().await.clone();
         let experience_names = response.calls.iter().filter_map(|call|call["name"].as_str().map(str::to_owned)).collect::<Vec<_>>();
         let experience_identities = tools::experience_identities(&ctx, &experience_names).unwrap_or_else(|_|json!({}));
@@ -5055,8 +5547,8 @@ async fn execute(
                 stopped = Some(GatewayError::new("ABORT_ERR", "任务已取消。", 499));
                 break;
             }
-            // A previous read may have been slow; recheck before dispatching the next batch.
-            // 上一步读取可能耗时较久；下一批派发前核对撤回，已预取的真实回执仍正常结算。
+            // Recheck revocations before the next batch; settle completed prefetched reads normally.
+            // 下一批派发前重核撤回，已完成的预取回执正常结算。
             if prefetch.is_none() && !memory_plan_invalidated
                 && let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
                 memory_refresh_notice(&mut state, &status);
@@ -5064,8 +5556,8 @@ async fn execute(
                 memory_plan_invalidated = true;
             }
             if prefetch.is_none() && (memory_plan_invalidated || steering_pending(&run, &ctx)) {
-                // Pair undispatched calls with an explicit skipped result before applying the user's correction.
-                // 应用用户调整前，为未派发调用补齐明确跳过结果；保持协议配对，不执行旧计划。
+                // Pair undispatched calls with skipped results before applying steering.
+                // 应用插话前，为未派发调用配对跳过结果。
                 for skipped in &response.calls {
                     if !results.iter().any(|result:&Value|result["call"]["id"]==skipped["id"]) {
                         let skipped_receipt = if memory_plan_invalidated {
@@ -5117,6 +5609,16 @@ async fn execute(
             } else {
                 Value::Null
             };
+            let failure_definition = tool_failure_definition(call, &all, &batch_catalog);
+            let failure_snapshot = if before_version.is_null() {
+                state.progress.verification()["codeVersionCoverage"]["latestSnapshot"].clone()
+            } else { before_version.clone() };
+            let mut failure_environment = tool_failure_environment(&version_context,
+                &failure_snapshot, state.mutation_sequence);
+            failure_environment["configuration"]["acceptanceRequirements"] = json!(state.acceptance_requirements);
+            failure_environment["operationIdentity"] = json!(operation_id);
+            let failure_correction = state.work_progress.failed_actions()
+                .before_dispatch(call, &failure_definition, &failure_environment);
             let count = count_tool_attempts(&state.assistant);
             if prefetch.is_none() && count.saturating_sub(segment_initial_calls) >= limits["maxToolCalls"].as_u64().unwrap_or(256) {
                 stopped = Some(GatewayError::new(
@@ -5134,8 +5636,8 @@ async fn execute(
             let effect_state = native(state.effects.apply("effects.state", &json!({})))?;
             state.timeline_order += 1;
             let tool_order = state.timeline_order;
-            // A batch already announced its calls with these same orders.
-            // 批次已用相同顺序号公布运行状态，此处不重复登记。
+            // The batch already announced these call orders; do not register them again.
+            // 批次已公布这些调用顺序，不重复登记。
             if prefetch.is_none() {
                 let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":"running","summary":"执行中","round":round,"order":tool_order});
                 run.emit(json!({"type":"tool_call","tool":activity})).await;
@@ -5147,6 +5649,10 @@ async fn execute(
             }
             let mut definition_failure = workspace_failure.map(|error|json!({"status":"error","executed":false,"isError":true,
                 "code":error.code,"content":error.response()}));
+            if definition_failure.is_none() && saved.is_null()
+                && (effect_state["hasUnknownEffects"] != true || is_observation) && prefetch.is_none() {
+                definition_failure = failure_correction;
+            }
             if call["unavailable"] == true
                 && definition_failure.is_none()
                 && saved.is_null()
@@ -5160,8 +5666,8 @@ async fn execute(
                     }).map(|tool| tool["name"].clone())
                 };
                 if let Some(candidate) = candidate {
-                    // This call has not run: load once through the real gateway, then dispatch its original arguments.
-                    // 原调用尚未执行：通过正式入口加载一次定义，再派发原参数；不重放成功或未知副作用。
+                    // Load the undispatched call once, then execute its original arguments; never replay unknown effects.
+                    // 未派发调用加载一次后执行原参数，不重放未知副作用。
                     ctx.config["activeToolCallId"] = call["id"].clone();
                     match tools::execute("tool.load", json!({"names":[candidate]}), &ctx).await {
                         Ok(loaded) => {
@@ -5218,6 +5724,13 @@ async fn execute(
                 }
                 ctx.config["activeToolCallId"] = call["id"].clone();
                 ctx.config["activeOperationId"] = json!(operation_id);
+                ctx.config["acceptanceRequirements"] = json!(state.acceptance_requirements);
+                if name.starts_with("task.") || name.starts_with("knowledge.") {
+                    // Capture this dispatch identity, not the context from the start of the request.
+                    // 捕获本次实际派发身份，不能沿用请求开始时的旧上下文。
+                    ctx.external_execute = Some(specialist_executor(&runtime, &run, &ctx, permission,
+                        input["message"].as_str().unwrap_or("")));
+                }
                 let dispatched_at = Instant::now();
                 let result = if let Some(result) = prefetched_result.take() {
                     result
@@ -5246,8 +5759,8 @@ async fn execute(
                             .await
                         {
                             Ok(true) => {
-                                // Approval does not restore memory withdrawn during the wait.
-                                // 审批不能恢复等待期间撤回的记忆；重新派发前核对当前版本。
+                                // Recheck memory after approval; withdrawn memory remains invalid.
+                                // 审批后重核记忆，等待期间撤回的内容仍无效。
                                 if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
                                     memory_refresh_notice(&mut state, &status);
                                     review_pending = false;
@@ -5283,6 +5796,8 @@ async fn execute(
                 };
                 tool_execution_receipt(result)
             };
+            normalize_reused_receipt(name, &mut receipt);
+            state.work_progress.failed_actions_mut().observe(call, &failure_definition, &failure_environment, &receipt);
             let canonical = receipt["content"].clone();
             let root = runtime.config.data_root.clone();
             let id = run.conversation_id.clone();
@@ -5303,8 +5818,9 @@ async fn execute(
             .await
             .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "工具回执保存失败。", 500))?? };
             receipt["resultRef"] = reference.clone();
-            // A batch call settled its operation when it completed; settle each other dispatch here.
-            // 批次调用完成时已结算操作；其余已派发调用在此结算，不重复结算。
+            let mut completion_proof = super::completion_evidence::from_receipt(&call, &receipt);
+            // Batch calls settled on completion; settle only other dispatches here.
+            // 批次调用完成时已结算，此处仅结算其他派发。
             if operation_dispatched && archived_reference.is_none() && let Some(journal) = &run.journal {
                 gateway_tool_batch::finish_dispatch(journal, &operation_id, &receipt, &reference, name, tool_execution_ms)?;
             }
@@ -5320,8 +5836,8 @@ async fn execute(
                 }
             }
             let source_metadata = crate::models::tool_context::source_metadata(&receipt["content"]);
-            // Identity uses the unabridged native result, including current text/structuredContent contracts.
-            // 身份依据未缩小的原生结果，兼容现有 text 和 structuredContent，不能因投影变化重置查重。
+            // Derive identity from full native text/structuredContent, not shortened projections.
+            // 按完整原生 text/structuredContent 判定身份，不受展示缩短影响。
             if let Ok(observation) = crate::tools::observations::calculate(
                 "observations.source",
                 &json!({"call":call,"value":canonical}),
@@ -5411,8 +5927,8 @@ async fn execute(
             {
                 round_progress.artifact_updated = true;
             }
-            // The sidecar describes the actual archived source, even when its repeated model projection is shorter.
-            // 侧车继续描述真实归档原件；重复展示缩短不能让原件退出摘要或被误当成只有元信息。
+            // Sidecars retain the archived source identity even when repeated projections shrink.
+            // 重复投影缩短时，侧车仍保留真实归档来源身份。
             state.result_sources.push(json!({"callId":call["id"],"name":call["name"],"arguments":call["arguments"],"sourceMetadata":source_metadata,"originalResultRef":if call["name"]=="tool.result.read" {source_metadata["resultRef"].clone()} else {Value::Null},"observation":is_observation,"executed":receipt["executed"]!=false,"originalExcerpt":crate::models::tool_context::source_excerpt(&canonical,512),"round":round,"status":receipt["status"],"resultRef":reference,"archiveOwner":{"requestId":run.request_id,"toolCallId":call["id"],"toolName":call["name"]}}));
             let _=state.effects.apply("effects.observe",&json!({"call":call,"result":receipt,"observation":is_observation,"workspaceRoot":version_context.workdir}));
             if is_observation && receipt["isError"] != true {
@@ -5473,8 +5989,8 @@ async fn execute(
             }
             let _=state.progress.apply("progress.recordTool",&json!({"id":call["id"],"round":round,"durationMs":tool_start.elapsed().as_millis() as u64,"approvalMs":0,"reused":receipt["reused"]==true,"dispatched":receipt["executed"]!=false}));
             let after_version = if track_version && !before_version.is_null() {
-                // A cancelled verification cannot discard an already delivered execution receipt.
-                // 取消或失败的版本核验不能丢弃已经取得的执行回执；仍保留未知验证状态。
+                // Keep execution receipts when verification fails or is cancelled; retain unknown verification state.
+                // 核验失败或取消时保留执行回执，核验状态保持未知。
                 match tools::capture_code_version(&version_context).await {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
@@ -5485,9 +6001,15 @@ async fn execute(
             } else {
                 Value::Null
             };
-            // Completion coverage uses the original settled content, not the abbreviated repeated-read projection.
-            // 完成覆盖依据结算后的原始正文，不能使用重复读取时缩小的模型展示投影。
-            let _=state.progress.apply("progress.observeOutcome",&json!({"call":call,"result":receipt,"canonicalResult":canonical,"beforeVersion":before_version,"afterVersion":after_version}));
+            // Compute completion coverage from settled originals, not shortened read projections.
+            // 完成覆盖按已结算原文计算，不用缩短的读取投影。
+            let _=state.progress.apply("progress.observeOutcome",&json!({"call":call,"result":receipt,"canonicalResult":canonical,"beforeVersion":before_version,"afterVersion":after_version,
+                "validationScope":{"cwd":version_context.workdir}}));
+            if completion_proof.is_object() && super::progress::validation_call(&call)
+                && let Some(validation) = state.progress.verification()["receipts"].as_array().into_iter().flatten()
+                    .find(|validation| validation["toolCallId"] == call["id"]) {
+                completion_proof["validation"] = validation.clone();
+            }
             let public = data::public_tool_result(
                 &receipt["content"],
                 Some(&reference),
@@ -5544,9 +6066,10 @@ async fn execute(
             if name == "tool.load" {
                 select_loaded_tools(&mut state, &receipt["content"], &call["arguments"]["names"]);
             }
+            settle_unexecuted_tool_intent(&mut state.review_checkpoint, name, &receipt);
             if name == "tool.search" && receipt["isError"] != true {
-                // Promote an already loaded match instead of sending discovery back into the same loop.
-                // 已加载的匹配工具优先展示定义，避免发现后仍被同一预算裁掉；不自动加载新能力或授予权限。
+                // Prefer already loaded matches without loading new tools or granting permissions.
+                // 优先保留已加载匹配项，不新增加载或授权。
                 if let Some(index) = receipt["content"]["tools"]
                     .as_array()
                     .into_iter()
@@ -5567,8 +6090,8 @@ async fn execute(
                     state.selected.insert(state.selected.len().min(2), loaded);
                 }
             }
-            // The archive remains canonical; only selected evidence receives short model references.
-            // 归档保留正式原文；仅选入模型的证据分配短引用，候选池不因引用数量被压小。
+            // Archive full originals; assign short references only to selected evidence without shrinking candidates.
+            // 归档保留全文，仅选中证据分配短引用，不缩小候选池。
             if ["knowledge.search", "knowledge.plan"].contains(&name) && receipt["isError"] != true
             {
                 if let Some(archive_id) = reference["id"].as_str().filter(|_| {
@@ -5589,8 +6112,9 @@ async fn execute(
                 descriptor["name"] == name && descriptor["annotations"]["readOnlyHint"] == true);
             let scene_read_only = name.rsplit('.').next().is_some_and(|method|
                 matches!(method, "get_scene_info" | "get_object_info" | "list_scene_items" | "get_world_state_snapshot"));
-            if !is_observation && !declared_read_only && !scene_read_only && receipt["executed"] != false && receipt["reused"] != true && successful_completion_receipt(&receipt)
-                && !name.starts_with("task.") && !matches!(name, "tool.load" | "context.compact") {
+            let mutating = !is_observation && !declared_read_only && !scene_read_only && receipt["executed"] != false && receipt["reused"] != true && successful_completion_receipt(&receipt)
+                && !name.starts_with("task.") && !matches!(name, "tool.load" | "context.compact");
+            if mutating {
                 state.mutation_sequence = state.mutation_sequence.saturating_add(1);
                 state.acceptance_reviewed = false;
                 state.visual_readback_delivered = false;
@@ -5601,7 +6125,12 @@ async fn execute(
                 state.pending_visual_readback = true;
                 state.pending_visual_hashes = super::task::receipt_visual_hashes(&receipt["content"]);
             }
-            results.push(json!({"call":call,"result":receipt,"observation":is_observation,"mutationSequence":state.mutation_sequence}));
+            if completion_proof.is_object() {
+                completion_proof["mutationSequence"] = json!(state.mutation_sequence);
+                completion_proof["mutating"] = json!(mutating);
+            }
+            results.push(json!({"call":call,"result":receipt,"observation":is_observation,
+                "mutationSequence":state.mutation_sequence,"completionProof":completion_proof}));
             if results.last().unwrap()["result"]["status"] == "unknown" {
                 let _ = state
                     .effects
@@ -5611,6 +6140,7 @@ async fn execute(
         if let Some(transcript) = state.transcript.last_mut() {
             transcript["observations"]=json!(results.iter().map(|pair|json!({"id":pair["call"]["id"],"name":pair["call"]["name"],"status":pair["result"]["status"],"ref":pair["result"]["resultRef"],
                 "verifiedSuccess":successful_completion_receipt(&pair["result"]),"mutationSequence":pair["mutationSequence"],
+                "completionProof":pair["completionProof"],
                 "toolIdentity":experience_identities[pair["call"]["name"].as_str().unwrap_or("")],
                 "argumentsTemplate":crate::storage::experiences::procedure_arguments(&pair["call"]["arguments"]),
                 "verifiedReadback":successful_completion_receipt(&pair["result"]) && super::task::receipt_is_readback(pair["call"]["name"].as_str().unwrap_or(""), &pair["result"]["content"]),
@@ -5659,8 +6189,8 @@ async fn execute(
             refresh_document_navigation(&mut state);
         }
         if guard["warning"] == true || guard["finalize"] == true {
-            // Corrective guidance survives history compaction without creating another permanent user turn.
-            // 纠偏指导保留在本次系统上下文，避免压缩立即丢失，也不不断追加永久用户轮次。
+            // Keep corrective guidance through compaction without appending permanent user turns.
+            // 压缩后保留纠偏指导，不不断追加永久用户轮次。
             if !system.contains(REPEATED_READ_GUIDANCE) {
                 system.push_str(REPEATED_READ_GUIDANCE);
             }
@@ -5775,8 +6305,8 @@ async fn execute(
                         run.emit(json!({"type":"assistant_segment","segment":state.segment(&fallback_id),"toolStreamProtocol":3})).await;
                     }
                 } else if let Err(error) = response {
-                    // A new external failure during recovery remains visible rather than being swallowed.
-                    // 恢复期间新发生的外部错误继续如实报告，不被先前内部错误掩盖。
+                    // Report new external failures during recovery.
+                    // 如实报告恢复期间的新外部故障。
                     stopped = Some(error.into());
                 }
             }
@@ -5808,7 +6338,8 @@ async fn execute(
         }
     }
     let effects = native(state.effects.apply("effects.state", &json!({})))?;
-    let final_version = if final_received && state.acceptance_reviewed {
+    let user_stopped = state.assistant["UserTaskDirective"]["stop"] == true;
+    let final_version = if user_stopped || final_received && state.acceptance_reviewed {
         state.progress.verification()["codeVersionCoverage"]["latestSnapshot"].clone()
     } else { match tools::capture_code_version(&ctx).await {
         Ok(snapshot) => snapshot,
@@ -5824,21 +6355,28 @@ async fn execute(
     let validation_context =
         json!({"conversationId":run.conversation_id,"requestId":run.request_id,
             "bindingSnapshot":ctx.config["bindingSnapshot"],"workspaceMounts":ctx.config["workspaceMounts"]});
-    let evidence_validation = tokio::task::spawn_blocking(move || {
+    // Stopping preserves previous evidence; it does not certify completion or run new checks.
+    // 停止保留已有证据，不认证完成，也不启动新的验收检查。
+    let evidence_validation = if user_stopped { json!({"state":"not-checked","reason":"user-requested-stop"}) }
+    else { tokio::task::spawn_blocking(move || {
         crate::retrieval::gateway::final_validate(&validation_config, &validation_context)
     })
     .await
-    .map_err(|_| GatewayError::new("EVIDENCE_WORKER_FAILED", "证据核对线程退出。", 500))??;
-    let completion=native(state.progress.apply("progress.completion",&json!({"interrupted":stopped.is_some(),"code":stopped.as_ref().map(|error|&error.code),"unknownEffects":effects["hasUnknownEffects"],"modelTaskState":task_status,"evidenceValidation":evidence_validation,
+    .map_err(|_| GatewayError::new("EVIDENCE_WORKER_FAILED", "证据核对线程退出。", 500))?? };
+    let mut completion=native(state.progress.apply("progress.completion",&json!({"interrupted":stopped.is_some(),"code":stopped.as_ref().map(|error|&error.code),"unknownEffects":effects["hasUnknownEffects"],"modelTaskState":task_status,"evidenceValidation":evidence_validation,
         "effectfulWork":current_effectful_work(&state),"requiresVerification":requires_task_verification(&state),
         "acceptanceReviewed":state.acceptance_reviewed,
         "requiresReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_result_readback(goal)),
         "hasReadback":has_task_readback(&state),
         "requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
         "hasVisualReadback":state.visual_readback_delivered})))?;
+    if state.assistant["UserTaskDirective"]["stop"] == true {
+        completion["completionState"] = json!("partial");
+        completion["userStopped"] = json!(true);
+    }
     let mut diagnostics = native(state.progress.apply("progress.diagnostics", &json!({})))?;
-    // Preserve model-phase display timing while exposing accepted-request preparation separately.
-    // 保留现有模型阶段展示计时，单独记录网关接受请求后的准备耗时；不包含桌面目录保存等待。
+    // Keep model timing and report accepted-request preparation separately, excluding desktop saves.
+    // 保留模型计时，另记请求接受后的准备耗时，不含桌面保存等待。
     diagnostics["requestTiming"] = json!({
         "acceptedToModelMs": model_started.saturating_duration_since(run.created).as_millis() as u64,
         "modelLoopMs": model_started.elapsed().as_millis() as u64,
@@ -5851,8 +6389,8 @@ async fn execute(
     state.assistant["DurationMs"] = json!(super::gateway_runtime::generation_elapsed_ms(
         state.generation_duration_base_ms, state.model_started,
     ));
-    // Reply delivery and task success have separate contracts; retain the failure in TaskCompletion.
-    // 回复交付与任务成功使用不同合同；内部受阻原因保留在 TaskCompletion，不冒充完成任务。
+    // Separate reply delivery from task success; retain failures in TaskCompletion.
+    // 回复交付与任务成功分开，失败原因保留在 TaskCompletion。
     let reply_interrupted = stopped
         .as_ref()
         .is_some_and(|error| !recoverable_step_failure(&error.code))
@@ -5880,8 +6418,8 @@ async fn execute(
                         .collect::<Vec<_>>();
                     if let Some(candidate) = crate::storage::experiences::verified_procedure_candidate(
                         &state.acceptance_requirements.join("\n"), &observations) {
-                        // A derived candidate is private navigation, not an artifact or permission grant.
-                        // 衍生候选是私有导航，不自动打开产物，不授予权限，须后续真实数据成熟才复用。
+                        // Derived candidates are private hints, not artifacts, authority or mature reusable experience.
+                        // 衍生候选仅作私有提示，不是产物、权限或成熟经验。
                         let _ = journal.emit_control("experience.candidate", &candidate);
                     }
                 }
@@ -5924,6 +6462,23 @@ mod preparation_tests {
         assert!(replanned_action(&mut checkpoint,&selected,&action,&json!([2,2,0])).is_some());
         assert!(replanned_action(&mut checkpoint,&[],&action,&json!([3,3,0])).is_none());
         assert!(replanned_action(&mut checkpoint,&selected,&json!({"name":"filesystem.read","arguments":"not an object"}),&json!([3,3,0])).is_none());
+    }
+
+    #[test]
+    fn completion_planning_repairs_specific_gaps_without_sweeping_historical_results() {
+        let selected = vec![json!({"name":"tool.result.read"}), json!({"name":"filesystem.read"})];
+        let mut checkpoint = json!({"executionChecks":[],"historicalResults":[{"id":"old-failure"}]});
+        assert!(completion_execution_plan(&mut checkpoint, &selected, &Value::Null, &json!([1,1,0])).is_none());
+        let action = json!({"name":"filesystem.read","arguments":{"path":"saved.txt","offset":40}});
+        let plan = completion_execution_plan(&mut checkpoint, &selected, &action, &json!([1,1,0])).unwrap();
+        assert_eq!(plan["arguments"], action["arguments"]);
+        assert!(completion_execution_plan(&mut checkpoint, &selected, &action, &json!([1,1,0])).is_none());
+        checkpoint["executionCapabilities"] = json!(["filesystem.read", "document.read"]);
+        let load = completion_execution_plan(&mut checkpoint, &selected, &Value::Null, &json!([1,1,0])).unwrap();
+        assert_eq!(load["name"], "tool.load");
+        assert_eq!(load["arguments"]["names"], json!(["document.read"]));
+        assert!(completion_execution_plan(&mut checkpoint, &selected, &Value::Null, &json!([1,1,0])).is_none());
+        assert!(completion_execution_plan(&mut checkpoint, &selected, &action, &json!([2,2,0])).is_some());
     }
 
     #[test]
@@ -6053,7 +6608,10 @@ mod preparation_tests {
             let old_id = new_id();
             let new_id = new_id();
             let success = json!({"id":"saved-write","name":"filesystem.write","status":"completed",
-                "verifiedSuccess":true,"completionEvidence":["C:/fixture/result.txt"]});
+                "verifiedSuccess":true,"completionEvidence":["C:/fixture/result.txt"],
+                "completionProof":{"version":1,"id":"saved-write","kinds":["execution","committed-output"],
+                    "targets":[{"kind":"file","identity":"c:/fixture/result.txt","version":"original-hash"}],
+                    "mutationSequence":7,"mutating":true}});
             let mut state = LoopState {
                 assistant: json!({"Id":old_id,"RequestId":"same-request","ReplyTo":"same-user",
                     "OperationNamespace":"old-operation-scope","Content":"Previously delivered output",
@@ -6153,6 +6711,21 @@ mod preparation_tests {
             vec![json!("saved-file"), json!("C:/work/result.txt")]);
     }
 
+    #[test]
+    fn restored_receipts_cannot_reintroduce_legacy_blender_false_success() {
+        let original = json!({"status":"completed","isError":false,"reused":true,"content":{
+            "isError":false,"content":[{"type":"text","text":"Error executing code: Could not connect to Blender."}]}});
+        let mut reused = original.clone();
+        normalize_reused_receipt("mcp.blender.execute_blender_code", &mut reused);
+        assert!(!successful_completion_receipt(&reused));
+        assert_eq!(reused["status"], "error");
+        assert_eq!(reused["content"], original["content"]);
+        assert_eq!(original["isError"], false);
+        let mut ordinary = original.clone();
+        normalize_reused_receipt("mcp.blender.get_scene_info", &mut ordinary);
+        assert_eq!(ordinary, original);
+    }
+
     #[tokio::test]
     async fn legacy_completion_evidence_rechecks_archive_identity_and_leaves_unavailable_refs_retryable() {
         let root = std::env::temp_dir().join(format!("kynxa-legacy-proof-{}", new_id()));
@@ -6175,6 +6748,11 @@ mod preparation_tests {
         })];
         restore_completion_evidence(&root, &chat, &request, &mut rounds).await;
         assert_eq!(task_evidence(&rounds), vec![json!("saved-before-upgrade"), json!("C:/fixture/result.txt")]);
+        let records = task_evidence_records(&rounds, &Value::Null);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], call["id"]);
+        assert_eq!(records[0]["targets"][0]["identity"], "c:/fixture/result.txt");
+        assert_eq!(records[0]["targets"][0]["version"], canonical["sha256"]);
         assert_eq!(rounds[0]["observations"][1]["verifiedSuccess"], false);
         assert_eq!(rounds[0]["observations"][2]["verifiedSuccess"], false);
         assert!(rounds[0]["observations"][3].get("verifiedSuccess").is_none());
@@ -6183,6 +6761,157 @@ mod preparation_tests {
         restore_completion_evidence(&root, &chat, &request, &mut rounds).await;
         assert_eq!(rounds, saved);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restored_blender_proofs_reject_false_success_and_preserve_real_progress_and_archives() {
+        let root = std::env::temp_dir().join(format!("kynxa-restored-blender-proof-{}", new_id()));
+        let chat = new_id();
+        let request = new_id();
+        data::ensure_conversation(&root, &chat, "Isolated Blender proof restoration").unwrap();
+        let mut observations = Vec::new();
+        let mut references = Vec::new();
+        for (id, text) in [("early-failure", "Error executing code: Could not connect to Blender."),
+            ("saved-scene", "Code executed successfully: saved scene.blend")] {
+            let call = json!({"id":id,"name":"mcp.blender.execute_blender_code"});
+            let canonical = json!({"isError":false,"content":[{"type":"text","text":text}]});
+            let reference = data::save_tool_result(&root, &chat, &request, &call, &canonical, None).unwrap();
+            let receipt = json!({"status":"completed","isError":false,"content":canonical,"resultRef":reference});
+            let mut proof = super::super::completion_evidence::from_receipt(&call, &receipt);
+            proof["mutationSequence"] = json!(7);
+            proof["visualObserved"] = json!(true);
+            observations.push(json!({"id":id,"name":call["name"],"status":"completed","ref":reference,
+                "verifiedSuccess":true,"completionEvidence":[],"completionProof":proof,"mutationSequence":7}));
+            references.push((reference, canonical));
+        }
+        let valid = observations[1].clone();
+        let mut transcript = vec![json!({"observations":observations})];
+        let original_transcript = transcript.clone();
+        restore_completion_evidence(&root, &chat, &request, &mut transcript).await;
+        assert_eq!(transcript[0]["observations"][0]["verifiedSuccess"], false);
+        assert!(transcript[0]["observations"][0]["completionProof"].is_null());
+        assert_eq!(transcript[0]["observations"][1], valid);
+        assert_eq!(task_evidence(&transcript), vec![json!("saved-scene")]);
+        let original_checkpoint = json!({"id":"immutable-original-checkpoint","sha256":"c".repeat(64)});
+        let mut state = LoopState {
+            assistant: json!({"Content":"Already published historical output","RequestId":request}),
+            history: vec![json!({"role":"assistant","content":"Original historical response"})],
+            history_sources: vec![json!({"projectionOrigin":"formal-assistant"})],
+            summary_sources: vec![], result_sources: vec![], selected: vec![],
+            effects: Default::default(), observations: Default::default(), progress: Default::default(), task: Default::default(),
+            segments: vec![json!({"content":"Already published historical output","status":"completed"})],
+            transcript: original_transcript.clone(), runtime_snapshot: None, prefix_diagnostics: Default::default(),
+            tool_series: Default::default(), pending_context_before: vec![], retained_completion_observations: vec![],
+            visual_readback_delivered: true, acceptance_reviewed: true, acceptance_review_revision: Some((7,"old".into())),
+            last_acceptance_reminder_round: 0,
+            review_checkpoint: json!({"pending":true,"attempts":3,"cachedReview":{"decision":{"reviewed":true,"action":"complete"}}}),
+            pending_delivery: "Old draft claims Blender is disconnected and the scene is missing".into(), delivery_continuing: true,
+            mutation_sequence: 7, pending_visual_readback: false, pending_visual_hashes: vec![], last_progress_ms: 0,
+            origin: json!({}), generated: 0, recoveries: 0, started: Instant::now(), model_started: None,
+            generation_duration_base_ms: None, timeline_order: 0, previous_summary: Value::Null, work_context_ready: true,
+            work_context_reference: original_checkpoint.clone(), formal_sources: vec![], applied_steering_ids: HashSet::new(),
+            acceptance_requirements: vec!["Save the Blender scene".into()], documents: Default::default(), work_progress: Default::default(),
+        };
+        let call = json!({"id":"saved-effect","name":"filesystem.write","arguments":{"path":"scene.blend","content":"saved"}});
+        let receipt = json!({"status":"completed","executed":true,"isError":false,"content":{"path":"C:/fixture/scene.blend"}});
+        state.effects.apply("effects.observe", &json!({"call":call,"result":receipt,"observation":false,"workspaceRoot":"C:/fixture"})).unwrap();
+        state.effects.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
+        let original_assistant = state.assistant.clone();
+        let original_history = state.history.clone();
+        let original_segments = state.segments.clone();
+        let before = restored_completion_projection(&state);
+        state.transcript = transcript.clone();
+        reconcile_restored_delivery(&mut state, &before);
+        assert!(state.pending_delivery.is_empty());
+        assert!(!state.delivery_continuing && !state.acceptance_reviewed);
+        assert!(state.acceptance_review_revision.is_none());
+        assert_eq!(state.review_checkpoint["pending"], false);
+        assert!(state.review_checkpoint["cachedReview"].is_null());
+        assert_eq!(state.review_checkpoint["restorationCorrection"]["evidenceChanged"], true);
+        assert_eq!(state.review_checkpoint["restorationCorrection"]["sourceCheckpoint"], original_checkpoint);
+        assert_eq!(state.work_context_reference, original_checkpoint);
+        assert_eq!(state.assistant, original_assistant);
+        assert_eq!(state.segments, original_segments);
+        assert_eq!(&state.history[..original_history.len()], original_history.as_slice());
+        assert_eq!(state.history_sources.last().unwrap()["projectionOrigin"], "broker-control");
+        let notice = state.history.last().unwrap()["content"].as_str().unwrap();
+        assert!(notice.contains("early-failure") && notice.contains("saved-scene"));
+        assert!(notice.contains("not whether a connection is available now"));
+        assert_eq!(state.transcript, transcript);
+        assert_eq!(original_transcript[0]["observations"][0]["verifiedSuccess"], true);
+        assert_eq!(state.effects.apply("effects.previous", &json!({"call":call,"observation":false})).unwrap()["result"], receipt);
+        let corrected = restored_completion_projection(&state);
+        let history_length = state.history.len();
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert_eq!(state.history.len(), history_length, "an unchanged restore without a draft needs no new notice");
+        // A second restore must also discard an unbound draft when the old proof was already corrected.
+        // 旧证据已纠正时，再次恢复也不能复用未绑定证据版本的草稿。
+        state.pending_delivery = "Another saved unversioned draft".into();
+        state.review_checkpoint["pending"] = json!(true);
+        state.acceptance_reviewed = true;
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert!(state.pending_delivery.is_empty() && !state.acceptance_reviewed);
+        assert_eq!(state.review_checkpoint["restorationCorrection"]["evidenceChanged"], false);
+        assert_eq!(state.review_checkpoint["restorationCorrection"]["supersededDelivery"], true);
+        assert_eq!(state.assistant, original_assistant);
+        let saved_transcript = state.transcript.clone();
+        let saved_review = state.review_checkpoint.clone();
+        state.assistant["Status"] = json!("completed");
+        state.review_checkpoint = json!({});
+        let intent = "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"mcp.blender.execute_blender_code\">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>";
+        for (round, public_text) in [(127, intent), (128, "")] {
+            let continuation = json!([{"role":"assistant","content":[
+                {"type":"thinking","thinking":intent},{"type":"text","text":public_text}],"reasoning_content":intent}]);
+            let canonical = json!({"content":[],"_meta":{"modelContinuation":{
+                "round":round,"origin":state.origin,"continuation":continuation}}});
+            let reference = data::save_tool_result(&root, &chat, &request,
+                &json!({"id":format!("model-continuation-{round}"),"name":"model.continuation"}), &canonical, None).unwrap();
+            state.transcript.push(json!({"round":round,"text":"","calls":[],"nativeContinuationRef":reference}));
+        }
+        let recovered = restore_legacy_review_intent(&root, &chat, &request, &state).await.unwrap();
+        assert_eq!(recovered, (vec!["mcp.blender.execute_blender_code".to_owned()], 127));
+        assert!(public_assistant_tool_intent(&json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":intent}],"reasoning_content":intent})).is_empty());
+        state.review_checkpoint["unexecutedToolIntent"] = json!({"names":[]});
+        assert!(restore_legacy_review_intent(&root, &chat, &request, &state).await.is_none(), "settled modern intent stays settled");
+        state.review_checkpoint = json!({});
+        state.transcript.push(json!({"round":129,"text":"A later actual answer","calls":[]}));
+        assert!(restore_legacy_review_intent(&root, &chat, &request, &state).await.is_none(), "do not search past a real work boundary");
+        state.assistant = original_assistant.clone();
+        state.transcript = saved_transcript;
+        state.review_checkpoint = saved_review;
+        let pending_wire = crate::models::protocol::wire_name("mcp.blender.execute_blender_code");
+        let catalog = vec![json!({"name":"mcp.blender.execute_blender_code"})];
+        assert!(retain_unexecuted_tool_intent(&mut state, &[pending_wire], &catalog, 127));
+        assert!(has_unexecuted_tool_intent(&state.review_checkpoint));
+        assert_eq!(state.review_checkpoint["unexecutedToolIntent"]["names"], json!(["mcp.blender.execute_blender_code"]));
+        state.pending_delivery = "Superseded answer calls the unexecuted action optional".into();
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert!(has_unexecuted_tool_intent(&state.review_checkpoint), "restoring a draft cannot drop the pending action");
+        assert_eq!(state.assistant, original_assistant);
+        for (reference, canonical) in references {
+            let archive = data::load_private_tool_result(&root, &chat, reference["id"].as_str().unwrap()).unwrap();
+            assert_eq!(archive["canonical"], canonical);
+            assert_eq!(archive["sha256"], reference["sha256"]);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn visual_completion_proofs_require_the_matching_dispatched_image_and_keep_metadata() {
+        let call = json!({"id":"actual-image","name":"browser.screenshot"});
+        let receipt = json!({"status":"completed","content":{"path":"C:/fixture/view.png",
+            "sha256":"a".repeat(64),"content":[{"type":"image","mimeType":"image/png","data":"bmV3LWltYWdl"}]}});
+        let proof = super::super::completion_evidence::from_receipt(&call, &receipt);
+        let mut observations = vec![json!({"id":call["id"],"completionProof":proof})];
+        let wrong = super::super::task::receipt_visual_hashes(&json!({"content":[
+            {"type":"image","mimeType":"image/png","data":"b2xkLWltYWdl"}]}));
+        mark_visual_proofs(&mut observations, &wrong);
+        assert_eq!(observations[0]["completionProof"]["visualObserved"], false);
+        mark_visual_proofs(&mut observations, &super::super::task::receipt_visual_hashes(&receipt["content"]));
+        assert_eq!(observations[0]["completionProof"]["visualObserved"], true);
+        assert_eq!(observations[0]["completionProof"]["targets"], proof["targets"]);
+        assert_eq!(observations[0]["completionProof"]["visualHashes"], proof["visualHashes"]);
     }
 
     #[test]
@@ -6346,6 +7075,7 @@ mod preparation_tests {
             "MODEL_RESPONSE_EMPTY", "MODEL_STREAM_INCOMPLETE", "MODEL_HTTP_ERROR", "DATA_WORKER_FAILED",
             "TASK_EVENT_BACKPRESSURE", "RESOURCE_ADMISSION_WAIT_TIMEOUT", "TOOL_RUN_ROUND_LIMIT",
             // Start and idle timeouts share one bounded recovery rule.
+            // 启动与空闲超时共用同一有界恢复规则。
             "MODEL_RESPONSE_TIMEOUT", "MODEL_IDLE_TIMEOUT", "TOOL_RUN_TIMEOUT", "TOOL_RUN_OUTPUT_LIMIT", "MODEL_HISTORY_ECHO",
             "TOOL_RUN_MESSAGE_ROUND_LIMIT", "TASK_COMPLETION_REVIEW_INVALID"] {
             assert!(internal_recovery_required(code), "{code}");
@@ -6354,9 +7084,26 @@ mod preparation_tests {
             "MODEL_AUTHENTICATION_FAILED", "MODEL_NETWORK_FAILED",
             "INVALID_MODEL_CONNECTION", "MODEL_ENDPOINT_NOT_FOUND",
             // Retrying cannot change these, so they settle instead of spinning in recovery.
+            // 重试无法改变这类结果，直接结算，避免空转。
             "TASK_BUDGET_EXHAUSTED", "CHAT_REQUEST_CONFLICT"] {
             assert!(!internal_recovery_required(code), "{code}");
         }
+    }
+
+    #[test]
+    fn dsml_pending_intent_requires_a_matching_formal_success_and_survives_checkpoint_roundtrip() {
+        let mut checkpoint = json!({"unexecutedToolIntent":{"names":["mcp.blender.execute_blender_code"],"round":127}});
+        checkpoint = serde_json::from_str(&serde_json::to_string(&checkpoint).unwrap()).unwrap();
+        for receipt in [json!({"status":"unknown"}), json!({"status":"error","isError":true}),
+            json!({"status":"completed","executed":false})] {
+            settle_unexecuted_tool_intent(&mut checkpoint, "mcp.blender.execute_blender_code", &receipt);
+            assert!(has_unexecuted_tool_intent(&checkpoint));
+        }
+        settle_unexecuted_tool_intent(&mut checkpoint, "tool.result.read", &json!({"status":"completed"}));
+        assert!(has_unexecuted_tool_intent(&checkpoint), "reading an old result cannot settle the planned action");
+        settle_unexecuted_tool_intent(&mut checkpoint, "mcp.blender.execute_blender_code",
+            &json!({"status":"completed","executed":true,"reused":true,"isError":false}));
+        assert!(!has_unexecuted_tool_intent(&checkpoint), "native identity-based reuse must not force a duplicate effect");
     }
 
     #[test]
@@ -6415,8 +7162,8 @@ mod preparation_tests {
                 value
             }
         };
-        // A serial preparation deadlocks at this barrier; all accepted-scope reads must be joined even on failure.
-        // 串行准备会停在此门闩；即使正式保存失败，各项范围内读取也须由同一请求完整等待收尾。
+        // Join all scoped preparation reads even after save failure; serial execution deadlocks here.
+        // 即使保存失败也须等待范围内全部准备读取，串行执行会卡在此屏障。
         let ((committed, _), (prepared, _)) = tokio::time::timeout(Duration::from_secs(2),
             prepare_in_parallel(commit, prepare_in_parallel(
                 prepare_in_parallel(read("model-config"), read("tool-context")),

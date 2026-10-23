@@ -23,12 +23,10 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      # This checks source boundaries, not native Windows functionality.
-      # 此检查验证源码边界，不代替 Windows 原生功能回归。
-      # CI Node runs this dependency-free guard; the Rust core does not require Node or the old gateway SDK.
-      # CI Node 仅运行无第三方依赖的开发守卫；Rust 核心不依赖 Node，此处不安装旧网关 SDK。
-      # The private packaged Node runtime is reserved for MCP extensions and verified sandbox skills.
-      # 随包私有 Node 仅供 MCP 扩展和已核验的沙箱技能使用。
+      # Node checks source boundaries here; Windows runtime behavior needs separate validation.
+      # 此处 Node 只检查源码边界，Windows 运行行为需单独验证。
+      # The Rust core needs no Node; packaged Node serves MCP and verified sandbox skills.
+      # Rust 核心不依赖 Node；随包 Node 用于 MCP 和已核验的沙箱技能。
       - run: node tools/development/check-architecture.mjs
 
   packaging-guards:
@@ -39,10 +37,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      # These isolated offline checks need neither SDK installation nor private runtime assets.
-      # 这些隔离离线检查不需要安装 SDK 或准备私有运行资产。
-      # Native build, deployment and GUI acceptance remain separate verification requirements.
-      # 原生构建、部署和界面验收仍需单独执行，不能用本任务结果代替。
+      # These offline checks need no SDK or private assets; build, deployment and GUI checks run separately.
+      # 这些离线检查无需 SDK 或私有资源；构建、部署和界面需单独验证。
       - name: Reject incomplete MCP caches
         shell: powershell
         run: ./tests/native-runtime-smoke/check-mcp-cache.ps1

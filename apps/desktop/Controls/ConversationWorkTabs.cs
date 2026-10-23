@@ -221,8 +221,8 @@ public sealed class ConversationWorkTabs : Grid, IDisposable
     private void ScrollLayoutUpdated(object? sender, object args)
     {
         if (_tabViewport.ActualWidth <= 0) return;
-        // Measure overflow against the entire tab viewport so the arrows cannot create their own overflow.
-        // 按整个标签视口判断溢出，避免箭头占位反过来制造溢出；等待正常布局，不强制同步布局整棵树。
+        // Measure the full tab viewport before showing overflow arrows.
+        // 按完整标签视口判断溢出，避免箭头反复撑大布局；沿用正常布局流程。
         var visibility = _tabs.DesiredSize.Width > _tabViewport.ActualWidth + 0.5 ? Visibility.Visible : Visibility.Collapsed;
         if (_scrollLeft.Visibility != visibility)
         {

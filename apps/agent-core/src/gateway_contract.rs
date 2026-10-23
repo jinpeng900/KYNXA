@@ -40,8 +40,8 @@ impl GatewayError {
         self
     }
 
-    /// Producers retain only safe machine diagnostics, never credentials or untrusted error bodies.
-    /// 生产者仅保留安全机器诊断，不在详情中放入凭据或不受信任的错误正文。
+    /// Expose safe diagnostics only; exclude credentials and untrusted error bodies.
+    /// 仅公开安全诊断，不携带凭据或不可信错误正文。
     pub fn with_details(mut self, details: Value) -> Self {
         self.details = details;
         self
@@ -56,8 +56,8 @@ impl std::fmt::Display for GatewayError {
 impl std::error::Error for GatewayError {}
 impl From<std::io::Error> for GatewayError {
     fn from(_error: std::io::Error) -> Self {
-        // Do not leak private host paths or credentials through public transport errors.
-        // 公开传输错误不泄露宿主私有路径或凭据；具体操作另保留机器错误码。
+        // Public errors expose an error code, not host paths or credentials.
+        // 公开错误仅返回错误码，不暴露主机私有路径或凭据。
         Self::new(
             "GATEWAY_IO_FAILED",
             "本机读写失败，请检查路径与运行权限。",
@@ -198,8 +198,8 @@ impl GatewayConfig {
         })
     }
 
-    /// The host may place its maintenance marker beside persistent pointers instead of package files.
-    /// 宿主可将维护标记放到持久指针旁，不要求向只读安装载荷写入。
+    /// Store maintenance markers beside persistent pointers, outside read-only packages.
+    /// 维护标记可放在持久指针旁，避免写入只读安装目录。
     pub fn migration_lock_path(&self) -> Result<PathBuf, GatewayError> {
         std::env::var_os("KYNXA_STORAGE_MIGRATION_LOCK")
             .map(|path| {

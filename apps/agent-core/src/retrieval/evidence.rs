@@ -30,8 +30,8 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
-/// Evidence decisions own only identities, versions and bounded facts; original quotes and complete tool receipts stay in Node.
-/// 证据决策只持有身份、版本与有界事实；原始引用和完整工具回执继续由 Node 缓存与持久化。
+/// Track evidence identities, versions and bounded facts; retain originals in native storage.
+/// 账本跟踪证据身份、版本和有界事实，原文及完整回执由原生存储保留。
 #[derive(Default)]
 pub struct EvidenceLedger {
     opened: bool,

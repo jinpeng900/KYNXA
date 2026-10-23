@@ -44,27 +44,41 @@ pub async fn accept(
         let message = input["message"].as_str().unwrap_or("");
         let mut goal: String = message.trim().chars().take(4096).collect();
         let mut acceptance = super::task::acceptance_requirements(message);
-        // Only a clear continuation of unfinished work inherits its scope, acceptance and remaining time.
-        // 仅明确续作未完成的工作才继承范围、验收项和剩余时长；问候、新话题及已完成工作均不携带旧预算。
+        // Only explicit unfinished-work continuations inherit scope, acceptance and remaining time.
+        // 仅明确续作未完成工作时继承范围、验收项和剩余时长。
         if super::task::is_explicit_continuation(message) && !super::budget::is_finite_response_request(message) {
             if let Some(previous) = repository.previous_roots_for_conversation(conversation, i64::MAX, 1)?.into_iter().next()
                 .filter(|task| !matches!(task.state, TaskState::Cancelled | TaskState::Completed)
                     && task.scope.project_id == relationship["projectId"].as_str().map(str::to_owned)
                     && crate::storage::workspace_mounts::validate_snapshot(&task.scope.permission_snapshot["bindingSnapshot"], &relationship))
             {
-                goal = previous.goal.chars().take(4096).collect();
-                acceptance = previous.input_reference.as_ref()
+                let directive = repository.latest_event(&previous.task_id, "task.user-directive")?;
+                let revised_requirements = directive.as_ref().and_then(|event| {
+                    if event.payload["stop"] == true && event.payload["suspendedRequirements"].is_array() {
+                        event.payload["suspendedRequirements"].as_array()
+                    } else {
+                        event.payload["requirements"].as_array()
+                    }
+                })
+                    .and_then(|items| items.iter().map(|item| item.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>());
+                // A committed empty list or zero duration is an explicit revocation, not missing metadata.
+                // 已提交的空清单或零时长表示明确撤销，不能回退并复活旧要求。
+                goal = revised_requirements.as_ref().map(|requirements| {
+                    if requirements.is_empty() { message.to_owned() } else { requirements.join("\n") }
+                }).unwrap_or_else(|| previous.goal.clone()).chars().take(4096).collect();
+                acceptance = revised_requirements.unwrap_or_else(|| previous.input_reference.as_ref()
                     .and_then(|reference| read_acceptance_requirements(&root, reference))
                     .filter(|requirements| !requirements.is_empty())
-                    .unwrap_or_else(|| previous.acceptance.clone());
+                    .unwrap_or_else(|| previous.acceptance.clone()));
                 if super::task::has_continuation_details(message) {
                     let combined = acceptance.iter().map(String::as_str).chain(std::iter::once(message)).collect::<Vec<_>>().join("\n");
                     acceptance = super::task::acceptance_requirements(&combined);
                 }
                 resolved["limits"]["continuedFromTaskId"] = json!(previous.task_id);
-                let minimum = previous.input_reference.as_ref()
+                let minimum = directive.as_ref().and_then(|event| event.payload["minimumActiveMs"].as_u64())
+                    .or_else(|| previous.input_reference.as_ref()
                     .and_then(|reference| read_resolved_limits(&root, reference))
-                    .and_then(|limits| limits["minActiveMs"].as_u64())
+                    .and_then(|limits| limits["minActiveMs"].as_u64()))
                     .unwrap_or(0);
                 let done = previous.usage.active_duration_ms.unwrap_or(0);
                 let remaining = minimum.saturating_sub(done);
@@ -113,15 +127,15 @@ pub async fn read(
         .map_err(|_| invalid("TASK_INPUT_WORKER_FAILED"))?
 }
 
-/// The limits resolved and persisted when the request was accepted, so every execution and recovery agrees.
-/// 读取接受请求时解析并保存的额度，保证每次执行与恢复使用同一结果（含继承的最低时长）。
+/// Reuse limits saved at acceptance, including inherited minimum duration.
+/// 执行和恢复沿用接受时保存的额度，包括继承的最低时长。
 pub(crate) fn read_resolved_limits(root: &Path, reference: &Value) -> Option<Value> {
     let value = read_input_document(root, reference)?;
     value.get("resolvedRunLimits").filter(|limits| limits.is_object()).cloned()
 }
 
-/// Complete acceptance remains in the authenticated input document, even when the task row uses short labels.
-/// 完整验收项保存在经过哈希核验的输入文件中，即使任务行采用短标签也不丢失要求。
+/// Keep full acceptance criteria in the hash-verified input, separate from short task labels.
+/// 完整验收项保存在哈希核验后的输入中，任务短标签不影响要求。
 pub(crate) fn read_acceptance_requirements(root: &Path, reference: &Value) -> Option<Vec<String>> {
     let value = read_input_document(root, reference)?;
     value.get("acceptanceRequirements")?.as_array()?.iter().map(|item| item.as_str().map(str::to_owned)).collect()

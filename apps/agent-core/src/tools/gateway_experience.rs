@@ -36,8 +36,8 @@ async fn procedures(arguments: Value, context: &GatewayToolContext) -> Result<Va
     if check_configuration_generation(context).is_err() { return Ok(unavailable("configuration-changed")); }
     match result {
         Ok(Ok(value)) => Ok(value),
-        // Optional derived advice must not fail the task or trigger a tool/model retry storm.
-        // 可选衍生建议不可中断任务或触发工具/模型重试风暴；已有正式回执仍是执行依据。
+        // Advice failures must not stop tasks or trigger retries; formal receipts remain authoritative.
+        // 建议失败不中断任务或触发重试；执行仍以正式回执为准。
         _ => Ok(unavailable("verified-procedures-unavailable")),
     }
 }

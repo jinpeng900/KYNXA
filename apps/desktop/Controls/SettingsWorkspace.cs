@@ -79,8 +79,8 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         body.Children.Add(new FontIcon { Glyph = iconGlyph, FontSize = 16,
             FontFamily = new FontFamily("Segoe Fluent Icons"), IsHitTestVisible = false, VerticalAlignment = VerticalAlignment.Center });
-        // Constrain translated labels to the remaining sidebar width so compact navigation can wrap instead of clipping.
-        // 将翻译后的标签限制在侧栏剩余宽度内，让紧凑导航自动换行，避免长名称被截断。
+        // Let translated labels wrap within the available sidebar width.
+        // 标签在侧栏剩余宽度内换行，避免长名称被截断。
         var label = new TextBlock { FontFamily = font, FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.Wrap };
         UiLocalization.Bind(label, TextBlock.TextProperty, labelKey);
@@ -146,10 +146,10 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
             double width = viewportWidth;
             if (double.IsNaN(frame.Width) || Math.Abs(frame.Width - width) > 0.1) frame.Width = width;
         }
-        // Keep B's responsive viewport while explicitly binding measured and arranged width to prevent ScrollViewer drift.
-        // 沿用 B 的视口自适应，同时显式统一测量与排布宽度，保留已修复的 ScrollViewer 偏移保护。
-        // Sizes are DIPs and change with the viewport; do not multiply content coordinates by monitor scale a second time.
-        // 内容尺寸使用 DIP 并随视口变化，不再对坐标重复乘以屏幕缩放比例。
+        // Match measured and arranged widths to prevent ScrollViewer drift.
+        // 统一测量和排布宽度，防止 ScrollViewer 偏移。
+        // Viewport sizes are DIPs; do not apply monitor scaling again.
+        // 视口尺寸使用 DIP，不重复乘以屏幕缩放比例。
         scroll.SizeChanged += (_, args) => FitWidth(args.NewSize.Width);
         scroll.Loaded += (_, _) => FitWidth(scroll.ActualWidth);
         return scroll;

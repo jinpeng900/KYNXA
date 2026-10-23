@@ -241,8 +241,8 @@ function Install-KynxaDevelopmentRust {
     & $tar.Source -xf $archive -C $cacheRoot "$distribution/rustc" "$distribution/cargo" "$distribution/rust-std-$script:managedRustHost" "$distribution/LICENSE-APACHE" "$distribution/LICENSE-MIT" "$distribution/COPYRIGHT"
     if ($LASTEXITCODE -ne 0) { throw 'Private Rust archive extraction failed. / 私有 Rust 归档解压失败。' }
     $toolchainRoot = Join-Path $cacheRoot 'toolchain'
-    # The official component manifests determine installed files; no shell installer or global rustup state is used.
-    # 按官方组件清单安装文件，不执行 shell 安装器，也不使用全局 rustup 状态。
+    # Install from official component manifests without shell installers or global rustup state.
+    # 按官方组件清单安装，不调用 shell 安装器或全局 rustup。
     foreach ($component in @('rustc', "rust-std-$script:managedRustHost", 'cargo')) {
         $componentRoot = Join-Path $cacheRoot "$distribution/$component"
         foreach ($entry in [IO.File]::ReadAllLines((Join-Path $componentRoot 'manifest.in'))) {

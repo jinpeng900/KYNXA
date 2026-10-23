@@ -107,8 +107,8 @@ fn context_rejection(body: &Value) -> Value {
     }
 }
 
-/// Recovery only narrows a verified rejected step; it never discards effects, changes identity or grants capacity.
-/// 恢复仅缩小明确被拒绝的步骤；不丢弃副作用、不更换身份，也不自行授予上下文容量。
+/// Narrow only verified rejected steps; preserve effects, identity and capacity limits.
+/// 仅缩小已确认被拒绝的步骤；保留副作用、身份和容量上限。
 fn recovery_limits(args: &Value) -> Value {
     let rejection = &args["rejection"];
     let current = &args["current"];
@@ -247,8 +247,8 @@ fn context_recovery_plan(args: &Value) -> Value {
         "expiresAt".to_owned(),
         json!(now.saturating_add(OBSERVED_CONTEXT_LIMIT_LIFETIME_MS)),
     );
-    // Reads do not renew expiry; a successful update becomes the most recent observation.
-    // 读取不续期；成功更新移动到最近观察位置，容量淘汰保持既有最近写入顺序。
+    // Reads do not renew expiry; eviction follows the latest successful write.
+    // 读取不续期；按最近成功写入的顺序淘汰。
     let remaining_keys: Vec<&Value> = args["cacheKeys"]
         .as_array()
         .into_iter()

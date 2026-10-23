@@ -3,8 +3,8 @@
     xmlns:services="using:KYNXA_Desktop.Services" xmlns:controls="using:KYNXA_Desktop.Controls" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:viewModels="using:KYNXA_Desktop.ViewModels" x:Name="PageRoot" Language="zh-CN" FontFamily="{StaticResource KynxaUIFont}" FontSize="14" Foreground="{StaticResource KynxaTextBrush}" Background="{StaticResource KynxaMainBrush}" Loaded="PageRoot_Loaded" mc:Ignorable="d">
 
     <Page.Resources>
-        <!-- Keep the dismissal surface transparent in every native Button state; only the existing pane paints its contents.
-             关闭命中面在 Button 的所有状态都保持透明，只由原有侧栏绘制内容。 -->
+        <!-- Keep the dismissal surface transparent in every Button state.
+             关闭命中面始终透明，内容仅由侧栏绘制。 -->
         <Style x:Key="ShellTransparentScrimStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -28,9 +28,6 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <!-- Sidebar slot
-             侧栏区域。
-        -->
         <Button x:Name="SidebarScrim" Grid.ColumnSpan="3" Canvas.ZIndex="15" Visibility="Collapsed"
                 Style="{StaticResource ShellTransparentScrimStyle}"
                 Click="SidebarScrim_Click" services:UiLocalization.AutomationName="收起侧栏" />
@@ -53,8 +50,8 @@
                         services:UiLocalization.AutomationName="展开侧栏" services:UiLocalization.ToolTip="展开侧栏">
                     <FontIcon Glyph="&#xE700;" FontSize="17" />
                 </Button>
-                <!-- Kimi medium segmented control: 36 high, 2 inset, equal 32-high halves.
-                     采用 Kimi 风格中号分段控件：总高 36、内缩 2，两半等宽且各高 32。
+                <!-- Equal segments: 36 high, 2 inset, 32-high content.
+                     等宽分段：总高 36、内缩 2、内容高 32。
                 -->
                 <Border x:Name="ChatWorkSwitcher" Height="36" Padding="2"
                         Background="{StaticResource KynxaSegmentIdleBrush}" CornerRadius="10">
@@ -468,9 +465,6 @@
         <controls:ResizeGrip x:Name="SidebarGrip" Grid.ColumnSpan="3" HorizontalAlignment="Left" Margin="238,0,0,0" Canvas.ZIndex="21"
                              Axis="Horizontal" IndicatorBrush="Transparent" CancelRequested="SidebarGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="SidebarGrip_DragDelta" DragStarted="SidebarGrip_DragStarted" ResetRequested="SidebarGrip_ResetRequested" />
 
-        <!-- Stable main slots: top workspace, primary content and optional preview.
-             主体固定为顶部工作区、主要内容以及可选预览区域。
-        -->
         <Grid x:Name="MainRegion" Grid.Column="2" Background="{StaticResource KynxaMainBrush}" SizeChanged="MainRegion_SizeChanged">
             <Grid.RowDefinitions>
                 <RowDefinition x:Name="TopWorkspaceRow" Height="0" />

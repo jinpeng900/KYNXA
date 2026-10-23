@@ -159,8 +159,8 @@ public static class MessageTimePresentation
             if (Cache is not { } cache) return Task.FromResult(true);
             var identity = (conversationId, message.Id);
             MessageWrites.TryGetValue(identity, out var preceding);
-            // Invalidate immediately in memory, then order disk removal before this message's next terminal write.
-            // 内存立即失效；磁盘删除仅排在同一消息旧写入之后、新终态写入之前，不等待其他聊天。
+            // Invalidate memory now; queue disk removal between this message's old and next writes.
+            // 内存立即失效；删除排在本消息旧写入之后、新终态写入之前，不等其他聊天。
             var removal = ForgetCoreAsync(cache, conversationId, message.Id, preceding);
             TrackWrite(identity, removal);
             return removal;
@@ -222,8 +222,8 @@ public static class MessageTimePresentation
         }
     }
 
-    // Client and gateway creation instants can differ; match public final content and status, not their clocks.
-    // 客户端与网关创建时刻可能不同；按最终公开正文和状态匹配，不要求两端时钟相同。
+    // Match final content and status; client and gateway timestamps may differ.
+    // 按最终公开正文和状态匹配，允许客户端与网关时钟不同。
     private static string ContentHash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
 
     private static bool IsTerminal(ChatMessageState message) => message.Role == "assistant" &&

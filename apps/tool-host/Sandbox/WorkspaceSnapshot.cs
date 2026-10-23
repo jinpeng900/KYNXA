@@ -92,7 +92,7 @@ internal sealed class WorkspaceSnapshot
             if (!IsWithin(root, path)) continue;
             // Only the service's canonical managed work folder may bypass its Data ancestor.
             // Explicit exclusions inside the work folder still apply, as do all sensitive-name filters.
-            // 只有服务规范化管理的工作目录可以跨越其 Data 祖先；工作目录内的显式排除和敏感文件名过滤仍然有效。
+            // 仅规范托管工作目录可跨越 Data 祖先；内部显式排除和敏感文件名过滤仍有效。
             if (_allowDataAncestor && IsWithin(root, _sourceRoot) && !PathEquals(root, _sourceRoot) && IsWithin(_sourceRoot, path)) continue;
             return true;
         }
@@ -110,8 +110,8 @@ internal sealed class WorkspaceSnapshot
         bool conversationBelowModels = parts.Length == 2 && Path.GetFileName(Path.TrimEndingDirectorySeparator(root))
             .Equals("Models", StringComparison.OrdinalIgnoreCase) && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) &&
             Guid.TryParse(parts[1], out _);
-        // An arbitrary model-home name is accepted only as the configured root, never every excluded extension/data folder.
-        // 自定义模型目录名仅在确为已配置根目录时被接受，不能放行所有被排除的扩展或数据目录。
+        // Accept custom model-home names only at the configured root, not other excluded folders.
+        // 自定义模型目录名仅放行已配置根目录，不扩大到其他被排除目录。
         bool conversationBelowConfiguredHome = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
             parts.Length == 2 && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);
         // The native broker passes the exact configured Data root for its current chat sandbox.

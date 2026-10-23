@@ -181,10 +181,8 @@ foreach ($dependency in $manifest.SelectNodes('/pkg:Package/pkg:Dependencies/pkg
     if (-not [IO.File]::Exists($dependencyPath)) { throw "Install the required desktop framework: $dependencyName $minimumVersion" }
     Add-AppxPackage -Path $dependencyPath
 }
-# Registration changes only the generated clean identity, never the source manifest or old application.
-# 只注册生成的独立身份，不修改源码清单，也不替换或关闭原软件。
-# Register the new loose layout as a development package, not as an already installed signed package.
-# 新布局按开发包注册，不将其误当作已经安装并签名的正式包。
+# Register only the generated identity as a development package; leave the source and existing app intact.
+# 仅将生成的独立身份注册为开发包，保留源码和现有软件。
 Add-AppxPackage -Register -Path $manifestPath
 $package = Get-AppxPackage -Name $packageIdentity | Select-Object -First 1
 if ($null -eq $package) { throw 'The clean package could not be registered.' }

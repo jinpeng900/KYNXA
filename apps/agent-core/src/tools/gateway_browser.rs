@@ -431,8 +431,8 @@ async fn start_workspace_browser(ctx: &GatewayToolContext) -> Result<WorkspaceBr
     super::gateway_browser_permissions::prepare(ctx, &browser).await?;
     let mut command = Command::new(browser);
     hide(&mut command);
-    // Native occlusion assumes top-level Chrome windows; the embedded child must keep its surface when the shell loses focus.
-    // 原生遮挡检测假设 Chrome 是顶层窗口；嵌入子窗口须在软件失去前台时保留页面表面。
+    // Disable top-level occlusion handling so embedded pages survive loss of shell focus.
+    // 关闭顶层遮挡处理，避免软件失去焦点时嵌入页面停止显示。
     command.args([
         "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
         "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
@@ -467,8 +467,8 @@ async fn start_workspace_browser(ctx: &GatewayToolContext) -> Result<WorkspaceBr
     let socket = version["webSocketDebuggerUrl"].as_str()
         .ok_or_else(|| failure("BROWSER_INVALID_ENDPOINT", "随包浏览器窗口连接尚未就绪。", 502))?.to_owned();
     let client = Box::pin(CdpClient::connect(&socket)).await?;
-    // DevTools can listen before the app's first page exists; consume that page instead of creating a second window.
-    // DevTools 可能先于应用首页就绪；等待并接管这个页面，不能误建第二个窗口留下孤窗。
+    // DevTools may be ready before the first page; wait for that page instead of opening another window.
+    // DevTools 可能先于首页就绪；等待并接管首页，避免多开窗口。
     let initial_target = loop {
         check_cancelled(ctx)?;
         let targets = client.call("Target.getTargets", json!({}), ctx).await?;
@@ -570,8 +570,8 @@ pub(crate) async fn workspace_open(
     loop {
         match workspace_action(&json!({"sessionId":id,"action":"state"}), ctx).await {
             Ok(value) if value["navigationCommitted"] != true && tokio::time::Instant::now() < committed_deadline => {
-                // A pending first URL is not a history entry yet; let Chrome commit before a second navigation replaces it.
-                // 初始 URL 尚在等待时还不是历史记录；短暂等待实际提交，避免紧接着导航吞掉可返回的第一页。
+                // Wait for the first URL to enter history before a second navigation replaces it.
+                // 等首页写入历史再导航，保留可返回的第一页。
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             Ok(value) => return Ok(value),
@@ -809,8 +809,8 @@ pub(crate) async fn workspace_action(
     )
 }
 
-/// Renderer replacement can briefly reject a read after navigation already succeeded; never replay that navigation.
-/// 导航已成功时 renderer 切换可能短暂拒绝历史读取；仅重查只读元数据，不能因此重放导航。
+/// After navigation, renderer changes may reject history reads; retry metadata, not navigation.
+/// 导航后切换渲染器可能暂时无法读取历史；仅重读元信息，不重放导航。
 async fn workspace_navigation_history(socket: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
     loop {
@@ -901,8 +901,8 @@ async fn clear_workspace_site_data(ctx: &GatewayToolContext) -> Result<Value, Ga
     Ok(json!({"cleared":true,"scope":"application","closedSessionIds":closed}))
 }
 
-/// Cleanup keeps only the already-closed owned session; the existing sixteen-session bound also bounds these jobs.
-/// 清理仅持有已确认关闭的自有会话，复用既有十六会话上限约束后台任务，不保留用户请求或另建调度器。
+/// Clean only confirmed-closed sessions, within the existing sixteen-session limit; retain no user request.
+/// 仅清理已确认关闭的会话，沿用十六会话上限，不保留用户请求。
 fn defer_owned_profile_cleanup(
     id: String,
     handle: Arc<Mutex<BrowserSession>>,
@@ -1609,8 +1609,8 @@ async fn stage_upload(
         .as_u64()
         .unwrap_or(2 * 1024 * 1024 * 1024)
         .clamp(1024 * 1024, 16 * 1024 * 1024 * 1024);
-    // Copy from stable verified handles once; Chromium's delayed form submission must not reopen a changed source path.
-    // 从稳定核验句柄复制一次；Chromium 延后提交表单时不能重新读取已改变的源路径。
+    // Copy once from verified handles; delayed form submission must not reopen a changed source.
+    // 从已核验句柄复制一次；延迟提交表单时不重读已变化的源路径。
     let result = tokio::task::spawn_blocking(move || {
         use std::io::{Read, Write};
         super::local_files::inspect(&created, true, false)
@@ -1839,8 +1839,8 @@ pub(crate) async fn execute(
         }
         let intent = super::intent::calculate("tools.browserIntent", &json!({"message":ctx.config["trustedUserText"],"previousUserMessages":ctx.config["previousUserMessages"]}))
             .map_err(|message| failure("TOOL_INTENT_FAILED", &message, 500))?;
-        // Prefer the visible workspace page; external presentation follows trusted user intent, not a guessed foreground flag.
-        // 优先复用可见工作区网页；外部展示依据真实用户意图，不依据模型猜测的前台参数。
+        // Reuse the visible workspace page; external display requires verified user intent.
+        // 优先复用可见工作区网页；外部展示须有已核验的用户意图。
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
             let handles = ctx
                 .runtime

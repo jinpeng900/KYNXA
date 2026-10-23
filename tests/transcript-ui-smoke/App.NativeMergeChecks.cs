@@ -46,8 +46,8 @@ public partial class App
                 "search includes all currently loaded messages, including distant recycled bodies");
             await SetBodySearchQueryAsync("NATIVE_LOADED_MATCH_00", 1);
             await ClickBodySearchAsync("next");
-            // Topmost matches can move the floating search bar below the text; assert the actual highlighted range is unobscured on either side.
-            // 顶部匹配会让搜索浮栏移到正文下方；验收实际高亮范围在浮栏任一侧完整可见，不假定浮栏始终在顶部。
+            // The search bar may move below top matches; verify the highlight remains unobscured.
+            // 顶部匹配可能让搜索栏移到下方；只验证高亮完整可见，不固定浮栏位置。
             await WaitAsync("kynxaTranscriptSearch.state().index===0 && (()=>{const highlight=CSS.highlights.get('transcript-search-current');if(!highlight)return false;const range=[...highlight][0];if(!range || range.toString()!=='NATIVE_LOADED_MATCH_00' || !"
                 + firstArticle + ".contains(range.startContainer))return false;const bounds=range.getBoundingClientRect(),bar=document.getElementById('transcript-search').getBoundingClientRect();return bounds.width>0 && bounds.height>0 && bounds.left>=0 && bounds.right<=innerWidth && bounds.top>=0 && bounds.bottom<=innerHeight && (bounds.bottom<=bar.top || bounds.top>=bar.bottom || bounds.right<=bar.left || bounds.left>=bar.right);})()",
                 "explicit search navigation reveals a match from the previously unmounted first message");

@@ -16,8 +16,8 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Open tabs retain bounded views and parsed projections; inactive views yield browser resources.
-/// 已打开标签保留有界视图和解析投影；闲置视图让出浏览器资源，切换不重复解析文档。
+/// Cache open views within limits; inactive views yield browser resources.
+/// 限量缓存已打开视图，切换不重复解析；闲置视图让出浏览器资源。
 /// </summary>
 public sealed class ConversationDocumentPanel : Grid, IDisposable
 {
@@ -39,8 +39,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private readonly List<DocumentWork> _pendingDocuments = [];
     private int _preparingDocuments;
     private sealed record CachedDocument(WorkspacePreviewTarget Preview, bool ShowSource, string? RequestedVersion);
-    // Each open resource owns preparation; selection only controls which completed view is presented.
-    // 每份资源独立持有准备过程，标签选择只决定展示哪个视图，不取消其他资源。
+    // Prepare each resource independently; selection only changes the visible view.
+    // 各资源独立准备；切换标签只改变显示，不取消其他资源。
     private sealed class DocumentWork(string key, Guid conversationId, string path, string? title, bool userSelected,
         string? requestedVersion, bool changes, Guid? messageId, ChatAttachment? attachment, Guid? mountId)
     {
@@ -260,8 +260,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         string? version = work.Attachment.Sha256;
         if (string.IsNullOrEmpty(version) && work.Preview?.Version is { Length: 64 } acceptedVersion)
             version = acceptedVersion;
-        // Keep the immutable version returned by the attachment client inside the exact scoped address.
-        // 附件客户端返回的不可变版本属于合法地址；仍精确限制同源、消息与附件路径，不能放行任意查询。
+        // Accept the returned immutable version only within the exact attachment scope.
+        // 允许附件返回的不可变版本，仍严格校验同源、消息和附件路径及查询。
         string query = $"messageId={work.MessageId:D}";
         if (!string.IsNullOrEmpty(version)) query += "&version=" + Uri.EscapeDataString(version);
         if (work.Preview?.Kind == "pdf" && !string.Equals(Path.GetExtension(work.Attachment.Name), ".pdf", StringComparison.OrdinalIgnoreCase))
@@ -541,8 +541,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 catch (Exception error) when (IsDirectOfficeDocument(preview.Kind)
                     && error is DirectDocumentPreviewException or TimeoutException)
                 {
-                    // A failed direct render changes only this file's representation, never the user's selected tab.
-                    // 直接渲染失败只替换本文件的表示形式，不切换用户当前标签，也不重复打开产物。
+                    // Render fallback replaces only this file's view, preserving the selected tab.
+                    // 渲染回退只替换本文件视图，保留当前标签，不重复打开。
                     if (!IsLive(work)) return;
                     await RequestPdfFallbackAsync(work);
                     if (!IsLive(work)) return;
@@ -576,8 +576,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         try
         {
-            // A later page can fail after the initial shown receipt; coalesce the same fallback and retain tab ownership.
-            // 后续页可能在首屏 shown 回执后失败；合并同一文件的转换请求，保留原标签与当前选择。
+            // Later pages may fail after first display; merge fallback requests for the same tab.
+            // 首屏显示后仍可能出错；合并同文件的转换请求，保留标签及当前选择。
             await RequestPdfFallbackAsync(work);
             if (work.Preparing) await work.Completion.Task;
             if (!IsLive(work)) return;
@@ -689,8 +689,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", "");
                 return;
             }
-            // Mapped static hosts bypass this event; a separate host serves only this view's verified original.
-            // 静态目录映射不会触发此事件；独立代理域只返回此视图已核验的原件，不开放其他文件或地址。
+            // Static mappings bypass this event; the separate host serves only the verified original.
+            // 静态映射不触发此事件；独立代理域仅提供本视图已核验的原件。
             var bytes = await _api.ReadDocumentContentAsync(address, work.Cancellation.Token);
             if (!IsLive(work) || !ReferenceEquals(work.Preview, preview))
             {
@@ -961,8 +961,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private static void DeactivateView(BrowserView view)
     {
         view.Active = false; view.Browser.Opacity = 0; view.Browser.IsHitTestVisible = false;
-        // First-paint admission and background settling are separate: keep unfinished hidden work alive without taking input.
-        // 首屏准入与后台完成分开；未完成的隐藏视图继续准备，但不能抢占用户输入。
+        // Separate first display from background completion; hidden work must not take input.
+        // 首屏显示与后台完成分开；隐藏视图继续准备，但不接收输入。
         view.Browser.Visibility = view.Preparing || view.BackgroundPreparing ? Visibility.Visible : Visibility.Collapsed;
         if (!view.Preparing && !view.BackgroundPreparing) _ = SuspendAsync(view);
     }
@@ -1101,8 +1101,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         Task<CoreWebView2Environment>? preparation = null;
         try
         {
-            // Low-priority environment-only preparation creates no document controller and is never awaited by chat or startup.
-            // 低优先级仅准备共享环境，不创建文档控制器，也不进入聊天或启动的等待链路。
+            // Warm only the shared environment at low priority; chat and startup never wait for it.
+            // 低优先级预热共享环境，不创建文档控制器，聊天和启动无需等待。
             preparation = _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
             await preparation;
         }

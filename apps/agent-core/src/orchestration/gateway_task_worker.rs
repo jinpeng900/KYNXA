@@ -6,6 +6,7 @@ use super::{
     gateway_runtime::{GatewayRuntime, RequestRun},
     gateway_task_journal::TaskJournal,
     progress::RunProgress,
+    gateway_work_progress::DeterministicFailures,
     task::{self, TaskState as SemanticTask},
 };
 use crate::{
@@ -82,6 +83,8 @@ struct WorkerContext {
     #[serde(default)]
     acceptance_review: Value,
     #[serde(default)]
+    review_checkpoint: Value,
+    #[serde(default)]
     review_visual_input: bool,
     #[serde(default)]
     readback_since: usize,
@@ -89,6 +92,12 @@ struct WorkerContext {
     last_parent_revision: u64,
     #[serde(default)]
     memory_plan_invalidated: bool,
+    #[serde(default)]
+    deterministic_failures: DeterministicFailures,
+}
+
+fn child_mutation_revision(state: &WorkerContext) -> u64 {
+    state.receipts.iter().filter(|saved| saved["mutating"] == true).count() as u64
 }
 
 fn invalidate_child_memory_plan(state:&mut WorkerContext,status:&Value) {
@@ -98,13 +107,42 @@ fn invalidate_child_memory_plan(state:&mut WorkerContext,status:&Value) {
     state.history.push(json!({"role":"user","content":format!("Broker: confirmed scoped memory changed while this step was pending. Follow only the current confirmed-memory block and current user request. Old interpretations and approvals cannot restore withdrawn memory. Replan undispatched work without replaying successful effects; preserve actual output and receipts. Affected identities: {}",status["invalidSources"])}));
 }
 
-/// A child's evidence shares the root's successful-receipt contract; tool arguments are never proof.
-/// 子任务与根任务共用成功回执合同，工具参数永远不能充当执行证明。
+/// Keep only undispatched tool identities in the existing worker checkpoint, never executable parameters.
+/// 现有子任务检查点只保留未派发工具身份，不把文本参数转成可执行调用。
+fn retain_child_tool_intent(state: &mut WorkerContext, content: &str, catalog: &[Value]) -> bool {
+    let requested = task::unexecuted_tool_names(content);
+    let mut names = state.review_checkpoint["unexecutedToolIntent"]["names"].as_array().cloned().unwrap_or_default();
+    for requested in requested {
+        let logical = catalog.iter().find(|tool| tool["name"].as_str().is_some_and(|name|
+            name == requested || crate::models::protocol::wire_name(name) == requested))
+            .and_then(|tool| tool["name"].as_str()).unwrap_or(&requested);
+        if !names.contains(&json!(logical)) { names.push(json!(logical)); }
+    }
+    if names.is_empty() { return false; }
+    if !state.review_checkpoint.is_object() { state.review_checkpoint = json!({}); }
+    state.review_checkpoint["unexecutedToolIntent"] = json!({"names":names,"round":state.rounds});
+    state.review_pending = false;
+    state.acceptance_reviewed = false;
+    true
+}
+
+fn child_tool_intent_notice(state: &WorkerContext) -> String {
+    format!("Broker: a previous tool-call envelope was ordinary text and did not execute. These intended tools still need a matching formal result: {}. Use the current native tool protocol, loading a known tool if needed. Do not reinterpret pending original work as optional or cite older unrelated success to settle it. Preserve successful effects; an actual scope change or genuine blocker must be stated explicitly.",
+        state.review_checkpoint["unexecutedToolIntent"]["names"])
+}
+
+/// Children use the root's successful-receipt contract, never tool arguments as proof.
+/// 子任务沿用根任务的成功回执合同，工具参数不作证明。
+fn verified_completion_receipt(saved: &Value) -> bool {
+    saved["verifiedSuccess"] != false && saved["completionProofVerification"] != "pending"
+        && task::successful_completion_receipt(&saved["result"])
+}
+
 fn completion_evidence(state: &WorkerContext) -> Vec<Value> {
     let mut evidence = Vec::new();
     for saved in &state.receipts {
         let name = saved["call"]["name"].as_str().unwrap_or("");
-        if !task::successful_completion_receipt(&saved["result"]) || !task::is_completion_evidence_tool(name) { continue; }
+        if !verified_completion_receipt(saved) || !task::is_completion_evidence_tool(name) { continue; }
         if let Some(id) = saved["call"]["id"].as_str().filter(|id| !id.is_empty()) {
             evidence.push(json!(id));
         }
@@ -115,6 +153,63 @@ fn completion_evidence(state: &WorkerContext) -> Vec<Value> {
     evidence
 }
 
+fn completion_evidence_records(state: &WorkerContext) -> Vec<Value> {
+    let verification = execution_validation(state, "");
+    let mut records = Vec::new();
+    let mut mutation_sequence = 0_u64;
+    for saved in &state.receipts {
+        if !verified_completion_receipt(saved) { continue; }
+        let name = saved["call"]["name"].as_str().unwrap_or("");
+        let mutating = saved["mutating"].as_bool().unwrap_or_else(||
+            saved["observation"] != true && saved["result"]["executed"] != false
+                && saved["result"]["reused"] != true && !name.starts_with("task.")
+                && !matches!(name, "tool.load" | "context.compact"));
+        if mutating { mutation_sequence = mutation_sequence.saturating_add(1); }
+        let mut proof = saved["completionProof"].clone();
+        if !proof.is_object() || proof["id"] != saved["call"]["id"] { continue; }
+        proof["mutationSequence"] = json!(mutation_sequence);
+        proof["mutating"] = json!(mutating);
+        if saved["visualDeliveredToModel"] == true { proof["visualObserved"] = json!(true); }
+        super::completion_evidence::bind_validation(&mut proof, &verification);
+        records.push(proof);
+    }
+    super::completion_evidence::current(&records)
+}
+
+async fn restore_completion_proofs(root: &std::path::Path, conversation: &str, request: &str, state: &mut WorkerContext) {
+    let observations = state.receipts.iter().map(|saved| {
+        let mut observation = json!({"id":saved["call"]["id"],"name":saved["call"]["name"],
+            "status":saved["result"]["status"],"ref":saved["result"]["resultRef"]});
+        if let Some(proof) = saved.get("completionProof") {
+            observation["completionProof"] = proof.clone();
+            observation["verifiedSuccess"] = saved.get("verifiedSuccess").cloned()
+                .unwrap_or_else(|| json!(task::successful_completion_receipt(&saved["result"])));
+        }
+        if let Some(pending) = saved.get("completionProofVerification") {
+            observation["completionProofVerification"] = pending.clone();
+        }
+        observation
+    }).collect::<Vec<_>>();
+    if observations.is_empty() { return; }
+    let mut rounds = vec![json!({"observations":observations})];
+    // Reuse archive ownership checks; missing metadata never authorizes replay.
+    // 复用归档归属核验，元数据缺失不能作为重做操作的依据。
+    gateway_loop::restore_completion_evidence(root, conversation, request, &mut rounds).await;
+    for observation in rounds[0]["observations"].as_array().into_iter().flatten() {
+        if let Some(saved) = state.receipts.iter_mut().find(|saved| saved["call"]["id"] == observation["id"]
+            && saved["result"]["resultRef"] == observation["ref"]) {
+            // Copy invalidation as well as proof; historical receipt bytes and effects stay untouched.
+            // 证明及失效状态一起恢复，历史回执正文与副作用事实保持原样。
+            for field in ["completionProof", "verifiedSuccess"] {
+                if let Some(value) = observation.get(field) { saved[field] = value.clone(); }
+            }
+            if let Some(pending) = observation.get("completionProofVerification") {
+                saved["completionProofVerification"] = pending.clone();
+            } else { saved.as_object_mut().unwrap().remove("completionProofVerification"); }
+        }
+    }
+}
+
 fn current_readback(state: &WorkerContext, visual: bool) -> Vec<Value> {
     let last_mutation = state.receipts.iter().rposition(|saved| {
         let name = saved["call"]["name"].as_str().unwrap_or("");
@@ -123,7 +218,7 @@ fn current_readback(state: &WorkerContext, visual: bool) -> Vec<Value> {
             && !task::receipt_is_readback(name, &saved["result"]["content"])
     }).unwrap_or(0);
     state.receipts.iter().skip(last_mutation.max(state.readback_since)).filter(|saved| {
-        task::successful_completion_receipt(&saved["result"])
+        verified_completion_receipt(saved)
             && if visual { saved["visualDeliveredToModel"] == true } else {
                 saved["visualDeliveredToModel"] == true || task::receipt_is_readback(
                     saved["call"]["name"].as_str().unwrap_or(""), &saved["result"]["content"])
@@ -132,13 +227,14 @@ fn current_readback(state: &WorkerContext, visual: bool) -> Vec<Value> {
         "visual":saved["visualDeliveredToModel"]==true})).collect()
 }
 
-/// Reconstruct the existing version-bound validator from owned receipts, not from model claims.
-/// 从自有回执重建既有的版本绑定核验器，不依赖模型自称测试或回读成功。
+/// Rebuild version-bound validation from owned receipts, not model claims.
+/// 根据自有回执重建版本核验，不采信模型自述。
 fn execution_validation(state: &WorkerContext, goal: &str) -> Value {
     let mut progress = RunProgress::default();
     for saved in &state.receipts {
         let _ = progress.apply("progress.observeOutcome",&json!({"call":saved["call"],"result":saved["result"],
-            "canonicalResult":saved["result"]["content"],"beforeVersion":saved["beforeVersion"],"afterVersion":saved["afterVersion"]}));
+            "canonicalResult":saved["result"]["content"],"beforeVersion":saved["beforeVersion"],"afterVersion":saved["afterVersion"],
+            "validationScope":saved["validationScope"]}));
     }
     let _ = progress.apply("progress.finalVersion",&json!({"snapshot":state.code_version}));
     let mut verification = progress.apply("progress.verification",&json!({})).unwrap_or(Value::Null);
@@ -149,8 +245,14 @@ fn execution_validation(state: &WorkerContext, goal: &str) -> Value {
 fn review_instruction(state: &WorkerContext, requires_readback: bool, requires_visual: bool) -> String {
     let requirements: Vec<Value> = state.acceptance_requirements.iter().enumerate().map(|(index, item)|
         json!({"requirementId":format!("requirement-{}",index + 1),"item":item})).collect();
-    format!("Broker: assess the actual saved output against EVERY original requirement. Return only a standalone <kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[],\"met\":[{{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"actual successful call ID\"]}}]}}</kynxa_task>. Use continue and a concrete changed strategy for any remaining gap. A malformed previous review is not completion. Do not invoke tools in this assessment; continue real work in the next step when needed. Successful IDs prove execution identity, not quality. Readback required={requires_readback}, image observation required={requires_visual}; evaluate only content or images actually observed. Genuine external/user/config blockers may use blocked; implementation difficulty is not such a blocker. Do not idle or repeat output to fill time.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nCurrent readback evidence: {}\nCurrent visual observations: {}",
-        json!(requirements),json!(completion_evidence(state)),json!(current_readback(state,false)),json!(current_readback(state,true)))
+    let instruction = format!("Broker: assess the actual saved output against EVERY original requirement. Prefer a standalone <kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[],\"met\":[{{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"actual successful call ID\"]}}]}}</kynxa_task>. Use continue and a concrete changed strategy for any remaining gap, or use available native tools to resolve that gap now. A malformed previous review is not completion. Tool calls use the formal protocol; never simulate DSML, XML or JSON calls as ordinary text. Match each reference to the requested action, actual target, current version and read range. A write proves existence, not content or visual quality. Readback required={requires_readback}, image observation required={requires_visual}; evaluate only content or images actually observed. Genuine external/user/config blockers may use blocked; implementation difficulty is not such a blocker. Do not idle or repeat output to fill time.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nCurrent readback evidence: {}\nCurrent visual observations: {}\nUnresolved execution checks: {}",
+        json!(requirements),json!(completion_evidence(state)),json!(current_readback(state,false)),json!(current_readback(state,true)),
+        gateway_loop::unresolved_check_summary(&execution_validation(state, "")));
+    if state.review_attempts == 0 && state.review_checkpoint["remaining"].as_array().is_none_or(Vec::is_empty) {
+        return instruction;
+    }
+    let directory = gateway_loop::completion_evidence_directory(&completion_evidence_records(state));
+    instruction + &format!("\nNative receipt directory (actual IDs, tools and targets; labels cannot change them): {directory}. Use exact IDs alone in evidence, explanations in item/reason. Repair references from this directory without sweeping unrelated archives.")
 }
 
 fn failure(code: &str, message: &str) -> GatewayError {
@@ -202,8 +304,8 @@ fn child_tool_allowed(name: &str) -> bool {
         && name != "work.folder.bind"
 }
 
-/// A reason or skill/MCP annotation cannot widen delegated write authority.
-/// reason 与 Skill/MCP 描述不能扩大委派写入范围；不透明命令须声明整个已授权工作区。
+/// Reason and Skill/MCP text cannot expand write scope; opaque commands need the authorized workspace.
+/// reason 和 Skill/MCP 描述不扩大写权限；不透明命令须声明授权工作区。
 fn check_write_target(ctx: &GatewayToolContext, input: &Value, call: &Value) -> Result<()> {
     let name = call["name"].as_str().unwrap_or("");
     if !child_tool_allowed(name) {
@@ -354,8 +456,8 @@ fn outcome_state(receipt: &Value) -> OperationState {
 
 fn effect_receipt(receipt: &Value) -> Value {
     let mut projected = receipt.clone();
-    // A recovered dispatch is unknown historical state; executed:false only describes this attempt's lack of replay.
-    // 恢复的派发属于历史未知状态；executed:false 只说明本次未重放，不能抹去原派发的未知账目。
+    // Recovered dispatch remains unknown; executed:false means this attempt did not replay it.
+    // 恢复的原派发仍未知，executed:false 仅表示本次未重放。
     if projected["status"] == "unknown" && projected["historicalDispatch"] == true {
         if let Some(object) = projected.as_object_mut() {
             object.remove("executed");
@@ -364,13 +466,14 @@ fn effect_receipt(receipt: &Value) -> Value {
     projected
 }
 
-/// Batch only independently authorized reads, settling each real receipt before returning to ordered projection.
-/// 只批量派发独立且已获授权的读取；每个真实回执立即结算，再按原顺序投影到模型。
+/// Batch authorized independent reads; settle each receipt before ordered projection.
+/// 批量执行已授权独立读取，逐个结算后按序投影。
 async fn prefetch_child_reads(
     runtime:&Arc<GatewayRuntime>, parent:&Arc<RequestRun>, run:&Arc<RequestRun>, journal:&Arc<TaskJournal>,
-    ctx:&GatewayToolContext,input:&Value,calls:Vec<(usize,Value)>,round:u64,
+    ctx:&GatewayToolContext,input:&Value,calls:Vec<(usize,Value)>,round:u64,state:&WorkerContext,catalog:&[Value],
 ) -> Result<std::collections::HashMap<usize,(Value,u64)>> {
     let mut prepared = Vec::new();
+    let mut action_keys = std::collections::HashSet::new();
     for (index,call) in calls {
         let name = call["name"].as_str().unwrap_or("");
         if !(crate::tools::policy::is_read_only_call(name,&call["arguments"]) || name.starts_with("mcp."))
@@ -380,6 +483,11 @@ async fn prefetch_child_reads(
             match tools::select_workspace_context(ctx,&call["arguments"]).await { Ok(value)=>value,Err(_)=>continue }
         } else { ctx.clone() };
         selected.authorized_roots = ctx.authorized_roots.clone();
+        selected.config["acceptanceRequirements"] = json!(state.acceptance_requirements);
+        let definition = gateway_loop::tool_failure_definition(&call, catalog, &[]);
+        let environment = gateway_loop::tool_failure_environment(&selected, &state.code_version, child_mutation_revision(state));
+        if state.deterministic_failures.before_dispatch(&call, &definition, &environment).is_some()
+            || !action_keys.insert(state.deterministic_failures.action_key(&call, &definition, &environment)) { continue; }
         prepared.push((index,call,selected));
     }
     if prepared.len()<2 { return Ok(Default::default()); }
@@ -389,8 +497,8 @@ async fn prefetch_child_reads(
             let result = async {
                 if *run.cancellation.borrow() || *parent.cancellation.borrow() { return Err(failure("ABORT_ERR","Child read cancelled before dispatch. / 子读取派发前已停止。")); }
                 journal.check_dispatch_fence()?;
-                // A catalog hint can schedule overlap but cannot make an external operation replayable.
-                // 目录并发提示不改变外部操作的副作用分类，不能因此允许恢复时重放。
+                // Concurrency hints do not change effect classification or authorize replay.
+                // 并发提示不改变副作用分类，也不授权重放。
                 let mut intent = operation_intent(&call,crate::tools::policy::is_read_only_call(call["name"].as_str().unwrap_or(""),&call["arguments"]),round);
                 let name = call["name"].as_str().unwrap_or("");
                 if tools::workspace_path_tool(name,&call["arguments"]) {
@@ -403,6 +511,10 @@ async fn prefetch_child_reads(
                 journal.dispatch_operation(&intent.operation_id)?;
                 context.config["activeToolCallId"]=call["id"].clone();
                 context.config["activeOperationId"]=json!(intent.operation_id);
+                if name.starts_with("knowledge.") {
+                    context.external_execute=Some(gateway_loop::specialist_executor(runtime,run,&context,
+                        &context.permission_mode,context.config["trustedUserText"].as_str().unwrap_or("")));
+                }
                 parent.emit(json!({"type":"task_tool_call","taskId":journal.task_id(),"tool":call})).await;
                 let started=Instant::now();
                 let executed=tools::execute(name,call["arguments"].clone(),&context).await;
@@ -423,8 +535,8 @@ async fn prefetch_child_reads(
     Ok(approvals)
 }
 
-/// Recovered dispatches use the repository's real outcome, never the model's recollection.
-/// 恢复已派发步骤时采信仓储真实结果；模型记忆不能证明副作用发生或未发生。
+/// Recover outcomes from the repository, not the model's recollection.
+/// 恢复结果以仓储为准，不采信模型回忆。
 async fn previous_operation(
     journal: &Arc<TaskJournal>,
     call: &Value,
@@ -504,8 +616,8 @@ fn split_summary_segment(segment: &str) -> Option<(String, String)> {
     Some((segment[..boundary].to_owned(), segment[boundary..].to_owned()))
 }
 
-/// Compaction keeps original context in a task-owned blob and counts its model call through the normal admission.
-/// 压缩原文保留在子任务产物中；摘要模型调用沿用正式准入和计量，不污染父聊天摘要。
+/// Keep compaction originals in child artifacts; use normal model admission and metering.
+/// 压缩原文保存在子任务产物，模型调用正常准入并计量。
 async fn compact_child(
     runtime: &Arc<GatewayRuntime>,
     run: &Arc<RequestRun>,
@@ -564,8 +676,8 @@ async fn compact_child(
     if projected.audit["currentStepCheckpoint"] == true
         || projected.audit["reducedTokens"].as_u64().unwrap_or(0) > 0
     {
-        // Successful native projection also counts, even when the expensive fallback is unnecessary.
-        // 原生投影成功同样记压缩次数，不能只统计后来才执行的昂贵分段回退。
+        // Count successful native compactions even without fallback.
+        // 原生压缩成功也计次数，不以回退是否执行为准。
         state.compactions += 1;
         journal.repository().record_usage(
             journal.token(),
@@ -587,8 +699,8 @@ async fn compact_child(
             "Child history cannot be encoded. / 子历史无法编码。",
         )
     })?;
-    // Chunk boundaries retain every source segment; long history is never silently represented by its tail alone.
-    // 分块覆盖全部历史，不能只取尾部再声称完整摘要；原文仍由检查点回读。
+    // Cover all history chunks; keep originals readable from checkpoints.
+    // 分块覆盖全部历史，原文可从检查点回读，不只保留尾部。
     let available = input_budget.saturating_sub(512).max(512);
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -656,8 +768,8 @@ async fn compact_child(
                     if error.code != "ABORT_ERR"
                         && error.details["contextRejection"].is_object() =>
                 {
-                    // Retry only this rejected summary, preserving both halves and every original receipt.
-                    // 仅缩小本次被拒的摘要；分块两半及原始回执完整保留，不重新执行任何工具。
+                    // Retry only the rejected summary; preserve both chunks and original receipts without rerunning tools.
+                    // 仅重试被拒摘要，保留分块两半和原回执，不重跑工具。
                     let rejection = &error.details["contextRejection"];
                     if context_repairs < 2 {
                         if let Some(limit) = rejection["providerMaxOutputTokens"]
@@ -677,8 +789,8 @@ async fn compact_child(
                             }
                         }
                     }
-                    // Unavailable semantic compression becomes explicit readback navigation, never fabricated facts.
-                    // 语义压缩不可用时改为明确的原文回查导航；不伪造摘要、不因窗口拒绝中断主任务。
+                    // If summarization fails, provide original-read navigation without invented facts or task interruption.
+                    // 摘要不可用时提供原文回读导航，不编造事实或中断任务。
                     summaries.push(format!(
                         "Segment {} remains unsummarized. Read the preserved original context with task.read, reference={}; page through the missing material before relying on it. Recorded effects must not be replayed.",
                         index + 1,
@@ -886,6 +998,14 @@ async fn execute_loop(
     let mut effects = EffectLedger::default();
     let mut observations = ObservationGuard::default();
     let mut semantic = SemanticTask::default();
+    restore_completion_proofs(&runtime.config.data_root, &run.conversation_id, &run.request_id, state).await;
+    if state.review_checkpoint.get("unexecutedToolIntent").is_none()
+        && state.acceptance_review["source"] == "unexecuted-tool-intent" {
+        let content = state.acceptance_review["content"].as_str().unwrap_or("").to_owned();
+        let mut available = catalog.clone();
+        available.extend(all.iter().cloned());
+        retain_child_tool_intent(state, &content, &available);
+    }
     for receipt in &state.receipts {
         let historical_root = tools::operation_mount_binding(&ctx,&receipt["call"]["arguments"]).ok()
             .and_then(|mount|mount["path"].as_str().map(PathBuf::from)).unwrap_or_else(||ctx.workdir.clone());
@@ -896,8 +1016,8 @@ async fn execute_loop(
             .history
             .push(json!({"role":"user","content":child.goal}));
     }
-    // User-acknowledged unknown effects stay unconfirmed but no longer block this child's next step.
-    // 用户已确认的未知副作用仍未核实，但不再阻止子任务下一步；模型须先观察当前状态。
+    // Acknowledged unknown effects permit progress after state observation, without becoming verified.
+    // 用户确认的未知操作仍未核实，先观察状态再继续。
     let acknowledged_unknown = gateway_loop::acknowledged_unknown_calls(run)?;
     if !acknowledged_unknown.is_empty() {
         let ids: Vec<Value> = acknowledged_unknown.iter().map(|call| call["toolCallId"].clone()).collect();
@@ -926,6 +1046,13 @@ async fn execute_loop(
         if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
             invalidate_child_memory_plan(state,&status);
         }
+        if gateway_loop::has_unexecuted_tool_intent(&state.review_checkpoint) {
+            state.review_pending = false;
+            let notice = child_tool_intent_notice(state);
+            if state.history.last().is_none_or(|message| message["content"] != notice) {
+                state.history.push(json!({"role":"user","content":notice}));
+            }
+        }
         if requires_verification {
             let headers = tools::relevant_skill_headers(&ctx, &child.goal).await.unwrap_or_default();
             let current = format!("\n<kynxa_available_skills>\nCurrent relevant skill headers (read bodies with skill.read; stale historical skill instructions are not current configuration): {}\n</kynxa_available_skills>\n",json!(headers));
@@ -951,8 +1078,8 @@ async fn execute_loop(
                 }
                 checkpoint(run,journal,state,"round-segment-renewed").await?;
             }
-            // Revocations and upgrades reconcile before pinning; cached metadata never grants a new child capability.
-            // 保留声明前先核对撤权与升级；仅刷新已有缓存定义，不能给子任务新增授权或发起连接。
+            // Reconcile revocations/upgrades before pinning cached tools; add no child authority or connections.
+            // 固定缓存工具前核对撤权和升级，不新增子任务权限或连接。
             ctx = tools::checked_configuration(&ctx).await?;
             let reusable = tools::reusable_mcp_catalog(&ctx);
             catalog.retain(|tool| !tool["name"].as_str().is_some_and(|name| name.starts_with("mcp.")) ||
@@ -971,7 +1098,6 @@ async fn execute_loop(
             state.tool_series.reconcile(&connection,&authorized_schemas,&authority);
             let mut required = state.tool_series.required_tool_names(&connection);
             let mut declared_catalog = catalog.clone();
-            if state.review_pending { declared_catalog.clear(); }
             declared_catalog.sort_by_key(|tool| {
                 if ["tool.search", "tool.load"].contains(&tool["name"].as_str().unwrap_or("")) {
                     0
@@ -1004,8 +1130,8 @@ async fn execute_loop(
                         protocol::protocol(&connection), &declared_catalog)).to_string())
                         .saturating_add(crate::models::protocol::estimate_tokens(&system));
                     if fixed > input_budget {
-                        // A genuine hard-window repair may rebuild declarations; soft compaction never drops pinned tools.
-                        // 真正硬窗口不足才明确重建声明；普通压缩不能删除已固定且仍获授权的工具。
+                        // Rebuild declarations for hard-window limits only; soft compaction retains authorized pinned tools.
+                        // 仅硬窗口不足时重建声明，普通压缩保留已授权固定工具。
                         state.tool_series.reset();
                         required.clear();
                     } else { break; }
@@ -1031,6 +1157,12 @@ async fn execute_loop(
             if state.compactions > previous_compactions {
                 let _ = effects.apply("effects.protect", &json!({"includeCurrent":true}));
             }
+            if state.review_pending {
+                let notice = review_instruction(state, requires_readback, requires_visual);
+                if state.history.last().is_none_or(|message| message["content"] != notice) {
+                    state.history.push(json!({"role":"user","content":notice}));
+                }
+            }
             let schemas = gateway_loop::model_tool_declarations(
                 protocol::protocol(&connection),
                 &declared_catalog,
@@ -1046,7 +1178,7 @@ async fn execute_loop(
                 &state.history,
                 &system,
                 Some(if state.review_pending {
-                    (512 + state.acceptance_requirements.len() as u64 * 128).min(output_budget)
+                    budget::review_output_limit(state.acceptance_requirements.len(), state.review_attempts, output_budget)
                 } else { output_budget }),
                 &schemas,
                 true,
@@ -1108,7 +1240,7 @@ async fn execute_loop(
                 model,
                 window,
                 body,
-                if state.review_pending { &[] } else { &catalog },
+                &catalog,
                 run.cancellation.subscribe(),
                 model_events,
                 Some(cache_policy),
@@ -1128,8 +1260,8 @@ async fn execute_loop(
                 )
                 .unwrap_or(json!(partial));
                 state.output.push_str(overlap.as_str().unwrap_or(""));
-                // A failed stream is preserved as incomplete text, never as an executable tool call.
-                // 失败流保留未完成正文；残缺调用不执行，也不伪造完整供应商续接签名。
+                // Keep failed streams as partial text; do not execute partial calls or forge continuation signatures.
+                // 失败流保留为未完成正文，不执行残缺调用或伪造续传签名。
                 state
                     .history
                     .push(json!({"role":"assistant","content":partial}));
@@ -1228,8 +1360,8 @@ async fn execute_loop(
             state.memory_plan_invalidated=false;
             state.pending_review = state.review_pending;
             state.pending_results.clear();
-            // The model's completed step is durable before dispatch, including native continuation signatures.
-            // 派发前完整保存模型步骤及原生续接签名；重启不会把已完成副作用当成新调用。
+            // Persist the model step and continuation signatures before dispatch.
+            // 派发前保存完整模型步骤和续传签名。
             checkpoint(run,journal, state, "model-received").await?;
         }
         let response = state
@@ -1237,24 +1369,13 @@ async fn execute_loop(
             .as_ref()
             .expect("durable pending response")
             .clone();
-        let reviewing = state.pending_review;
+        let reviewing = state.pending_review && response.calls.is_empty();
         if let Some(status)=live_memory.refresh(&runtime.config.data_root,&run.conversation_id,&run.request_id,&mut system).await? {
             invalidate_child_memory_plan(state,&status);
         }
-        if reviewing && !response.calls.is_empty() {
-            // Review turns never dispatch actions; repair their protocol with explicit non-executed feedback.
-            // 验收轮绝不派发动作；用明确未执行的反馈修正协议，不重放工具调用。
-            let rejected: Vec<Value> = response.calls.iter().map(|call| json!({"call":call,"result":{
-                "status":"rejected","executed":false,"isError":true,"content":{"code":"TASK_REVIEW_HAS_CALLS","notice":"Assessment turns return structured status only; continue actual work in the next normal turn."}}})).collect();
-            state.history = protocol::append_results(protocol::protocol(&connection), &state.history, &response, &rejected)?;
-            state.pending = None;
-            state.pending_review = false;
-            state.review_attempts += 1;
-            state.history.push(json!({"role":"user","content":review_instruction(state,requires_readback,requires_visual)}));
-            checkpoint(run,journal,state,"review-protocol-repair").await?;
-            let mut repair_cancel = run.cancellation.subscribe();
-            tokio::select! { _ = tokio::time::sleep(Duration::from_millis(250)) => {}, _ = tools::wait_for_cancellation(&mut repair_cancel) => {} }
-            continue;
+        if !response.calls.is_empty() {
+            state.review_pending = false;
+            state.acceptance_reviewed = false;
         }
         let batches = super::gateway_tool_batch::plan_with_catalog(&response.calls,&catalog);
         let mut early_approvals = std::collections::HashMap::new();
@@ -1285,7 +1406,7 @@ async fn execute_loop(
                     let unknown=effects.apply("effects.state",&json!({})).unwrap_or(Value::Null)["hasUnknownEffects"]==true;
                     let calls=batch.clone().filter(|index|!unknown || crate::tools::policy::is_read_only_call(response.calls[*index]["name"].as_str().unwrap_or(""),&response.calls[*index]["arguments"]))
                         .map(|index|(index,response.calls[index].clone())).collect();
-                    early_approvals.extend(prefetch_child_reads(runtime,parent,run,journal,&ctx,input,calls,state.rounds).await?);
+                    early_approvals.extend(prefetch_child_reads(runtime,parent,run,journal,&ctx,input,calls,state.rounds,state,&catalog).await?);
                 }
             }
             let early_approval = early_approvals.remove(&index);
@@ -1300,8 +1421,8 @@ async fn execute_loop(
             let selection_error = selection.as_ref().err().cloned();
             let can_use_workspace = selection_error.is_none();
             let mut call_context = selection.unwrap_or_else(|_|ctx.clone());
-            // Delegation targets keep the original root; choosing a mount does not reinterpret relative write grants.
-            // 委派目标保持原始根解释；选择其他挂载不能把相对写权限重新解释到另一个目录。
+            // Preserve the original delegation root; mount selection cannot reinterpret relative write grants.
+            // 保留原委派根目录，切换挂载不能重解释相对写权限。
             call_context.authorized_roots = ctx.authorized_roots.clone();
             let ctx = &mut call_context;
             let _workspace = if !state.memory_plan_invalidated && !observation && !name.starts_with("task.") && selection_error.is_none() {
@@ -1314,6 +1435,12 @@ async fn execute_loop(
             } else {
                 Value::Null
             };
+            let failure_definition = gateway_loop::tool_failure_definition(call, &catalog, &[]);
+            let mut failure_environment = gateway_loop::tool_failure_environment(ctx,
+                if before.is_null() { &state.code_version } else { &before }, child_mutation_revision(state));
+            failure_environment["configuration"]["acceptanceRequirements"] = json!(state.acceptance_requirements);
+            failure_environment["operationIdentity"] = json!(operation_intent(call, observation, state.rounds).operation_id);
+            let failure_correction = state.deterministic_failures.before_dispatch(call, &failure_definition, &failure_environment);
             let protected = effects
                 .apply(
                     "effects.previous",
@@ -1346,6 +1473,9 @@ async fn execute_loop(
                 let mut receipt = protected["result"].clone();
                 receipt["reused"] = json!(true);
                 receipt
+            } else if early_approval.is_none() && failure_correction.is_some()
+                && (observation || effects.apply("effects.state", &json!({})).unwrap_or(Value::Null)["hasUnknownEffects"] != true) {
+                failure_correction.unwrap()
             } else if call["unavailable"] == true {
                 error_receipt(
                     &failure(
@@ -1384,6 +1514,11 @@ async fn execute_loop(
                         if !already_dispatched { journal.dispatch_operation(&intent.operation_id)?; }
                         ctx.config["activeToolCallId"] = call["id"].clone();
                         ctx.config["activeOperationId"] = json!(intent.operation_id);
+                        ctx.config["acceptanceRequirements"] = json!(state.acceptance_requirements);
+                        if name.starts_with("task.") || name.starts_with("knowledge.") {
+                            ctx.external_execute = Some(gateway_loop::specialist_executor(runtime, run, &ctx,
+                                &ctx.permission_mode, ctx.config["trustedUserText"].as_str().unwrap_or("")));
+                        }
                         if !already_dispatched { parent
                             .emit(
                                 json!({"type":"task_tool_call","taskId":child.task_id,"tool":call}),
@@ -1498,6 +1633,7 @@ async fn execute_loop(
                     }
                 }
             };
+            gateway_loop::normalize_reused_receipt(name, &mut receipt);
             if receipt["resultRef"].is_null() {
                 receipt = archive_receipt(runtime, run, call, receipt).await?;
             }
@@ -1551,6 +1687,7 @@ async fn execute_loop(
                     }
                 }
             }
+            state.deterministic_failures.observe(call, &failure_definition, &failure_environment, &receipt);
             let observation_record =
                 json!({"call":call,"result":receipt,"observation":observation});
             let _ = effects.apply("effects.observe", &json!({"call":call,"result":effect_receipt(&receipt),"observation":observation,"workspaceRoot":ctx.workdir}));
@@ -1574,6 +1711,15 @@ async fn execute_loop(
             }
             let source_metadata = crate::models::tool_context::source_metadata(&receipt["content"]);
             state.result_sources.push(json!({"callId":call["id"],"name":name,"arguments":call["arguments"],"sourceMetadata":source_metadata,"originalResultRef":if name=="tool.result.read" {source_metadata["resultRef"].clone()} else {Value::Null},"observation":observation,"executed":receipt["executed"]!=false,"originalExcerpt":crate::models::tool_context::source_excerpt(&receipt["content"],512),"round":state.rounds,"status":receipt["status"],"resultRef":receipt["resultRef"],"archiveOwner":{"requestId":run.request_id,"toolCallId":call["id"],"toolName":name}}));
+            let completion_proof = super::completion_evidence::from_receipt(call, &receipt);
+            let declared_read_only = ctx.runtime.schemas.read().await.iter().any(|descriptor|
+                descriptor["name"] == name && descriptor["annotations"]["readOnlyHint"] == true);
+            let scene_read_only = name.rsplit('.').next().is_some_and(|method|
+                matches!(method, "get_scene_info" | "get_object_info" | "list_scene_items" | "get_world_state_snapshot"));
+            let mutating = !observation && !declared_read_only && !scene_read_only
+                && receipt["executed"] != false && receipt["reused"] != true
+                && task::successful_completion_receipt(&receipt)
+                && !name.starts_with("task.") && !matches!(name, "tool.load" | "context.compact");
             let projected = data::public_tool_result(
                 &receipt["content"],
                 Some(&receipt["resultRef"]),
@@ -1582,8 +1728,8 @@ async fn execute_loop(
             )?;
             let mut model_receipt = receipt.clone();
             model_receipt["content"] = projected;
-            // Evidence references are allocated after the owning original receipt, exactly as in the main loop.
-            // 与主循环一致，所属原始回执保存后才分配证据短引用，不另建子代理引用协议。
+            // Allocate evidence references after saving the receipt, using the root's protocol.
+            // 保存原回执后再分配证据引用，沿用根任务协议。
             if ["knowledge.search", "knowledge.plan"].contains(&name) && receipt["isError"] != true
             {
                 if let Some(archive_id) = receipt["resultRef"]["id"].as_str().filter(|_| {
@@ -1602,14 +1748,17 @@ async fn execute_loop(
             }
             let result = json!({"call":call,"result":model_receipt,"observation":observation});
             state.pending_results.push(result);
-            // Context checkpoints retain bounded projections and references; tool archives own original media and bodies.
-            // 上下文检查点只留有界投影及引用；原始媒体和工具正文由正式工具归档持有。
+            // Keep bounded projections in checkpoints and original media/bodies in tool archives.
+            // 检查点保留有界投影与引用，原始媒体和正文保留在工具归档。
             state
                 .receipts
                 .push(json!({"call":call,"result":model_receipt,"observation":observation,
+                    "completionProof":completion_proof,"mutating":mutating,
+                    "validationScope":{"cwd":ctx.workdir},
                     "visualAvailable":task::receipt_has_visual_observation(&receipt["content"]),
                     "visualHashes":task::receipt_visual_hashes(&receipt["content"]),
                     "beforeVersion":before,"afterVersion":after}));
+            gateway_loop::settle_unexecuted_tool_intent(&mut state.review_checkpoint, name, &receipt);
             state.acceptance_reviewed = false;
             state.tool_calls += 1;
             let repeated = observations
@@ -1665,6 +1814,23 @@ async fn execute_loop(
         let mut inspected = semantic
             .apply("task.inspect", &json!({"text":response.content}))
             .unwrap_or(json!({"content":response.content,"state":"unknown"}));
+        if response.calls.is_empty() && inspected["source"] == "unexecuted-tool-intent" {
+            let mut available = catalog.clone();
+            available.extend(all.iter().cloned());
+            if retain_child_tool_intent(state, &response.content, &available) {
+                state.history.push(json!({"role":"user","content":child_tool_intent_notice(state)}));
+                checkpoint(run,journal,state,"unexecuted-tool-intent").await?;
+                continue;
+            }
+        }
+        if response.calls.is_empty() && gateway_loop::has_unexecuted_tool_intent(&state.review_checkpoint)
+            && !task::genuine_blocker(&inspected) {
+            state.review_pending = false;
+            state.acceptance_reviewed = false;
+            state.history.push(json!({"role":"user","content":child_tool_intent_notice(state)}));
+            checkpoint(run,journal,state,"continue-unexecuted-tool-intent").await?;
+            continue;
+        }
         let public = super::task::strip_history_records(inspected["content"].as_str().unwrap_or(""));
         if !reviewing {
             let overlap = budget::apply(
@@ -1703,17 +1869,19 @@ async fn execute_loop(
         let needs_readback = requires_readback || !state.changed_files.is_empty();
         let execution_check = execution_validation(state,&acceptance_query);
         if reviewing && inspected["state"]=="complete"
-            && (execution_check["needsValidation"]==true || execution_check["documentValidation"]["pending"]==true
-                || execution_check["state"]=="checks-failed") {
-            inspected["unmet"] = json!([format!("Run a current-version execution check or complete the hash-matched artifact readback: {}",execution_check)]);
+            && execution_check["pendingValidation"]==true {
+            inspected["unmet"] = json!([format!("Resolve the remaining version-bound execution checks or complete the hash-matched artifact readback. State: {}; checks: {}",
+                execution_check["state"], gateway_loop::unresolved_check_summary(&execution_check))]);
         }
         let readback = current_readback(state,false);
         let visual = current_readback(state,true);
         let decision = semantic.apply("task.decide",&json!({"reply":inspected,"isReview":reviewing,
+            "verification":execution_check,
             "hasCalls":false,"outputTruncated":response.output_truncated,"hasUnknownEffects":false,
             "outputContinuations":state.continuations,"requiresVerification":needs_verification,
             "evidenceRequired":needs_verification,"expectedRequirements":state.acceptance_requirements,
-            "validEvidence":completion_evidence(state),"requiresReadback":needs_readback,"hasReadback":!readback.is_empty(),
+            "validEvidence":completion_evidence(state),"evidenceRecords":completion_evidence_records(state),
+            "requiresReadback":needs_readback,"hasReadback":!readback.is_empty(),
             "requiresVisualReadback":requires_visual,"hasVisualReadback":!visual.is_empty() && state.review_visual_input,
             "reviewAttempts":state.review_attempts,"minimumActiveMs":limits["minActiveMs"].as_u64().unwrap_or(0),
             "activeElapsedMs":run.effective_active_ms(),"remainingRounds":limits["maxRounds"].as_u64().unwrap_or(64)
@@ -1737,6 +1905,8 @@ async fn execute_loop(
                 let _ = semantic.apply("task.resumed",&json!({}));
                 let remaining = decision["remaining"].as_array().filter(|items|!items.is_empty())
                     .map(|items|json!(items).to_string()).unwrap_or_else(||json!(task::remaining_work(&inspected)).to_string());
+                if !state.review_checkpoint.is_object() { state.review_checkpoint = json!({}); }
+                state.review_checkpoint["remaining"] = decision["remaining"].clone();
                 state.history.push(json!({"role":"user","content":format!("Broker: continue the same delegated goal from its saved checkpoint. Remaining={remaining}. Preserve actual successful effects and output. Change a failing strategy and obtain the missing real observation; difficulty and phase reports do not finish the task. Do not repeat unchanged calls or idle to fill time.")}));
                 checkpoint(run,journal,state,"continue-unmet-acceptance").await?;
                 continue;
@@ -1813,8 +1983,8 @@ async fn execute_loop(
     }
 }
 
-/// The Hub owns dependencies; each real mutation leases its workspace lock within this independent worker.
-/// Hub 负责依赖调度；独立 Worker 的每次真实修改单独持有工作区锁，等待子任务时不占写锁。
+/// The Hub schedules dependencies; workers lock each mutation, not child waits.
+/// Hub 调度依赖；Worker 仅在修改时持工作区锁，等待子任务时不占锁。
 pub async fn execute(
     runtime: Arc<GatewayRuntime>,
     parent: Arc<RequestRun>,
@@ -1859,8 +2029,8 @@ pub async fn execute(
         60_000,
     )?;
     let run = runtime.child_run(&child, journal.clone())?;
-    // Tool protocol checkpoints belong to this child attempt, never the shared parent's event channel.
-    // 工具协议检查点归当前子尝试，不能借用父事件通道写进父任务账本。
+    // Write child protocol checkpoints to the child attempt, not the parent's event channel.
+    // 子任务协议检查点写入自身尝试，不借用父事件通道。
     let (tool_sender,mut tool_receiver)=tokio::sync::mpsc::channel(64);
     let tool_run=run.clone();
     let tool_forwarder=tokio::spawn(async move {
@@ -1881,8 +2051,8 @@ pub async fn execute(
         Some(saved) => checkpoint_decode(&journal.read_blob(&saved.context_reference).await?)?,
         None => WorkerContext::default(),
     };
-    // Old checkpoints can contain an unfiltered public summary; sanitize only that projection, not protocol history.
-    // 旧检查点可能含未过滤摘要；只清理公开投影，不改写协议历史、调用配对或原生续接字段。
+    // Sanitize legacy public summaries only; retain protocol history, call pairs and signatures.
+    // 仅清理旧公开摘要，保留协议历史、调用配对和续传签名。
     state.output = super::task::strip_history_records(&state.output);
     if let Some(reason) = input["parentRevision"]["reason"].as_str().filter(|_|input["parentRevision"]["reviewedVersion"].as_u64().unwrap_or(0)>state.last_parent_revision) {
         state.last_parent_revision=input["parentRevision"]["reviewedVersion"].as_u64().unwrap_or(0);
@@ -1971,8 +2141,8 @@ pub async fn execute(
                 && state.code_version["complete"] == true
         );
     }
-    // Final delivery is distinct from its progress transcript; the full transcript remains in the same checkpoint.
-    // 最终交付与过程记录分开；完整过程正文仍保留原检查点，不能靠删历史来缩短父上下文。
+    // Separate final delivery from progress; retain the full transcript in its checkpoint.
+    // 最终交付与进度分开，完整过程记录仍保存在原检查点。
     let delivery=if status==TaskState::Completed && !state.final_summary.trim().is_empty(){&state.final_summary}else{&state.output};
     let mut result = json!({"taskId":child.task_id,"status":status,"summary":delivery,"summarySource":if status==TaskState::Completed && !state.final_summary.trim().is_empty(){"latest-delivery"}else{"preserved-progress"},"evidence":state.receipts.iter().filter(|receipt| receipt["observation"]==true && receipt["result"]["isError"]!=true).map(|receipt| receipt["result"]["resultRef"].clone()).collect::<Vec<_>>(),"changedFiles":state.changed_files,"verification":state.verification,"unresolved":if blocked.is_null() {json!([])} else {json!([blocked])},"successfulOpsRefs":state.receipts.iter().filter(|receipt| receipt["observation"]!=true && receipt["result"]["status"]=="completed").map(|receipt| receipt["result"]["resultRef"].clone()).collect::<Vec<_>>(),"completionMeans":"executor-reported; verification is supported only by the listed real receipts","contextRef":journal.latest_checkpoint()?.map(|saved| saved.context_reference)});
     result["outputHistoryRef"]=result["contextRef"].clone();
@@ -2016,8 +2186,8 @@ pub async fn execute(
     journal
         .finish(status.clone(), blocked["code"].as_str())
         .await?;
-    // Only a bounded preview crosses the live UI channel; the complete report stays in its formal artifact.
-    // 实时界面通道只传有界预览；完整报告保留正式产物，不随完成事件重复传输长正文。
+    // Send bounded UI previews; keep full reports in formal artifacts.
+    // 界面仅传有界预览，完整报告保存在正式产物。
     let mut preview_units = 0usize;
     let preview: String = delivery
         .chars()

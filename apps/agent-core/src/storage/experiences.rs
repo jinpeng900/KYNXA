@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_AGE_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 
-/// Templates deliberately contain no historical credentials, commands, URLs or personal filesystem values.
-/// 模板不保留历史凭据、命令、URL或个人文件路径；每次都须从当前任务重新绑定参数。
+/// Exclude historical credentials, commands, URLs and paths; bind current-task parameters anew.
+/// 模板不存历史凭据、命令、URL 或路径，每次重新绑定当前参数。
 pub(crate) fn procedure_arguments(value: &Value) -> Value {
     fn mask(value: &Value, depth: usize) -> Value {
         if depth >= 8 { return json!("{{current-value}}"); }
@@ -21,8 +21,8 @@ pub(crate) fn procedure_arguments(value: &Value) -> Value {
     mask(value,0)
 }
 
-/// New identity-policy observations accumulate before promotion; legacy statistics cannot activate procedures.
-/// 新工具身份规则下的真实观察须先积累，旧统计和模拟回执不能使步骤模板提前激活。
+/// Promote only after real observations under the new tool identity, not legacy or mock statistics.
+/// 新工具身份下积累真实观察后才晋升，不沿用旧统计或模拟数据激活。
 pub(crate) fn verified_procedure_candidate(goal: &str, observations: &[Value]) -> Option<Value> {
     use sha2::{Digest,Sha256};
     let mut seen = HashSet::new();
@@ -83,8 +83,8 @@ fn navigation(value: &Value) -> bool {
         .is_some_and(|values| values.len() <= 32 && values.iter().all(|value| text(value, 1000)))
 }
 
-/// Experience remains expiring, scope-bound navigation; no saved conclusion grants permission or correctness.
-/// 经验只是过期和范围绑定的导航线索，保存结论不能授予权限或认证正确性。
+/// Experience is expiring scoped guidance, not proof or permission.
+/// 经验是有时效和范围的线索，不证明正确或授予权限。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.experiences.validate" {
         let input = &arguments["input"];
@@ -174,8 +174,8 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 "Experience receipt is too large. / 检索经验回执过大。",
             ));
         }
-        // The codec supplies exact compact JSON byte counts; array commas and brackets belong to the service budget.
-        // 编码边界提供精确紧凑 JSON 字节数，数组逗号和括号由服务预算计算。
+        // Count compact JSON bytes exactly, including array separators and brackets.
+        // 精确计算紧凑 JSON 字节，包含数组分隔符和括号。
         let mut size = entry_bytes
             + 2
             + selected

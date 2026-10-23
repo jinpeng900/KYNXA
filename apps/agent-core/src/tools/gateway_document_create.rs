@@ -124,8 +124,8 @@ pub(super) async fn create(context: &GatewayToolContext, arguments: Value) -> Re
     check_cancelled(context)?;
     let expected = arguments["expectedHash"].clone();
     let result_format = format.clone();
-    // The worker keeps the existing commit rule: cancellation after rename cannot turn a committed file into a failed receipt.
-    // 工作线程沿用既有提交规则：重命名后的取消不能把已提交文件伪报为失败。
+    // Cancellation after rename must retain the committed-file receipt.
+    // 重命名后取消仍保留文件已提交的回执。
     let receipt = tokio::task::spawn_blocking(move || {
         let bytes = match content {
             GeneratedContent::Bytes(bytes) => bytes,

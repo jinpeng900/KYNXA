@@ -1,5 +1,5 @@
-//! Shared document-format contracts keep scanning, parsing and persisted identity consistent.
-//! 共享格式合同统一扫描、解析和持久身份；扩展名只选择解析器，不证明内容合法。
+//! Use one format identity for scanning, parsing and storage.
+//! 扫描、解析和存储使用同一格式标识。
 
 use std::path::Path;
 
@@ -20,8 +20,8 @@ pub struct DocumentFormat {
     pub version: &'static str,
 }
 
-/// Return a canonical parser identity, including compound archive extensions.
-/// 返回规范化解析身份，复合压缩后缀优先于最后一个扩展名。
+/// Resolve parser IDs, including compound archive suffixes.
+/// 解析规范格式标识，支持复合压缩后缀。
 pub fn detect(path: &Path) -> Option<DocumentFormat> {
     let filename = path.file_name()?.to_str()?.to_ascii_lowercase();
     for (suffix, name) in [

@@ -60,8 +60,8 @@ fn declaration_name<'a>(field: &str, tool: &'a Value) -> Option<&'a str> {
 }
 
 impl StableToolOrder {
-    /// Reorder exactly the supplied declarations; names disappearing from this request disappear immediately.
-    /// 只重排本次所选声明；本次撤销的名称立即删除，契约内容完全采用本次快照，绝不冻结能力。
+    /// Reorder current declarations; apply removals and schema changes immediately.
+    /// 仅重排当前声明；删除与定义变更立即生效。
     fn project(&mut self, body: &Value) -> Result<Value, &'static str> {
         let mut projected = body.clone();
         for field in ["tools", "functions"] {
@@ -222,8 +222,8 @@ struct CalibrationGroup {
     absolute_difference_total: f64,
 }
 
-/// The caller owns file access. This bounded analyzer accepts only already-saved request records.
-/// 调用方负责文件访问；有界分析器只接收已保存的请求记录，不重放工具、不调用供应商。
+/// Analyze saved requests within limits; callers handle files, without tool or provider replay.
+/// 有界分析已保存请求；文件由调用方读取，不重放工具或供应商请求。
 pub struct ReplayAnalyzer {
     scopes: HashMap<String, ReplayScope>,
     order: VecDeque<String>,
@@ -270,8 +270,8 @@ fn select_prices<'a>(prices: Option<&'a Value>, protocol: &str, model: &str) -> 
 }
 
 fn date_eligible(record: &Value) -> bool {
-    // Use the saved record's own calendar date; neither execution time nor the file's mtime is evidence.
-    // 使用已保存记录自身的日期，不用当前运行时间或文件修改时间替代证据日期。
+    // Use the record date, not the current time or file modification time.
+    // 使用记录日期，不以当前时间或文件修改时间代替。
     record["recordedAt"].as_str().and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .is_some_and(|timestamp| timestamp.date_naive() >= NaiveDate::from_ymd_opt(2026, 10, 21).unwrap())
 }
@@ -537,8 +537,8 @@ impl ReplayAnalyzer {
                 }
             } else { self.incomplete("model-protocol-group-diagnostic-capacity"); }
         }
-        // No provider tokenizer or residency simulator is claimed; stable prefixes alone never prove real cache hits.
-        // 首版没有供应商 tokenizer 或缓存驻留模拟；稳定前缀只供比较，不能冒充真实命中率。
+        // Without provider tokenization or residency data, stable prefixes do not prove cache hits.
+        // 缺少供应商分词和驻留数据，稳定前缀只能比较，不能证明实际命中。
         if self.observations.len()<MAXIMUM_OBSERVATIONS { self.observations.push(observation); }
         else { self.incomplete("public-observation-capacity-summary-continues"); }
     }

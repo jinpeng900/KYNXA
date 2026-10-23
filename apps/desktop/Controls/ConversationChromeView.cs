@@ -54,8 +54,8 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         await _loaded.Task.WaitAsync(_lifetime.Token);
         WatchViewportVisibility();
         _conversationId = conversationId;
-        // A dismissed view still observes the startup receipt so Rust can close the exact process it created.
-        // 视图被关闭后仍接收启动回执，随后按准确会话关闭 Rust 创建的进程。
+        // Observe late startup receipts so Rust can close the owned process.
+        // 视图关闭后仍接收启动回执，以便关闭对应进程。
         _opening = _api.OpenAsync(conversationId, address, CancellationToken.None);
         _page = await _opening;
         if (_disposed) return;
@@ -141,8 +141,8 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
     public void SetActive(bool active)
     {
         _active = active && !_disposed;
-        // An inactive page keeps its transparent input layer out of hit testing, so views stacked beneath it still scroll.
-        // 非活动网页的透明输入层不参与命中测试，叠在其下方的文档视图才能正常滚动与翻页。
+        // Disable input hit testing on inactive pages so underlying documents remain usable.
+        // 非活动网页不接收输入，让下层文档正常滚动和翻页。
         IsHitTestVisible = _active;
         if (_active) { PositionWindow(); _timer.Start(); } else _timer.Stop();
         if (!_active) { ReleaseBrowserInput(); HideBrowserWindow(); }
@@ -264,8 +264,8 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         _windowInsets[_chrome] = _chromeUiInsets;
     }
 
-    // Chrome's infobar can wrap after a narrow resize. Read the actual visible page HWND instead of feeding CSS height back into window size.
-    // Chrome 提示栏在窄窗口会换行；从真实可见页面 HWND 读取装饰边界，不用 CSS 高度反向累加窗口尺寸。
+    // Narrow infobars may wrap; measure the visible page HWND, not CSS height.
+    // 窄窗口的提示栏会换行；按可见页面 HWND 测量，避免 CSS 高度反复撑大窗口。
     private void UpdateRendererInsets()
     {
         if (!TryRendererWindow(out _, out var renderer) || !GetWindowRect(_chrome, out var browser)) return;
@@ -345,8 +345,8 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         _geometryHook = SetWinEventHook(0x8002, 0x800B, 0, _geometryChanged, (uint)processId, 0, 0);
     }
 
-    // Browser bubbles stay top-level after their browser is embedded; attach only this active browser's frameless popups.
-    // 浏览器嵌入后气泡仍可能是顶层窗口；只接入当前自有浏览器的无框弹层，排除普通网页窗口和系统对话框。
+    // Embedded browser bubbles stay top-level; attach only its active frameless popups.
+    // 嵌入后的气泡仍可能置顶；只接入当前浏览器的无框弹层，排除网页窗口和系统对话框。
     private void AttachBrowserBubble(nint window)
     {
         if (_disposed || !_active || _host == 0 || _page is null || !IsWindowVisible(_host) || !IsWindowVisible(window)) return;
@@ -392,8 +392,8 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         DispatcherQueue.TryEnqueue(() => { _positionQueued = false; PositionWindow(); });
     }
 
-    // CDP window IDs are not HWNDs. Resolve only this owned process, using the target title and actual bounds.
-    // CDP 窗口 ID 不等于 HWND；仅在自有进程内结合目标标题与实际边界查找，绝不接入个人浏览器窗口。
+    // CDP IDs are not HWNDs; match title and bounds within the owned process.
+    // CDP ID 不是 HWND；只在自有进程内按标题和边界匹配，不接入个人浏览器。
     private static nint FindOwnedWindow(int processId, string? title, ChromeWorkspaceWindowBounds? bounds)
     {
         var matches = new List<(nint Window, bool BoundsMatch)>();

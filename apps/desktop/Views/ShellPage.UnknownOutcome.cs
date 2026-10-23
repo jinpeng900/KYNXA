@@ -6,8 +6,8 @@ using Microsoft.UI.Xaml;
 namespace KYNXA_Desktop.Views;
 
 /// <summary>
-/// Inline unknown-outcome notice for the open chat; it overlays the queue display without touching queued messages.
-/// 当前聊天的结果未知提示；只覆盖排队区的显示，不删除、发送或重排排队消息，也不弹窗。
+/// Overlay an unknown-outcome notice without changing queued messages.
+/// 行内提示当前聊天的未知结果，仅覆盖排队区，不删除、发送或重排消息。
 /// </summary>
 public sealed partial class ShellPage
 {
@@ -156,11 +156,6 @@ public sealed partial class ShellPage
             if (!TaskStates.IsTerminal(detail.Task.State))
                 await _tasksApiClient.ControlAsync(chatId, task.TaskId, detail.Task.Version, "cancel",
                     task.Scope.ProjectId, deadline.Token);
-            if (_pausedTaskIds.TryGetValue(chatId, out var paused) && paused == task.TaskId)
-            {
-                _pausedTaskIds.Remove(chatId);
-                ForgetPausedTaskRecovery(chatId);
-            }
             _unknownOutcomes.Remove(chatId);
             TaskPanel.NotifyChanged(chatId);
             return null;

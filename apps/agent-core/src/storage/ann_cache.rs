@@ -102,8 +102,8 @@ fn temporary(directory: &Path, key: &str, value: &Value) -> Result<PathBuf, Cont
     Ok(directory.join(leaf))
 }
 
-/// SDK graph bytes remain opaque. Native storage owns verification, graph/manifest publication and pruning.
-/// SDK 图字节保持不透明；原生存储拥有核验、图及清单发布，以及预算清理。
+/// Storage verifies and publishes opaque graph bytes and manifests, then prunes the cache.
+/// 存储层核验并发布不透明图数据和清单，负责缓存清理。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let _guard = CACHE_TRANSACTIONS.lock().map_err(|_| {
         failure(
@@ -159,8 +159,8 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             if metadata["identity"]["scopeKey"] != scope {
                 continue;
             }
-            // Validate both owned cache files before deleting either; no source or workspace path is consulted.
-            // 两个自有缓存文件均核验后再删除；不读取或删除来源、工作目录、共享记录或Trash原文。
+            // Verify both cache files before deletion; never touch source, workspace or Trash content.
+            // 先核对两个缓存文件再删除，不触碰来源、工作目录或 Trash 原文。
             let graph_exists = inspect(root, &graph, false)?;
             inspect(root, &manifest, false)?;
             if graph_exists {

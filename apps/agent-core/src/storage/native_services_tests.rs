@@ -567,6 +567,28 @@ fn archive_files_are_exclusive_and_keep_original_utf16_json_bytes() {
     .unwrap();
     assert_eq!(page["offset"], 1);
     assert_eq!(page["end"], 3);
+    assert_eq!(page["hasMore"],true);
+    let last = super::tool_results::apply("storage.toolResults.page",
+        &json!({"sourceRaw":"\"a😀b\"","offset":page["end"],"limit":1,"projection":"public"})).unwrap();
+    assert_eq!(last["end"],4); assert_eq!(last["hasMore"],false);
+    let eof = super::tool_results::apply("storage.toolResults.page",
+        &json!({"sourceRaw":"\"a😀b\"","offset":last["end"],"limit":1,"projection":"public"})).unwrap();
+    assert_eq!(eof["offset"],eof["end"]); assert_eq!(eof["hasMore"],false);
+
+    let chat = uuid::Uuid::new_v4().to_string();
+    super::gateway::ensure_conversation(&fixture.root,&chat,"archive paging fixture").unwrap();
+    let original = json!({"text":"a😀b","hasMore":true,"totalCharacters":100});
+    let reference = super::gateway::save_tool_result(&fixture.root,&chat,&uuid::Uuid::new_v4().to_string(),
+        &json!({"id":"original-read","name":"filesystem.read","arguments":{}}),&original,None).unwrap();
+    let id = reference["id"].as_str().unwrap();
+    let first = super::gateway::read_tool_result(&fixture.root,&chat,id,0,1).unwrap();
+    assert_eq!(first["hasMore"],true); assert_eq!(first["resultRef"],reference);
+    let last = super::gateway::read_tool_result(&fixture.root,&chat,id,first["nextOffset"].as_u64().unwrap(),16000).unwrap();
+    assert_eq!(last["hasMore"],false); assert_eq!(last["resultRef"],reference);
+    let reconstructed: Value = serde_json::from_str(&format!("{}{}",first["text"].as_str().unwrap(),last["text"].as_str().unwrap())).unwrap();
+    // EOF covers this saved projection only; its original source can still have unread content.
+    // 归档页结束只覆盖该结果的公开投影，原始来源仍可能有未读内容。
+    assert_eq!(reconstructed,original);
 }
 
 #[test]

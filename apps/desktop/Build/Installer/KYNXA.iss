@@ -7,7 +7,7 @@
   #define PackageOutputDir "..\..\..\..\artifacts\installer\output"
 #endif
 #ifndef PackageVersion
-  #define PackageVersion "1.7.0"
+  #define PackageVersion "1.7.1"
 #endif
 #ifndef LauncherFile
   #define LauncherFile "KYNXA.Desktop.exe"
@@ -87,10 +87,10 @@ zhcn.RunEntryExec=启动 KYNXA
 zhcn.ConfirmUninstall=是否卸载 KYNXA？聊天、模型、用户工具和数据会保留。
 
 [Files]
-; Never enumerate a development output or an existing installation directly.
-; 不直接枚举开发输出或已有安装；发布脚本只把批准的运行载荷放进暂存目录。
-; Anchor private-root exclusions so nested third-party data and extensions remain available.
-; 私有目录排除规则限定在载荷根目录，保留第三方依赖内的同名目录。
+; Package only staged runtime files, not a development output or existing installation.
+; 只打包暂存的运行文件，不直接读取开发输出或现有安装。
+; Exclude private directories only at the root, preserving nested third-party names.
+; 私有目录仅从根目录排除，保留第三方依赖内的同名目录。
 Source: "{#PayloadRoot}\*"; DestDir: "{app}"; Excludes: "\Data,\Data\*,\Extensions,\Extensions\*,\.git,\.git\*,*.pdb,\prerequisites,\prerequisites\*,\runtime\rerank\builtin-multilingual-reranker,\runtime\rerank\builtin-multilingual-reranker\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BrandImageFile}"; DestName: "kynxa-installer-logo.png"; Flags: dontcopy
 Source: "Configure-Kynxa.ps1"; DestName: "Configure-Kynxa-Read.ps1"; Flags: dontcopy

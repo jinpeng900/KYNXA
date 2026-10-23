@@ -640,8 +640,8 @@ fn tensors(
     Ok((inputs, mask, width))
 }
 
-/// A separate scoped cancellation watcher terminates the actual native graph and joins before its options drop.
-/// 独立的作用域取消观察线程终止实际原生图，并在 RunOptions 释放前退出。
+/// Stop the native graph on cancellation and join the watcher before dropping RunOptions.
+/// 取消时停止原生图；释放 RunOptions 前等待观察线程退出。
 fn execute(
     model: &LoadedModel,
     encodings: &[Encoding],
@@ -898,8 +898,8 @@ pub fn embed_blocking(
     embed_with_options(root, texts, kind, &InferenceOptions::default(), cancel)
 }
 
-/// The caller passes Rust's admitted hardware budget; this executor does not invent another scheduler.
-/// 调用方传入 Rust 已准入的硬件授额；执行器不另建一套资源调度策略。
+/// Use the caller's admitted hardware budget without a second scheduler.
+/// 使用调用方已准入的硬件额度，不另建调度器。
 pub fn embed_with_options(
     root: &Path,
     texts: &[String],

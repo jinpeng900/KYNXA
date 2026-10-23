@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('appearance', 'appearance-transfer', 'all', 'typography', 'shortcut-tooltip', 'body-search', 'sidebar-controls', 'sidebar-roundness', 'settings-interactions', 'settings-workspace', 'dialogs', 'window-presentation', 'prompt-send', 'steering-timer', 'workspace-auto-open')]
+    [ValidateSet('appearance', 'appearance-transfer', 'all', 'typography', 'shortcut-tooltip', 'body-search', 'sidebar-controls', 'sidebar-roundness', 'settings-interactions', 'settings-workspace', 'dialogs', 'window-presentation', 'prompt-send', 'prompt-queue', 'steering-timer', 'workspace-auto-open')]
     [string]$Scenario = 'appearance',
     [switch]$BuildOnly,
     [switch]$Rebuild,
@@ -122,9 +122,8 @@ try {
     Write-Host "Compiler: $compilerPath ($compilerVersion)"
     Write-Host "Artifacts: $runRoot"
     if ($SingleProcessor) {
-        # Children inherit this temporary scheduling mask; it is a local compatibility
-        # diagnostic, not a confirmed hardware diagnosis or a machine-wide setting.
-        # 子进程继承此临时调度掩码；它仅用于本机兼容诊断，不代表已确诊硬件或更改全机设置。
+        # Children inherit this diagnostic mask; it neither diagnoses hardware nor changes system settings.
+        # 子进程继承此诊断掩码，不代表硬件已确诊，也不改系统设置。
         # https://learn.microsoft.com/en-us/windows/win32/procthread/inheritance
         $runnerProcess = [Diagnostics.Process]::GetCurrentProcess()
         $runnerProcess.Refresh()
@@ -204,8 +203,8 @@ try {
         return
     }
 
-    # Own a unique sparse identity and directory; winapp otherwise walks up to an existing .winapp/debug.
-    # 每轮独占稀疏身份和目录，防止 winapp 向上查找时复用现有 .winapp/debug 或正式应用身份。
+    # Use a unique sparse identity and directory so winapp cannot reuse an existing .winapp/debug.
+    # 使用独立稀疏身份和目录，避免 winapp 复用已有的 .winapp/debug。
     New-Item -ItemType Directory -Path (Join-Path $identityRoot '.winapp') -Force | Out-Null
     $identityToolPath = [IO.Path]::GetFullPath($targetProperties.WinAppCliPath)
     if (!(Test-Path -LiteralPath $identityToolPath)) { throw 'The restored WinApp CLI identity tool was not found.' }
@@ -228,8 +227,8 @@ try {
     foreach ($resource in $manifest.SelectNodes('/pkg:Package/pkg:Resources/pkg:Resource', $manifestNs)) {
         if ($resource.GetAttribute('Language') -eq 'x-generate') { $resource.SetAttribute('Language', 'zh-CN') }
     }
-    # Read the exact restored x64 framework identity, including split Windows App SDK package versions.
-    # 从实际还原的 x64 框架包读取身份，兼容 Windows App SDK 拆分包版本；不猜测或硬编码运行时版本。
+    # Read x64 framework identities from restored packages, including split Windows App SDK versions.
+    # 从实际还原的包读取 x64 框架身份，兼容 Windows App SDK 拆分版本。
     $frameworks = @($targetEvaluation.Items.AppxPackageRegistration | Where-Object Architecture -eq 'x64')
     if ($frameworks.Count -eq 0) { throw 'The packaged fixture did not resolve any x64 framework dependencies.' }
     $dependencies = $manifest.SelectSingleNode('/pkg:Package/pkg:Dependencies', $manifestNs)

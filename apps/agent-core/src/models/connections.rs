@@ -72,8 +72,8 @@ pub(crate) fn valid_model(value: &Value) -> bool {
     })
 }
 
-/// Connection validation and save plans own credentials/endpoints and retained defaults; adapters only persist.
-/// 连接校验及保存计划拥有密钥/端点边界与旧默认值保留；适配器只执行正式持久化 I/O。
+/// Validate credentials, endpoints and retained defaults here; adapters only persist them.
+/// 此处校验凭据、端点和保留的默认值；适配器只负责持久化。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     let value = match operation {
         "models.connections.localEndpoint" => json!(local_host(string(&args["hostname"]))),

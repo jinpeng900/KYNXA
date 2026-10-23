@@ -124,8 +124,8 @@ pub(crate) fn enqueue_conversation_semantic(config: &GatewayConfig, conversation
     }
 }
 
-/// Preserve complete original-message provenance; association never concatenates different source bodies.
-/// 保留完整原始消息与问答关联；关联元数据不会把不同消息正文拼成无法回读的合成来源。
+/// Retain original message provenance; never concatenate distinct source bodies.
+/// 保留原消息来源，不拼接不同来源正文。
 pub(crate) fn conversation_message_sources(chat: &str, messages: &[Value]) -> Vec<Value> {
     let users = messages.iter().filter(|message| message["Role"] == "user")
         .filter_map(|message| message["Id"].as_str()).collect::<HashSet<_>>();
@@ -246,8 +246,8 @@ fn maintenance_attempt(
                             .filter_map(Value::as_str)
                             .any(temporary_index_failure)
                     })
-                // Reuse the scanner's failure classification instead of leaving unchanged files stuck after a timeout.
-                // 复用扫描器的失败分类，避免未变更文件因一次超时永久停留在未完成状态。
+                // Use scanner failure classes so a timeout cannot permanently stall unchanged files.
+                // 沿用扫描器故障分类，避免一次超时永久卡住未变文件。
                 || job["coverage"]["failures"]
                     .as_array()
                     .is_some_and(|failures| failures.iter().any(|failure| failure["retryable"] == true)))
@@ -310,8 +310,8 @@ fn maintain_memory(config: &GatewayConfig, cancel: &Arc<AtomicBool>) -> Result<(
             }
         };
         if let Err(error) = result {
-            // Keep transient work bounded and retryable; deleting one scope does not discard other scopes.
-            // 暂时性失败保留为有界待处理任务；单个范围删除或失败不会丢弃其他范围的更新。
+            // Keep transient work bounded/retryable and preserve unrelated scopes.
+            // 暂时性工作有界重试，删除或失败不影响其他范围。
             if temporary_index_failure(error.code()) && !cancel.load(Ordering::Acquire) {
                 item.ready_at = std::time::Instant::now() + retry_delay(item.attempt);
                 item.attempt = item.attempt.saturating_add(1).min(10);
@@ -340,8 +340,8 @@ fn maintain_deleted_chats(
         *cursor = 0;
         return Ok(());
     }
-    // Rotate bounded batches so a long deletion history cannot starve later tombstones or foreground work.
-    // 有界轮转删除清理，避免长删除历史遗漏后面的聊天或阻塞前台；不扫描项目日志或共享来源正文。
+    // Rotate bounded cleanup batches to serve later tombstones without blocking foreground work.
+    // 有界轮转清理删除记录，避免遗漏后续项或阻塞前台。
     let count = deleted.len().min(16);
     let start = *cursor % deleted.len();
     let mut failure = None;
@@ -406,8 +406,8 @@ fn maintain_conversation_scope(
     if settings["local"]["enabled"] == false || settings["local"]["semantic"] == "off" {
         return Ok(());
     }
-    // Bound each maintenance visit; completed vectors are reused and remaining work returns to the same queue.
-    // 每次维护有界处理；已有向量直接复用，剩余来源仍回到同一队列，不占用聊天发送链路。
+    // Bound maintenance visits; reuse vectors and requeue remaining sources.
+    // 维护分次有界执行，复用已有向量，剩余来源回原队列。
     let mut generated = 0;
     for source in &sources {
         if cancel.load(Ordering::Acquire) {
@@ -545,8 +545,8 @@ fn embedding_prewarm_identity(config: &GatewayConfig, local: &Value) -> String {
     )
 }
 
-/// Startup warming runs separately from catalog discovery and indexing, under the same inference owner and leases.
-/// 启动预热独立于目录发现和索引扫描，复用同一推理所有者及后台租约；资源不足只延后预热。
+/// Warm up separately from indexing, using shared inference ownership and background leases.
+/// 预热独立于索引，复用推理所有者和后台租约；资源不足时延后。
 fn run_embedding_prewarm(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
     if !wait_background(stop, std::time::Duration::from_secs(2)) {
         return;
@@ -579,8 +579,8 @@ fn run_embedding_prewarm(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
                     complete = true;
                 } else {
                     match super::gateway_embedding::warm(config, local, stop.clone()) {
-                        // Missing assets are never downloaded at startup; asset/config changes schedule another attempt.
-                        // 启动不下载缺失资产；文件或配置变更后重新尝试，闲置回收后不循环重新加载。
+                        // Do not download at startup; retry on asset/config changes, not idle eviction.
+                        // 启动不下载资产，资产或配置变化时重试，不因空闲回收循环重载。
                         Ok(_) => complete = true,
                         Err(error) if temporary_index_failure(error.code()) => {
                             let delay =
@@ -655,8 +655,8 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
             let mut inventories: HashMap<String, InventorySnapshot> = HashMap::new();
             let mut watches = super::gateway_watch::WatchSet::default();
             let mut deleted_cursor = 0;
-            // Discovery runs inside the existing watcher, so startup never waits for full memory preparation.
-            // 发现过程位于现有 watcher 内，启动不会等待全部记忆准备；待处理范围分批合并同一队列。
+            // Discover through the existing watcher and coalesce queued preparation without delaying startup.
+            // 现有 watcher 负责发现并合并准备队列，启动不等待全部记忆准备。
             let mut startup_memory =
                 storage::gateway_memory::startup_index_scopes(&config.data_root, &shared.stop)
                     .ok()
@@ -1486,8 +1486,8 @@ fn run_index(
                 .any(|other| legacy_roots.contains(other) && nested_mount(other, root)) { continue; }
             if remaining_files == 0 || remaining_bytes == 0 { incomplete = true; break; }
             let mut scan_limits = settings["local"]["indexing"].clone();
-            // The most specific mounted root owns overlapping files; all roots share one project output budget.
-            // 重叠文件归最具体的挂载根所有；全部根共享项目级输出额度，不按挂载数量放大索引容量。
+            // Assign overlaps to the most specific mount; share one project-wide output budget.
+            // 重叠文件归最具体挂载根，全部挂载共用项目输出额度。
             scan_limits["mountExcludedRoots"] = json!(mounts.iter().filter_map(|other| other["path"].as_str())
                 .filter(|other| !legacy_roots.contains(root) && nested_mount(root, other)).collect::<Vec<_>>());
             scan_limits["scopeBudget"] = json!({"files":remaining_files,"bytes":remaining_bytes});
@@ -1533,8 +1533,8 @@ fn run_index(
                                 && previous["sourceRevision"] == source["sourceRevision"] && previous["bindingRevision"] == source["bindingRevision"]
                                 && gateway_index::mounted_root(&project, &previous["locator"]).is_ok()));
                         if let Some(prior) = prior {
-                            // Legacy locator metadata remains valid; learning file observations must not invalidate its vectors.
-                            // 旧定位仍有效时保留其派生身份；首次补录文件元信息不会使已有向量失效或重嵌入。
+                            // Keep valid legacy derivation IDs when first adding file observations; reuse vectors.
+                            // 首次补录文件信息时保留有效旧派生身份，复用已有向量。
                             source["locator"] = prior["locator"].clone();
                         } else if !mount["id"].is_null() {
                             source["locator"]["mountId"] = mount["id"].clone();
@@ -1621,8 +1621,8 @@ fn run_index(
         id,
         json!({"completedSources":count,"totalSources":count,"reusedSources":reused_files,"phase":"semantic"}),
     )?;
-    // Incomplete scans retain unobserved sources; complete scans revoke deletions before later embedding work.
-    // 不完整扫描保留未观察来源；完整扫描在后续向量化之前撤销删除内容。
+    // Incomplete scans retain unseen sources; complete scans revoke deletions before embedding.
+    // 未完整扫描时保留未见来源，完整扫描后先撤销删除内容再向量化。
     if failed == 0 && !incomplete {
         let mut after = Value::Null;
         loop {
@@ -1729,8 +1729,8 @@ fn finish_semantic(
         if settings["local"]["semantic"] == "off" {
             continue;
         }
-        // Lexical publication already checked this version; complete vectors need no second document decode.
-        // 词法发布已核验此来源版本；向量完整时直接复用，不再次解析整份文档。
+        // Reuse complete vectors after lexical version checks without decoding documents again.
+        // 词法发布已核验版本且向量完整时，直接复用，不重复解析文档。
         let receipt = gateway_index::reuse_semantic(config, &source, &settings["local"])
             .and_then(|cached| match cached {
                 Some(cached) if source["sourceType"] != "work-file" => Ok(cached),
@@ -2706,15 +2706,26 @@ mod gateway_tests {
             "RETRIEVAL_SEARCH_TIMEOUT"
         );
         drop(held);
-        let first = storage::sqlite_index::apply("storage.index.retireChat", &args).unwrap();
+        let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let cleanup = || loop {
+            match storage::sqlite_index::apply("storage.index.retireChat", &args) {
+                Ok(result) => break result,
+                Err(error) if error.code() == "RETRIEVAL_SEARCH_TIMEOUT" => {
+                    // Concurrent test I/O may exhaust one real 100 ms batch; retry its rolled-back work.
+                    // 并行测试 I/O 可能耗尽单批真实的 100 毫秒，重试已回滚批次，不放宽生产期限。
+                    assert!(std::time::Instant::now() < cleanup_deadline, "chat cleanup made no bounded progress: {error:?}");
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("unexpected cleanup failure: {error:?}"),
+            }
+        };
+        let first = cleanup();
         assert_eq!(first["hasMore"], true);
         assert!(first["removedChunks"].as_u64().unwrap() <= 128);
         assert!(first["removed"].as_u64().unwrap() <= 16);
         let mut complete = false;
         for _ in 0..32 {
-            if storage::sqlite_index::apply("storage.index.retireChat", &args).unwrap()["complete"]
-                == true
-            {
+            if cleanup()["complete"] == true {
                 complete = true;
                 break;
             }

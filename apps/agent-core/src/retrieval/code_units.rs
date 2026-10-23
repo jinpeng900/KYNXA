@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 
 use super::chunking;
 
-/// A bounded map describes only the selected current code evidence, never an exhaustive language-service graph.
-/// 有界代码地图只描述已选中的当前代码证据，不扫描仓库，也不冒充语言服务的完整调用关系。
+/// Map selected current evidence only, not a complete language-service graph.
+/// 仅映射当前选中代码证据，不作为完整语言服务图。
 pub fn navigation(items: &[Value], maximum_tokens: u64) -> Value {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -33,8 +33,8 @@ pub fn navigation(items: &[Value], maximum_tokens: u64) -> Value {
     json!({"entries":entries,"omitted":omitted,"coverage":"selected-current-evidence", "resolvedCallGraph":false})
 }
 
-/// A sweep assigns each AST span to its deepest declaration without treating syntactic ownership as resolved references.
-/// 扫描线把 AST 区间分配给最深声明；语法归属不等于已经解析的引用或真实调用关系。
+/// Assign AST spans to the deepest declaration without claiming resolved references.
+/// AST 区间归最内层声明，语法归属不代表引用已解析。
 pub fn select(args: &Value) -> Result<Value, String> {
     let text = args["text"]
         .as_str()

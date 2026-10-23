@@ -48,8 +48,8 @@ fn builtins() -> &'static (Vec<Value>, String) {
     static CATALOG: OnceLock<(Vec<Value>, String)> = OnceLock::new();
     CATALOG.get_or_init(|| {
         let descriptors = super::gateway::builtin_catalog();
-        // The full catalog hash refreshes metadata; storage validates experience against each tool's own contract.
-        // 整份目录哈希仅用于刷新元信息；存储层按每个工具自身契约核验经验，不据此清空全部内置统计。
+        // Catalog hashes refresh metadata; validate experience per tool without clearing unrelated statistics.
+        // 目录哈希只刷新元信息；按工具核验经验，不清空无关统计。
         let fingerprint = digest(&json!(descriptors));
         (descriptors, fingerprint)
     })

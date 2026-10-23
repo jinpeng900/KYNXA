@@ -1,8 +1,7 @@
 ﻿Set-StrictMode -Version Latest
 
-# MSBuild invokes nested Windows PowerShell scripts with a reduced module
-# discovery path; import the inbox utility module explicitly for Get-FileHash.
-# MSBuild 嵌套调用 Windows PowerShell 时模块发现路径可能被裁剪；显式加载系统工具模块以提供 Get-FileHash。
+# Import Get-FileHash's module explicitly; nested MSBuild calls may lose its lookup path.
+# 显式导入 Get-FileHash 所在模块，避免 MSBuild 嵌套调用时找不到模块。
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AtomicFiles.psm1') -Force
 
@@ -266,8 +265,8 @@ function Save-KynxaPreparedComponent {
             if (-not $identities.ContainsKey($file.path) -or $identities[$file.path] -ne $file.sha256) { $sameFiles = $false; break }
             [void]$identities.Remove($file.path)
         }
-        # Setup and MSBuild share this record; unchanged resources must not republish the same ready file.
-        # Setup 与 MSBuild 共用完成记录；输入、清单和文件元数据未变时直接复用，避免重复替换就绪文件。
+        # Setup and MSBuild reuse this record when inputs, inventories and file metadata match.
+        # 输入、清单和文件元数据一致时，Setup 与 MSBuild 复用同一完成记录。
         if ($sameFiles -and (Test-KynxaPreparedComponent -Root $Root -Component $Component -InputHash $InputHash -State $existing)) { return }
     }
     $snapshot = [KynxaResourceMetadata]::Capture($Root, [string[]]@($Files | ForEach-Object { $_.path }), [string[]]@($Files | ForEach-Object { $_.sha256 }))

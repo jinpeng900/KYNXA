@@ -874,8 +874,8 @@ pub(crate) async fn cancelled(cancellation: &mut watch::Receiver<bool>) {
             return;
         }
         if cancellation.changed().await.is_err() {
-            // Closing the lifecycle owner cancels a request instead of silently orphaning the HTTP body.
-            // 生命周期拥有者关闭时取消请求，不能让 HTTP 正文成为无人管理的任务。
+            // Cancel the request when its owner closes, so the HTTP body is not orphaned.
+            // 所有者关闭时取消请求，避免 HTTP 正文无人处理。
             return;
         }
     }
@@ -937,8 +937,8 @@ pub async fn request_with_catalog(
     let streaming = AtomicBool::new(false);
     let reported_usage = std::sync::Mutex::new(Value::Null);
     let client_timing = ClientTiming::default();
-    // timeoutMs bounds response startup; after streaming starts, cancellation and per-chunk idle detection own its lifetime.
-    // timeoutMs 仅约束响应开始；流启动后由取消和逐块闲置检查管理生命周期，不按累计一小时截断有效输出。
+    // timeoutMs covers startup; an active stream uses cancellation and per-chunk idle checks.
+    // timeoutMs 只约束响应开始；流启动后按取消和逐块闲置检查处理，不截断持续输出。
     let deadline = async {
         tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
         if streaming.load(Ordering::Acquire) {
@@ -954,8 +954,8 @@ pub async fn request_with_catalog(
     let observed = reported_usage.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
     match result {
         Ok(mut response) => {
-            // A later usage fragment can omit earlier nested cache counts; merge only our already observed numeric whitelist.
-            // 后续用量片段可能省略较早的嵌套缓存计量；仅合并本次已观测的数值白名单，不复制正文。
+            // Later usage may omit cache counts; retain observed whitelisted numbers, without copying content.
+            // 后续计量可能省略缓存数量；保留已观测的白名单数值，不复制正文。
             if !response.usage.is_object() { response.usage = json!({}); }
             for (key, value) in observed.as_object().into_iter().flatten() {
                 if matches!(key.as_str(), "prompt_tokens_details" | "input_tokens_details") {
@@ -979,8 +979,8 @@ pub async fn request_with_catalog(
     }
 }
 
-/// Keep only already received numeric billing fields in this request, including before a later cancellation/error.
-/// 本次请求内仅保留已收到的数值计量；后续取消或断流也不丢失，绝不复制响应正文到诊断。
+/// Retain observed numeric usage through cancellation or failure; exclude response content.
+/// 取消或失败后保留已观测的数值计量；诊断不保存响应正文。
 fn observe_provider_usage(target: &std::sync::Mutex<Value>, usage: &Value) {
     if !usage.is_object() { return; }
     let mut selected = target.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1041,8 +1041,8 @@ async fn execute_request(
             gateway_protocol::request_path(connection)
         )
     };
-    // Local input_tokens uses the same template and tokenizer without running generation or consuming a model call.
-    // 本地计数复用实际模板与分词器，不执行生成；超限交回请求工厂压缩，不把错误请求发给生成接口。
+    // Count locally with the real template/tokenizer; oversized requests return for compaction before generation.
+    // 用实际模板和分词器本地计数；超限先返回压缩，不发起生成。
     if let Some(measured) = super::gateway_local_engine::count_request_tokens(
         connection,
         body["model"].as_str().unwrap_or(""),

@@ -4,10 +4,10 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 const toRelativePath = (repositoryRoot, path) => relative(repositoryRoot, path).split(sep).join('/');
 const isInside = (root, path) => path === root || path.startsWith(`${root}${sep}`);
 
-// Ignore comments and literals before reading module paths, including nested comments and raw strings.
-// 读取模块路径前跳过注释和字面量，包括嵌套注释与原始字符串，避免把示例当作依赖。
-// This is a limited static scanner; Rust compilation remains responsible for names, macros and cfg expansion.
-// 此扫描器仅检查静态结构；名称解析、宏展开及 cfg 条件仍由 Rust 编译负责。
+// Skip literals and nested comments so examples do not become dependencies.
+// 跳过字面量和嵌套注释，避免把示例当作依赖。
+// This scans static structure; Rust resolves names, macros and cfg conditions.
+// 此处仅扫描静态结构，名称、宏和 cfg 条件由 Rust 解析。
 function rustTokens(source) {
   const tokens = [];
   let offset = 0;
@@ -64,8 +64,8 @@ function rustTokens(source) {
   return tokens;
 }
 
-// Resolve explicit module paths and grouped use trees without executing code or expanding macros.
-// 解析显式模块路径与分组 use 树，不执行代码或展开宏；编译器仍负责完整名称解析。
+// Resolve explicit paths and grouped use trees without expanding macros.
+// 解析显式路径和分组 use 树，不展开宏。
 function referencedModules(tokens, nativeModule, crateNames, domains, moduleFiles) {
   const module = nativeModule.replace(/\.rs$/u, '').split('/');
   if (module.at(-1) === 'mod') module.pop();

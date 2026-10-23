@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>1.7.0</Version>
+    <Version>1.7.1</Version>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>KYNXA_Desktop</RootNamespace>
@@ -52,25 +52,16 @@
     <Compile Include="..\shared\Memory\RetrievalApiContracts.cs" Link="Contracts\RetrievalApiContracts.cs" />
   </ItemGroup>
 
-  <!--
-    Defining the "Msix" ProjectCapability here allows the Single-project MSIX Packaging
-    Tools extension to be activated for this project even if the Windows App SDK Nuget
-    package has not yet been restored.
-       在此声明 Msix 项目能力后，即使尚未还原 Windows App SDK NuGet 包，也能为项目启用单项目 MSIX 打包扩展。
-  -->
+  <!-- Enable MSIX packaging before the Windows App SDK package is restored.
+       在 Windows App SDK 包还原前启用 MSIX 打包扩展。 -->
   <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <ProjectCapability Include="Msix" />
   </ItemGroup>
 
-  <!--
-    Microsoft.Windows.SDK.BuildTools.WinApp adds first-class support for
-    `dotnet run` on packaged WinUI apps: it hooks the .NET CLI Run target to
-    register a debug identity via the winapp CLI and launch the app with
-    package identity (AUMID).
-    Set <EnableWinAppRunSupport>false</EnableWinAppRunSupport> in a
-    <PropertyGroup> above to opt out.
-       此 WinApp 构建包通过 .NET CLI Run 目标注册调试身份，并使用包身份 AUMID 启动 WinUI 应用；如需关闭，在上方 PropertyGroup 中将 EnableWinAppRunSupport 设为 false。
-  -->
+  <!-- WinApp lets dotnet run register a debug identity and launch with AUMID.
+       WinApp 让 dotnet run 注册调试身份并通过 AUMID 启动。
+       Set EnableWinAppRunSupport=false above to disable it.
+       在上方设置 EnableWinAppRunSupport=false 可关闭此功能。 -->
   <ItemGroup>
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <PackageReference Include="CSharpMath.SkiaSharp" Version="0.5.1" />
@@ -82,19 +73,12 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.6.1" />
   </ItemGroup>
 
-  <!--
-    Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution
-    Explorer "Package and Publish" context menu entry to be enabled for this project even if
-    the Windows App SDK Nuget package has not yet been restored.
-       在此声明 HasPackageAndPublishMenuAddedByProject 属性后，即使尚未还原 Windows App SDK NuGet 包，也能启用解决方案资源管理器的打包与发布菜单。
-  -->
+  <!-- Enable the Package and Publish menu before the Windows App SDK package is restored.
+       在 Windows App SDK 包还原前启用打包与发布菜单。 -->
   <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
 
-  <!-- Publish Properties
-       发布属性。
-  -->
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>

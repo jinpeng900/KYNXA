@@ -1,5 +1,5 @@
-//! Storage maintenance closes admission, drains real writers and replaces immutable runtimes.
-//! 存储维护关闭准入、结算真实写入者并替换不可变运行时，健康字段不能代替实际结算。
+//! Storage maintenance closes admission, drains writers and replaces runtimes.
+//! 存储维护先关闭准入、等待写入结束，再替换运行时。
 
 use crate::{
     gateway_contract::{GatewayConfig, GatewayError},
@@ -146,8 +146,8 @@ impl StorageLifecycle {
                 (false, Phase::Waiting) => state.phase = Phase::Running,
                 _ => {}
             }
-            // Retry failed cleanup on a later request, including an abandoned migration whose marker was removed.
-            // 后续请求可重试失败的结算；即使用户已撤销维护标记，也必须先结算成功再重建运行时。
+            // Retry unfinished cleanup before rebuilding runtimes, even if its marker was removed.
+            // 重建运行时前重试未完成清理，维护标记已删除也一样。
             if !attempted_cleanup
                 && (active && state.phase == Phase::Waiting || state.phase == Phase::CleanupFailed)
                 && self.active_http.load(Ordering::Acquire) == 0
@@ -157,8 +157,8 @@ impl StorageLifecycle {
                 state.phase = Phase::Draining;
                 let lifecycle = self.clone();
                 let runtime = state.runtime.clone();
-                // Own cleanup in an independent task: a disconnected health caller cannot cancel halfway.
-                // 独立任务拥有清理流程；健康请求断开不能在结算中途撤销清理。
+                // Run cleanup independently so health-request disconnects cannot cancel it.
+                // 清理由独立任务执行，健康检查断开不会中途取消。
                 tokio::spawn(async move {
                     let result = runtime.quiesce_storage().await;
                     let mut state = lifecycle.state.lock().await;
@@ -239,8 +239,8 @@ impl StorageLifecycle {
     }
 }
 
-/// The desktop holds a deny-write OS handle; stale files alone never pause the gateway.
-/// 桌面持有拒绝写共享的操作系统句柄；仅残留锁文件不能使网关永久进入维护。
+/// Require the desktop's deny-write handle; stale marker files cannot pause the gateway.
+/// 以桌面的拒写句柄为准，旧标记文件不能暂停网关。
 fn migration_active(path: &std::path::Path) -> Result<bool, GatewayError> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),

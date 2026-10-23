@@ -29,8 +29,8 @@ public sealed class ChatMessageState
     public Guid? SupersededByUserMessageId { get; set; }
     public Guid? InReplyToUserMessageId { get; set; }
     public Guid? OriginUserMessageId { get; set; }
-    // Display the gateway's task outcome separately from the reply transport status.
-    // 网关任务结果与回复传输状态分别展示；此投影不能反向认证正式任务结果。
+    // Display task outcomes separately from reply transport status.
+    // 分开展示任务结果和传输状态；界面投影不能决定正式结果。
     [JsonIgnore]
     public string TaskCompletionState { get; set; } = string.Empty;
 
@@ -96,7 +96,7 @@ public sealed class ChatMessageState
     }
 
     // Steering changes the visible reply anchor while retaining the same task clock.
-    // 中途引导只更换展示回复锚点，保留同一任务时钟，真正的新回复使用新的时钟标识。
+    // 中途引导只换回复锚点，沿用任务时钟；新回复使用新的时钟标识。
     public void InheritGenerationTiming(ChatMessageState source)
     {
         if (source.GenerationElapsedMs is not long elapsed) return;
@@ -116,8 +116,8 @@ public sealed class ChatMessageState
 }
 
 /// <summary>
-/// Older previews stored each user message as a plain string. Preserve them when loading new transcripts.
-/// 旧版预览把用户消息保存为纯字符串；加载新聊天记录时保留这些数据。
+/// Preserve legacy plain-string user messages when loading transcripts.
+/// 加载时兼容旧版预览保存的纯字符串用户消息。
 /// </summary>
 public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
 {

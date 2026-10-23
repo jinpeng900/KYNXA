@@ -46,6 +46,7 @@ public partial class App : Application
     private bool _windowPresentationOnly;
 
     private bool _promptSendOnly;
+    private bool _promptQueueOnly;
     private bool _steeringTimerOnly;
     private bool _workspaceAutoOpenOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
@@ -122,6 +123,9 @@ public partial class App : Application
         _promptSendOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--prompt-send-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--prompt-send-only", StringComparer.Ordinal);
+        _promptQueueOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--prompt-queue-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--prompt-queue-only", StringComparer.Ordinal);
         _steeringTimerOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--steering-timer-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--steering-timer-only", StringComparer.Ordinal);
@@ -467,7 +471,7 @@ public partial class App : Application
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= 980 && NativeUi.IsVisible(Element<Button>("HistorySearchButton")),
                 "the initialized fixture has a realized wide sidebar before search automation");
-            if (_promptSendOnly || _steeringTimerOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
+            if (_promptSendOnly || _promptQueueOnly || _steeringTimerOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
             else await CheckInitialHomeAsync();
             await WaitAsync(() => _shell.IsLoaded && _shell.XamlRoot is not null && _gateway.CatalogReads == 1 &&
                 (bool)typeof(ShellPage).GetField("_projectsReady", PrivateInstance)!.GetValue(_shell)! && _gateway.ModelReads >= 1 &&
@@ -539,9 +543,9 @@ public partial class App : Application
                     $"\nPASS: {_checks.Count} production Shell steering timer checks.\nArtifacts: {_directory}");
                 return;
             }
-            if (_promptSendOnly)
+            if (_promptSendOnly || _promptQueueOnly)
             {
-                await CheckPromptSendAsync();
+                await CheckPromptSendAsync(_promptQueueOnly);
                 await CheckSteeringTimerAsync();
                 Check(_gateway.Failure is null && _unhandled is null,
                     "focused prompt sends complete without production storage or upstream model access");

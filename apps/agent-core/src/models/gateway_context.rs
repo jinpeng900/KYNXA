@@ -33,8 +33,8 @@ fn prefix_fingerprint(connection: &Value, model: &str, messages: &[Value], syste
         messages, system, tools]).to_string().as_bytes()))
 }
 
-/// Snapshot the planned wire prefix using a cloned series; summaries never mutate the live series or formal history.
-/// 用序列副本生成本次计划发送的协议前缀；摘要不修改活动序列或正式历史，也不叠加第二次投影。
+/// Snapshot the wire prefix from a series clone; do not mutate live history or project twice.
+/// 从序列副本生成协议前缀，不修改活动历史或重复投影。
 pub(crate) fn summary_prefix(connection: &Value, model: &str, messages: &[Value], system: &str,
     tools: &[Value], series: &super::tool_updates::ToolSeries) -> Result<Option<Value>, ModelError> {
     if !super::tool_updates::supports_additions(connection) { return Ok(None); }
@@ -252,8 +252,8 @@ fn summary_output_allocation(
     )
 }
 
-/// Revalidate the actual public archive even on cache hits and process recovery; a persisted boolean is not proof.
-/// 缓存命中和进程恢复也重新核验真实公开归档，持久化布尔值不能作为可回读证明。
+/// Recheck the public archive on cache hits and recovery; a saved flag does not prove readability.
+/// 缓存命中和恢复时仍核验公开归档；保存的标记不能证明可读。
 pub(crate) async fn verify_working_summary_archive(
     data_root: &std::path::Path,
     conversation: &str,
@@ -335,8 +335,8 @@ async fn archive_working_summary(
     Ok((verified["archive"]["verified"] == true).then(|| verified["archive"].clone()))
 }
 
-/// Persist changed public payloads before exposing their archive; unchanged payloads reuse actual readback verification.
-/// 公开载荷改变后先重新保存并读回核验；未改变时复用本轮真实回读结果，不以新统计冒用旧归档。
+/// Save and read back changed payloads; unchanged payloads reuse this round's verified archive.
+/// 内容变化后重新保存并回读；未变时复用本轮已核验归档。
 async fn refresh_working_summary_archive(
     root: &std::path::Path,
     conversation: &str,
@@ -405,8 +405,8 @@ async fn summarize_current_step_with_prefix(
     // Size public work against the actual remaining checkpoint, not a fixed 2K ceiling.
     // 工作正文按实际检查点余量授额，不固定压到 2K；其余空间保留引用与执行状态。
     let content_budget = (u128::from(checkpoint_budget) * 3 / 4) as u64;
-    // 中文：正文目标与供应商思考/正文共用的传输额度分开，实际硬限仍由统一预算夹取。
-    // English: Public facts have a separate target from shared reasoning/output transport, capped by the common budget.
+    // Separate the public-content target from reasoning/output transport; both respect the shared hard limit.
+    // 正文目标与思考/正文传输额度分开，均遵守统一硬上限。
     let requested_output = requested_summary_output(content_budget);
     let Some(executor) = executor else {
         return Ok((
@@ -908,8 +908,8 @@ async fn summarize_current_step_with_prefix(
                     ) => value,
                     _ => "unknown",
                 };
-                // 中文：诊断仅保留安全形状，不保存正文、私有推理或模型生成的未知字符串。
-                // English: Diagnostics retain only safe response shape, never content, private reasoning or unknown generated strings.
+                // Keep only safe response metadata; exclude content, private reasoning and unknown generated strings.
+                // 诊断仅保留安全元信息，不保存正文、私有推理或未知生成字符串。
                 last_response_shape = json!({"publicCharacters":response.content.encode_utf16().count(),"publicEstimatedTokens":public_tokens,
                 "privateReasoningPresent":!response.reasoning.is_empty(),"outputTruncated":response.output_truncated,"normalizedFinish":normalized_finish,
                 "jsonParsed":candidate.is_some(),"wholeJsonFence":whole_json_fence,"factsArray":next_facts.is_some(),"factsCount":next_facts.map_or(0,Vec::len),
@@ -943,8 +943,8 @@ async fn summarize_current_step_with_prefix(
                 if response.calls.is_empty()
                     && (rejection == Some("over-content-budget") || rejection.is_none())
                 {
-                    // 中文：正文目标是软目标；只有真实检查点可完整容纳事实与未知副作用时才接纳偏差。
-                    // English: The content target is soft; only a complete, safe projection inside the real checkpoint grant can accept overshoot.
+                    // Exceed the soft content target only if the checkpoint still fits all facts and unknown effects.
+                    // 仅当检查点仍能容纳全部事实和未知副作用时，才允许超过正文软目标。
                     let mut projected_cursors = cursors.clone();
                     let current = json!({"tool":source["tool"],"resultRef":reference,"source":source["source"],"processedCharacters":end,"totalCharacters":total});
                     if let Some(index) = projected_cursors
@@ -1024,8 +1024,8 @@ async fn summarize_current_step_with_prefix(
                     && calls < summary_call_limit
                     && (optional_refinement || missing_prior_refinement || hard_refinement)
                 {
-                    // 中文：每次压缩只允许一次公开事实精简，仍共享真实调用总限额与执行器计量。
-                    // English: One public-fact refinement per compaction shares the existing dispatch cap and metered executor.
+                    // Allow one fact refinement per compaction, within the shared call cap and metering.
+                    // 每次压缩只精简一次事实，仍计入共用调用上限和计量。
                     repair_used = true;
                     let mut feedback_facts = merged_facts.clone().unwrap();
                     if missing_prior_refinement {
@@ -1232,8 +1232,8 @@ async fn summarize_with_prefix(
         ));
     };
     let mut plan = plan.clone();
-    // 中文：原生计划仍用正文预算验收；仅传输请求授予经统一硬限夹取的思考/正文额度。
-    // English: Native acceptance keeps the content budget; transport receives the separately capped allowance.
+    // Validate against the content budget; cap reasoning/output transport separately.
+    // 按正文预算验收，思考/正文传输额度另行限额。
     plan["maxOutputTokens"] = output_allocation["summaryOutputBudgetTokens"].clone();
     let opened = summary_call(
         "open",
@@ -2366,8 +2366,8 @@ mod tests {
             second.history_sources.last().unwrap()["checkpointSemanticSummary"]["semanticCorrectnessCertified"],
             false
         );
-        // 中文：同版本、同读取范围的新归档引用复用已核验摘要游标。
-        // English: A new archive of the same verified source range reuses the summary cursor.
+        // Reuse the summary cursor for the same verified version and read range.
+        // 同一已核验版本和读取范围复用摘要游标。
         let duplicate_reference = data::save_tool_result(
             &root,
             &chat,
@@ -2653,8 +2653,8 @@ mod tests {
         assert_eq!(retry["modelCalls"], 1);
         assert_eq!(calls.load(Ordering::Acquire), 2);
         assert!(retry_plan["checkpointSemanticSummary"]["failedInputSignature"].is_null());
-        // 中文：旧版只做投影的失败签名不能阻断新有界反馈策略的一次恢复。
-        // English: A projection-only failure signature must not fence one recovery under the bounded refinement policy.
+        // An old projection-only failure must not block the bounded refinement attempt.
+        // 旧版仅投影失败不能阻止一次有界精简恢复。
         use sha2::{Digest, Sha256};
         let old_signature = format!(
             "{:x}",
@@ -2998,8 +2998,8 @@ mod tests {
             summary["sources"][0]["processedCharacters"],
             body.encode_utf16().count()
         );
-        // 中文：真正超出检查点的公开候选只精简一次，保持来源、目标及未知操作原始边界。
-        // English: A truly oversized public candidate gets one refinement with original source, goal and unknown-effect boundaries.
+        // Refine an oversized candidate once; preserve its source, goal and unknown-effect boundaries.
+        // 超限候选仅精简一次；保留来源、目标和未知副作用边界。
         let repair_calls = Arc::new(AtomicUsize::new(0));
         let count = repair_calls.clone();
         let original_candidate = hard.clone();

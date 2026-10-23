@@ -16,6 +16,19 @@ pub fn failure(error: impl std::fmt::Display) -> ContractError {
     )
 }
 
+pub fn sql_failure(error: rusqlite::Error) -> ContractError {
+    if matches!(&error, rusqlite::Error::SqliteFailure(details, _)
+        if details.code == rusqlite::ErrorCode::OperationInterrupted) {
+        return match cancelled() {
+            Err(cancelled) => cancelled,
+            Ok(()) => ContractError::new(
+                "SQLite execution deadline reached; the transaction did not complete. / SQLite 执行期限已到，事务未完成。",
+                "RETRIEVAL_SEARCH_TIMEOUT", 504),
+        };
+    }
+    failure(error)
+}
+
 /// Upgrade relational constraints in one transaction, preserving rows, column order, indexes and triggers.
 /// 在同一事务中升级关系约束，保留全部记录、列序、索引与触发器；旧记录不合格时回滚，不删数据。
 pub(crate) fn migrate_integrity(
@@ -154,9 +167,9 @@ pub fn sql_execute(
 ) -> Result<usize, ContractError> {
     connection
         .prepare_cached(sql)
-        .map_err(failure)?
+        .map_err(sql_failure)?
         .execute(params_from_iter(parameters))
-        .map_err(failure)
+        .map_err(sql_failure)
 }
 pub(crate) fn row_projection(row: &Row<'_>) -> rusqlite::Result<Value> {
     let mut record = serde_json::Map::new();
@@ -179,11 +192,11 @@ pub fn rows(
 ) -> Result<Vec<Value>, ContractError> {
     connection
         .prepare_cached(sql)
-        .map_err(failure)?
+        .map_err(sql_failure)?
         .query_map(params_from_iter(parameters), row_projection)
-        .map_err(failure)?
+        .map_err(sql_failure)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(failure)
+        .map_err(sql_failure)
 }
 
 pub fn open(root: &Path, path: &Path, create: bool) -> Result<Connection, ContractError> {
@@ -244,17 +257,17 @@ pub fn open(root: &Path, path: &Path, create: bool) -> Result<Connection, Contra
 pub fn generation(connection: &Connection) -> Result<i64, ContractError> {
     let value: String = connection
         .prepare_cached("SELECT value FROM retrieval_metadata WHERE key='generation'")
-        .map_err(failure)?
+        .map_err(sql_failure)?
         .query_row([], |row| row.get(0))
-        .map_err(failure)?;
+        .map_err(sql_failure)?;
     value.parse().map_err(failure)
 }
 pub fn snapshot(connection: &Connection) -> Result<String, ContractError> {
     let epoch: String = connection
         .prepare_cached("SELECT value FROM retrieval_metadata WHERE key='index_epoch'")
-        .map_err(failure)?
+        .map_err(sql_failure)?
         .query_row([], |row| row.get(0))
-        .map_err(failure)?;
+        .map_err(sql_failure)?;
     Ok(format!("{epoch}:{}", generation(connection)?))
 }
 pub fn next_generation(
@@ -309,18 +322,75 @@ pub fn finish(connection: &Connection, result: super::ContractResult) -> super::
     match result {
         Ok(value) => {
             if let Err(error) = cancelled() {
-                connection.execute_batch("ROLLBACK").map_err(failure)?;
-                return Err(error);
+                return Err(rollback_failure(connection, error));
             }
-            connection.execute_batch("COMMIT").map_err(failure)?;
-            Ok(value)
+            match connection.execute_batch("COMMIT") {
+                Ok(()) => Ok(value),
+                Err(error) => Err(rollback_failure(connection, sql_failure(error))),
+            }
         }
         Err(error) => {
-            connection.execute_batch("ROLLBACK").map_err(failure)?;
-            if cancellation::is_cancelled() {
-                return cancelled().map(|_| Value::Null);
-            }
-            Err(error)
+            let error = cancelled().err().unwrap_or(error);
+            Err(rollback_failure(connection, error))
         }
+    }
+}
+
+fn rollback_failure(connection: &Connection, original: ContractError) -> ContractError {
+    // SQLITE_INTERRUPT and conflict policies can already roll back the transaction.
+    // SQLITE_INTERRUPT 及冲突策略可能已自动回滚，不能再用二次回滚错误覆盖原始失败。
+    if connection.is_autocommit() { return original; }
+    // Cleanup must bypass the expired request callback; it never authorizes a late commit.
+    // 清理须绕过过期请求回调，只执行回滚，不允许超时后补提交。
+    let cleanup = connection.progress_handler(0, None::<fn() -> bool>)
+        .and_then(|_| connection.execute_batch("ROLLBACK"));
+    if cleanup.is_err() && !connection.is_autocommit() {
+        // The lease independently discards a handle whose transaction cannot be cleaned.
+        // 租约会另行丢弃无法清理事务的句柄；此处保留原错误类别并补清理诊断。
+        return ContractError::new(format!("{} / SQLite rollback cleanup failed.", original.message), original.code, original.status_code);
+    }
+    original
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn already_rolled_back_transaction_preserves_the_original_constraint_failure() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE sample(value INTEGER UNIQUE); BEGIN IMMEDIATE; INSERT INTO sample VALUES(1);").unwrap();
+        let error = sql_execute(&connection, "INSERT OR ROLLBACK INTO sample VALUES(1)", vec![]).unwrap_err();
+        let message = error.message().to_owned();
+        assert!(connection.is_autocommit(), "SQLite already rolled back this failed statement's transaction.");
+        let error = finish(&connection, Err(error)).unwrap_err();
+        assert_eq!(error.code(), "RETRIEVAL_INDEX_FAILED");
+        assert_eq!(error.message(), message);
+        assert_eq!(connection.query_row("SELECT count(*) FROM sample", [], |row|row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn interrupted_write_keeps_timeout_classification_and_rolls_back_prior_changes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(1); BEGIN IMMEDIATE; INSERT INTO sample VALUES(2);").unwrap();
+        connection.progress_handler(256, Some(||true)).unwrap();
+        let result = sql_execute(&connection,
+            "WITH RECURSIVE spin(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM spin WHERE x<1000000) INSERT INTO sample SELECT x FROM spin", vec![]);
+        assert_eq!(result.as_ref().unwrap_err().code(), "RETRIEVAL_SEARCH_TIMEOUT");
+        let error = finish(&connection, result.map(|_|Value::Null)).unwrap_err();
+        assert_eq!(error.code(), "RETRIEVAL_SEARCH_TIMEOUT");
+        assert!(connection.is_autocommit());
+        connection.progress_handler(0, None::<fn()->bool>).unwrap();
+        assert_eq!(connection.query_row("SELECT count(*) FROM sample", [], |row|row.get::<_,i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn failed_commit_rolls_back_instead_of_leaving_an_active_transaction() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE parents(id INTEGER PRIMARY KEY); CREATE TABLE children(parent_id INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED); BEGIN IMMEDIATE; INSERT INTO children VALUES(42);").unwrap();
+        let error = finish(&connection, Ok(json!({"pending":true}))).unwrap_err();
+        assert_eq!(error.code(), "RETRIEVAL_INDEX_FAILED");
+        assert!(connection.is_autocommit());
+        assert_eq!(connection.query_row("SELECT count(*) FROM children", [], |row|row.get::<_,i64>(0)).unwrap(), 0);
     }
 }

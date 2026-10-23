@@ -21,14 +21,14 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, mpsc};
 
 const MAX_RPC_BYTES: usize = 32 * 1024 * 1024;
-/// Default per-call MCP execution deadline when the server sets no timeoutMs: long enough for renders and builds.
-/// 服务未设置 timeoutMs 时的 MCP 单次调用默认执行期限，足以覆盖渲染与构建等较长操作。
+/// Default to ten minutes when the server omits timeoutMs.
+/// 服务未设置 timeoutMs 时，单次调用默认十分钟。
 const DEFAULT_MCP_EXECUTION_MS: u64 = 600_000;
 const PROTOCOL: &str = "2025-11-25";
 const MCP_BUDGET_REFRESH: Duration = Duration::from_secs(5);
 
-/// Lifecycle gates own startup/stop scheduling; the existing client map remains the only connection owner.
-/// 生命周期门控仅负责启动、停止调度，现有 client map 仍是唯一连接所有者，不另造连接账本。
+/// Gates schedule startup and shutdown; the existing client map owns connections.
+/// 门控负责启停调度，连接仍由现有 client map 管理。
 pub(crate) struct McpLifecycle {
     starts: Arc<McpQuota>,
     calls: Arc<McpQuota>,
@@ -1315,8 +1315,8 @@ pub(crate) fn transient_connection_failure(code: &str) -> bool {
         | "MCP_CONNECTION_LOST" | "MCP_CONNECTION_CLOSED" | "MCP_CLEANUP_PENDING")
 }
 
-/// Prepare only the search owner's bounded read retry; never replay an invocation or reset an explicit stop.
-/// 仅准备搜索所有者的有界只读重试，不重放调用，也不撤销用户停止；配置、代次及资源规则继续有效。
+/// Retry bounded search reads under current configuration, generation and resource rules; honor explicit stops.
+/// 按当前配置、代次和资源规则有界重试搜索读取；保留用户停止，不重放调用。
 pub(crate) async fn prepare_read_retry(server: &Value, ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     super::gateway::check_configuration_generation(ctx)?;
     let id = server["id"].as_str().unwrap_or("");
@@ -1393,8 +1393,8 @@ async fn admit_buffers(
     let request = json!({"taskId":uuid::Uuid::new_v4().to_string(),"workspaceId":if workspace.is_empty(){"mcp"}else{workspace},
         "kind":if background{"background"}else{"foreground"},"workload":"compute","cpuThreads":1,
         "memoryBytes":MAX_RPC_BYTES,"gpuMemoryBytes":0,"waitMs":if background{5000}else{30000},"ttlMs":30000});
-    // An owned admission future survives caller cancellation long enough to retire a racing late grant.
-    // 自有准入任务在调用方取消后继续核销竞争中的晚到授额，不能丢弃尚未兑现的预约回执。
+    // After caller cancellation, settle any late admission grant before releasing its owner.
+    // 调用方取消后仍结算晚到授额，再释放准入任务。
     let attempt = tokio::spawn(async move { service.acquire_waiting(request, cancellation).await });
     let lease = attempt
         .await
@@ -1407,8 +1407,8 @@ pub(crate) fn configuration_generation(ctx: &GatewayToolContext) -> u64 {
     ctx.runtime.mcp_lifecycle.generation.load(Ordering::Acquire)
 }
 
-/// Durable definitions are discovery candidates; live dispatch still reconnects and validates the actual schema.
-/// 持久定义只参与能力发现；真正执行仍重新连接并核对实际定义，发现不启动或等待服务。
+/// Saved definitions support discovery without startup; execution reconnects and checks the live schema.
+/// 已存定义供发现使用，不启动服务；执行时重新连接并核验实际定义。
 pub(crate) fn reusable_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
     let generation = configuration_generation(ctx);
     let mut candidates = ctx.runtime.schemas.try_read().map(|schemas| schemas.clone()).unwrap_or_default();
@@ -1472,8 +1472,8 @@ async fn connection_with_priority(
     };
     refresh_budget(ctx).await;
     lifecycle.check(id, generation)?;
-    // Background waiters never hold the per-service gate while yielding to a foreground request.
-    // 后台等待前台让路时不能占住服务单飞锁，否则前台申请同一服务会互相等待。
+    // Yield the service gate to foreground work to avoid mutual waiting.
+    // 向前台让路时释放服务锁，避免互相等待。
     let gate = lifecycle.gate(id).await;
     let (_singleflight, background_permit) = if background {
         loop {
@@ -1483,8 +1483,8 @@ async fn connection_with_priority(
                 && lifecycle.foreground_active.load(Ordering::Acquire) == 0
             {
                 if let Some(permit) = lifecycle.starts.try_acquire_owned() {
-                    // Never wait for a service gate while holding capacity needed by a foreground owner of that gate.
-                    // 前台可能已持服务锁等待启动额度；后台拿不到锁就立即归还额度，不能形成反向互等。
+                    // Return capacity when the service gate is busy; its foreground owner may need that capacity.
+                    // 服务锁繁忙时立即归还额度，持锁的前台可能正等待该额度。
                     if let Ok(guard) = gate.clone().try_lock_owned() {
                         break (guard, Some(permit));
                     }
@@ -1794,8 +1794,8 @@ async fn reap_idle(ctx: &GatewayToolContext, timeout: Duration) {
     );
 }
 
-/// Warm trusted installed services using observed scheduling capacity; never install dependencies or borrow chat authority.
-/// 依据真实资源额度预热受信任的已安装服务，不安装依赖、不继承聊天授权或执行陌生仓库命令。
+/// Warm trusted installed services within observed capacity; do not install dependencies or inherit chat authority.
+/// 按观测额度预热受信任的已安装服务；不安装依赖或继承聊天授权。
 pub(crate) fn prewarm(ctx: &GatewayToolContext) -> Value {
     // Bind queued configuration before spawning; a reset cannot lend new authority to an old task.
     // 排队前绑定配置代次；重置后的新代次不能为旧预热任务重新赋予启动权限。
@@ -1960,8 +1960,8 @@ pub(crate) async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, Gate
     catalog_selected(ctx, servers(ctx)).await
 }
 
-/// Synchronize the actual handshake catalog before learning an invocation outcome.
-/// 在学习调用结果前，把本次真实握手目录同步到内存和持久发现视图；不在连接锁内执行磁盘操作。
+/// Sync the handshake catalog before recording outcomes; keep disk I/O outside the connection lock.
+/// 记录调用结果前同步握手目录；磁盘 I/O 放在连接锁外。
 async fn remember_actual_catalog(
     server: &Value,
     actual: &[Value],
@@ -2081,6 +2081,25 @@ fn checked_task(value: Value, id: Option<&str>) -> Result<Value,GatewayError> {
     Ok(value)
 }
 
+/// Recognize protocol errors and Blender's exact execution-failure wrapper, not arbitrary logs.
+/// 识别协议错误及 Blender 明确的执行失败包装，不扫描普通日志中的错误单词。
+pub(crate) fn explicit_tool_error(name: &str, result: &Value) -> bool {
+    if result["isError"] == true { return true; }
+    let blender_execution = name.strip_prefix("mcp.").and_then(|suffix| suffix.split_once('.'))
+        .is_some_and(|(_, tool)| tool == "execute_blender_code");
+    if !blender_execution { return false; }
+    let failed = |text: &str| text.trim_start().starts_with("Error executing code:");
+    result["content"].as_array().and_then(|blocks| blocks.first())
+        .filter(|block| block["type"] == "text").and_then(|block| block["text"].as_str())
+        .is_some_and(failed)
+        || result["structuredContent"]["result"].as_str().is_some_and(failed)
+}
+
+fn normalize_tool_result(name: &str, mut result: Value) -> Value {
+    if explicit_tool_error(name, &result) { result["isError"] = json!(true); }
+    result
+}
+
 /// Crash recovery queries a journaled remote identity; it never dispatches the original tool again.
 /// 崩溃恢复只查询正式事件日志中的远端身份，绝不再次派发原工具。
 pub(crate) async fn recover_checkpoint(handle: &Value, original_call_id: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -2104,6 +2123,7 @@ pub(crate) async fn recover_checkpoint(handle: &Value, original_call_id: &str, c
     if task["status"] != "completed" { result["isError"] = json!(true); }
     result["remoteTask"] = task;
     result["recoveryHandle"] = handle.clone();
+    let result = normalize_tool_result(handle["toolName"].as_str().unwrap_or(""), result);
     Ok(json!({"status":"settled","result":result}))
 }
 
@@ -2196,7 +2216,7 @@ pub(crate) async fn execute_task(name:&str,args:Value,ctx:&GatewayToolContext)->
     if !result.is_object(){return Err(failure("MCP_INVALID_TASK_RESULT","原任务结果格式无效，未标记成功。",502));}
     if task["status"]!="completed" {result["isError"]=json!(true);}
     result["_mcpTaskProof"]=json!({"serverId":handle["serverId"],"taskId":id,"toolCallId":handle["toolCallId"],"configurationFingerprint":handle["configurationFingerprint"],"terminalStatus":task["status"]});
-    Ok(result)
+    Ok(normalize_tool_result(handle["toolName"].as_str().unwrap_or(""), result))
 }
 
 pub(crate) async fn execute(
@@ -2275,7 +2295,8 @@ pub(crate) async fn execute(
     match result {
         Ok(value) => {
             ctx.runtime.mcp_errors.lock().await.remove(id);
-            if task_supported {poll_task(&server,value["task"].clone(),name,ctx).await}else{Ok(value)}
+            let value = if task_supported { poll_task(&server,value["task"].clone(),name,ctx).await? } else { value };
+            Ok(normalize_tool_result(name, value))
         }
         Err(error)
             if [
@@ -2503,6 +2524,82 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blender_execution_error_wrapper_overrides_false_success_without_rewriting_output() {
+        let text = "Error executing code: Could not connect to Blender. Make sure the Blender addon is running.";
+        let original = json!({"isError":false,"content":[{"type":"text","text":text}],
+            "structuredContent":{"result":text}});
+        assert!(explicit_tool_error("mcp.blender.execute_blender_code", &original));
+        let normalized = normalize_tool_result("mcp.blender.execute_blender_code", original.clone());
+        assert_eq!(normalized["isError"], true);
+        assert_eq!(normalized["content"], original["content"]);
+        assert_eq!(normalized["structuredContent"], original["structuredContent"]);
+        assert_eq!(original["isError"], false);
+        assert!(explicit_tool_error("mcp.personal-blender.execute_blender_code",
+            &json!({"structuredContent":{"result":text}})));
+        assert!(explicit_tool_error("mcp.other.read", &json!({"isError":true})));
+    }
+
+    #[test]
+    fn ordinary_logs_and_examples_are_not_blender_execution_failures() {
+        for text in [
+            "Code executed successfully: error_count=0\nError executing code: example output",
+            "Example: Error executing code: connection unavailable",
+            "```python\nprint('Error executing code: example')\n```",
+            "The source contains Error executing code: for its error handler.",
+        ] {
+            let result = json!({"isError":false,"content":[{"type":"text","text":text}],
+                "structuredContent":{"result":text}});
+            assert!(!explicit_tool_error("mcp.blender.execute_blender_code", &result));
+            assert_eq!(normalize_tool_result("mcp.blender.execute_blender_code", result.clone()), result);
+        }
+        let unrelated = json!({"content":[{"type":"text","text":"Error executing code: a quoted source"}]});
+        assert!(!explicit_tool_error("mcp.blender.get_scene_info", &unrelated));
+        assert!(!explicit_tool_error("mcp.documents.read", &unrelated));
+        let later_log = json!({"content":[{"type":"text","text":"Code executed successfully: inspected log"},
+            {"type":"text","text":"Error executing code: previous example"}]});
+        assert!(!explicit_tool_error("mcp.blender.execute_blender_code", &later_log));
+    }
+
+    #[tokio::test]
+    async fn blender_wrapper_failure_remains_a_tool_result_and_the_same_connection_can_recover() {
+        use axum::{Json, Router, extract::State, routing::post};
+        async fn handler(State(initializations): State<Arc<AtomicUsize>>, Json(request): Json<Value>) -> Json<Value> {
+            let result = match request["method"].as_str().unwrap_or("") {
+                "initialize" => {
+                    initializations.fetch_add(1, Ordering::AcqRel);
+                    json!({"protocolVersion":PROTOCOL,"capabilities":{"tools":{}},"serverInfo":{"name":"blender-fixture","version":"1"}})
+                }
+                "tools/list" => json!({"tools":[{"name":"execute_blender_code","inputSchema":{"type":"object","properties":{"recover":{"type":"boolean"}}}}]}),
+                "tools/call" => {
+                    let text = if request["params"]["arguments"]["recover"] == true {
+                        "Code executed successfully: CONNECTED; error_count=0"
+                    } else { "Error executing code: Could not connect to Blender. Make sure the Blender addon is running." };
+                    json!({"isError":false,"content":[{"type":"text","text":text}],"structuredContent":{"result":text}})
+                }
+                _ => json!({}),
+            };
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+        }
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route("/mcp", post(handler)).with_state(initializations.clone());
+        let service = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        ctx.config["mcpServers"] = json!([{"id":"blender-fixture","enabled":true,"transport":"streamable-http","url":format!("http://{address}/mcp")}]);
+        let failed = execute("mcp.blender-fixture.execute_blender_code", json!({"arguments":{"recover":false}}), &ctx).await.unwrap();
+        assert_eq!(failed["isError"], true);
+        assert!(failed["content"][0]["text"].as_str().unwrap().starts_with("Error executing code:"));
+        let recovered = execute("mcp.blender-fixture.execute_blender_code", json!({"arguments":{"recover":true}}), &ctx).await.unwrap();
+        assert_eq!(recovered["isError"], false);
+        assert_eq!(initializations.load(Ordering::Acquire), 1);
+        shutdown(&ctx).await;
+        service.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn remote_task_checkpoint_recovers_actual_result_without_replaying_original_mutation() {

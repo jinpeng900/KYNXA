@@ -7,7 +7,7 @@
   #define PackageOutputDir "..\..\..\..\artifacts\installer\output"
 #endif
 #ifndef PackageVersion
-  #define PackageVersion "1.7.0"
+  #define PackageVersion "1.7.1"
 #endif
 #ifndef IconFile
   #define IconFile "..\..\Assets\AppIcon.ico"

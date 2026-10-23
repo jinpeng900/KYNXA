@@ -143,8 +143,8 @@ public sealed partial class ToolManagementWindow : Window
         bool narrow = width > 0 && width < 780;
         var full = new GridLength(1, GridUnitType.Star);
         double listHeight = narrow ? Math.Clamp(AgentRoot.ActualHeight * 0.22, 92, 180) : double.PositiveInfinity;
-        // Keep long forms reachable in short stacked windows; the controls retain their state when reparented.
-        // 短窗采用上下布局时，将额外操作并入可滚动表单；迁移控件父级不重建草稿或展开状态。
+        // Move controls into the scrollable form on short windows without rebuilding their state.
+        // 短窗上下布局时，将额外操作移入滚动表单，保留草稿和展开状态。
         if (narrow && !AgentServerEditorBody.Children.Contains(AgentConnectionPanel))
         {
             AgentServersGrid.Children.Remove(AgentConnectionPanel);
@@ -489,8 +489,8 @@ public sealed partial class ToolManagementWindow : Window
 
     private void RefreshFilteredHints()
     {
-        // Visible list selection is a projection; hidden editors keep their stable identity and unsaved fields.
-        // 可见列表选择只是展示投影；被隐藏的编辑器仍保留稳定身份及未保存字段。
+        // Hidden editors retain stable identities and drafts independently of list selection.
+        // 列表选择只作展示；隐藏编辑器保留稳定身份和未保存字段。
         AgentServerFilteredHint.Visibility = _editingServerId is not null && !_servers.Any(server => server.Id == _editingServerId)
             ? Visibility.Visible : Visibility.Collapsed;
         AgentSkillFilteredHint.Visibility = _editingSkill is not null && !AgentSkillList.Items.OfType<AgentSkill>().Any(skill => skill.Id == _editingSkill.Id)

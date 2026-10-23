@@ -132,8 +132,8 @@ foreach ($package in $nativePackages) {
                         try { $input.CopyTo($output) } finally { $input.Dispose(); $output.Dispose() }
                     }
                     else {
-                        # Extract a single safe known member; no archive-wide path traversal or executable hooks.
-                        # 只提取一个已知安全成员；不展开任意路径，也不运行归档中的安装钩子。
+                        # Extract only the known safe member, without running archive hooks.
+                        # 只提取指定的安全文件，不运行归档中的安装钩子。
                         if ($asset.entry -notmatch '^[A-Za-z0-9_./-]+$' -or $asset.entry.Contains('..')) { throw 'Invalid pinned archive member.' }
                         $extractRoot = Get-NativeOutputPath ('extract/' + [Guid]::NewGuid().ToString('N') + '/marker')
                         $extractRoot = [IO.Path]::GetDirectoryName($extractRoot)
@@ -171,8 +171,8 @@ if ($Profile -eq 'Full') {
 # A private fixed Node serves optional MCP/skill execution only; npm runs on the build machine, never startup.
 # 私有固定 Node 仅供 MCP/技能执行；npm 只在构建机运行，软件启动不下载依赖。
 if ($Profile -eq 'Full') {
-    # Include the current source notice before MCP records its payload integrity, avoiding a second npm preparation.
-    # 在 MCP 记录资源完整性前放入当前来源清单，避免随后修改载荷导致二次 npm 准备。
+    # Include source notices before MCP hashes the payload to avoid preparing npm twice.
+    # 在 MCP 计算资源哈希前放入来源说明，避免重复准备 npm。
     Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json' -ConfigurationText
     & (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath -VerifyResources:$VerifyResources
     foreach ($preparedFile in (Read-KynxaPreparedComponent -Root $runtimeRoot -Component 'mcp')['files']) {
@@ -340,8 +340,8 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
         $metadataJson = $metadataOutput.Result
     }
     finally { $metadataProcess.Dispose() }
-    # Cargo feature names are case-sensitive (for example USB and usb); Windows PowerShell objects are not.
-    # Cargo 特征名区分大小写（例如 USB 与 usb）；Windows PowerShell 对象不能安全承载这些键。
+    # Cargo feature names are case-sensitive; PowerShell object keys are not.
+    # Cargo 特征名区分大小写，PowerShell 对象键不区分。
     if ($PSVersionTable.PSVersion.Major -ge 6) {
         $metadata = ($metadataJson -join [Environment]::NewLine) | ConvertFrom-Json -AsHashtable
     }
@@ -419,8 +419,8 @@ if (-not $AssetsOnly) {
         }
     }
 }
-# Component preparation already checked each path; publication must not repeat an ancestor walk for every MCP/Office file.
-# 各组件已检查过所属路径，发布清单时不再为每个 MCP/Office 文件重复遍历祖先目录。
+# Components already checked their paths; reuse that result when publishing the inventory.
+# 组件已检查过路径，发布清单时复用结果，避免逐文件重复遍历。
 $bundleFiles = @($bundle | Sort-Object -Unique | ForEach-Object { [IO.Path]::GetFullPath([IO.Path]::Combine($runtimeRoot, $_)) })
 [IO.File]::WriteAllLines((Join-Path $runtimeRoot $(if ($AssetsOnly) {'asset-files.txt'} else {'bundle-files.txt'})), [string[]]$bundleFiles, $utf8)
 Write-Output "Native Windows payload ready ($Profile): $($bundleFiles.Count) verified files."

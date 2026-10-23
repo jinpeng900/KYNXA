@@ -70,8 +70,8 @@ fn file_identity(path: &Path) -> Result<FileIdentity, ModelError> {
     let path = std::fs::canonicalize(path).map_err(io_error)?;
     let file = std::fs::File::open(&path).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
-    // The shared handle identity detects replacements without reading large weights or duplicating Win32 declarations.
-    // 复用统一句柄身份识别文件替换，不读取大权重，也不重复声明 Windows 接口。
+    // Detect file replacement through shared handle identity, without reading weights.
+    // 复用句柄身份识别文件替换，不读取权重。
     let identity = crate::file_identity::handle_identity(&file).map_err(io_error)?;
     Ok(FileIdentity { path, bytes: metadata.len(), modified: metadata.modified().ok(),
         volume: identity.volume, file_id: identity.identity })
@@ -496,8 +496,8 @@ pub async fn count_request_tokens(
         cancelled(&cancellation, owner)?;
         Ok(Some(LocalRequestTokens { input_tokens, context_window_tokens }))
     };
-    // The same process lock fences replacement during this bounded preflight; the caller keeps its generation guard.
-    // 有界预检期间持有同一进程锁，防止服务被替换；沿用调用方的生成保护，不重复获取保护或占用推理槽。
+    // Hold the process lock during preflight; reuse the caller's guard without another inference slot.
+    // 预检期间持有进程锁；复用调用方保护，不重复占用推理槽。
     tokio::time::timeout(Duration::from_secs(3), checked).await
         .map_err(|_| error("LOCAL_MODEL_TOKEN_COUNT_TIMEOUT", "本地模型上下文预检稍慢，请稍后继续。", 503))?
 }
@@ -574,8 +574,8 @@ pub fn request_capabilities(metadata: &Value, observed: &Value) -> Value {
     json!(capabilities)
 }
 
-/// Cached readiness is reusable only while the same files, endpoint and owned child still exist.
-/// 仅当文件身份、端口与自有子进程仍一致时复用就绪观测；暖路径不重复HTTP、不扫描目录或读取大权重。
+/// Reuse readiness only for unchanged files, endpoint and child; no warm-path probes or weight reads.
+/// 文件、端点和子进程未变时复用就绪状态；暖路径不重复探测或读取权重。
 pub async fn refresh_status(root: &Path, connection: &Value, model: &str) -> Result<Value, ModelError> {
     let id = identity(connection, model)?;
     let owner = engine(root, id);
@@ -633,8 +633,8 @@ pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::
     ensure_with_priority(root, connection, model, token, true).await
 }
 
-/// Model loading belongs to the engine lifecycle, not a settings observer's 60/90-second wait.
-/// 装载归推理引擎生命周期；设置观察者的 60/90 秒等待或单个会话取消不能销毁其他等待者所需装载。
+/// Settings wait limits or one caller's cancellation must not stop loading for other waiters.
+/// 设置页等待到期或单个调用方取消，不停止其他等待者需要的装载。
 pub async fn ensure_with_priority(root: &Path, connection: &Value, model: &str, token: watch::Receiver<bool>, foreground: bool) -> Result<(), ModelError> {
     if !is_managed(connection) { return Ok(()); }
     let id = identity(connection, model)?.to_owned();

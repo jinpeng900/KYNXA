@@ -73,8 +73,8 @@ fn key(identity: (u64, u64), row: &Value) -> String {
     let descriptor = json!({"version":"scoped-original-passages-v1", "databaseIdentity":identity,"versions":versions});
     format!("{:x}", Sha256::digest(descriptor.to_string().as_bytes()))
 }
-/// The caller must first authorize metadata inside its current transaction; missing rows never reach this lookup.
-/// 调用方须在当前事务先核验元数据权限；缺失、删除或越权的来源不得进入此查找。
+/// Authorize metadata in the current transaction before lookup; skip missing rows.
+/// 查询前在当前事务核验元数据权限，缺失记录不查缓存。
 pub(crate) fn read<E>(identity: (u64, u64), row: &Value, load: impl FnOnce() -> Result<Value, E>) -> Result<Value, E> {
     let Some(cache) = CACHE.get() else { return load(); };
     cache.read(identity, row, load)

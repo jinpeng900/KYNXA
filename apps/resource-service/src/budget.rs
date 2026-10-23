@@ -173,8 +173,8 @@ impl ResourceBudget {
             let Some(baseline) = observations.iter().filter_map(|observation| observation.baseline_memory_bytes).max() else { continue; };
             let mut available_credit = current.saturating_sub(baseline.max(self.gpu_baseline_floors.get(&identity).copied().unwrap_or(0)));
             observations.sort_by_key(|observation| &observation.lease_id);
-            // Free VRAM already includes verified process increments; pay down each increment only once across leases.
-            // 空闲显存已反映经过身份复核的进程增量；同一增量跨租约只能抵扣一次，未知数值保留完整预约。
+            // Credit each verified VRAM increment once across leases; unknown usage keeps its reservation.
+            // 已核验显存增量跨租约只抵扣一次；未知用量保留完整预约。
             for observation in observations {
                 let credit = available_credit.min(self.leases[&observation.lease_id].gpu_memory_bytes);
                 available_credit -= credit;
@@ -204,8 +204,8 @@ impl ResourceBudget {
             baseline = baseline.max(self.baseline_floors.get(&identity).copied().unwrap_or(0));
             let mut available_credit = current.saturating_sub(baseline);
             observations.sort_by_key(|observation| &observation.lease_id);
-            // One process increment can pay down several leases only once, and never beyond their reservation.
-            // 单个进程的增量可分摊多个预约，但只计算一次且不超过每份预约；基线和未知显存不作信用。
+            // Share each process increment once, capped per lease; exclude baseline and unknown VRAM.
+            // 进程增量只分摊一次且不超单份预约，基线和未知显存不抵扣。
             for observation in observations {
                 let credit = available_credit.min(self.leases[&observation.lease_id].memory_bytes);
                 available_credit -= credit;
@@ -223,8 +223,8 @@ impl ResourceBudget {
         let (_, reserved, _) = self.reserved();
         let materialized = self.materialized_memory().values().sum::<u64>();
         let capacity = if workload == "model-transport" {
-            // Transport may use the foreground headroom, but keeps the system floor and all unresolved debt.
-            // 轻量模型通信可使用为前台保留的比例余量，仍保留系统底线并扣除全部未兑现预约。
+            // Transport may use foreground headroom, preserving the system floor and unresolved debt.
+            // 模型通信可使用前台余量，仍预留系统底线并扣除未兑现预约。
             hardware.memory.available_bytes.saturating_sub(512 * 1024 * 1024)
         } else { memory_capacity(hardware) };
         capacity.saturating_sub(reserved.saturating_sub(materialized))
@@ -244,8 +244,8 @@ impl ResourceBudget {
                 cpu_threads:lease.cpu_threads,memory_bytes:lease.memory_bytes,gpu_memory_bytes:lease.gpu_memory_bytes,
                 device_id:None,execution_provider:None,execution_device_id:None,task_id:lease.task_id });
         }
-        // Restoration imports held debt atomically, without treating a restarted monitor as newly free capacity.
-        // 重启时原子恢复未结清账目；监控重启不等于旧工作已经释放，也不重新判为可分配容量。
+        // Restore held debt atomically; monitor restarts do not free capacity.
+        // 原子恢复未结清预约，监控重启不代表资源已经释放。
         self.leases = restored;
         json!({"status":"restored","restoredLeases":self.leases.len(),"accountingState":"unverified-reservations"})
     }
@@ -379,8 +379,8 @@ impl ResourceBudget {
             if let Some(observation) = self.memory_observations.iter().find(|observation|observation.lease_id == lease_id) {
                 let identity = (observation.process_id,observation.start_time_ms);
                 let baseline = self.baseline_floors.get(&identity).copied().unwrap_or(observation.baseline_memory_bytes.unwrap_or(0));
-                // Released RSS may remain in the allocator; it cannot be reassigned as another lease's new credit.
-                // 已释放工作对应的 RSS 可能仍在分配器中，不能把它重新算成另一预约的新兑现信用。
+                // Retained allocator RSS cannot count as another lease's new credit.
+                // 分配器保留的已释放 RSS 不能抵扣另一份新预约。
                 self.baseline_floors.insert(identity,baseline.saturating_add(credit));
             }
         }

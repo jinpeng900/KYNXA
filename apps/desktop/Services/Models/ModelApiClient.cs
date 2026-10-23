@@ -40,8 +40,8 @@ public sealed class ModelApiClient : IDisposable
         return value;
     }
 
-    // Short-lived preparation clients and the chat client reuse local keep-alive connections.
-    // 短期预准备客户端与聊天客户端复用本地长连接；仅回环地址跳过系统代理，远程自定义网关仍遵循系统配置。
+    // Preparation and chat clients share local keep-alive connections.
+    // 准备和聊天共用本地长连接；仅回环地址跳过代理，远程网关仍遵循系统配置。
     private static readonly SocketsHttpHandler LocalTransport = new()
         { UseProxy = false, PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5) };
     private readonly HttpClient _httpClient;
@@ -173,8 +173,8 @@ public sealed class ModelApiClient : IDisposable
         int recoveryAttempt = 0;
         while (true)
         {
-            // Only the first request may submit a prompt. Recovery observes the accepted identity without replaying effects.
-            // 只有首次请求能够提交消息；恢复只观察已接受的原身份，不能重发消息或重做工具副作用。
+            // Submit the prompt once; recovery observes the accepted request without replaying effects.
+            // 消息只提交一次；恢复时观察原请求，不重发消息或重做工具操作。
             Func<HttpRequestMessage> nextRequest = isInitialRequest ? initialRequest : () => new HttpRequestMessage(HttpMethod.Get,
                 observeDurableTask && taskId is Guid durableTaskId
                     ? $"/api/tasks/{durableTaskId:D}/stream?conversationId={conversationId:D}"
@@ -210,8 +210,8 @@ public sealed class ModelApiClient : IDisposable
 
             cancellationToken.ThrowIfCancellationRequested();
             if (!CanRecoverObservation(observationError)) throw observationError;
-            // Backoff bounds repeated malformed snapshots while the task and existing UI remain available.
-            // 持续异常的投影按退避间隔重新读取；任务与已收到的界面内容保持可用，不快速空转重试。
+            // Back off malformed snapshot retries while preserving the task and visible content.
+            // 异常投影按退避间隔重读，保留任务和已显示内容，避免快速空转。
             int delayMs = recoveryAttempt++ switch { 0 => 100, 1 => 300, 2 => 1000, 3 => 2000, _ => 5000 };
             await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
             ChatRunStatus? status = null;
@@ -338,8 +338,8 @@ public sealed class ModelApiClient : IDisposable
         if (taskState is not ("completed" or "partial" or "failed" or "cancelled"))
             return new(conversationId, requestId, "running", null);
 
-        // A restarted gateway may have released its in-memory stream; only the matching durable task and message can finish it.
-        // 网关重启可能释放内存流；仅同一持久任务及对应正式消息能够补齐终态，不重新执行原请求。
+        // After restart, restore terminal state only from the matching durable task and message.
+        // 重启后仅用同一持久任务和正式消息补齐终态，不重做原请求。
         Guid replyId = requestId;
         if (detail.TryGetProperty("checkpoint", out var checkpoint) && checkpoint.ValueKind == JsonValueKind.Object
             && checkpoint.TryGetProperty("contextReference", out var context) && context.ValueKind == JsonValueKind.Object
