@@ -27,6 +27,16 @@ const MAXIMUM_SAFE_ELAPSED_MS: u64 = 9_007_199_254_740_991;
 const MAXIMUM_ACTIVE_REQUESTS: usize = 64;
 const MAXIMUM_COMPLETED_REQUESTS: usize = 64;
 const COMPLETED_REQUEST_RETENTION: Duration = Duration::from_secs(30 * 60);
+const STREAM_BATCH_DELAY: Duration = Duration::from_millis(32);
+const STREAM_BATCH_BYTES: usize = 32 * 1024;
+const STREAM_BATCH_EVENTS: usize = 128;
+
+#[derive(Default)]
+struct StreamEmission {
+    pending: VecDeque<Value>,
+    bytes: usize,
+    scheduled: bool,
+}
 
 /// Use only saved generation time and a real monotonic start, never a message creation date.
 /// 仅使用已保存的生成用时与真实单调起点，不根据消息创建日期推算工作时间。
@@ -105,7 +115,8 @@ pub struct RequestRun {
     pub native_cancellation: crate::service_cancellation::CancellationLease,
     pub cancellation_key: String,
     pub events: broadcast::Sender<Value>,
-    emission: Mutex<()>,
+    emission: Mutex<StreamEmission>,
+    stream_owner: std::sync::OnceLock<Weak<RequestRun>>,
     replay: Mutex<ReplayState>,
     pub finished: AtomicBool,
     finished_at: std::sync::Mutex<Option<Instant>>,
@@ -198,34 +209,20 @@ impl RequestRun {
         self.cancellation.send_replace(true);
     }
 
-    /// Keep one queued control across temporary storage pressure without cancelling its accepted task.
-    /// 临时持久化拥塞时保留同一控制事件，等待原批次落盘，不取消已接受任务或重派副作用。
-    async fn persist_event(
+    /// Keep the journal's original event IDs across transient storage pressure.
+    /// 临时存储拥塞时保留原日志事件 ID，不重新入队或重派副作用。
+    async fn flush_journal(
         &self,
         journal: &Arc<super::gateway_task_journal::TaskJournal>,
-        kind: &str,
-        durable: &Value,
-        _terminal: bool,
     ) -> Result<(), GatewayError> {
-        let mut queued = false;
         let mut cancellation = self.cancellation.subscribe();
         let mut delay = Duration::from_millis(100);
         let mut waiting_since = None;
         let result = loop {
-            if !queued {
-                match journal.emit_control(kind, durable) {
-                    Ok(()) => queued = true,
-                    Err(error) if error.code == "TASK_EVENT_BACKPRESSURE" => {
-                        waiting_since.get_or_insert_with(Instant::now);
-                    }
-                    Err(error) => break Err(error),
-                }
-            }
             // A displayed delta is a durable promise too: enqueueing alone cannot acknowledge it.
             // 可见正文增量同样承诺可恢复；仅入内存队列不能作为提交确认或推进回放水位。
             match journal.flush().await {
-                Ok(()) if queued => break Ok(()),
-                Ok(()) => continue,
+                Ok(()) => break Ok(()),
                 Err(error)
                     if matches!(
                         error.code.as_str(),
@@ -254,6 +251,57 @@ impl RequestRun {
             );
         }
         result
+    }
+
+    async fn enqueue_event(
+        &self,
+        journal: &Arc<super::gateway_task_journal::TaskJournal>,
+        kind: &str,
+        durable: &Value,
+    ) -> Result<(), GatewayError> {
+        loop {
+            match journal.emit_control(kind, durable) {
+                Err(error) if error.code == "TASK_EVENT_BACKPRESSURE" => self.flush_journal(journal).await?,
+                result => return result,
+            }
+        }
+    }
+
+    async fn flush_stream(&self, emission: &mut StreamEmission) -> Result<(), GatewayError> {
+        if emission.pending.is_empty() { return Ok(()); }
+        if let Some(journal) = &self.journal {
+            if let Err(error) = self.flush_journal(journal).await {
+                journal.remember_persistence_error(error.clone());
+                return Err(error);
+            }
+        }
+        while let Some(event) = emission.pending.front().cloned() {
+            self.publish_event(event).await;
+            emission.pending.pop_front();
+        }
+        emission.bytes = 0;
+        Ok(())
+    }
+
+    fn schedule_stream(&self, emission: &mut StreamEmission) -> bool {
+        if emission.scheduled { return true; }
+        let Some(owner) = self.stream_owner.get().and_then(Weak::upgrade) else { return false; };
+        emission.scheduled = true;
+        // Own this bounded drain until it finishes; no asynchronous Drop or detached per-token writers.
+        // 持有本次有界排空任务直到结束；不靠异步 Drop，也不逐 token 创建写入者。
+        tokio::spawn(async move {
+            let mut cancellation = owner.cancellation.subscribe();
+            if !*cancellation.borrow() {
+                tokio::select! {
+                    _ = tokio::time::sleep(STREAM_BATCH_DELAY) => {},
+                    _ = cancellation.changed() => {},
+                }
+            }
+            let mut emission = owner.emission.lock().await;
+            let _ = owner.flush_stream(&mut emission).await;
+            emission.scheduled = false;
+        });
+        true
     }
 
     pub(crate) async fn published_stream_sequence(&self) -> u64 {
@@ -289,25 +337,36 @@ impl RequestRun {
     }
 
     async fn emit_one(&self, mut event: Value) {
+        let mut emission = self.emission.lock().await;
+        if self.finished.load(Ordering::Acquire) { return; }
         // Remote task handles are private recovery evidence, never an unrecognized desktop stream event.
         // 远端任务句柄属于私有恢复证据，不能作为桌面无法识别的新事件进入聊天流。
         if event["type"] == "mcp_task_checkpoint" {
             if let Some(journal) = &self.journal {
                 event["conversationId"] = json!(self.conversation_id);
                 event["requestId"] = json!(self.request_id);
-                if !journal.is_released() { let _ = self.persist_event(journal, "mcp_task_checkpoint", &event, true).await; }
+                if self.flush_stream(&mut emission).await.is_err() { return; }
+                if !journal.is_released() {
+                    if self.enqueue_event(journal, "mcp_task_checkpoint", &event).await.is_ok() {
+                        let _ = self.flush_journal(journal).await;
+                    }
+                }
             }
             return;
         }
-        let _emission = self.emission.lock().await;
-        let mut replay = self.replay.lock().await;
-        if self.finished.load(Ordering::Acquire) {
-            return;
+        // Bound unpublished bytes before admission; storage pressure stalls this producer, not the task.
+        // 入队前限制未发布字节；存储拥塞只对当前生产者施加背压，不中断任务。
+        if emission.bytes >= STREAM_BATCH_BYTES || emission.pending.len() >= STREAM_BATCH_EVENTS {
+            if self.flush_stream(&mut emission).await.is_err() { return; }
         }
+        let mut replay = self.replay.lock().await;
+        let is_delta = matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta"));
+        let first_delta = is_delta && replay.content.is_empty() && replay.reasoning.is_empty()
+            && emission.pending.is_empty();
         event["conversationId"] = json!(self.conversation_id);
         event["requestId"] = json!(self.request_id);
         event["createdAt"] = json!(now_iso8601());
-        event["eventSequence"] = json!(replay.sequence + 1);
+        event["eventSequence"] = json!(replay.sequence + emission.pending.len() as u64 + 1);
         if event["replyMessageId"].is_null() {
             event["replyMessageId"] = replay.reply_anchor.as_ref()
                 .map(|anchor| anchor["replyMessageId"].clone())
@@ -360,11 +419,10 @@ impl RequestRun {
             }
             if !journal.is_released() {
                 if let Err(error) = self
-                    .persist_event(
+                    .enqueue_event(
                         journal,
                         event["type"].as_str().unwrap_or("progress"),
                         &durable,
-                        terminal_event(&event),
                     )
                     .await
                 {
@@ -377,9 +435,25 @@ impl RequestRun {
                 }
             }
         }
+        emission.bytes += event.to_string().len();
+        emission.pending.push_back(event);
+        let scheduled = self.journal.is_some() && self.schedule_stream(&mut emission);
+        // First output and control boundaries are immediate; later deltas share one committed batch.
+        // 首次输出与控制边界立即提交，后续增量共用一次已确认批次。
+        if !is_delta || first_delta || self.journal.is_none()
+            || *self.cancellation.borrow() || self.suspending.load(Ordering::Acquire)
+            || emission.bytes >= STREAM_BATCH_BYTES || emission.pending.len() >= STREAM_BATCH_EVENTS
+            || !scheduled
+        {
+            let _ = self.flush_stream(&mut emission).await;
+        }
+    }
+
+    async fn publish_event(&self, event: Value) {
         // Publish replay watermarks only after persistence has stopped waiting.
         // 持久化等待结束后才推进回放水位，避免新观察者提前终结或跳过尚未发布的事件。
         let mut replay = self.replay.lock().await;
+        let mut final_result = if terminal_event(&event) { Some(self.result.lock().await) } else { None };
         replay.sequence = event["eventSequence"].as_u64().unwrap();
         if event["type"] == "reply_anchor" {
             // A new reply changes only replay/display ownership; the durable task journal keeps earlier receipts.
@@ -469,8 +543,8 @@ impl RequestRun {
         }
         // Publish the final reply before waking either HTTP reader; emit/finish cannot leave a lost wakeup.
         // 唤醒 HTTP 读取者前发布最终结果；emit/finish 之间不能出现漏唤醒窗口。
-        if terminal_event(&event) {
-            *self.result.lock().await = Some(event.clone());
+        if let Some(result) = final_result.as_mut() {
+            **result = Some(event.clone());
             *self.finished_at.lock().unwrap() = Some(Instant::now());
             self.finished.store(true, Ordering::Release);
         }
@@ -557,12 +631,7 @@ impl RequestRun {
         })
     }
 
-    /// Auxiliary model work shares admission without creating a task, stream or execution journal.
-    /// 辅助模型请求复用准入，不创建任务、公开消息流或执行账本。
-    pub(super) fn auxiliary(conversation: &str) -> Result<Arc<Self>, GatewayError> {
-        Self::auxiliary_with_capacity(conversation, 16)
-    }
-
+    #[cfg(test)]
     fn auxiliary_with_capacity(conversation: &str, capacity: usize) -> Result<Arc<Self>, GatewayError> {
         let (cancellation, _) = watch::channel(false);
         let (events, _) = broadcast::channel(capacity);
@@ -584,6 +653,7 @@ impl RequestRun {
             cancellation_key,
             events,
             emission: Default::default(),
+            stream_owner: Default::default(),
             replay: Default::default(),
             finished: AtomicBool::new(false),
             finished_at: Default::default(),
@@ -979,6 +1049,7 @@ impl GatewayRuntime {
             steering: watch::channel(0).0,
             events,
             emission: Default::default(),
+            stream_owner: Default::default(),
             native_cancellation,
             cancellation_key,
             // The ledger high-water includes every published event and survives a new execution attempt.
@@ -995,6 +1066,7 @@ impl GatewayRuntime {
             is_background_recovery: AtomicBool::new(background),
             recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         });
+        let _ = run.stream_owner.set(Arc::downgrade(&run));
         self.task_runs
             .lock()
             .map_err(|_| GatewayError::new("TASK_RUN_LOCK_FAILED", "任务执行者登记失败。", 500))?
@@ -1185,6 +1257,7 @@ impl GatewayRuntime {
             cancellation_key,
             events,
             emission: Default::default(),
+            stream_owner: Default::default(),
             replay: Mutex::new(ReplayState { sequence:task.event_sequence, ..Default::default() }),
             finished: AtomicBool::new(false),
             finished_at: Default::default(),
@@ -1197,6 +1270,7 @@ impl GatewayRuntime {
             is_background_recovery: AtomicBool::new(background),
             recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         });
+        let _ = run.stream_owner.set(Arc::downgrade(&run));
         let mut runs = self.task_runs.lock().map_err(|_| {
             GatewayError::new("TASK_RUN_LOCK_FAILED", "子任务执行者登记失败。", 503)
         })?;
@@ -1764,6 +1838,7 @@ mod approval_tests {
         )
         .unwrap();
         Arc::get_mut(&mut run).unwrap().journal = Some(journal);
+        let _ = run.stream_owner.set(Arc::downgrade(&run));
         run
     }
 
@@ -1931,6 +2006,7 @@ mod approval_tests {
         let text = "金色 🏰\n\0".repeat(4000);
         run.emit(json!({"type":"text_delta","segmentId":segment,"delta":text})).await;
         run.emit(json!({"type":"reasoning_delta","segmentId":segment,"delta":"saved visible reasoning"})).await;
+        run.emit(json!({"type":"task_progress","phase":"working"})).await;
         let committed = journal.repository().read_events(journal.task_id(),0,512).unwrap();
         let mut published_text = String::new(); let mut first_delta = None;
         while let Ok(event) = wire.try_recv() {
@@ -1960,6 +2036,138 @@ mod approval_tests {
         journal.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_batch_commits_sequential_deltas_together_and_terminal_drains_in_order() {
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let mut wire = run.events.subscribe();
+        run.emit(json!({"type":"text_delta","delta":"first"})).await;
+        let first = wire.recv().await.unwrap();
+        let initial_batches = journal.committed_event_batches();
+        for index in 0..12 {
+            run.emit(json!({"type":"text_delta","delta":format!("-{index}")})).await;
+        }
+        assert_eq!(run.published_stream_sequence().await, first["eventSequence"].as_u64().unwrap());
+        assert!(wire.try_recv().is_err(), "queued bytes are not a published promise");
+        assert_eq!(journal.pending_event_ids().len(), 12);
+        let ids = journal.pending_event_ids();
+        run.finish(json!({"type":"completed","content":"first-0-1-2-3-4-5-6-7-8-9-10-11"})).await;
+        assert_eq!(journal.committed_event_batches() - initial_batches, 1,
+            "sequential provider emits and the terminal share one actual repository transaction");
+        let saved = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
+        let mut previous = first["eventSequence"].as_u64().unwrap();
+        for index in 0..13 {
+            let event = wire.recv().await.unwrap();
+            previous += 1;
+            assert_eq!(event["eventSequence"], previous);
+            let stored = saved.iter().find(|saved| saved.payload["eventSequence"] == previous).unwrap();
+            if index < 12 { assert_eq!(stored.event_id, ids[index]); }
+            assert_eq!(terminal_event(&event), index == 12);
+        }
+        assert_eq!(run.recovery(0).await.unwrap().through, previous);
+        run.emit(json!({"type":"text_delta","delta":"must not follow completion"})).await;
+        assert!(wire.try_recv().is_err());
+        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_batch_cancel_keeps_original_ids_and_hides_uncommitted_reconnect_watermarks() {
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let mut wire = run.events.subscribe();
+        run.emit(json!({"type":"text_delta","delta":"saved"})).await;
+        let first = wire.recv().await.unwrap();
+        let through = first["eventSequence"].as_u64().unwrap();
+        let blocker = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        run.emit(json!({"type":"reasoning_delta","delta":"known reason"})).await;
+        run.emit(json!({"type":"text_delta","delta":" tail 🏰"})).await;
+        let ids = journal.pending_event_ids();
+        assert_eq!(ids.len(), 2);
+        run.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while run.emission.try_lock().is_ok() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let recovery = run.recovery(0).await.unwrap();
+        assert_eq!(recovery.through, through);
+        assert!(wire.try_recv().is_err());
+        assert!(!run.finished.load(Ordering::Acquire));
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        for (index, id) in ids.iter().enumerate() {
+            let event = tokio::time::timeout(Duration::from_secs(5), wire.recv()).await.unwrap().unwrap();
+            assert_eq!(event["eventSequence"], through + index as u64 + 1);
+            let committed = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
+            let stored = committed.iter().filter(|saved| saved.event_id == *id).collect::<Vec<_>>();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].payload["delta"], event["delta"]);
+        }
+        let task = journal.load_current().unwrap();
+        journal.repository().control(journal.task_id(), task.version,
+            crate::storage::task_repository::TaskControl::Pause).unwrap();
+        journal.finish(TaskState::Paused, Some("fixture-paused")).await.unwrap();
+        run.finish(json!({"type":"interrupted","content":"saved tail 🏰"})).await;
+        assert!(terminal_event(&wire.recv().await.unwrap()));
+        assert!(run.finished.load(Ordering::Acquire));
+        assert!(journal.repository().operations(journal.task_id()).unwrap().is_empty());
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_batch_aborted_barrier_preserves_accepted_event_until_owned_drain() {
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let mut wire = run.events.subscribe();
+        let blocker = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let operation = run.clone();
+        let emitting = tokio::spawn(async move {
+            operation.emit(json!({"type":"text_delta","delta":"accepted before disconnect"})).await;
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while journal.pending_event_ids().is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let ids = journal.pending_event_ids();
+        emitting.abort();
+        assert!(emitting.await.unwrap_err().is_cancelled());
+        assert_eq!(run.published_stream_sequence().await, 0);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        let event = tokio::time::timeout(Duration::from_secs(5), wire.recv()).await.unwrap().unwrap();
+        assert_eq!(event["delta"], "accepted before disconnect");
+        let saved = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
+        assert_eq!(saved.iter().filter(|saved| saved.event_id == ids[0]).count(), 1);
+        run.finish(json!({"type":"completed","content":"accepted before disconnect"})).await;
+        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_batch_timer_owns_the_last_delta_without_a_followup_event() {
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap().clone();
+        let mut wire = run.events.subscribe();
+        run.emit(json!({"type":"text_delta","delta":"first"})).await;
+        let _ = wire.recv().await.unwrap();
+        run.emit(json!({"type":"text_delta","delta":" retained tail"})).await;
+        drop(run);
+        let event = tokio::time::timeout(Duration::from_secs(5), wire.recv()).await.unwrap().unwrap();
+        assert_eq!(event["delta"], " retained tail");
+        let saved = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
+        assert!(saved.iter().any(|saved| saved.payload["delta"] == event["delta"]));
+        journal.finish(TaskState::Partial, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(journal); drop(runtime); std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

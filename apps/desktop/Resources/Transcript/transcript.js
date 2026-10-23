@@ -192,6 +192,7 @@
     // 正文选区保留旧快照时，仅更新页脚元信息；切换语言仍使用最新结束状态。
     entry.timeMetadata = {
       role: message.role, streaming: message.streaming, status: message.status,
+      executionPhase: message.executionPhase, generationTimingState: message.generationTimingState,
       createdAtMs: message.createdAtMs, endRecordedAtMs: message.endRecordedAtMs
     };
     const english = document.documentElement.lang === 'en', separator = english ? ': ' : '：';
@@ -200,7 +201,12 @@
     const value = user ? message.createdAtMs : message.endRecordedAtMs;
     const formatted = streaming ? uiStrings.timeNotRecorded : formatMessageTime(value);
     const label = user ? uiStrings.messageSentAt : message.status === 'completed' ? uiStrings.replyCompletedAt : uiStrings.replyEndedAt;
-    const text = streaming ? uiStrings.generating : label + separator + formatted;
+    const phases = english
+      ? {saving:'Saving…',reviewing:'Verifying…','waiting-verification':'Waiting for verification…',recovering:'Recovering…','waiting-config':'Waiting for configuration…'}
+      : {saving:'正在保存',reviewing:'正在核验','waiting-verification':'等待核验',recovering:'正在恢复','waiting-config':'等待配置'};
+    const text = streaming ? phases[message.executionPhase]
+      || (message.generationTimingState === 'paused' ? (english ? 'Waiting for task status…' : '等待任务状态') : uiStrings.generating)
+      : label + separator + formatted;
     // The persistent footer is outside copied content; unknown end times must never be inferred from duration.
     // 时间常显在操作行，不进入复制正文；未知结束时刻不能根据用时推算。
     if (entry.time.textContent !== text) entry.time.textContent = text;
@@ -209,15 +215,43 @@
       if (entry.time.getAttribute('datetime') !== dateTime) entry.time.setAttribute('datetime', dateTime);
     } else if (entry.time.hasAttribute('datetime')) entry.time.removeAttribute('datetime');
   }
+  function retainMessageState(entry, message, revision) {
+    if (Number.isSafeInteger(revision) && Number.isSafeInteger(entry.stateRevision) && revision < entry.stateRevision)
+      return entry.stateMetadata || message;
+    entry.stateMetadata = message;
+    entry.stateRevision = Number.isSafeInteger(revision) ? revision : null;
+    return message;
+  }
+  function updateMessageState(entry, message) {
+    if (!entry.mounted || !message) return;
+    updateElapsedState(entry, message);
+    updateMessageTime(entry, message);
+    // Final metadata must not infer an interrupted answer from body segments still awaiting layout.
+    // 终态元信息不根据尚待排版的旧正文分段，误判回复中断。
+    const mode = message.status === 'streaming' ? 'active' : message.status === 'completed' ? 'final' : 'partial';
+    setStatusText(entry, statusText(message, Array.isArray(message.assistantSegments) ? presentationFor(message) : {mode}));
+    const generating = message.streaming && message.generationTimingState !== 'paused';
+    const existingDot = entry.status.querySelector('.streaming-dot');
+    if (generating && !existingDot) {
+      const dot = document.createElement('span'); dot.className = 'streaming-dot';
+      dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot);
+    } else if (!generating) existingDot?.remove();
+    entry.retry.hidden = !message.canRetry;
+  }
+  function applyMessageState(command) {
+    if (command.conversationId !== conversationId || !command.message) return;
+    const entry = entries.get(String(command.message.id));
+    if (!entry) return;
+    updateMessageState(entry, retainMessageState(entry, command.message, command.revision));
+    synchronizeElapsedTimer();
+  }
   function localizeEntry(entry) {
     if (entry.mounted && entry.message) updateAttachments(entry, entry.message);
     if (!entry.mounted) return;
     localizeCopyButton(entry);
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
-      updateMessageTime(entry);
-      setStatusText(entry, statusText(entry.message));
-      refreshElapsedText(entry);
+      updateMessageState(entry, entry.stateMetadata || entry.message);
     }
     entry.status.querySelector('.streaming-dot')?.setAttribute('aria-label', uiStrings.generating);
     for (const row of entry.toolRows?.values() || []) localizeToolRow(row);
@@ -626,13 +660,12 @@
   function updateMessage(entry, message) {
     if (!entry.mounted) { entry.message = message; return; }
     const old = entry.message;
-    updateElapsedState(entry, message);
+    updateMessageState(entry, entry.stateMetadata || message);
     if (old && ['role', 'content', 'html', 'htmlStableLength', 'htmlStableBlocks', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'generationTimingState', 'generationClockId', 'presentationMode', 'createdAtMs', 'endRecordedAtMs', 'taskCompletionState']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length &&
       JSON.stringify(old.attachments || []) === JSON.stringify(message.attachments || [])) return;
     entry.message = message;
-    updateMessageTime(entry, message);
     const presentation = presentationFor(message); entry.presentation = presentation;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -664,11 +697,6 @@
       }
       patchBlocks(entry.body, message.html || '', message.htmlStableLength, message.htmlStableBlocks);
     }
-    setStatusText(entry, statusText(message, presentation));
-    const existingDot = entry.status.querySelector('.streaming-dot');
-    if (message.streaming && !existingDot) { const dot = document.createElement('span'); dot.className = 'streaming-dot'; dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot); }
-    else if (!message.streaming) existingDot?.remove();
-    entry.retry.hidden = !message.canRetry;
     entry.copy.hidden = !copiedMessage(message);
   }
   const FILE_ICON = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
@@ -994,7 +1022,8 @@
       for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
       for (const message of snapshot.messages) {
         const entry = entries.get(String(message.id));
-        if (entry?.mounted) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
+        if (entry) updateMessageState(entry, snapshot.stateMessageIds && !snapshot.stateMessageIds.has(String(message.id))
+          ? entry.stateMetadata || message : retainMessageState(entry, message, snapshot.revision));
       }
       synchronizeElapsedTimer(); updateJumpButton(); return;
     }
@@ -1011,7 +1040,10 @@
       const id = String(message.id);
       let entry = entries.get(id);
       if (!entry) { entry = createMessage(message); entries.set(id, entry); }
+      const state = snapshot.stateMessageIds && !snapshot.stateMessageIds.has(id)
+        ? entry.stateMetadata || message : retainMessageState(entry, message, snapshot.revision);
       if (entry.message !== message) { updateMessage(entry, message); if (entry.mounted) changedArticles.push(entry.article); }
+      else updateMessageState(entry, state);
       const expected = previous ? previous.nextSibling : messages.firstChild;
       if (expected !== entry.article) messages.insertBefore(entry.article, expected);
       if (searchingLoadedMessages && !entry.mounted) mountMessage(entry);
@@ -1053,7 +1085,7 @@
     for (const [id, message] of replacements) merged.set(id, message);
     const ordered = Array.isArray(messageOrder) ? messageOrder.map(id => merged.get(String(id))).filter(Boolean)
       : [...merged.values()];
-    applyTranscript({ ...snapshot, messages: ordered });
+    applyTranscript({ ...snapshot, messages: ordered, stateMessageIds: new Set(replacements.keys()) });
   }
 
   function requestEarlierHistory() {
@@ -1297,6 +1329,7 @@
     else if (command?.type === 'setAppearance') setAppearance(command);
     else if (command?.type === 'render') applyTranscript(command);
     else if (command?.type === 'renderPatch') applyTranscriptPatch(command);
+    else if (command?.type === 'messageState') applyMessageState(command);
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'historyAvailability' && command.conversationId === conversationId) {
       historyHasOlder = command.hasOlder === true; historyHasNewer = command.hasNewer === true;

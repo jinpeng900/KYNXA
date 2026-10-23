@@ -11,7 +11,8 @@ public partial class App
         var user = Message(chat, "user", "TIMING_USER_UNCHANGED");
         var reply = Message(chat, "assistant", "", "streaming");
         _transcript.ShowConversation(chat, [user, reply]);
-        await WaitAsync("document.querySelectorAll('#messages > article').length === 2", "waiting reply renders before generation starts");
+        await WaitAsync("document.querySelectorAll('#messages > article').length === 2 && !!document.querySelector('.assistant .message-elapsed')",
+            "waiting reply mounts its timing control before generation starts");
         Check(await EvalAsync<bool>("document.querySelector('.assistant .message-elapsed').hidden && transcriptState().liveElapsedCount === 0 && !transcriptState().elapsedTimerActive"), "preparation shows no elapsed clock or interval");
         Check(await EvalAsync<bool>("KynxaMessagePresentation.elapsedText(0, {}, {live:true}) === '用时 0秒' && KynxaMessagePresentation.elapsedText(0, {}, {known:true}) === '用时 0秒' && KynxaMessagePresentation.elapsedText(0, {}) === '' && KynxaMessagePresentation.elapsedText(-1, {}, {live:true}) === ''"), "known zero is visible while unknown legacy final duration stays hidden");
 
@@ -79,6 +80,8 @@ public partial class App
         reply.Message.DurationMs = 3200;
         reply.Refresh();
         await WaitAsync("transcriptState().pending && !transcriptState().elapsedTimerActive && transcriptState().liveElapsedCount === 0 && document.querySelector('.assistant .message-elapsed').textContent === '用时 4秒'", "the canonical final total arrives even while a selection defers body convergence");
+        Check(await EvalAsync<bool>("!document.querySelector('.assistant .streaming-dot') && !document.querySelector('.assistant .message-time').textContent.includes('正在生成')"),
+            "terminal state clears both generation indicators while selected prose remains frozen");
         Check(await EvalAsync<bool>("getSelection().toString() === 'TIMING_FIRST' && document.querySelector('[data-segment-id=timing-first] .message-body').firstChild === window.__timingStableBody && document.querySelectorAll('.assistant-segment').length === 2"), "terminal timing update does not replace selected intermediate prose");
         Check(await EvalAsync<bool>("document.querySelector('.assistant .message-elapsed').dataset.mode === 'final' && document.querySelector('.assistant .message-elapsed').textContent === '用时 4秒'"), "successful final duration comes from the canonical gateway total");
         await Task.Delay(1100);
@@ -155,6 +158,7 @@ public partial class App
         laterReply.Refresh();
         await WaitAsync("document.querySelectorAll('.assistant .message-elapsed')[0].dataset.mode === 'final' && document.querySelectorAll('.assistant .message-elapsed')[1].dataset.mode === 'live' && !document.querySelectorAll('.assistant .message-elapsed')[1].hidden && transcriptState().liveElapsedCount === 1", "a later tool-only reply shows its own live clock while the first reply retains its total");
 
+        await CheckTerminalStateBeforeBodyAsync();
         await EvalAsync<bool>("""
             (() => {
               window.__legacyTimingBase = {id:'legacy-timing-reply',role:'assistant',
@@ -174,5 +178,56 @@ public partial class App
                 && !transcriptState().elapsedTimerActive;
             })()
             """), "an older final snapshot without a total preserves its established clock");
+    }
+
+    private async Task CheckTerminalStateBeforeBodyAsync()
+    {
+        var chat = Guid.NewGuid();
+        var reply = Message(chat, "assistant", "BODY_BEFORE_TERMINAL", "streaming");
+        reply.Message.StartGenerationTiming();
+        await EvalAsync<bool>("""
+            (() => {
+              window.__stateRaceSnapshot = null;
+              window.__stateRaceListener = event => {
+                if ((event.data.type === 'render' || event.data.type === 'renderPatch') && event.data.messages?.some(row => row.content === 'BODY_BEFORE_TERMINAL'))
+                  window.__stateRaceSnapshot = event.data;
+              };
+              chrome.webview.addEventListener('message', __stateRaceListener); return true;
+            })()
+            """);
+        _transcript.ShowConversation(chat, [reply]);
+        await WaitAsync("!!window.__stateRaceSnapshot && !!document.querySelector('.assistant .streaming-dot')", "the terminal-race fixture starts with a rendered live reply");
+        var rendering = typeof(KYNXA_Desktop.Controls.ConversationTranscript).GetField("_rendering",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        // Hold body work like an outstanding Markdown/cache operation; state must still reach the browser.
+        // 模拟尚未完成的正文排版或缓存操作；状态仍须先抵达浏览器。
+        rendering.SetValue(_transcript, true);
+        try
+        {
+            reply.Message.ExecutionPhase = "saving";
+            reply.Message.ApplyGenerationTiming(4321, false); reply.Refresh();
+            await WaitAsync("document.querySelector('.assistant .message-time').textContent === '正在保存' && !transcriptState().elapsedTimerActive",
+                "a frozen execution clock reports the real saving phase without claiming completion");
+            Check(reply.Message.Status == "streaming", "saving does not turn an unfinished request into a completed reply");
+            reply.Message.Content = "BODY_AFTER_TERMINAL";
+            reply.Message.Status = "completed"; reply.Message.DurationMs = 5000; reply.Message.ExecutionPhase = "";
+            MessageTimePresentation.RecordEnd(chat, reply.Message, DateTimeOffset.UtcNow); reply.Refresh();
+            await WaitAsync("document.querySelector('.assistant .message-time').textContent.startsWith('回复完成时间') && !document.querySelector('.assistant .streaming-dot') && !transcriptState().elapsedTimerActive",
+                "authoritative terminal metadata stops generation before blocked body work can finish");
+            Check(await EvalAsync<bool>("__transcriptSmoke.bodyText().includes('BODY_BEFORE_TERMINAL') && !__transcriptSmoke.bodyText().includes('BODY_AFTER_TERMINAL')"),
+                "terminal controls update without prematurely replacing unfinished body layout");
+            await EvalAsync<bool>("(() => { applyTranscriptPatch({...__stateRaceSnapshot, type:'renderPatch'}); return true; })()");
+            Check(await EvalAsync<bool>("!document.querySelector('.assistant .streaming-dot') && document.querySelector('.assistant .message-time').textContent.startsWith('回复完成时间')"),
+                "an older in-flight body snapshot cannot restore the generating state");
+        }
+        finally
+        {
+            rendering.SetValue(_transcript, false);
+            await EvalAsync<bool>("(() => { chrome.webview.removeEventListener('message', __stateRaceListener); return true; })()");
+            await (Task)typeof(KYNXA_Desktop.Controls.ConversationTranscript).GetMethod("FlushAsync",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(_transcript, null)!;
+        }
+        await WaitAsync("__transcriptSmoke.bodyText().includes('BODY_AFTER_TERMINAL') && !document.querySelector('.assistant .streaming-dot')",
+            "the complete final body converges after the held layout work resumes");
     }
 }

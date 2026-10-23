@@ -32,6 +32,8 @@ public sealed partial class ShellPage
         public Dictionary<string, (StringBuilder Content, StringBuilder Reasoning)> SegmentText { get; } = new(StringComparer.Ordinal);
         public HashSet<string> DirtySegments { get; } = new(StringComparer.Ordinal);
         public Stopwatch ThinkingTime { get; } = new();
+        public long LastTextFlushTimestamp { get; set; }
+        public Guid LastTextFlushMessageId { get; set; }
         public bool Dirty { get; set; }
         public bool Started { get; set; }
         public bool UserPersisted { get; set; }
@@ -118,16 +120,36 @@ public sealed partial class ShellPage
     private void FlushReply(PendingChatReply pending, bool final = false)
     {
         if (!pending.Dirty && !final) return;
+        bool textChanged = pending.Message.Content.Length != pending.Content.Length
+            || pending.Message.Reasoning.Length != pending.Reasoning.Length;
+        // Use a 120 ms snapshot interval above 256 KiB of growing text; anchors and final state flush immediately.
+        // 增长中的文本超过 256 KiB 时按 120 毫秒合并快照；新回复锚和终态立即刷新。
+        if (!final && textChanged && (long)pending.Content.Length + pending.Reasoning.Length >= 128 * 1024
+            && pending.LastTextFlushMessageId == pending.Message.Id && pending.LastTextFlushTimestamp != 0
+            && Stopwatch.GetElapsedTime(pending.LastTextFlushTimestamp).TotalMilliseconds < 120) return;
         foreach (string id in pending.DirtySegments)
         {
             int index = pending.Message.AssistantSegments.FindIndex(segment => segment.Id == id);
             if (index >= 0 && pending.SegmentText.TryGetValue(id, out var text))
-                pending.Message.AssistantSegments[index] = pending.Message.AssistantSegments[index] with
-                { Content = text.Content.ToString(), Reasoning = text.Reasoning.ToString() };
+            {
+                var segment = pending.Message.AssistantSegments[index];
+                pending.Message.AssistantSegments[index] = segment with
+                {
+                    Content = segment.Content.Length == text.Content.Length ? segment.Content : text.Content.ToString(),
+                    Reasoning = segment.Reasoning.Length == text.Reasoning.Length ? segment.Reasoning : text.Reasoning.ToString()
+                };
+            }
         }
         pending.DirtySegments.Clear();
-        pending.Message.Content = pending.Content.ToString();
-        pending.Message.Reasoning = pending.Reasoning.ToString();
+        // Absolute replacements update Message too; unchanged channels reuse their existing strings.
+        // 绝对快照同步更新 Message；未增长的通道直接复用已有字符串。
+        if (pending.Message.Content.Length != pending.Content.Length) pending.Message.Content = pending.Content.ToString();
+        if (pending.Message.Reasoning.Length != pending.Reasoning.Length) pending.Message.Reasoning = pending.Reasoning.ToString();
+        if (textChanged)
+        {
+            pending.LastTextFlushTimestamp = Stopwatch.GetTimestamp();
+            pending.LastTextFlushMessageId = pending.Message.Id;
+        }
         pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
         pending.Dirty = false;
@@ -201,6 +223,11 @@ public sealed partial class ShellPage
                                 if (pending.StopRequested) await StopPendingReplyAsync(pending);
                                 break;
                             case "task_progress":
+                                if (update.TaskId is null || update.TaskId == pending.TaskId)
+                                {
+                                    pending.Message.ExecutionPhase = update.Phase ?? string.Empty;
+                                    pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
+                                }
                                 if (update.Phase == "waiting-verification") _ = RefreshUnknownOutcomeAsync(pending.ConversationId);
                                 TaskPanel.NotifyChanged(pending.ConversationId);
                                 continue;
@@ -242,12 +269,14 @@ public sealed partial class ShellPage
                                 }
                                 break;
                             case "reasoning_delta":
+                                pending.Message.ExecutionPhase = string.Empty;
                                 StartReplyTimer(pending);
                                 pending.ThinkingTime.Start();
                                 pending.Reasoning.Append(update.Delta);
                                 AppendSegmentDelta(pending, update, reasoning: true);
                                 break;
                             case "text_delta":
+                                pending.Message.ExecutionPhase = string.Empty;
                                 StartReplyTimer(pending);
                                 pending.ThinkingTime.Stop();
                                 pending.Content.Append(update.Delta);
@@ -263,16 +292,22 @@ public sealed partial class ShellPage
                             case "content_snapshot":
                                 // Reattached streams publish absolute snapshots, including an intentionally empty current reply.
                                 // 重附事件流给出绝对快照；当前回复为空也应覆盖旧投影，避免重复文字或遗留上一段内容。
-                                pending.Content.Clear(); pending.Content.Append(update.Content);
-                                pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning);
+                                AcceptReplyTextSnapshot(pending, update.Content, update.Reasoning);
                                 break;
                             case "completed":
                             case "interrupted":
                             case "error":
                                 pending.ThinkingTime.Stop();
                                 if (!string.IsNullOrEmpty(update.Content) || pending.Content.Length == 0)
-                                { pending.Content.Clear(); pending.Content.Append(update.Content); }
-                                if (update.Reasoning is not null) { pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning); }
+                                {
+                                    pending.Message.Content = update.Content ?? string.Empty;
+                                    pending.Content.Clear(); pending.Content.Append(pending.Message.Content);
+                                }
+                                if (update.Reasoning is not null)
+                                {
+                                    pending.Message.Reasoning = update.Reasoning;
+                                    pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning);
+                                }
                                 if (update.AssistantSegments is { } segments && (segments.Any() || pending.Message.AssistantSegments.Count == 0))
                                 {
                                     pending.Message.AssistantSegments.Clear();
@@ -281,6 +316,8 @@ public sealed partial class ShellPage
                                     pending.DirtySegments.Clear();
                                 }
                                 pending.Message.Status = update.Type == "completed" ? "completed" : update.Type;
+                                pending.Message.ExecutionPhase = string.Empty;
+                                SettleReplySegments(pending);
                                 pending.Message.Error = update.Error ?? string.Empty;
                                 pending.Message.DurationMs = update.DurationMs;
                                 pending.Message.TaskCompletionState = ChatMessageState.ReadTaskCompletion(update.TaskCompletion);
@@ -291,7 +328,6 @@ public sealed partial class ShellPage
                                 }
                                 MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                                 FlushReply(pending, final: true);
-                                await CacheReplyPresentationAsync(pending, maintainHistory: false);
                                 break;
                         }
                         pending.Dirty = true;
@@ -330,6 +366,7 @@ public sealed partial class ShellPage
         }
         finally
         {
+            bool cachePresentation = false;
             try
             {
                 CloseReplyApprovals(pending);
@@ -341,18 +378,13 @@ public sealed partial class ShellPage
                     pending.Message.Status = "interrupted";
                     pending.Message.Error = UiText.Get("连接已结束，回复尚未完成。");
                 }
-                if (pending.Message.Status != "completed")
-                {
-                    var segments = pending.Message.AssistantSegments;
-                    for (int index = 0; index < segments.Count; index++)
-                        if (segments[index].Status == "streaming") segments[index] = segments[index] with { Status = "interrupted" };
-                }
+                SettleReplySegments(pending);
                 if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
                 {
                     MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                     FlushReply(pending, final: true);
                     _pendingReplies.Remove(pending.ConversationId);
-                    await CacheReplyPresentationAsync(pending, maintainHistory: true);
+                    cachePresentation = true;
                 }
             }
             finally
@@ -375,15 +407,18 @@ public sealed partial class ShellPage
                         _ = DrainQueuedPromptsAsync(pending.ConversationId);
                 }
             }
+            // Formal terminal state releases execution first; display-cache maintenance cannot hold the queue.
+            // 正式终态先释放执行状态；展示缓存维护不能拖住发送和后续队列。
+            if (cachePresentation) await CacheReplyPresentationAsync(pending);
         }
     }
 
-    private async Task CacheReplyPresentationAsync(PendingChatReply pending, bool maintainHistory)
+    private async Task CacheReplyPresentationAsync(PendingChatReply pending)
     {
         try
         {
             await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
-            if (maintainHistory) await MaintainHistoryAfterReplyAsync(pending.ConversationId);
+            await MaintainHistoryAfterReplyAsync(pending.ConversationId);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException
             or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException)
@@ -428,6 +463,23 @@ public sealed partial class ShellPage
         // Start timing at the first model segment, not transport acceptance or later rounds.
         // 首个模型段开始计时；接受传输不启表，后续轮次不重置。
         pending.Message.StartGenerationTiming();
+    }
+
+    private static void AcceptReplyTextSnapshot(PendingChatReply pending, string? content, string? reasoning)
+    {
+        pending.Message.Content = content ?? string.Empty;
+        pending.Message.Reasoning = reasoning ?? string.Empty;
+        pending.Content.Clear(); pending.Content.Append(pending.Message.Content);
+        pending.Reasoning.Clear(); pending.Reasoning.Append(pending.Message.Reasoning);
+    }
+
+    private static void SettleReplySegments(PendingChatReply pending)
+    {
+        if (pending.Message.Status == "streaming") return;
+        var segments = pending.Message.AssistantSegments;
+        for (int index = 0; index < segments.Count; index++)
+            if (segments[index].Status == "streaming")
+                segments[index] = segments[index] with { Status = pending.Message.Status == "completed" ? "completed" : "interrupted" };
     }
 
     private static void AcceptAssistantSegment(PendingChatReply pending, AssistantSegment segment)
@@ -493,12 +545,9 @@ public sealed partial class ShellPage
     {
         if (!_pendingReplies.Remove(chatId, out var pending)) return;
         pending.ThinkingTime.Stop();
-        pending.Message.Content = pending.Content.ToString();
-        pending.Message.Reasoning = pending.Reasoning.ToString();
-        pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Message.Status = "interrupted";
         MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
-        pending.Presentation.Refresh();
+        FlushReply(pending, final: true);
         pending.Cancellation.Cancel();
         RenderProjects();
     }

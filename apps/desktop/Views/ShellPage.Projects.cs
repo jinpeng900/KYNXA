@@ -50,8 +50,12 @@ public sealed partial class ShellPage
         {
             var catalog = await _projectStore.LoadMetadataAsync();
             if (_projectViewClosed) return;
+            // Loading metadata cannot discard a chat draft created while startup was waiting on the gateway.
+            // 启动等待网关时新建的聊天草稿仍属于用户，目录返回不能丢掉它及当前对象身份。
+            var drafts = _standaloneChats.Where(chat => !chat.IsPersisted
+                && !catalog.Chats.Any(saved => saved.Id == chat.Id)).ToArray();
             _projects = catalog.Projects;
-            _standaloneChats = catalog.Chats;
+            _standaloneChats = drafts.Concat(catalog.Chats).ToList();
             RebuildStandaloneRows();
             _projectsReady = true;
             RenderProjects();

@@ -471,7 +471,8 @@ public partial class App : Application
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= 980 && NativeUi.IsVisible(Element<Button>("HistorySearchButton")),
                 "the initialized fixture has a realized wide sidebar before search automation");
-            if (_promptSendOnly || _promptQueueOnly || _steeringTimerOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
+            if (_promptSendOnly || _steeringTimerOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
+            else if (_promptQueueOnly) await CheckStartupDraftIdentityAsync();
             else await CheckInitialHomeAsync();
             await WaitAsync(() => _shell.IsLoaded && _shell.XamlRoot is not null && _gateway.CatalogReads == 1 &&
                 (bool)typeof(ShellPage).GetField("_projectsReady", PrivateInstance)!.GetValue(_shell)! && _gateway.ModelReads >= 1 &&

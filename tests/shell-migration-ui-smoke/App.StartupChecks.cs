@@ -1,6 +1,7 @@
 using System.Text.Json;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
+using KYNXA_Desktop.Models.UI;
 using MemoryUiSmoke;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -13,6 +14,37 @@ public partial class App
 {
     private sealed record StartupHomeGeometry(Rect Composer, Rect Prompt, Rect Send, Rect Logo,
         double EditorHeight, double SurfaceHeight, bool FooterVisible);
+
+    private async Task CheckStartupDraftIdentityAsync()
+    {
+        try
+        {
+            await WaitAsync(() => _gateway.CatalogReads == 1 && NativeUi.IsVisible(Element<Button>("ChatModeButton")),
+                "the focused startup check holds the first catalog response");
+            Check(!StartupProjectsReady && _gateway.Writes == 0, "the focused startup check begins before metadata is accepted");
+            NativeUi.Invoke(Element<Button>("ChatModeButton"));
+            await WaitAsync(() => _shell.ViewModel.IsChatMode, "Chat mode is usable before the catalog returns");
+            NativeUi.Invoke(Element<Button>("NewChatButton"));
+            await WaitAsync(() => ActiveId is not null, "the real New Chat action creates a draft while startup is waiting");
+            const string draft = "STARTUP_SYNTHETIC_CHAT_DRAFT";
+            NativeUi.SetText(Prompt, draft);
+            Guid chatId = ActiveId!.Value;
+            var chat = ShellField<List<ProjectChatState>>("_standaloneChats").Single(item => item.Id == chatId);
+            Check(!chat.IsPersisted && Prompt.Text == draft, "the loading-time draft remains local and editable");
+            _gateway.ReleaseInitialCatalog();
+            await WaitAsync(() => StartupProjectsReady, "the held catalog completes initialization");
+            Check(ActiveId == chatId && Prompt.Text == draft &&
+                ShellField<List<ProjectChatState>>("_standaloneChats").Any(item => ReferenceEquals(item, chat)),
+                "catalog completion retains the same draft object, stable ID and exact user text");
+            NativeUi.SetText(Prompt, string.Empty);
+            NativeUi.Invoke(Element<Button>("WorkModeButton"));
+            await WaitAsync(() => !_shell.ViewModel.IsChatMode && ActiveId is null && Prompt.Text.Length == 0,
+                "the focused startup check restores the empty Work mode");
+            Check(_gateway.CatalogReads == 1 && _gateway.Writes == 0,
+                "checking the startup draft identity makes no catalog or conversation writes");
+        }
+        finally { _gateway.ReleaseInitialCatalog(); }
+    }
 
     private async Task CheckInitialHomeAsync()
     {

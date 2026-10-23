@@ -33,6 +33,8 @@ public sealed class ChatMessageState
     // 分开展示任务结果和传输状态；界面投影不能决定正式结果。
     [JsonIgnore]
     public string TaskCompletionState { get; set; } = string.Empty;
+    [JsonIgnore]
+    public string ExecutionPhase { get; set; } = string.Empty;
 
     public static string ReadTaskCompletion(JsonElement? value)
     {

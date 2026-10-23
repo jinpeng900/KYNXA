@@ -182,13 +182,19 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
     if state.native_stop_cycle.load(Ordering::Acquire) {
         let current_guidance = body["messages"].as_array().into_iter().flatten()
             .filter_map(|message| message["content"].as_str())
-            .any(|content| content.contains("现在停止这个任务，取消剩余时长与要求"));
+            .any(|content| content.contains("交付已有成果，结束不要再检查"));
         let first_acknowledgement = current_guidance
             && state.native_stop_emissions.fetch_add(1, Ordering::AcqRel) == 0;
-        let content = if first_acknowledgement { "已停止，不再执行任何工具，保留原文件和成功回执。" }
-            else { "已停止。\n\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"用户停止\",\"unmet\":[],\"stop\":true}</kynxa_task>" };
+        let content = if first_acknowledgement || !current_guidance {
+            "现有文件已保留，先核对原验收。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"旧目标尚待核对\",\"unmet\":[]}</kynxa_task>"
+        } else {
+            "交付已有文件，未核验项仍保留，不再执行检查。\n<kynxa_task>{\"state\":\"complete\",\"met\":\"invalid old evidence\",\"disposition\":\"deliver-existing\"}</kynxa_task>"
+        };
+        let call_id = if first_acknowledgement { "withdrawn-check-before-control" } else { "withdrawn-check-after-control" };
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant",
-            "content":content},"finish_reason":"stop"}],
+            "content":content,"tool_calls":[{"id":call_id,"type":"function","function":{
+                "name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.stat"),
+                "arguments":json!({"path":"annotated-result.txt"}).to_string()}}]},"finish_reason":"tool_calls"}],
             "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
     }
     if state.annotated_evidence_cycle.load(Ordering::Acquire) || state.dsml_review_cycle.load(Ordering::Acquire)
@@ -206,14 +212,17 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
         let native_review = state.native_review_cycle.load(Ordering::Acquire);
         let resume_generation = state.resume_generation.load(Ordering::Acquire);
         let resumed_call_id = format!("resume-stat-{resume_generation}");
+        let current_file_guidance = body["messages"].as_array().unwrap().iter().any(|message|
+            message["role"] == "user" && message["content"] == "继续核对原文件并保留全部成功回执。");
         if resume_generation == 2 && !has_receipt(&resumed_call_id)
-            && !body["messages"].as_array().unwrap().iter().any(|message|
-                message["role"] == "user" && message["content"] == "继续核对原文件并保留全部成功回执。") {
+            && !current_file_guidance {
             // Keep one real provider request in flight so guidance exercises cancellation and re-dispatch.
             // 留住一次真实供应商请求，让插话覆盖取消旧生成及重新派发的实际链路。
             state.resume_generation_gate.notified().await;
         }
-        let call = |id: &str, name: &str, arguments: Value| json!({"role":"assistant","content":"继续完成当前文件。",
+        let call = |id: &str, name: &str, arguments: Value| json!({"role":"assistant","content":if current_file_guidance {
+                "继续完成当前文件。\n<kynxa_task>{\"state\":\"continue\",\"next\":\"核对当前文件\",\"disposition\":\"continue\"}</kynxa_task>"
+            } else { "继续完成当前文件。" },
             "tool_calls":[{"id":id,"type":"function","function":{
                 "name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":arguments.to_string()}}]});
         let message = if is_completion_review_request(&body) {
@@ -233,6 +242,7 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
             let content = reply["content"].as_str().unwrap();
             let mut assessment: Value = serde_json::from_str(content.strip_prefix("<kynxa_task>").unwrap()
                 .strip_suffix("</kynxa_task>").unwrap()).unwrap();
+            if current_file_guidance { assessment["disposition"] = json!("continue"); }
             for item in assessment["met"].as_array_mut().unwrap() {
                 let references = item["evidence"].as_array().unwrap();
                 assert!(references.contains(&json!("annotated-write")) && references.contains(&json!("annotated-read")),
@@ -459,7 +469,7 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
     if state.steering_cycle.load(Ordering::Acquire) && is_completion_review_request(&body) {
         // Steered replies receive the real independent completion review, rather than another chat answer.
         // 被引导的回复仍经过真实独立完成审核；夹具按审核协议返回标记，不重复普通聊天正文。
-        return Json(json!({"id":"steering-review-fixture","choices":[{"index":0,"message":{"role":"assistant","content":"<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"The final guided answer is complete\"}</kynxa_task>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+        return Json(json!({"id":"steering-review-fixture","choices":[{"index":0,"message":{"role":"assistant","content":"<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"The final guided answer is complete\",\"disposition\":\"continue\"}</kynxa_task>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
     }
     if state.cancel
         && (!state.steering_cycle.load(Ordering::Acquire)
@@ -667,6 +677,12 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
     } else {
         json!({"role":"assistant","content":if state.tool {"已读取 native-file-body。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"已取得当前原文\"}</kynxa_task>"} else {"你好！"}})
     };
+    if state.steering_cycle.load(Ordering::Acquire) && body["messages"].as_array().into_iter().flatten()
+        .any(|message| message["role"] == "user" && matches!(message["content"].as_str(),
+            Some("更新方案：保留原范围，只解释结果，不再继续写入。" | "再补充：用简短结论回答，接着当前工作。"))) {
+        message["content"] = json!(format!("{}\n<kynxa_task>{{\"state\":\"complete\",\"disposition\":\"continue\"}}</kynxa_task>",
+            message["content"].as_str().unwrap_or("")));
+    }
     let has_calls = message["tool_calls"].is_array();
     if (state.cancel_summary.load(Ordering::Acquire) && state.calls.load(Ordering::Acquire) == 1)
         || (control_cycle && matches!(control_step, Some(1 | 4)))
@@ -2616,8 +2632,8 @@ async fn partial_http_resume_reopens_the_same_task_twice_and_steers_without_repl
     assert!(!guided["Content"].as_str().unwrap().is_empty());
     assert_eq!(repository.user_steering(&original.task_id).unwrap().len(), 1);
     assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
-    // A plain stop answer must reach directive review before any old acceptance readback is synthesized.
-    // 首轮只有停止正文时须先解释最新引导，不能按旧验收自动补读文件；下一轮正式停止后不再恢复。
+    // Missing control cannot authorize an old check; malformed completion evidence cannot erase valid delivery control.
+    // 未解释引导不能授权旧检查；完成证据格式错误也不能吞掉交付已有成果的有效控制。
     let previous = repository.load(&original.task_id).unwrap();
     let mut partial = previous.clone();
     partial.state = TaskState::Partial;
@@ -2643,7 +2659,7 @@ async fn partial_http_resume_reopens_the_same_task_twice_and_steers_without_repl
     let stopped = fixture.client.post(format!("{}/api/tasks/{}/steer", fixture.url, original.task_id))
         .json(&json!({"conversationId":fixture.conversation,"expectedVersion":repository.load(&original.task_id).unwrap().version,
             "userMessageId":stop_user,"replyMessageId":stop_reply,"action":"update",
-            "message":"现在停止这个任务，取消剩余时长与要求，保留已有文件和成功回执。"})).send().await.unwrap();
+            "message":"交付已有成果，结束不要再检查，保留原文件和成功回执，未验收的部分如实说明。"})).send().await.unwrap();
     assert!(stopped.status().is_success());
     fixture.provider.resume_generation_gate.notify_waiters();
     let result = tokio::time::timeout(Duration::from_secs(8), async {
@@ -2660,19 +2676,28 @@ async fn partial_http_resume_reopens_the_same_task_twice_and_steers_without_repl
     assert_eq!(result["type"], "completed");
     assert!(result["taskPauseError"].is_null());
     assert_eq!(result["taskCompletion"]["userStopped"], true);
+    assert_eq!(result["taskCompletion"]["userDirectedDelivery"], true);
+    assert_eq!(result["taskCompletion"]["completionState"], "partial");
     let stopped = fixture.messages().await.into_iter().find(|message| message["Id"] == stop_reply).unwrap();
     assert_eq!(stopped["ReplyTo"], stop_user);
+    assert_eq!(stopped["UserTaskDirective"]["userMessageId"], stop_user);
     assert_eq!(stopped["UserTaskDirective"]["stop"], true);
+    assert_eq!(stopped["UserTaskDirective"]["deliverExisting"], true);
     assert_eq!(stopped["UserTaskDirective"]["minimumActiveMs"], 0);
+    assert!(stopped["UserTaskDirective"]["requirements"].as_array().unwrap().is_empty());
+    assert!(!stopped["UserTaskDirective"]["suspendedRequirements"].as_array().unwrap().is_empty());
+    assert!(stopped["Content"].as_str().unwrap().contains("未核验项仍保留"));
     let calls_after_stop = fixture.provider.calls.load(Ordering::Acquire);
     assert_eq!(calls_after_stop, calls_before_stop_resume + 3,
-        "Only the superseded request, plain stop acknowledgement and directive review may run.");
+        "Only the superseded request, unresolved old check proposal and delivery-control interpretation may run.");
     assert_eq!(fixture.provider.native_stop_emissions.load(Ordering::Acquire), 2);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(fixture.provider.calls.load(Ordering::Acquire), calls_after_stop, "Paused stop must never re-enter the model loop.");
     let operations = repository.operations(&original.task_id).unwrap();
     assert_eq!(operations.len(), operations_before_stop.len(),
-        "An unparsed stop acknowledgement must not trigger a broker stat/read against old acceptance requirements.");
+        "Neither unresolved guidance nor accepted delivery control may dispatch an old stat/read against withdrawn acceptance.");
+    assert!(!operations.iter().any(|operation| operation.intent.tool_call_id.starts_with("withdrawn-check-")),
+        "Proposed checks must not enter the operation ledger before or after delivery control is applied.");
     for name in ["filesystem.write", "filesystem.read"] {
         assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name).count(), 1);
     }

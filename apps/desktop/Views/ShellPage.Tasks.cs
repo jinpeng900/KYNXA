@@ -313,8 +313,7 @@ public sealed partial class ShellPage
             }
             steeringAccepted = true;
             prompt.SteeringDeliveryUnconfirmed = false;
-            QueueFor(conversation).Remove(prompt);
-            RefreshPromptQueue();
+            ConsumeAcceptedGuidance(conversation, prompt);
             TaskPanel.NotifyChanged(conversation);
             if (receipt.Task.State == "paused")
             {

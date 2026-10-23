@@ -383,10 +383,14 @@ public partial class App : Application
             _metrics["loaded200Mounted"] = await EvalAsync<int>("window.transcriptState().mountedMessageCount");
             Check(requestedHistory == 0, "initial bottom navigation does not request earlier pages");
             await EvalAsync<bool>("(() => { window.__unchangedArticle = document.querySelector('article.message'); return true; })()");
+            long snapshotCapturesBefore = _transcript.SnapshotCaptureCount;
             rows[^1].Message.Content += " PATCH_VISIBLE";
             rows[^1].Refresh();
             await WaitAsync("__transcriptSmoke.bodyText().includes('PATCH_VISIBLE')", "changed message is rendered");
             Check(await EvalAsync<bool>("__renderCommands.at(-1).type === 'renderPatch' && __renderCommands.at(-1).count === 1"), "one changed row is transported instead of all 200 loaded messages");
+            Check(_transcript.SnapshotCaptureCount - snapshotCapturesBefore == 1,
+                "one changed row is projected without walking the other 199 cached messages");
+            _metrics["singleRowSnapshotCaptures"] = _transcript.SnapshotCaptureCount - snapshotCapturesBefore;
             Check(await EvalAsync<bool>("window.__unchangedArticle === document.querySelector('article.message')"), "unchanged article retains its DOM identity");
 
             await EvalAsync<bool>("(() => { window.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true})); window.scrollTo({top:0,behavior:'instant'}); return true; })()");

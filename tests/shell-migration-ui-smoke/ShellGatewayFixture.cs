@@ -20,6 +20,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private readonly Task _listening;
     private readonly List<Task> _responses = [];
     private readonly object _sync = new();
+    private readonly Dictionary<Guid, int> _recoverableReads = [];
     private readonly string _fixtureDirectory;
     private readonly string _fixtureDataDirectory;
     private TaskCompletionSource? _initialCatalogGate;
@@ -53,14 +54,27 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int StreamRequests => Volatile.Read(ref _streamRequests);
     public int ChromeOpenRequests => Volatile.Read(ref _chromeOpenRequests);
     public int ActivationRequests => Volatile.Read(ref _activationRequests);
+    public int RecoverableReads(Guid conversationId)
+    {
+        lock (_sync) return _recoverableReads.GetValueOrDefault(conversationId);
+    }
     public bool EnablePromptSends { get; set; }
     public TaskCompletionSource? PromptReplyGate { get; set; }
     public TaskDetailResponse? SteeringDetail { get; set; }
+    public TaskCompletionSource? NextSteeringDetailGate { get; set; }
+    public TaskRecord? UnknownOutcomeTask { get; set; }
     public TaskSteeringRequest? LastSteeringReplay { get; private set; }
     public List<TaskSteeringRequest> SteeringAttempts { get; } = [];
     public int SteeringDetailReads { get; private set; }
     public bool ConflictNextSteering { get; set; }
     public TaskCompletionSource? SteeringAcknowledgementGate { get; set; }
+    public bool FailNextSteeringAcknowledgement { get; set; }
+    public TaskCompletionSource? SteeringResumeGate { get; set; }
+    public int SteeringResumeRequests { get; private set; }
+    public ConversationHistoryPage? HistoryPageOverride { get; set; }
+    public TaskCompletionSource? HistoryPageEntered { get; set; }
+    public TaskCompletionSource? HistoryPageGate { get; set; }
+    public bool FailNextHistoryPage { get; set; }
     public bool EnableAttachmentImports { get; set; }
     public int AttachmentImports { get; private set; }
     public Guid? AttachmentMessageId { get; private set; }
@@ -200,11 +214,32 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         {
             object result;
             string path = context.Request.Url!.AbsolutePath;
+            if (context.Request.HttpMethod == "GET" && HistoryPageOverride is { } historyPage
+                && path == $"/api/conversations/{historyPage.ConversationId:D}/messages")
+            {
+                bool fail = FailNextHistoryPage;
+                FailNextHistoryPage = false;
+                var gate = HistoryPageGate;
+                HistoryPageEntered?.TrySetResult();
+                if (gate is not null) await gate.Task.WaitAsync(_shutdown.Token);
+                context.Response.ContentType = "application/json";
+                if (fail)
+                {
+                    context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+                    await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(
+                        new { code = "FIXTURE_HISTORY_UNAVAILABLE", error = "Synthetic delayed history failure." }), _shutdown.Token);
+                }
+                else await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(historyPage), _shutdown.Token);
+                return;
+            }
             if (context.Request.HttpMethod == "GET" && SteeringDetail is { } steering
                 && path == $"/api/tasks/{steering.Task.TaskId:D}"
                 && context.Request.QueryString["conversationId"] == steering.Task.Scope.ConversationId.ToString("D"))
             {
                 SteeringDetailReads++;
+                var detailGate = NextSteeringDetailGate;
+                NextSteeringDetailGate = null;
+                if (detailGate is not null) await detailGate.Task.WaitAsync(_shutdown.Token);
                 context.Response.ContentType = "application/json";
                 await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(steering,
                     new JsonSerializerOptions(JsonSerializerDefaults.Web)), _shutdown.Token);
@@ -218,6 +253,14 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 SteeringAttempts.Add(LastSteeringReplay!);
                 context.Response.ContentType = "application/json";
                 if (SteeringAcknowledgementGate is { } gate) await gate.Task.WaitAsync(_shutdown.Token);
+                if (FailNextSteeringAcknowledgement)
+                {
+                    FailNextSteeringAcknowledgement = false;
+                    context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+                    await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(
+                        new { code = "TASK_RUNTIME_UNAVAILABLE", error = "Fixture acknowledgement is unavailable." }), _shutdown.Token);
+                    return;
+                }
                 if (ConflictNextSteering)
                 {
                     ConflictNextSteering = false;
@@ -230,6 +273,21 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(
                     new TaskControlResponse(completedSteering.Task, [completedSteering.Task.TaskId],
                         ReplyMessageId: LastSteeringReplay!.ReplyMessageId), new JsonSerializerOptions(JsonSerializerDefaults.Web)), _shutdown.Token);
+                return;
+            }
+            if (context.Request.HttpMethod == "POST" && SteeringDetail is { } resumeSteering
+                && path == $"/api/tasks/{resumeSteering.Task.TaskId:D}/control")
+            {
+                var request = await JsonSerializer.DeserializeAsync<TaskControlRequest>(context.Request.InputStream,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web), _shutdown.Token);
+                if (request is null || request.Action != "resume" || request.ConversationId != resumeSteering.Task.Scope.ConversationId)
+                    throw new InvalidDataException("The queue fixture only accepts resuming its original task.");
+                SteeringResumeRequests++;
+                if (SteeringResumeGate is { } gate) await gate.Task.WaitAsync(_shutdown.Token);
+                context.Response.ContentType = "application/json";
+                context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+                await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(
+                    new { code = "TASK_RUNTIME_UNAVAILABLE", error = "Fixture observation fails after steering was accepted." }), _shutdown.Token);
                 return;
             }
             if (context.Request.HttpMethod == "POST" && path == "/api/retrieval/activate")
@@ -308,8 +366,13 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 result = new ConversationUsageSnapshot("conversation", conversation,
                     conversation == WorkChatId ? ProjectId : null, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, 0);
             }
-            else if (path is "/api/tasks" or "/api/tasks/recoverable" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
-                result = new TaskListResponse([], false, null);
+            else if (path is "/api/tasks" or "/api/tasks/recoverable" && Guid.TryParse(context.Request.QueryString["conversationId"], out var taskConversationId))
+            {
+                if (path == "/api/tasks/recoverable")
+                    lock (_sync) _recoverableReads[taskConversationId] = _recoverableReads.GetValueOrDefault(taskConversationId) + 1;
+                result = new TaskListResponse(path == "/api/tasks/recoverable" && UnknownOutcomeTask is { } unknown
+                    && unknown.Scope.ConversationId == taskConversationId ? [unknown] : [], false, null);
+            }
             else if (path == "/api/tasks/paused" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
             {
                 Interlocked.Increment(ref _pausedReads);

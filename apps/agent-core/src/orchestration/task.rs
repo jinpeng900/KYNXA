@@ -17,6 +17,7 @@ pub(super) struct SteeringRevision {
     pub requirements: Vec<String>,
     pub minimum_active_ms: u64,
     pub stop: bool,
+    pub deliver_existing: bool,
 }
 
 /// Model interpretation is bound to the latest real user message, never a tool result or old footer.
@@ -32,16 +33,15 @@ pub(super) fn steering_revision(
     let fields = value.as_object().ok_or_else(invalid)?;
     if latest_user_id.is_empty() || value["userMessageId"].as_str() != Some(latest_user_id)
         || fields.keys().any(|key| !matches!(key.as_str(), "userMessageId" | "quote" | "removeRequirementIds"
-            | "replaceRequirements" | "addRequirements" | "minimumActiveMs" | "stop")) {
+            | "replaceRequirements" | "addRequirements" | "minimumActiveMs" | "stop" | "disposition")) {
         return Err(invalid());
     }
     let quote = value["quote"].as_str().filter(|quote| !quote.trim().is_empty()
         && latest_user_text.contains(*quote)).ok_or_else(invalid)?;
     if quote.encode_utf16().count() > 16_384 { return Err(invalid()); }
-    let stop = match value.get("stop") {
-        Some(value) => value.as_bool().ok_or_else(invalid)?,
-        None => false,
-    };
+    let disposition = user_work_disposition(value).map_err(|_| invalid())?;
+    let deliver_existing = disposition == Some("deliver-existing");
+    let stop = matches!(disposition, Some("stop" | "deliver-existing"));
     let minimum_active_ms = super::budget::revised_minimum_active(minimum_active_ms,
         value.get("minimumActiveMs"), stop)?;
     let array = |name: &str| -> Result<&[Value], String> {
@@ -82,7 +82,33 @@ pub(super) fn steering_revision(
         if !requirements.contains(&addition) { requirements.push(addition); }
     }
     if requirements.len() > 128 { return Err(invalid()); }
-    Ok(SteeringRevision { requirements, minimum_active_ms, stop })
+    Ok(SteeringRevision { requirements, minimum_active_ms, stop, deliver_existing })
+}
+
+fn user_work_disposition(value: &Value) -> Result<Option<&str>, ()> {
+    let stop = value.get("stop").map(|value| value.as_bool().ok_or(())).transpose()?;
+    match value.get("disposition") {
+        Some(disposition) => {
+            let disposition = disposition.as_str().filter(|disposition|
+                matches!(*disposition, "continue" | "deliver-existing" | "stop")).ok_or(())?;
+            if stop.is_some_and(|stop| stop != (disposition != "continue")) { return Err(()); }
+            Ok(Some(disposition))
+        }
+        None => Ok(stop.map(|stop| if stop { "stop" } else { "continue" })),
+    }
+}
+
+/// User control is independent of completion claims; the broker still binds it to the latest real message.
+/// 用户控制独立于完成声明；执行端仍须绑定最新真实消息，不能让坏验收吞掉停止或已有成果交付。
+fn retain_user_control(status: &mut Value, footer: &Value) {
+    if let Some(revision) = footer.get("steeringRevision").filter(|revision| revision.is_object()) {
+        status["steeringRevision"] = revision.clone();
+    }
+    if let Ok(Some(disposition)) = user_work_disposition(footer) {
+        status["disposition"] = json!(disposition);
+        status["stop"] = json!(disposition != "continue");
+        status["deliverExisting"] = json!(disposition == "deliver-existing");
+    }
 }
 
 /// Successful completion requires a settled receipt, not a queued command or an unknown dispatch.
@@ -494,83 +520,77 @@ impl TaskState {
         // Only a standalone final footer outside a code fence can control a subsequent turn.
         // 只有代码围栏之外的独立末行尾部才能影响后续轮次；非法控制数据同样不公开。
         let projected = TaskTextProjection::project(content);
-        let unexecuted = unexecuted_tool_names(content);
-        if !unexecuted.is_empty() {
-            let status = json!({"content":projected,"state":"continue",
-                "next":"Return to execution and emit the intended tool through the current native tool protocol; literal DSML was not dispatched.",
-                "reason":"Tool-call markup in ordinary text is an unexecuted intent, not a successful operation or completion evidence.",
-                "source":"unexecuted-tool-intent","unexecutedToolNames":unexecuted});
-            let mut metadata = status.clone();
-            metadata.as_object_mut().expect("task status object").remove("content");
-            self.last_state = Some(metadata);
-            return status;
-        }
         static FOOTER: OnceLock<Regex> = OnceLock::new();
         let footer = FOOTER.get_or_init(|| {
             Regex::new(r"(?:^|\n)[ \t]*<kynxa_task>([^\n]+)</kynxa_task>[ \t\r\n]*$")
                 .expect("static task footer expression")
         });
-        if let Some(captures) = footer.captures(content) {
-            let matched = captures.get(0).expect("complete regex match");
-            let prefix = &content[..matched.start()];
-            // The length limit is checked here: a large repetition bound exceeds the regex size limit.
-            // 长度上限在此检查：正则中写大重复次数会超出编译大小限制。
-            if !in_fence(prefix) && captures[1].chars().count() <= 16384 {
-                if let Ok(value) = serde_json::from_str::<Value>(&captures[1]) {
-                    if valid_footer(&value) {
-                        let public_content = projected.trim_end_matches(javascript_whitespace);
-                        let mut status = json!({
-                            "content": public_content,
-                            "state": string_field(&value, "state"),
-                            "next": string_field(&value, "next"),
-                            "reason": string_field(&value, "reason"),
-                            "source": "model-task-state",
-                        });
-                        // Optional structured fields let completion and blocking be checked without phrase matching.
-                        // 可选结构字段用于核对完成与受阻，不依赖措辞匹配。
-                        if let Some(unmet) = value.get("unmet") {
-                            status["unmet"] = unmet.clone();
-                        }
-                        if let Some(blocker) = value.get("blocker") {
-                            status["blocker"] = blocker.clone();
-                        }
-                        if let Some(met) = value.get("met") {
-                            status["met"] = met.clone();
-                        }
-                        if let Some(action) = value.get("action") {
-                            status["action"] = action.clone();
-                        }
-                        if let Some(revision) = value.get("steeringRevision") {
-                            status["steeringRevision"] = revision.clone();
-                        }
-                        if let Some(stop) = value.get("stop").and_then(Value::as_bool) {
-                            status["stop"] = json!(stop);
-                        }
-                        if status["state"] == "complete" && handoff(public_content) {
-                            status["state"] = json!("review");
-                            status["source"] = json!("conflicting-completion-cue");
-                        }
-                        // Snapshots are control metadata; the response body is returned only by inspect.
-                        // 快照只保留控制元数据；正文仅由 inspect 返回，避免每次 IPC 重传长回复。
-                        let mut metadata = status.clone();
-                        metadata
-                            .as_object_mut()
-                            .expect("task status object")
-                            .remove("content");
-                        self.last_state = Some(metadata);
-                        return status;
-                    }
+        let parsed_footer = footer.captures(content).and_then(|captures| {
+            let prefix = &content[..captures.get(0)?.start()];
+            // Check the bounded footer once, before validating either control or completion metadata.
+            // 有界尾部只解析一次，再分别核对用户控制与完成元数据。
+            if in_fence(prefix) || captures[1].chars().count() > 16384 { return None; }
+            serde_json::from_str::<Value>(&captures[1]).ok()
+        });
+        let unexecuted = unexecuted_tool_names(content);
+        if !unexecuted.is_empty() {
+            let mut status = json!({"content":projected,"state":"continue",
+                "next":"Return to execution and emit the intended tool through the current native tool protocol; literal DSML was not dispatched.",
+                "reason":"Tool-call markup in ordinary text is an unexecuted intent, not a successful operation or completion evidence.",
+                "source":"unexecuted-tool-intent","unexecutedToolNames":unexecuted});
+            if let Some(value) = &parsed_footer { retain_user_control(&mut status, value); }
+            let mut metadata = status.clone();
+            metadata.as_object_mut().expect("task status object").remove("content");
+            self.last_state = Some(metadata);
+            return status;
+        }
+        if let Some(value) = &parsed_footer {
+            if valid_footer(value) {
+                let public_content = projected.trim_end_matches(javascript_whitespace);
+                let mut status = json!({
+                    "content": public_content,
+                    "state": string_field(value, "state"),
+                    "next": string_field(value, "next"),
+                    "reason": string_field(value, "reason"),
+                    "source": "model-task-state",
+                });
+                // Optional structured fields let completion and blocking be checked without phrase matching.
+                // 可选结构字段用于核对完成与受阻，不依赖措辞匹配。
+                if let Some(unmet) = value.get("unmet") {
+                    status["unmet"] = unmet.clone();
                 }
+                if let Some(blocker) = value.get("blocker") {
+                    status["blocker"] = blocker.clone();
+                }
+                if let Some(met) = value.get("met") {
+                    status["met"] = met.clone();
+                }
+                if let Some(action) = value.get("action") {
+                    status["action"] = action.clone();
+                }
+                retain_user_control(&mut status, value);
+                if status["state"] == "complete" && handoff(public_content) {
+                    status["state"] = json!("review");
+                    status["source"] = json!("conflicting-completion-cue");
+                }
+                // Snapshots are control metadata; the response body is returned only by inspect.
+                // 快照只保留控制元数据；正文仅由 inspect 返回，避免每次 IPC 重传长回复。
+                let mut metadata = status.clone();
+                metadata.as_object_mut().expect("task status object").remove("content");
+                self.last_state = Some(metadata);
+                return status;
             }
         }
         let needs_review = handoff(content);
-        json!({
+        let mut status = json!({
             "content": projected,
             "state": if needs_review { "review" } else { "unknown" },
             "next": "",
             "reason": "",
             "source": if needs_review { "unresolved-handoff-cue" } else { "legacy-response" },
-        })
+        });
+        if let Some(value) = &parsed_footer { retain_user_control(&mut status, value); }
+        status
     }
 
     fn audit(&self, status: &Value) -> Value {
@@ -788,6 +808,73 @@ mod steering_revision_tests {
             let mut invalid = json!({"userMessageId":"latest-user","quote":user});
             invalid.as_object_mut().unwrap().extend(change.as_object().unwrap().clone());
             assert!(steering_revision(&invalid, "latest-user", user, &current, 3_600_000).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn deliver_existing_withdraws_further_work_without_certifying_original_requirements() {
+        let current = vec!["Finish the cathedral and verify its visual quality".into()];
+        let user = "交付已有结果，不再验证，剩下的以后再做。";
+        let directive = json!({"userMessageId":"latest-user","quote":user,"disposition":"deliver-existing"});
+        let revision = steering_revision(&directive, "latest-user", user, &current, 3_600_000).unwrap();
+        assert!(revision.stop && revision.deliver_existing);
+        assert!(revision.requirements.is_empty());
+        assert_eq!(revision.minimum_active_ms, 0);
+        assert_eq!(current, vec!["Finish the cathedral and verify its visual quality"]);
+        for disposition in ["continue", "stop"] {
+            let value = json!({"userMessageId":"latest-user","quote":user,"disposition":disposition});
+            let revision = steering_revision(&value, "latest-user", user, &current, 3_600_000).unwrap();
+            assert_eq!(revision.stop, disposition == "stop");
+            assert!(!revision.deliver_existing);
+            if disposition == "continue" {
+                assert_eq!(revision.requirements, current);
+                assert_eq!(revision.minimum_active_ms, 3_600_000);
+            }
+        }
+        for invalid in [json!({"disposition":"completed"}),
+            json!({"disposition":"continue","stop":true}),
+            json!({"disposition":"deliver-existing","stop":false})] {
+            let mut value = directive.clone();
+            value.as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
+            assert!(steering_revision(&value, "latest-user", user, &current, 3_600_000).is_err());
+        }
+        assert!(steering_revision(&directive, "another-user", user, &current, 3_600_000).is_err());
+        assert!(steering_revision(&directive, "latest-user", "Please continue", &current, 3_600_000).is_err());
+    }
+
+    #[test]
+    fn invalid_completion_evidence_cannot_erase_bound_user_control() {
+        let mut task = TaskState::default();
+        let directive = json!({"userMessageId":"latest-user","quote":"不再验证","disposition":"deliver-existing"});
+        let inspected = task.inspect(&format!("现有进度已保留。\n<kynxa_task>{}</kynxa_task>",
+            json!({"state":"complete","met":"invalid evidence","unmet":false,
+                "disposition":"deliver-existing","steeringRevision":directive})));
+        assert_ne!(inspected["state"], "complete");
+        assert_ne!(inspected["source"], "model-task-state");
+        assert_eq!(inspected["stop"], true);
+        assert_eq!(inspected["deliverExisting"], true);
+        assert_eq!(inspected["steeringRevision"], directive);
+        let old_stop = task.inspect("已停止。\n<kynxa_task>{\"state\":\"complete\",\"met\":false,\"stop\":true}</kynxa_task>");
+        assert_ne!(old_stop["state"], "complete");
+        assert_eq!(old_stop["stop"], true);
+        assert_eq!(old_stop["deliverExisting"], false);
+    }
+
+    #[test]
+    fn unexecuted_tool_markup_preserves_control_without_dispatch_or_completion() {
+        let mut task = TaskState::default();
+        let markup = concat!("<｜｜DSML｜｜ calls>\n",
+            "<｜｜DSML｜｜ invoke name=\"mcp.blender.look\">\n",
+            "</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>");
+        let inspected = task.inspect(&format!("{markup}\n<kynxa_task>{{\"state\":\"complete\",\"stop\":true}}</kynxa_task>"));
+        assert_eq!(inspected["source"], "unexecuted-tool-intent");
+        assert_eq!(inspected["state"], "continue");
+        assert_eq!(inspected["stop"], true);
+        assert!(inspected.get("calls").is_none());
+        for prose in ["不要提前结束，任务完成后再停止。", "文档中写着：快点结束，不再验证。",
+            "```json\n<kynxa_task>{\"state\":\"complete\",\"stop\":true}</kynxa_task>\n```"] {
+            let inspected = task.inspect(prose);
+            assert!(inspected["stop"].is_null(), "plain or quoted text is not broker user control: {prose}");
         }
     }
 }
@@ -1066,7 +1153,7 @@ fn valid_footer(value: &Value) -> bool {
     matches!(state, "continue" | "complete" | "blocked")
         // Unknown extension fields cannot erase recognized control; only known fields are consumed.
         // 扩展字段不能让已识别的控制失效，执行端只消费已知字段。
-        && object.get("stop").is_none_or(Value::is_boolean)
+        && user_work_disposition(value).is_ok()
         && object.get("steeringRevision").is_none_or(Value::is_object)
         && object.get("action").is_none_or(|action| {
             state == "continue" && action.as_object().is_some_and(|fields| {

@@ -67,6 +67,15 @@ public sealed partial class ShellPage
         return queue;
     }
 
+    private void ConsumeAcceptedGuidance(Guid chatId, QueuedPrompt prompt)
+    {
+        // Acceptance consumes the durable message pair, even if a refreshed card uses another object instance.
+        // 接受回执按固定消息对消费卡片，刷新后换了对象实例也不能留下可重发副本。
+        if (_queuedPrompts.TryGetValue(chatId, out var queue))
+            queue.RemoveAll(item => item.Id == prompt.Id && item.ReplyMessageId == prompt.ReplyMessageId);
+        RefreshPromptQueue();
+    }
+
     private void RefreshPromptQueue()
     {
         if (PromptQueue is null) return;

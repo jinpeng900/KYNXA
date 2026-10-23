@@ -79,6 +79,8 @@ pub struct TaskJournal {
     released: AtomicBool,
     renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
     renewal_stop: Arc<Notify>,
+    #[cfg(test)]
+    committed_event_batches: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl TaskJournal {
@@ -131,6 +133,8 @@ impl TaskJournal {
             released: AtomicBool::new(false),
             renewal: Default::default(),
             renewal_stop: Arc::new(Notify::new()),
+            #[cfg(test)]
+            committed_event_batches: Default::default(),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&journal);
@@ -156,6 +160,14 @@ impl TaskJournal {
     }
     pub fn task_id(&self) -> &str {
         &self.token.task_id
+    }
+    #[cfg(test)]
+    pub(super) fn committed_event_batches(&self) -> usize {
+        self.committed_event_batches.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(super) fn pending_event_ids(&self) -> Vec<String> {
+        self.pending.lock().unwrap().events.iter().map(|event| event.0.clone()).collect()
     }
     pub fn input_reference(&self) -> Option<&Value> {
         self.input_reference.as_ref()
@@ -313,11 +325,15 @@ impl TaskJournal {
         let repository = self.repository.clone();
         let token = self.token.clone();
         let event_ids = batch.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>();
+        #[cfg(test)]
+        let committed_event_batches = self.committed_event_batches.clone();
         let result = tokio::task::spawn_blocking(move || {
             // Stable IDs allow replay after partial commits; keep each transaction within 512 events.
             // 稳定 ID 支持部分提交后重放，单次事务仍不超 512 条。
             for portion in batch.chunks(512) {
                 repository.append_events(&token, portion)?;
+                #[cfg(test)]
+                committed_event_batches.fetch_add(1, Ordering::AcqRel);
             }
             Ok::<(), crate::storage::ContractError>(())
         })

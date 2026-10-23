@@ -23,7 +23,7 @@ public sealed partial class ShellPage
 
     private void ReleaseTaskReplyObservation(PendingChatReply pending)
     {
-        if (_chatClosing || _savingOnClose) return;
+        if (_chatClosing || _savingOnClose || ActiveChatId != pending.ConversationId) return;
         if (_runningTaskRecovery is { } recovery && recovery.Chat.Id == pending.ConversationId)
         {
             if (pending.Message.Status == "completed" || pending.PauseConfirmed)
@@ -56,6 +56,10 @@ public sealed partial class ShellPage
 
     private void RecoverRunningTaskObservation(ProjectChatState? chat, Guid? projectId)
     {
+        // A departed reply cannot replace the observer owned by the newly selected chat.
+        // 离开的旧回复不能替换新选中聊天的观察；校验须早于取消旧读取。
+        if (chat?.Id != ActiveChatId || chat is not null &&
+            (FindChat(chat.Id).Chat != chat || FindChat(chat.Id).Project?.Id != projectId)) return;
         if (chat is null || _runningTaskRecovery is { } old &&
             (old.Chat != chat || old.ProjectId != projectId))
         {

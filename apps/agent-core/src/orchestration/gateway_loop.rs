@@ -391,7 +391,7 @@ pub(super) fn unresolved_check_summary(verification: &Value) -> Value {
 
 fn completion_review_instruction(state: &LoopState) -> String {
     if unresolved_user_steering(state) {
-        return format!("Broker: resolve the latest real user steering BEFORE enforcing older acceptance checks or duration. Do not perform an old readback, stat or validation merely to keep the original task running. If the user stopped, acknowledge with <kynxa_task>{{\"state\":\"complete\",\"stop\":true}}</kynxa_task>; stopping does not claim the original work is finished and requires no completion evidence. Otherwise encode the requested requirement/duration changes in steeringRevision in the normal footer. If requirements are unchanged, include steeringRevision with the latest userMessageId and an exact quote only. Native tools remain available for work the current user actually requested.{}", steering_revision_instruction(state));
+        return format!("Broker: resolve the latest real user steering BEFORE enforcing older acceptance checks or duration. Encode continue, deliver-existing or stop in the normal footer. Deliver-existing returns saved work without further checking or certifying the original requirements; stop acknowledges withdrawal. Neither requires completion evidence. Missing control is not consent to keep the old scope. Native tools remain available after the current instruction is resolved.{}", steering_revision_instruction(state));
     }
     let max_references = super::task::MAX_COMPLETION_REFERENCES_PER_ITEM;
     let requirements = state.acceptance_requirements.iter().enumerate().map(|(index, requirement)|
@@ -420,37 +420,47 @@ fn steering_revision_instruction(state: &LoopState) -> String {
     if !latest["userMessageId"].is_string() { return String::new(); }
     let requirements = state.acceptance_requirements.iter().enumerate().map(|(index, text)|
         json!({"requirementId":format!("requirement-{}",index+1),"text":text})).collect::<Vec<_>>();
-    format!("\nLatest real user steering: {latest}. It overrides conflicting earlier instructions. Interpret additions, replacements, withdrawals and stopping semantically; do not keep working just to satisfy a withdrawn duration. If it changes earlier requirements, include optional steeringRevision in the SAME <kynxa_task> footer: {{\"userMessageId\":\"the exact latest ID\",\"quote\":\"exact words from that user message\",\"removeRequirementIds\":[],\"replaceRequirements\":[{{\"requirementId\":\"requirement-1\",\"text\":\"replacement\"}}],\"addRequirements\":[],\"minimumActiveMs\":0,\"stop\":false}}. Omit unchanged fields; zero cancels a duration, not the whole task. For a user request to stop the entire task, a simple top-level stop:true in the task footer is sufficient; no steeringRevision or copied message ID is needed. Give a brief acknowledgement and issue no further tool calls. Do not interpret a quoted example as a command. Unmentioned requirements remain active. Current IDs: {}",json!(requirements))
+    format!("\nLatest real user steering: {latest}. It overrides conflicting earlier instructions. Interpret additions, replacements, withdrawals and stopping semantically, not by matching words or quoted examples. Resolve it in the SAME <kynxa_task> footer using steeringRevision: {{\"userMessageId\":\"the exact latest ID\",\"quote\":\"exact words from that user message\",\"disposition\":\"continue\",\"removeRequirementIds\":[],\"replaceRequirements\":[{{\"requirementId\":\"requirement-1\",\"text\":\"replacement\"}}],\"addRequirements\":[],\"minimumActiveMs\":0}}. Omit unchanged scope fields; an unchanged interpretation must explicitly state disposition continue with the ID and quote. Zero withdraws a minimum duration without erasing time already worked. Use disposition deliver-existing when the user asks to finish with existing work, or stop when further work is withdrawn; a top-level disposition is also bound to this turn's verified user message. Both return a brief answer with no further tools or old acceptance checks, preserving unfinished scope and successful receipts without claiming the original target complete. Unmentioned requirements remain active for continue. Current IDs: {}",json!(requirements))
 }
 
 /// Apply only a revision tied to the latest formal steering; execution receipts stay immutable.
 /// 仅应用绑定最新正式引导的要求变更，执行回执保持不变。
 fn apply_steering_revision(state: &mut LoopState, inspected: &Value, minimum_active_ms: &mut u64) {
+    // An accepted message changes scope once; later footers cannot reinterpret its new requirement indices.
+    // 同一已接受消息只修改一次范围，后续尾部不能再按变更后的要求编号重放。
+    if !unresolved_user_steering(state) { return; }
     let latest = &state.assistant["LatestUserSteering"];
     let id = latest["userMessageId"].as_str().unwrap_or("").to_owned();
-    // Bind a simple stop flag to this turn's verified user steering, without model-written IDs.
-    // 简单停止标记绑定本轮已核实的真实引导，不要求模型复写消息身份。
-    let inferred = if inspected["stop"] == true && !id.is_empty() {
-        json!({"userMessageId":id,"quote":latest["text"],"stop":true})
-    } else if unresolved_user_steering(state) && inspected["source"] == "model-task-state"
-        && inspected["steeringRevision"].is_null() {
-        // An explicit unchanged assessment keeps existing scope, rather than inventing more work.
-        // 明确未变更的判断沿用当前范围，不凭空添加工作。
-        json!({"userMessageId":id,"quote":latest["text"]})
-    } else { Value::Null };
-    let revision = if inferred.is_object() { &inferred } else { &inspected["steeringRevision"] };
+    // Bind explicit control only; an omitted revision never acknowledges unchanged scope.
+    // 只绑定明确控制，缺少变更不能默认为用户要求不变。
+    let mut revision = inspected["steeringRevision"].clone();
+    if let Some(disposition) = inspected["disposition"].as_str()
+        .or_else(|| (inspected["stop"] == true).then_some("stop")) {
+        if revision.is_null() { revision = json!({"userMessageId":id,"quote":latest["text"]}); }
+        if revision["disposition"].as_str().is_some_and(|nested| nested != disposition) {
+            state.broker_note("Conflicting steering dispositions were not applied. Resolve the latest user instruction consistently; preserve existing work.");
+            return;
+        }
+        revision["disposition"] = json!(disposition);
+    }
     if revision.is_null() { return; }
     let revision_hash = crate::retrieval::gateway_index::hash(&revision.to_string());
-    if state.assistant["UserTaskDirective"]["userMessageId"] == id
-        && state.assistant["UserTaskDirective"]["revisionHash"] == revision_hash { return; }
-    match super::task::steering_revision(revision, &id, latest["text"].as_str().unwrap_or(""),
+    match super::task::steering_revision(&revision, &id, latest["text"].as_str().unwrap_or(""),
         &state.acceptance_requirements, *minimum_active_ms) {
         Ok(updated) => {
+            if revision["disposition"].is_null() && revision["stop"].is_null()
+                && updated.requirements == state.acceptance_requirements
+                && updated.minimum_active_ms == *minimum_active_ms {
+                // Copying identity alone does not explicitly choose to continue unchanged.
+                // 只复写消息身份，不能代替明确选择按原范围继续。
+                return;
+            }
             let suspended = updated.stop.then(|| state.acceptance_requirements.clone());
             state.acceptance_requirements = updated.requirements;
             *minimum_active_ms = updated.minimum_active_ms;
             state.assistant["UserTaskDirective"] = json!({"userMessageId":id,
                 "minimumActiveMs":updated.minimum_active_ms,"stop":updated.stop,
+                "deliverExisting":updated.deliver_existing,
                 "requirements":state.acceptance_requirements,"suspendedRequirements":suspended,
                 "revisionHash":revision_hash});
             state.review_checkpoint = Value::Null;
@@ -720,59 +730,6 @@ fn refresh_acceptance_reminder(state: &mut LoopState, round: u64) {
     let concise = format!("Broker: {} acceptance items remain unverified. Reuse saved receipts; verify remaining original requirements, preserve progress and do not redo successful operations or stop for this reminder.", gaps.len());
     let notice = bounded_advisory_notice(Some(notice), &concise, 320).unwrap_or(concise);
     state.context_note(&notice, json!({"projectionOrigin":"broker-control","acceptanceGapNotice":true}));
-}
-
-/// Merge restored streams only along identical prefixes; snapshots may already include later text.
-/// 恢复流仅按相同前缀合并，快照可能已包含后续正文。
-fn align_committed_text(saved: &str, base: &str, delta: &str, replace: bool) -> Option<String> {
-    let committed = if replace { delta.to_owned() } else { format!("{base}{delta}") };
-    if committed.starts_with(saved) { Some(committed) }
-    else if saved.starts_with(&committed) { Some(saved.to_owned()) }
-    else { None }
-}
-
-fn segment_display_text(segments: &[Value], field: &str, separator: &str) -> String {
-    segments.iter().filter_map(|segment|segment[field].as_str()).filter(|text|!text.is_empty())
-        .collect::<Vec<_>>().join(separator)
-}
-
-/// Rebuild only proved segment boundaries; unknown baselines leave text and watermarks unchanged.
-/// 仅按已证实的分段边界重建；基线未知时不改正文或水位。
-fn align_committed_segments(saved: &Value, original: &[Value], projection: &Value) -> Option<(String,String,Vec<Value>)> {
-    let saved_content = saved["Content"].as_str().unwrap_or("");
-    let saved_reasoning = saved["Reasoning"].as_str().unwrap_or("");
-    if segment_display_text(original,"content","\n\n") != saved_content
-        || segment_display_text(original,"reasoning","") != saved_reasoning || projection["mode"] == "replace" { return None; }
-    let changes = projection["segments"].as_array()?;
-    if changes.iter().filter_map(|segment|segment["contentAppend"].as_str()).collect::<String>() != projection["content"].as_str().unwrap_or("")
-        || changes.iter().filter_map(|segment|segment["reasoningAppend"].as_str()).collect::<String>() != projection["reasoning"].as_str().unwrap_or("") { return None; }
-    let exact_formal_base = projection["baseContent"] == saved_content && projection["baseReasoning"] == saved_reasoning;
-    let mut segments = original.to_vec();
-    for change in changes {
-        let id = change["id"].as_str()?;
-        let existing = segments.iter().position(|segment|segment["id"]==id);
-        let mut segment = existing.map(|index|segments[index].clone())
-            .unwrap_or_else(||json!({"id":id,"content":"","reasoning":""}));
-        for (field,base,delta) in [("content","baseContent","contentAppend"),("reasoning","baseReasoning","reasoningAppend")] {
-            let current = segment[field].as_str().unwrap_or("");
-            let addition = change[delta].as_str().unwrap_or("");
-            let text = if change["baseKnown"] == true {
-                align_committed_text(current,change[base].as_str().unwrap_or(""),addition,false)?
-            } else if addition.is_empty() { current.to_owned() }
-            else if exact_formal_base { current.to_owned()+addition }
-            else { return None; };
-            segment[field] = json!(text);
-        }
-        for key in ["round","order","phase","status","reasoningDurationMs"] {
-            if let Some(value) = change.get(key) { segment[key]=value.clone(); }
-        }
-        if !segment["round"].is_u64() || !segment["order"].is_u64()
-            || !matches!(segment["phase"].as_str(),Some("answer"|"commentary"))
-            || !matches!(segment["status"].as_str(),Some("streaming"|"completed")) { return None; }
-        if let Some(index) = existing { segments[index]=segment; } else { segments.push(segment); }
-    }
-    segments.sort_by_key(|segment|segment["order"].as_u64().unwrap_or(u64::MAX));
-    Some((segment_display_text(&segments,"content","\n\n"),segment_display_text(&segments,"reasoning",""),segments))
 }
 
 async fn restore_committed_stream(run: &RequestRun, state: &mut LoopState) {
@@ -1744,6 +1701,7 @@ async fn apply_user_steering(
             state.acceptance_requirements = serde_json::from_value(
                 state.assistant["UserTaskDirective"]["suspendedRequirements"].clone()).unwrap_or_default();
             state.assistant["UserTaskDirective"]["stop"] = json!(false);
+            state.assistant["UserTaskDirective"]["deliverExisting"] = json!(false);
         }
         state.assistant["LatestUserSteering"] = json!({"userMessageId":saved["Id"],"text":text});
         state.broker_note(&steering_revision_instruction(state));
@@ -3164,7 +3122,9 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             TaskState::Partial
         };
         let _ = journal.emit_control("task.final", &json!({"conversationId":run.conversation_id,"requestId":run.request_id,"assistantMessageId":value.get("replyMessageId").unwrap_or(&json!(run.request_id)),"completion":value["taskCompletion"],"code":value["code"]}));
-        let reason = if value["taskCompletion"]["userStopped"] == true {
+        let reason = if value["taskCompletion"]["userDirectedDelivery"] == true {
+            Some("user-directed-delivery".to_owned())
+        } else if value["taskCompletion"]["userStopped"] == true {
             Some("user-steering-stopped".to_owned())
         } else if run.suspending.load(std::sync::atomic::Ordering::Acquire) {
             Some("gateway-shutdown".to_owned())
@@ -3754,6 +3714,7 @@ async fn execute(
             state.acceptance_requirements = serde_json::from_value(
                 state.assistant["UserTaskDirective"]["suspendedRequirements"].clone()).unwrap_or_default();
             state.assistant["UserTaskDirective"]["stop"] = json!(false);
+            state.assistant["UserTaskDirective"]["deliverExisting"] = json!(false);
             state.assistant["LatestUserSteering"] = Value::Null;
             state.broker_note("The user explicitly resumed this paused task. Continue its saved unfinished requirements; the earlier stop is historical, and its withdrawn minimum duration stays withdrawn. Preserve successful effects.");
         }
@@ -4118,6 +4079,7 @@ async fn execute(
             state.generation_duration_base_ms, state.model_started),
         "generationActive":true})).await;
     let mut final_received = false;
+    let mut final_evidence_validation = None;
     let mut freshness_recoveries = 0;
     let mut output_continuations = 0;
     let mut review_pending = steering_applied == 0 && state.review_checkpoint["pending"] == true;
@@ -4274,7 +4236,7 @@ async fn execute(
             format!(
             "Delivery phase: {}. Reuse successful outputs, saved findings and actual validation receipts. Finish the final answer and report the artifact and actual result. {}",
                 serde_json::to_value(&delivery).unwrap_or(Value::Null),
-                if tools_closed { "No tools are callable in this response. Do not simulate tool calls using DSML, XML or JSON. Give the user-readable final answer from current evidence and completed outputs; state any genuinely unfinished requirement." }
+                if declarations_disabled { "No tools are callable in this response. Do not simulate tool calls using DSML, XML or JSON. Give the user-readable final answer from current evidence and completed outputs; state any genuinely unfinished requirement." }
                 else if synthesize_delivery { "Recorded output readback or execution checks are available. Compare them with the original user goal and prefer a concise final answer when it is met. Native tools remain available for a genuinely missing action or validation; use the formal protocol rather than simulating DSML, XML or JSON calls as text. An unfinished requirement remains work in the original task." }
                 else { "Complete missing delivery steps with current tools; combine compatible authorized actions." }
             )
@@ -4338,8 +4300,8 @@ async fn execute(
                 Some(compact_document_notice(&state.documents.directory(), &state.result_sources, advisory_budget / 2)), "", advisory_budget / 2);
         }
         delivery_notice = bounded_advisory_notice(delivery_notice,
-            if tools_closed { "Delivery: tools are unavailable this turn. Answer from verified outputs; do not simulate calls. State any unfinished requirement." }
-            else if synthesize_delivery { "Delivery: tools are unavailable this turn. Compare verified outputs with the user goal. Answer if complete; otherwise identify the missing step and use state=continue. Do not simulate calls." }
+            if declarations_disabled { "Delivery: tools are unavailable this turn. Answer from verified outputs; do not simulate calls. State any unfinished requirement." }
+            else if synthesize_delivery { "Delivery: compare verified outputs with the user goal. Native tools remain available for missing actions or validation; use formal calls and continue the original task. Do not simulate calls." }
             else { "Finish the remaining delivery and validation using saved evidence. Reuse successful outputs; do not recreate them." },
             advisory_budget / 4);
         strategy_notice = bounded_advisory_notice(strategy_notice,
@@ -5014,6 +4976,10 @@ async fn execute(
             .as_u64()
             .or_else(|| response.usage["output_tokens"].as_u64())
             .unwrap_or_else(|| crate::models::protocol::estimate_tokens(&response.content));
+        // A reply formed before new steering cannot acknowledge or execute that unseen instruction.
+        // 新引导到达前生成的回复，不能确认该引导或继续派发旧计划。
+        let steering_arrived = steering_pending(&run, &ctx)
+            && apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0;
         let inspected = native(
             state
                 .task
@@ -5021,7 +4987,9 @@ async fn execute(
         )?;
         task_status = inspected.clone();
         let prior_directive = state.assistant["UserTaskDirective"].clone();
-        apply_steering_revision(&mut state, &inspected, &mut minimum_active_ms);
+        if !steering_arrived {
+            apply_steering_revision(&mut state, &inspected, &mut minimum_active_ms);
+        }
         if prior_directive != state.assistant["UserTaskDirective"] {
             if let Some(journal) = &run.journal {
                 journal.emit_control("task.user-directive", &state.assistant["UserTaskDirective"])?;
@@ -5042,6 +5010,24 @@ async fn execute(
             // 用户停止已完成本次答复，不应误报轮次耗尽再恢复执行。
             final_received = true;
             break;
+        }
+        if unresolved_user_steering(&state) {
+            // Pair skipped proposals for protocol continuity; they are not execution receipts.
+            // 跳过的提议仍配对协议结果，但不能记为执行回执。
+            let skipped = response.calls.iter().map(|call| json!({"call":call,"result":{
+                "status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED",
+                "content":{"notice":"Not dispatched: resolve the latest verified user instruction before continuing the old plan."}
+            }})).collect::<Vec<_>>();
+            state.history = protocol::append_results(&protocol_name, &state.history, &response, &skipped)?;
+            state.push_transcript_round(json!({"round":round,"text":inspected["content"],"calls":[],
+                "unexecutedCallCount":response.calls.len(),"awaitingUserDirective":true}));
+            state.append("", "", round, &segment);
+            run.emit(json!({"type":"assistant_segment","segment":state.segment(&segment),"toolStreamProtocol":3})).await;
+            review_pending = true;
+            let notice = completion_review_instruction(&state);
+            append_control_notice(&mut state, "completionReviewNotice", Some(&notice));
+            state.save(&runtime, &run, "streaming", None).await?;
+            continue;
         }
         if response.calls.is_empty() && has_unexecuted_tool_intent(&state.review_checkpoint)
             && task_status["state"] != "blocked" {
@@ -5166,18 +5152,6 @@ async fn execute(
             stopped = Some(GatewayError::new("MODEL_RESPONSE_EMPTY", "模型未返回可见正文，请重试。", 502));
             break;
         }
-        if response.calls.is_empty() && unresolved_user_steering(&state) && !response.output_truncated {
-            // Resolve new steering before inherited checks, child acceptance or automatic readback.
-            // 新引导先于旧验收、子任务核对和自动回读生效。
-            state.history = protocol::append_results(&protocol_name, &state.history, &response, &[])?;
-            state.push_transcript_round(json!({"round":round,"text":text,"calls":[],
-                "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
-            review_pending = true;
-            let notice = completion_review_instruction(&state);
-            append_control_notice(&mut state, "completionReviewNotice", Some(&notice));
-            state.save(&runtime, &run, "streaming", None).await?;
-            continue;
-        }
         if response.calls.is_empty() && let Some(journal) = &run.journal {
             let children = runtime.tasks.children_acceptance(journal.task_id()).await?;
             if children["allAccepted"] == false && children["unaccepted"].as_array().is_some_and(|items|
@@ -5276,6 +5250,7 @@ async fn execute(
                         ));
                         break;
                     }
+                    final_evidence_validation = Some(current);
                     if !state.pending_delivery.is_empty() {
                         let delivery = std::mem::take(&mut state.pending_delivery);
                         state.delivery_continuing = false;
@@ -5477,6 +5452,7 @@ async fn execute(
                 ));
                 break;
             }
+            final_evidence_validation = Some(freshness);
             if buffered_delivery && !state.pending_delivery.is_empty() {
                 let delivery = std::mem::take(&mut state.pending_delivery);
                 state.delivery_continuing = false;
@@ -6358,6 +6334,7 @@ async fn execute(
     // Stopping preserves previous evidence; it does not certify completion or run new checks.
     // 停止保留已有证据，不认证完成，也不启动新的验收检查。
     let evidence_validation = if user_stopped { json!({"state":"not-checked","reason":"user-requested-stop"}) }
+    else if let Some(validation) = final_evidence_validation { validation }
     else { tokio::task::spawn_blocking(move || {
         crate::retrieval::gateway::final_validate(&validation_config, &validation_context)
     })
@@ -6373,6 +6350,7 @@ async fn execute(
     if state.assistant["UserTaskDirective"]["stop"] == true {
         completion["completionState"] = json!("partial");
         completion["userStopped"] = json!(true);
+        completion["userDirectedDelivery"] = json!(state.assistant["UserTaskDirective"]["deliverExisting"] == true);
     }
     let mut diagnostics = native(state.progress.apply("progress.diagnostics", &json!({})))?;
     // Keep model timing and report accepted-request preparation separately, excluding desktop saves.
@@ -6395,6 +6373,11 @@ async fn execute(
         .as_ref()
         .is_some_and(|error| !recoverable_step_failure(&error.code))
         || *cancellation.borrow();
+    if !continuing {
+        // Delivery is being committed, not still generated; completion waits for durable settlement.
+        // 答复进入正式保存，已非继续生成；成功终态仍须等待持久化结算。
+        run.emit(json!({"type":"task_progress","phase":"saving","round":1})).await;
+    }
     state
         .save(
             &runtime,
@@ -6507,43 +6490,6 @@ mod preparation_tests {
             assert_eq!(require_completion_action(&connection,&mut body),expected);
             assert_eq!(body["tool_choice"],if expected {"required"} else {"auto"});
         }
-    }
-
-    #[test]
-    fn committed_stream_segments_restore_paragraph_separators_and_already_saved_overlap() {
-        let original = vec![json!({"id":"one","round":1,"order":1,"phase":"commentary","status":"completed","content":"first","reasoning":"thought"}),
-            json!({"id":"two","round":2,"order":2,"phase":"commentary","status":"streaming","content":"second par","reasoning":""})];
-        let saved = json!({"Content":"first\n\nsecond par","Reasoning":"thought"});
-        let projection = json!({"mode":"append","baseContent":"firstsecond ","baseReasoning":"thought", "content":"paragraph 🏰","reasoning":"",
-            "segments":[{"id":"two","baseKnown":true,"baseContent":"second ","baseReasoning":"","contentAppend":"paragraph 🏰","reasoningAppend":""}]});
-        let (content,reasoning,segments) = align_committed_segments(&saved,&original,&projection).unwrap();
-        assert_eq!(content,"first\n\nsecond paragraph 🏰"); assert_eq!(reasoning,"thought");
-        assert_eq!(segments[1]["content"],"second paragraph 🏰");
-        assert!(segments[1].get("contentAppend").is_none()); assert!(segments[1].get("baseKnown").is_none());
-    }
-
-    #[test]
-    fn committed_stream_unknown_segment_base_requires_exact_formal_boundary_and_preserves_snapshots() {
-        let original = vec![json!({"id":"one","round":1,"order":1,"phase":"commentary","status":"streaming","content":"base","reasoning":""})];
-        let saved = json!({"Content":"base","Reasoning":""});
-        let mut projection = json!({"mode":"append","baseContent":"base","baseReasoning":"","content":" tail","reasoning":"",
-            "segments":[{"id":"one","baseKnown":false,"baseContent":"","baseReasoning":"","contentAppend":" tail","reasoningAppend":""}]});
-        let (content,_,segments) = align_committed_segments(&saved,&original,&projection).unwrap();
-        assert_eq!(content,"base tail"); assert_eq!(segments[0]["content"],"base tail");
-        projection["baseContent"] = json!("different saved original");
-        assert!(align_committed_segments(&saved,&original,&projection).is_none());
-        projection["mode"] = json!("replace"); projection["content"] = json!("base snapshot tail");
-        assert!(align_committed_segments(&saved,&original,&projection).is_none());
-        assert_eq!(original[0]["content"],"base"); assert_eq!(saved["Content"],"base");
-    }
-
-    #[test]
-    fn committed_stream_alignment_preserves_unicode_partial_snapshots_and_never_duplicates_output() {
-        assert_eq!(align_committed_text("hello wor", "hello ", "world 🏰", false).as_deref(),Some("hello world 🏰"));
-        assert_eq!(align_committed_text("hello world 🏰", "hello ", "world 🏰", false).as_deref(),Some("hello world 🏰"));
-        assert_eq!(align_committed_text("hello world 🏰 more", "hello ", "world 🏰", false).as_deref(),Some("hello world 🏰 more"));
-        assert_eq!(align_committed_text("hello", "ignored base", "hello new", true).as_deref(),Some("hello new"));
-        assert!(align_committed_text("original version", "another", " version", false).is_none());
     }
 
     #[test]
@@ -6675,6 +6621,33 @@ mod preparation_tests {
             assert_eq!(state.mutation_sequence, 7);
             assert!(state.visual_readback_delivered);
             assert_eq!(state.effects.apply("effects.previous", &json!({"call":call,"observation":false})).unwrap()["result"], receipt);
+            state.acceptance_requirements = vec!["A".into(), "B".into(), "C".into()];
+            state.assistant["LatestUserSteering"] = json!({"userMessageId":"scope-change","text":"Remove the second requirement only."});
+            let mut minimum = 60_000;
+            apply_steering_revision(&mut state, &json!({"state":"complete","source":"model-task-state"}), &mut minimum);
+            assert!(unresolved_user_steering(&state), "An absent revision must not acknowledge unchanged scope.");
+            apply_steering_revision(&mut state, &json!({"steeringRevision":{
+                "userMessageId":"scope-change","quote":"Remove the second requirement only."}}), &mut minimum);
+            assert!(unresolved_user_steering(&state), "Identity alone is not a semantic continuation decision.");
+            let mut revision = json!({"steeringRevision":{"userMessageId":"scope-change",
+                "quote":"Remove the second requirement only.","removeRequirementIds":["requirement-2"]}});
+            apply_steering_revision(&mut state, &revision, &mut minimum);
+            assert_eq!(state.acceptance_requirements, vec!["A", "C"]);
+            revision["steeringRevision"]["quote"] = json!("second requirement");
+            apply_steering_revision(&mut state, &revision, &mut minimum);
+            assert_eq!(state.acceptance_requirements, vec!["A", "C"], "Rewording an accepted revision must not delete C.");
+            state.assistant["LatestUserSteering"] = json!({"userMessageId":"deliver-now","text":"Deliver the saved work."});
+            let mut delivery = json!({"disposition":"deliver-existing","steeringRevision":{
+                "userMessageId":"deliver-now","quote":"Deliver the saved work.","disposition":"continue"}});
+            apply_steering_revision(&mut state, &delivery, &mut minimum);
+            assert!(unresolved_user_steering(&state), "Conflicting controls cannot acknowledge the user instruction.");
+            delivery["steeringRevision"].as_object_mut().unwrap().remove("disposition");
+            apply_steering_revision(&mut state, &delivery, &mut minimum);
+            assert!(!unresolved_user_steering(&state));
+            assert!(state.acceptance_requirements.is_empty());
+            assert_eq!(state.assistant["UserTaskDirective"]["deliverExisting"], true);
+            assert_eq!(state.assistant["UserTaskDirective"]["suspendedRequirements"], json!(["A", "C"]));
+            assert_eq!(minimum, 0);
         }
     }
 

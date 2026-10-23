@@ -34,6 +34,10 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private readonly Dictionary<Guid, CachedHtml> _html = [];
     private readonly Dictionary<Guid, Snapshot> _publishedRows = [];
     private readonly Dictionary<Guid, Snapshot> _capturedRows = [];
+    private readonly Dictionary<Guid, ConversationMessageViewModel> _messageRows = [];
+    private readonly HashSet<Guid> _dirtyRows = [];
+    private Guid[] _messageOrder = [];
+    private bool _allRowsDirty = true;
     private Guid[] _publishedOrder = [];
     private bool _hasPublishedSnapshot;
     private bool _historyHasOlder, _historyHasNewer, _historyHasNewReplies;
@@ -73,13 +77,14 @@ public sealed class ConversationTranscript : Grid, IDisposable
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
         ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
         long? GenerationElapsedMs, long? GenerationStartedTimestamp, string GenerationTimingState, Guid GenerationClockId,
-        long? CreatedAtMs, long? EndRecordedAtMs, string TaskCompletionState, AttachmentDisplay[] Attachments);
+        long? CreatedAtMs, long? EndRecordedAtMs, string TaskCompletionState, string ExecutionPhase, AttachmentDisplay[] Attachments);
     private sealed record AttachmentDisplay(Guid Id, string Name, string ContentType, long SizeBytes, string Status,
         string? Error, string? ThumbnailUrl);
     private sealed record ToolDisplayRevision(WeakReference<ToolActivity> Source, long Revision);
 
     public Task Ready => _ready.Task;
     internal WebView2 Browser => _browser;
+    internal long SnapshotCaptureCount { get; private set; }
     internal Func<DiagramExportDocument, Task<DiagramExportOutcome>>? DiagramExportSaveOverride { get; set; }
     public event EventHandler<Guid>? RetryRequested;
     public event EventHandler<ToolResultRequest>? ToolResultRequested;
@@ -150,6 +155,10 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _generation++;
         _capturedRows.Clear();
         _messages = messages.ToArray();
+        _messageRows.Clear();
+        _dirtyRows.Clear();
+        _messageOrder = _messages.Select(row => row.Message.Id).ToArray();
+        foreach (var message in _messages) _messageRows[message.Message.Id] = message;
         foreach (var message in _messages) message.PropertyChanged += MessageChanged;
         _timeRestoreCancellation?.Cancel();
         _timeRestoreCancellation?.Dispose();
@@ -376,12 +385,41 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     private void MessageChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (sender is ConversationMessageViewModel row) _capturedRows.Remove(row.Message.Id);
-        QueueRefresh();
+        if (sender is ConversationMessageViewModel row)
+        {
+            _capturedRows.TryGetValue(row.Message.Id, out var previous);
+            _capturedRows.Remove(row.Message.Id);
+            QueueRefresh(row.Message.Id);
+            var message = row.Message;
+            if (previous is null || previous.Status != message.Status || previous.GenerationTimingState != message.GenerationTimingState
+                || previous.GenerationClockId != message.GenerationClockId || previous.ExecutionPhase != message.ExecutionPhase
+                || previous.TaskCompletionState != message.TaskCompletionState || previous.Error != message.Error)
+                PublishMessageState(row);
+        }
+        else QueueRefresh();
     }
-    private void QueueRefresh()
+
+    private void PublishMessageState(ConversationMessageViewModel row)
+    {
+        if (_disposed || row.ConversationId != _conversationId) return;
+        var message = row.Message;
+        // State bypasses Markdown and body encoding; the revision rejects older in-flight projections.
+        // 状态不等 Markdown 和正文编码；版本号防止在途旧投影把终态改回生成中。
+        Post(new { type = "messageState", conversationId = _conversationId?.ToString() ?? "", revision = _revision,
+            message = new { id = message.Id, role = message.Role, status = message.Status, streaming = row.IsStreaming,
+                waiting = row.IsWaiting, error = message.Error, canRetry = row.RetryVisibility == Visibility.Visible,
+                reasoningState = row.IsThinking ? "thinking" : null, durationMs = message.DurationMs,
+                taskCompletionState = message.TaskCompletionState, executionPhase = message.ExecutionPhase,
+                generationElapsedMs = message.GenerationElapsedMs, generationTimingState = message.GenerationTimingState,
+                generationClockId = message.GenerationClockId,
+                createdAtMs = message.CreatedAt > DateTimeOffset.UnixEpoch ? (long?)message.CreatedAt.ToUnixTimeMilliseconds() : null,
+                endRecordedAtMs = MessageTimePresentation.GetEnd(row.ConversationId, message)?.ToUnixTimeMilliseconds() } });
+    }
+    private void QueueRefresh(Guid? messageId = null)
     {
         if (_disposed) return;
+        if (messageId is Guid id) _dirtyRows.Add(id);
+        else _allRowsDirty = true;
         _revision++;
         _dirty = true;
         _refresh.Start();
@@ -660,9 +698,14 @@ public sealed class ConversationTranscript : Grid, IDisposable
         long revision = _revision;
         long generation = _generation;
         var conversationId = _conversationId;
+        bool refreshAll = _allRowsDirty || !_hasPublishedSnapshot;
+        var pendingRows = _dirtyRows.ToArray();
+        _allRowsDirty = false;
+        _dirtyRows.Clear();
+        bool published = false;
         try
         {
-            var sourceOrder = _messages.Select(row => row.Message.Id).ToArray();
+            var sourceOrder = _messageOrder;
             bool initialPublished = !_hasPublishedSnapshot && _messages.Count > 4;
             if (initialPublished)
             {
@@ -680,10 +723,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 await Task.Yield();
                 if (_disposed || generation != _generation) return;
             }
-            var snapshots = _messages.Select(CaptureSnapshot).ToArray();
-            var order = snapshots.Select(row => row.Id).ToArray();
+            // Streaming updates only project dirty rows; navigation still reconciles the whole window.
+            // 流式更新只投影脏行；导航时仍核对整个消息窗口。
+            var snapshots = refreshAll ? _messages.Select(CaptureSnapshot).ToArray()
+                : pendingRows.Where(_messageRows.ContainsKey).Select(id => CaptureSnapshot(_messageRows[id])).ToArray();
+            var order = sourceOrder;
             bool fullSnapshot = !_hasPublishedSnapshot;
-            bool orderChanged = !_publishedOrder.SequenceEqual(order);
+            bool orderChanged = !ReferenceEquals(_publishedOrder, order) && !_publishedOrder.SequenceEqual(order);
             // Evicted historical HTML needs no parsing while its published message stays unchanged.
             // 历史 HTML 被淘汰后，只要已发布消息未变化就无需重新解析。
             var changed = fullSnapshot ? snapshots : snapshots.Where(row =>
@@ -760,10 +806,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 // 解析顺序优先最新消息，但缓存热端仍按消息顺序保留最新内容。
                 foreach (var item in rendered) CacheHtml(item.Row.Id, item.Cache!);
             }
-            _publishedRows.Clear();
-            foreach (var row in snapshots) _publishedRows.Add(row.Id, row);
+            if (refreshAll)
+                foreach (var id in _publishedRows.Keys.Where(id => !_messageRows.ContainsKey(id)).ToArray())
+                    _publishedRows.Remove(id);
+            foreach (var row in snapshots) _publishedRows[row.Id] = row;
             _publishedOrder = order;
             _hasPublishedSnapshot = true;
+            published = true;
             _openAtBottom = false;
             _notice.Visibility = Visibility.Collapsed;
         }
@@ -775,6 +824,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
         finally
         {
+            // An interrupted batch must keep its unpublished rows, including evicted historical HTML.
+            // 批次未发完就保留待更新行，包括 HTML 已被淘汰的历史行。
+            if (!published && !_disposed && generation == _generation)
+            {
+                _allRowsDirty |= refreshAll;
+                foreach (var id in pendingRows) _dirtyRows.Add(id);
+            }
             _rendering = false;
             if (_dirty && !_disposed) _refresh.Start();
         }
@@ -782,6 +838,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     private Snapshot CaptureSnapshot(ConversationMessageViewModel row)
     {
+        SnapshotCaptureCount++;
         // Reuse unchanged historical projections; a live row invalidates only its own snapshot.
         // 复用未变的历史投影；活动消息只让自身快照失效。
         if (_capturedRows.TryGetValue(row.Message.Id, out var captured)) return captured;
@@ -797,7 +854,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             row.Message.GenerationElapsedMs, row.Message.GenerationStartedTimestamp,
             row.Message.GenerationTimingState, row.Message.GenerationClockId,
             row.Message.CreatedAt > DateTimeOffset.UnixEpoch ? row.Message.CreatedAt.ToUnixTimeMilliseconds() : null,
-            MessageTimePresentation.GetEnd(row.ConversationId, row.Message)?.ToUnixTimeMilliseconds(), row.Message.TaskCompletionState,
+            MessageTimePresentation.GetEnd(row.ConversationId, row.Message)?.ToUnixTimeMilliseconds(), row.Message.TaskCompletionState, row.Message.ExecutionPhase,
             row.Message.Attachments.Select(attachment => AttachmentView(row.ConversationId, row.Message.Id, attachment)).ToArray());
     }
 
@@ -858,6 +915,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
                 presentationMode = item.Row.Mode, durationMs = item.Row.DurationMs,
                 taskCompletionState = item.Row.TaskCompletionState,
+                executionPhase = item.Row.ExecutionPhase,
                 attachments = item.Row.Attachments.Select(attachment => new { id = attachment.Id, name = attachment.Name,
                     contentType = attachment.ContentType, sizeBytes = attachment.SizeBytes, status = attachment.Status,
                     error = attachment.Error, thumbnailUrl = attachment.ThumbnailUrl }).ToArray(),
@@ -894,6 +952,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         previous.ReasoningState == current.ReasoningState && previous.ReasoningSeconds == current.ReasoningSeconds &&
         previous.Waiting == current.Waiting && previous.Status == current.Status && previous.Error == current.Error &&
         previous.CanRetry == current.CanRetry && previous.Mode == current.Mode && previous.DurationMs == current.DurationMs &&
+        previous.ExecutionPhase == current.ExecutionPhase &&
         previous.GenerationStartedTimestamp == current.GenerationStartedTimestamp &&
         previous.GenerationTimingState == current.GenerationTimingState && previous.GenerationClockId == current.GenerationClockId &&
         (current.GenerationTimingState == "live" || previous.GenerationElapsedMs == current.GenerationElapsedMs) &&
@@ -954,6 +1013,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _html.Clear();
         _publishedRows.Clear();
         _capturedRows.Clear();
+        _messageRows.Clear();
+        _dirtyRows.Clear();
+        _messageOrder = [];
         _publishedOrder = [];
         _cacheOrder.Clear();
         _cacheNodes.Clear();

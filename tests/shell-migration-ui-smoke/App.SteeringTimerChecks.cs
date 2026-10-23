@@ -7,7 +7,9 @@ using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.Views;
+using MemoryUiSmoke;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace KYNXA_Desktop;
 
@@ -51,7 +53,12 @@ public partial class App
             waitingMessages[chat.Id].Clear();
         }
         finally { Prompt.Text = priorDraft; type.GetProperty("TaskId")!.SetValue(pending, taskId); }
+        await CheckNewChatDuringReplyAsync(chat, pending, waitingMessages);
+        await CheckUnknownOutcomeRefreshAsync(chat);
+        await CheckBackgroundReplyObservationAsync(chat, pending);
+        await CheckHistoryLifecycleAsync(chat, pending);
         var initial = (ChatMessageState)type.GetProperty("Message")!.GetValue(pending)!;
+        CheckReplyTextSnapshots(pending);
         long origin = Stopwatch.GetTimestamp() - 120 * Stopwatch.Frequency;
         initial.GenerationStartedTimestamp = origin;
         ((StringBuilder)type.GetProperty("Content")!.GetValue(pending)!).Append("STEERING_EARLIER_OUTPUT");
@@ -142,22 +149,68 @@ public partial class App
             var held = new QueuedPrompt(Guid.NewGuid(), "EXPLICIT_GUIDANCE_RETAINS_CARD_UNTIL_ACK", null, null, "ask");
             waitingMessages[chat.Id] = [held];
             Call("RefreshPromptQueue");
+            var queueControl = Element<ConversationPromptQueue>("PromptQueue");
+            await SettleAsync();
+            Button GuidanceButton() => NativeUi.Descendants<Button>(queueControl)
+                .Single(button => button.Content?.ToString() == UiText.Get("引导"));
+            bool CardVisible(QueuedPrompt queued) => queueControl.Visibility == Visibility.Visible
+                && NativeUi.Descendants<TextBlock>(queueControl).Any(label => label.Text == queued.DisplayText);
+            var guidanceButton = GuidanceButton();
             var acknowledgement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int priorResumes = _gateway.SteeringResumeRequests;
+            _gateway.SteeringDetail = new(completed with { State = "paused", Version = 12 }, [], [], null, []);
             _gateway.SteeringAcknowledgementGate = acknowledgement;
-            Task steering = (Task)Call("SteerQueuedPromptAsync", chat.Id, held)!;
+            _gateway.SteeringResumeGate = resume;
             try
             {
+                NativeUi.Invoke(guidanceButton);
                 await WaitAsync(() => _gateway.LastSteeringReplay?.UserMessageId == held.Id,
                     "explicit guidance reaches its original task while the acknowledgement is held");
                 Check(held.IsTaskGuidance && held.IsSubmitting && waitingMessages[chat.Id].Contains(held)
-                    && Element<ConversationPromptQueue>("PromptQueue").Visibility == Visibility.Visible,
+                    && CardVisible(held) && !guidanceButton.IsEnabled,
                     "an in-flight guidance card stays visible and disabled until its formal acknowledgement");
+                acknowledgement.TrySetResult();
+                await WaitAsync(() => _gateway.SteeringResumeRequests == priorResumes + 1,
+                    "the accepted guidance reaches resume while its follow-up response remains pending");
+                Check(!waitingMessages[chat.Id].Contains(held) && held.IsSubmitting
+                    && queueControl.Visibility == Visibility.Collapsed && !CardVisible(held)
+                    && !NativeUi.Descendants<Button>(queueControl).Any(),
+                    "formal acceptance immediately removes the actual native card before resume or observation finishes");
             }
-            finally { acknowledgement.TrySetResult(); _gateway.SteeringAcknowledgementGate = null; }
-            await steering;
+            finally
+            {
+                acknowledgement.TrySetResult(); resume.TrySetResult();
+                _gateway.SteeringAcknowledgementGate = null; _gateway.SteeringResumeGate = null;
+            }
+            await WaitAsync(() => !held.IsSubmitting, "the synthetic post-acceptance resume failure settles");
+            int acceptedAttempts = _gateway.SteeringAttempts.Count;
+            await (Task)Call("SteerQueuedPromptAsync", chat.Id, held)!;
             Check(!waitingMessages[chat.Id].Contains(held)
+                && queueControl.Visibility == Visibility.Collapsed && _gateway.SteeringAttempts.Count == acceptedAttempts
                 && held.TargetTaskId == taskId && held.TargetRequestId == initial.Id,
-                "acknowledgement removes only the accepted card and preserves the original task identity");
+                "an accepted card stays consumed after follow-up failure and a stale click cannot submit it twice");
+
+            var lostAck = new QueuedPrompt(Guid.NewGuid(), "UNKNOWN_ACK_RETAINS_SAME_CARD", null, null, "ask");
+            waitingMessages[chat.Id] = [lostAck];
+            _gateway.SteeringDetail = new(completed with { State = "running", Version = 13 }, [], [], null, []);
+            _gateway.FailNextSteeringAcknowledgement = true;
+            Call("RefreshPromptQueue");
+            await SettleAsync();
+            NativeUi.Invoke(GuidanceButton());
+            await WaitAsync(() => _gateway.LastSteeringReplay?.UserMessageId == lostAck.Id && !lostAck.IsSubmitting,
+                "the unavailable acknowledgement leaves the original card retryable");
+            Check(waitingMessages[chat.Id].Contains(lostAck) && CardVisible(lostAck)
+                && lostAck.SteeringDeliveryUnconfirmed && GuidanceButton().IsEnabled,
+                "an unconfirmed delivery retains its visible native card and stable task binding");
+            NativeUi.Invoke(GuidanceButton());
+            await WaitAsync(() => !waitingMessages[chat.Id].Contains(lostAck) && !lostAck.IsSubmitting,
+                "retry reconciles the original message identities and consumes the acknowledged card");
+            Check(queueControl.Visibility == Visibility.Collapsed && !CardVisible(lostAck)
+                && _gateway.SteeringAttempts.TakeLast(2).All(attempt => attempt.UserMessageId == lostAck.Id
+                    && attempt.ReplyMessageId == lostAck.ReplyMessageId)
+                && lostAck.TargetTaskId == taskId && lostAck.TargetRequestId == initial.Id,
+                "acknowledgement recovery reuses the same message pair and removes its actual card without a new root");
             replies.Remove(chat.Id);
             _gateway.SteeringDetail = null;
             Prompt.Text = "IDLE_DIRECT_CHAT";
@@ -196,6 +249,127 @@ public partial class App
             ((CancellationTokenSource)type.GetProperty("Cancellation")!.GetValue(pending)!).Dispose();
             ShellField<DispatcherTimer?>("_replyRefreshTimer")?.Stop();
             Call("UpdateConversationPresentation", false);
+        }
+    }
+
+    private async Task CheckNewChatDuringReplyAsync(ProjectChatState chat, object pending,
+        Dictionary<Guid, List<QueuedPrompt>> queues)
+    {
+        var queue = queues[chat.Id];
+        var queued = new QueuedPrompt(Guid.NewGuid(), "KEEP_OLD_CHAT_QUEUE", null, null, "ask");
+        queue.Add(queued);
+        var expectedQueue = queue.ToArray();
+        var expectedMessages = chat.Messages.ToArray();
+        var recent = _shell.ViewModel.RecentConversations.Single(item => item.Id == chat.Id);
+        Call("RefreshPromptQueue");
+        Check(ShellField<bool>("_unknownOutcomeReplyActive"),
+            "the old conversation has a running reply before new-chat navigation");
+        try
+        {
+            // New chats finish the unknown-outcome read synchronously, including its queue refresh.
+            // 新聊天的未知结果读取及其队列刷新会同步结束，必须覆盖真实切换入口。
+            Call("NewStandaloneChat_Click", _shell, new RoutedEventArgs());
+            var fresh = ShellField<ProjectChatState>("_activeStandaloneChat");
+            Call("RefreshPromptQueue");
+            var read = (Task)Call("RefreshUnknownOutcomeAsync", fresh.Id)!;
+            Check(fresh.Id != chat.Id && !fresh.IsPersisted && ActiveId == fresh.Id
+                && read.IsCompletedSuccessfully
+                && ShellField<Guid?>("_unknownOutcomeCheckedChat") == fresh.Id
+                && !ShellField<bool>("_unknownOutcomeReplyActive"),
+                "switching a running reply to an unsaved new chat returns synchronously without recursive queue refresh");
+            await SettleAsync();
+            Check(ReferenceEquals(queues[chat.Id], queue) && queue.SequenceEqual(expectedQueue)
+                && chat.Messages.SequenceEqual(expectedMessages)
+                && ReferenceEquals(ShellField<IDictionary>("_pendingReplies")[chat.Id], pending),
+                "new-chat navigation preserves the old queue, reply identity and existing messages");
+            Check(_gateway.RecoverableReads(fresh.Id) == 0
+                && Element<ConversationPromptQueue>("PromptQueue").Visibility == Visibility.Collapsed,
+                "an unsaved new chat neither requests recoverable tasks nor displays the old chat queue");
+        }
+        finally
+        {
+            queue.Remove(queued);
+            Call("SelectStandaloneChat", recent);
+        }
+    }
+
+    private async Task CheckUnknownOutcomeRefreshAsync(ProjectChatState chat)
+    {
+        var reads = ShellField<Dictionary<Guid, Task>>("_unknownOutcomeReads");
+        if (reads.TryGetValue(chat.Id, out var initialRead)) await initialRead;
+        var states = ShellField<IDictionary>("_unknownOutcomes");
+        var controls = ShellField<HashSet<Guid>>("_unknownOutcomeControls");
+        var card = Element<ConversationUnknownOutcomeCard>("UnknownOutcomeCard");
+        bool Busy() => !((Button)typeof(ConversationUnknownOutcomeCard)
+            .GetField("_confirm", PrivateInstance)!.GetValue(card)!).IsEnabled;
+        var task = new TaskRecord(Guid.NewGuid(), Guid.NewGuid().ToString("D"), "Unknown result fixture", [], new(chat.Id, null),
+            null, [], new(256, null), new(0, 0, 0, 0, 0, 0, 0), "waiting-verification", 1, 1, null, 0, null, 0, 0);
+        var operation = new TaskOperation(task.TaskId, Guid.Parse(task.RequestId),
+            new("unknown-call", "unknown-call", "terminal.host.run", "irreversible"), "unknown", null, null, 300);
+        object State(TaskRecord owner) => Activator.CreateInstance(
+            typeof(ShellPage).GetNestedType("UnknownOutcomeState", BindingFlags.NonPublic)!,
+            [owner, new[] { operation }, Array.Empty<TaskModelReservation>()])!;
+        var recent = _shell.ViewModel.RecentConversations.Single(item => item.Id == chat.Id);
+        Guid? freshId = null;
+        try
+        {
+            states[chat.Id] = State(task);
+            controls.Add(chat.Id);
+            Call("RefreshPromptQueue");
+            Check(card.TaskId == task.TaskId && Busy(), "an active unknown-result control disables its own conversation card");
+            Call("NewStandaloneChat_Click", _shell, new RoutedEventArgs());
+            freshId = ActiveId!.Value;
+            var other = task with { TaskId = Guid.NewGuid(), Scope = new(freshId.Value, null) };
+            states[freshId.Value] = State(other);
+            // A cached target card replaces the previous busy card without an intermediate Hide.
+            // 目标聊天已有缓存卡片时，会直接替换仍忙碌的旧卡片，不先经过 Hide。
+            card.Show(task, [operation]);
+            card.SetBusy(true);
+            Call("RefreshPromptQueue");
+            Check(card.TaskId == other.TaskId && !Busy(), "switching cards does not inherit another conversation's busy state");
+            controls.Add(freshId.Value);
+            Call("RefreshPromptQueue");
+            controls.Remove(chat.Id);
+            Call("OnUnknownOutcomeControlled", chat.Id, task with { State = "running", Version = 2 });
+            Check(card.TaskId == other.TaskId && Busy(), "a background control receipt cannot unlock the current conversation's busy card");
+        }
+        finally
+        {
+            controls.Remove(chat.Id);
+            states.Remove(chat.Id);
+            if (freshId is Guid otherId) { controls.Remove(otherId); states.Remove(otherId); }
+            Call("SelectStandaloneChat", recent);
+        }
+        if (reads.TryGetValue(chat.Id, out var priorRead)) await priorRead;
+        var detailGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _gateway.UnknownOutcomeTask = task;
+        _gateway.SteeringDetail = new(task, [], [operation], null, []);
+        _gateway.NextSteeringDetailGate = detailGate;
+        states[chat.Id] = State(task);
+        int detailReads = _gateway.SteeringDetailReads;
+        var staleRead = (Task)Call("RefreshUnknownOutcomeAsync", chat.Id)!;
+        try
+        {
+            await WaitAsync(() => _gateway.SteeringDetailReads > detailReads, "the old unknown-result detail is held before its response");
+            Call("OnUnknownOutcomeControlled", chat.Id, task with { State = "running", Version = 2 });
+            _gateway.UnknownOutcomeTask = null;
+            var freshRead = (Task)Call("RefreshUnknownOutcomeAsync", chat.Id)!;
+            Check(!ReferenceEquals(freshRead, staleRead), "a confirmed control starts a fresh lookup instead of joining its obsolete read");
+            await freshRead;
+            detailGate.TrySetResult();
+            await staleRead;
+            Check(!states.Contains(chat.Id) && !card.IsShown && !reads.ContainsKey(chat.Id),
+                "a late waiting-verification response cannot resurrect a resolved card or retain its read slot");
+        }
+        finally
+        {
+            detailGate.TrySetResult();
+            await staleRead;
+            _gateway.UnknownOutcomeTask = null;
+            _gateway.NextSteeringDetailGate = null;
+            _gateway.SteeringDetail = null;
+            states.Remove(chat.Id);
+            Call("RefreshPromptQueue");
         }
     }
 

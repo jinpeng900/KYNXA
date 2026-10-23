@@ -39,17 +39,21 @@ public sealed partial class ShellPage
         if (UnknownOutcomeCard is null) return;
         Guid? chatId = ActiveChatId;
         bool replyActive = chatId is Guid current && IsReplyInProgress(current);
-        if (chatId != _unknownOutcomeCheckedChat || (_unknownOutcomeReplyActive && !replyActive))
+        bool needsRefresh = chatId != _unknownOutcomeCheckedChat || (_unknownOutcomeReplyActive && !replyActive);
+        // Commit the observed transition before a read can complete synchronously and render the queue again.
+        // 读取可能同步结束并再次渲染队列，必须先提交已观察到的状态，避免重复进入同一转换。
+        _unknownOutcomeCheckedChat = chatId;
+        _unknownOutcomeReplyActive = replyActive;
+        if (needsRefresh)
         {
             // Re-read when the chat changes or its reply ends; a running task cannot be waiting for verification.
             // 切换聊天或回复结束时重新读取；正在运行的任务不会处于等待核验。
-            _unknownOutcomeCheckedChat = chatId;
             if (chatId is Guid id) _ = RefreshUnknownOutcomeAsync(id);
         }
-        _unknownOutcomeReplyActive = replyActive;
         if (chatId is Guid active && _unknownOutcomes.TryGetValue(active, out var state))
         {
             UnknownOutcomeCard.Show(state.Task, state.Operations, state.Reservations);
+            UnknownOutcomeCard.SetBusy(_unknownOutcomeControls.Contains(active));
             UnknownOutcomeCard.SetQueuedCount(_queuedPrompts.TryGetValue(active, out var queue) ? queue.Count : 0);
             PromptQueue.Visibility = Visibility.Collapsed;
         }
@@ -60,12 +64,19 @@ public sealed partial class ShellPage
     {
         if (_chatClosing) return Task.CompletedTask;
         if (_unknownOutcomeReads.TryGetValue(chatId, out var running)) return running;
-        var read = ReadUnknownOutcomeAsync(chatId);
-        if (!read.IsCompleted) _unknownOutcomeReads[chatId] = read;
-        return read;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _unknownOutcomeReads[chatId] = completion.Task;
+        _ = ReadRegisteredAsync();
+        return completion.Task;
+
+        async Task ReadRegisteredAsync()
+        {
+            try { await ReadUnknownOutcomeAsync(chatId, completion.Task); completion.TrySetResult(); }
+            catch (Exception error) { completion.TrySetException(error); }
+        }
     }
 
-    private async Task ReadUnknownOutcomeAsync(Guid chatId)
+    private async Task ReadUnknownOutcomeAsync(Guid chatId, Task owner)
     {
         try
         {
@@ -91,7 +102,7 @@ public sealed partial class ShellPage
                     break;
                 }
             }
-            if (_chatClosing || FindChat(chatId).Chat != chat) return;
+            if (_chatClosing || FindChat(chatId).Chat != chat || _unknownOutcomeReads.GetValueOrDefault(chatId) != owner) return;
             if (found is not null) _unknownOutcomes[chatId] = found;
             else _unknownOutcomes.Remove(chatId);
         }
@@ -104,8 +115,13 @@ public sealed partial class ShellPage
         }
         finally
         {
-            _unknownOutcomeReads.Remove(chatId);
-            if (!_chatClosing && ActiveChatId == chatId) RefreshPromptQueue();
+            // A control receipt supersedes older reads; they cannot overwrite or unregister the fresh lookup.
+            // 控制回执替代旧读取，旧响应不能覆盖状态，也不能清掉后续读取的登记。
+            if (_unknownOutcomeReads.GetValueOrDefault(chatId) == owner)
+            {
+                _unknownOutcomeReads.Remove(chatId);
+                if (!_chatClosing && ActiveChatId == chatId) RefreshPromptQueue();
+            }
         }
     }
 
@@ -124,10 +140,11 @@ public sealed partial class ShellPage
         finally
         {
             _unknownOutcomeControls.Remove(chatId);
+            _unknownOutcomeReads.Remove(chatId);
             await RefreshUnknownOutcomeAsync(chatId);
-            if (!_chatClosing)
+            if (!_chatClosing && ActiveChatId == chatId)
             {
-                UnknownOutcomeCard.SetBusy(false);
+                RefreshPromptQueue();
                 // Still waiting after an explicit control means it was not confirmed; say so inside the card.
                 // 明确操作后仍在等待说明未获确认，只在卡片内说明，不弹窗。
                 if (UnknownOutcomeCard.TaskId == request.Task.TaskId && ActiveChatId == chatId)
@@ -140,8 +157,9 @@ public sealed partial class ShellPage
     /// 继续流程回调：网关确认任务离开等待核验后立即移除提示，不等待整段回复结束。</summary>
     private void OnUnknownOutcomeControlled(Guid chatId, TaskRecord task)
     {
-        if (task.State == "waiting-verification" || !_unknownOutcomes.TryGetValue(chatId, out var state)
-            || state.Task.TaskId != task.TaskId) return;
+        if (task.State == "waiting-verification") return;
+        _unknownOutcomeReads.Remove(chatId);
+        if (!_unknownOutcomes.TryGetValue(chatId, out var state) || state.Task.TaskId != task.TaskId) return;
         _unknownOutcomes.Remove(chatId);
         RefreshPromptQueue();
     }
@@ -156,6 +174,7 @@ public sealed partial class ShellPage
             if (!TaskStates.IsTerminal(detail.Task.State))
                 await _tasksApiClient.ControlAsync(chatId, task.TaskId, detail.Task.Version, "cancel",
                     task.Scope.ProjectId, deadline.Token);
+            _unknownOutcomeReads.Remove(chatId);
             _unknownOutcomes.Remove(chatId);
             TaskPanel.NotifyChanged(chatId);
             return null;
