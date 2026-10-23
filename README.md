@@ -1,4 +1,4 @@
-# KYNXA 1.7
+# KYNXA 1.7.1
 
 <p align="center">
   English | <a href="./README.zh.md">中文</a>
@@ -6,15 +6,15 @@
 
 **KYNXA** is a local-first personal agent application for Windows. It brings cloud and local models, durable tasks, document retrieval, tools, and a file/browser/terminal workspace into one desktop application.
 
-**First stable release: `1.7` (package version `1.7.0`) · Windows x64**
+**Current release: `1.7.1` · Windows x64**
 
-Version 1.7 is KYNXA's first stable release. It combines durable task continuation and recovery, scoped memory and tools, retrieval and cache reuse, desktop control, and document creation and previews. Local retrieval now uses multilingual E5 plus lexical rank fusion (RRF) and lightweight sorting, replacing BGE. Direct DOCX/PPTX/XLSX previews, native Office document generation, and terminal execution receipts remain included. See the [1.7 release notes](docs/releases/1.7.md), [package release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0), and [documentation index](docs/README.md).
+Version 1.7.1 updates the first stable 1.7 release with fixes for queued messages, explicit steering, task recovery, completion evidence, and large-file reads. It also improves retrieval preparation and history reuse. The existing E5/lexical retrieval, direct DOCX/PPTX/XLSX previews, native Office document generation, and terminal execution receipts remain included. See the [1.7.1 release notes](docs/releases/1.7.1.md), [package release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.1), and [documentation index](docs/README.md). The [1.7 notes](docs/releases/1.7.md) retain the first stable release's history.
 
 **Release/source note:** Use the matching release tag when building a published package from source; a different branch or revision may contain different implementation changes.
 
 Validation uses focused Rust, HTTP/SSE, and Windows UI checks. These checks cover the exercised paths, not every model, website, installation scenario, or large-library retrieval workload. Earlier results remain in the [1.5.3 patch notes](docs/releases/1.5.3.md).
 
-## Capabilities in the 1.7 package
+## Capabilities in the 1.7.1 package
 
 | Area | Current capabilities |
 | --- | --- |
@@ -40,16 +40,16 @@ The full runtime includes the multilingual **E5 embedding model** for retrieval,
 
 ## Install and store your data
 
-The [1.7 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0) is published with the following Windows x64 downloads:
+The [1.7.1 release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.1) provides these Windows x64 downloads:
 
 | Download | Use |
 | --- | --- |
-| [Installer ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | Extract the archive, then run the included EXE to install the application and its full base runtime payload. |
-| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
+| [Installer ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.1/KYNXA-1.7.1-windows-x64-setup.zip) | Extract the archive, then run the included EXE to install the application and its full base runtime payload. |
+| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.1/KYNXA-1.7.1-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
 
 The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
 
-Version 1.7 distributes only the installer ZIP and runtime resource ZIP. Standalone and online installer EXEs are not public release assets; online installer tooling remains available to maintainers in the source.
+Version 1.7.1 distributes only the installer ZIP and runtime resource ZIP. Standalone and online installer EXEs are not public release assets; online installer tooling remains available to maintainers in the source.
 
 **End users of a complete installer do not need development SDKs, Rust, Node, Python, or manual PATH configuration.** Cloud model credentials and third-party services that require accounts remain user-configured. The current installer build is not production-code-signed, and its generated EXE has not undergone an installation run; see [installer packaging](apps/desktop/Build/Installer/README.md).
 
@@ -114,7 +114,7 @@ The source repository keeps maintained documentation, code, manifests, and prepa
 
 Useful entry points:
 
-* [Documentation index](docs/README.md) and [1.7 release notes](docs/releases/1.7.md)
+* [Documentation index](docs/README.md) and [1.7.1 release notes](docs/releases/1.7.1.md)
 * [Core guide](apps/agent-core/README.md) and [native architecture](docs/architecture/native-gateway.md)
 * [Memory and conversations](docs/architecture/chat-work-memory.md)
 * [Document parsing](docs/architecture/document-ingestion.md) and [retrieval](docs/architecture/retrieval.md)

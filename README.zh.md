@@ -1,4 +1,4 @@
-# KYNXA 1.7
+# KYNXA 1.7.1
 
 <p align="center">
   <a href="./README.md">English</a> | 中文
@@ -6,15 +6,15 @@
 
 **KYNXA** 是面向 Windows 的本地优先个人 Agent 应用，将云端与本地模型、长任务、文档检索、工具，以及文件／网页／终端工作区整合在桌面中。
 
-**首个正式版：`1.7`（安装包版本 `1.7.0`）· Windows x64**
+**当前正式版：`1.7.1` · Windows x64**
 
-1.7 是 KYNXA 的首个正式版，整合长任务续跑与恢复、有范围隔离的记忆和工具、检索与缓存复用、桌面操作，以及文档生成和预览。本地检索改用多语言 E5 加词法检索、RRF 名次融合与轻量排序，替代 BGE。DOCX／PPTX／XLSX 原格式预览、原生 Office 文档生成和终端执行回执均继续保留。版本变化见 [1.7 更新说明](docs/releases/1.7.md)，安装入口见 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)，架构与使用入口见 [文档索引](docs/README.md)。
+1.7.1 是首个正式版 1.7 的修复更新，改进消息排队、显式引导、任务恢复、逐项证据验收和大文件读取，并优化检索准备与历史复用。已有 E5／词法检索、DOCX／PPTX／XLSX 原格式预览、原生 Office 文档生成和终端执行回执继续保留。版本变化见 [1.7.1 更新说明](docs/releases/1.7.1.md)，安装入口见 [1.7.1 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.1)，架构与使用入口见 [文档索引](docs/README.md)。[1.7 更新说明](docs/releases/1.7.md)保留首个正式版的历史记录。
 
 **成品与源码说明：** 从源码构建已发布版本时，请使用对应的发布标签；不同分支或修订可能包含不同实现。
 
 验证采用 Rust、HTTP／SSE 和 Windows UI 定向检查，覆盖实际执行的路径，不等于所有模型、网站、安装场景或大库检索质量均已覆盖；历史验证结果保留在 [1.5.3 补丁说明](docs/releases/1.5.3.md)。
 
-## 1.7 成品能力
+## 1.7.1 成品能力
 
 | 领域 | 已接入的功能 |
 | --- | --- |
@@ -40,16 +40,16 @@ DOCX 先显示可操作页面，嵌入字体和图片在后台补齐；长文档
 
 ## 安装与数据位置
 
-Windows x64 正式版已在 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)发布，下载入口如下：
+Windows x64 [1.7.1 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.1)提供以下下载：
 
 | 下载 | 用途 |
 | --- | --- |
-| [安装包 ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | 解压后运行其中的 EXE，安装软件及完整基础运行资源。 |
-| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
+| [安装包 ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.1/KYNXA-1.7.1-windows-x64-setup.zip) | 解压后运行其中的 EXE，安装软件及完整基础运行资源。 |
+| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.1/KYNXA-1.7.1-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
 
 EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
 
-1.7 公开分发仅安装包 ZIP 与运行资源 ZIP，不单独提供安装 EXE 或在线安装器；源码中的在线安装构建工具仍可供维护者使用。
+1.7.1 公开分发仅安装包 ZIP 与运行资源 ZIP，不单独提供安装 EXE 或在线安装器；源码中的在线安装构建工具仍可供维护者使用。
 
 **使用完整安装包的普通用户不需要安装开发 SDK、Rust、Node、Python 或手动配置 PATH。** 云端模型凭据及需要账号的第三方服务仍由用户配置。当前安装器构建尚未配置生产代码签名，生成的 EXE 尚未进行安装运行测试，详见 [安装打包说明](apps/desktop/Build/Installer/README.md)。
 
@@ -114,7 +114,7 @@ Rust 拥有正式 HTTP／SSE 后端、模型与工具 I/O、任务状态、检�
 
 常用入口：
 
-* [文档索引](docs/README.md) 与 [1.7 更新说明](docs/releases/1.7.md)
+* [文档索引](docs/README.md) 与 [1.7.1 更新说明](docs/releases/1.7.1.md)
 * [核心指南](apps/agent-core/README.md) 与 [原生架构](docs/architecture/native-gateway.md)
 * [聊天与工作记忆](docs/architecture/chat-work-memory.md)
 * [文档解析](docs/architecture/document-ingestion.md) 与 [检索](docs/architecture/retrieval.md)
