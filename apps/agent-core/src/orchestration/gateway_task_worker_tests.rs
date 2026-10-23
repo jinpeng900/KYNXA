@@ -91,6 +91,31 @@ async fn child_pending_proof_verification_survives_checkpoint_and_recovers_only_
 }
 
 #[test]
+fn child_readback_reuses_scoped_and_delivered_proofs_across_checkpoint_reviews() {
+    let saved = |name: &str, id: &str, content: Value, mutating: bool| {
+        let call = json!({"id":id,"name":name});
+        let result = json!({"status":"completed","isError":false,"content":content});
+        json!({"call":call,"result":result,"mutating":mutating,"observation":!mutating,
+            "completionProof":super::super::completion_evidence::from_receipt(&call,&result)})
+    };
+    let mut image = saved("mcp.fixture.look", "scene-image", json!({"sourceId":"scene-main","sourceVersion":1,
+        "content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]}), false);
+    let read = saved("filesystem.read", "read-a", json!({"path":"C:/work/a.txt","sha256":"a".repeat(64),"content":"body"}), false);
+    let log = saved("filesystem.write", "save-log", json!({"path":"C:/work/log.txt","sha256":"b".repeat(64),"bytes":5}), true);
+    let mut state = WorkerContext { receipts:vec![read, image.clone(), log], review_pending:true, ..Default::default() };
+    assert!(current_readback(&state, false).iter().any(|proof| proof["toolCallId"] == "read-a"));
+    assert!(current_readback(&state, true).is_empty());
+    image["visualDeliveredToModel"] = json!(true);
+    state.receipts[1] = image;
+    let mut resumed = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(current_readback(&resumed, true)[0]["toolCallId"], "scene-image");
+    resumed.receipts.push(saved("terminal.host.run", "opaque-change", json!({"exitCode":0}), true));
+    assert!(current_readback(&resumed, false).is_empty());
+    assert!(current_readback(&resumed, true).is_empty());
+    assert_eq!(resumed.receipts[..3], state.receipts);
+}
+
+#[test]
 fn child_checkpoint_keeps_unresolved_checks_until_the_corresponding_retry_passes() {
     let snapshot = json!({"signature":"a".repeat(64),"complete":true,
         "files":[{"pathId":"b".repeat(64),"state":"present","sha256":"c".repeat(64)}]});
@@ -162,8 +187,7 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
     }
     let assessment = request["messages"].as_array().into_iter().flatten().last()
         .and_then(|message|message["content"].as_str())
-        .filter(|text|text.starts_with("Broker: assess the actual saved output")
-            && text.contains("Expected acceptance requirements:") && text.contains("Verified completion evidence:"));
+        .filter(|text|text.contains("Expected acceptance requirements:") && text.contains("Verified completion evidence:"));
     if let Some(assessment) = assessment {
         provider.review_requests.fetch_add(1,Ordering::AcqRel);
         if (provider.review_native_action.load(Ordering::Acquire) || provider.review_dsml_action.load(Ordering::Acquire))
@@ -796,8 +820,8 @@ async fn owned_visual_readback_rehydrates_images_into_the_actual_child_model_req
     assert_eq!(result["acceptanceReview"]["reviewed"],true);
     assert!(!result["acceptanceReview"]["visualReadbackRefs"].as_array().unwrap().is_empty());
     let requests = fixture.provider.requests.lock().unwrap();
-    assert!(requests.iter().filter(|request|crate::models::protocol::image_inputs(request)>0).count() >= 2,
-        "Both the actual continuation and visual assessment must carry the rehydrated image.");
+    assert!(requests.iter().any(|request|crate::models::protocol::image_inputs(request)>0),
+        "Visual acceptance needs an actual model delivery, not a placeholder or compulsory resend in each review.");
     assert!(requests.iter().any(|request|request.to_string().contains(encoded)));
     drop(requests);
     fixture.close().await;

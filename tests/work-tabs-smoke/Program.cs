@@ -265,6 +265,19 @@ Check(automaticTabs.OpenItems.All(tab => tab.Key != presentationOutputs[0].Key),
 
 var actualFinal = ConversationWorkspaceSources.FromTool(write with { ToolCallId = "final-write" },
     System.Text.Json.JsonSerializer.SerializeToElement(new { path = @"D:\work\deliveries\最终报告.md", sha256 = "final-version" }))!;
+var routineCapture = shot with { PresentationPriority = WorkspacePresentationPriority.CatalogOnly };
+var capturePresentation = new ConversationWorkTabState();
+capturePresentation.ShowConversation(chatA, [routineCapture]);
+Check(capturePresentation.HasItems && !capturePresentation.HasOpenTabs && capturePresentation.SelectedTab is null,
+    "Routine capture evidence stays available in the catalog without opening the right workspace.");
+capturePresentation.ShowConversation(chatA, [routineCapture, actualFinal with { PresentationPriority = WorkspacePresentationPriority.Final }]);
+Check(capturePresentation.OpenItems.Count == 1 && capturePresentation.SelectedTab?.Key == actualFinal.Key,
+    "A final output is presented while the routine screenshot remains hidden.");
+capturePresentation.Reopen(routineCapture.Key);
+capturePresentation.ShowConversation(chatA, [routineCapture, actualFinal with { PresentationPriority = WorkspacePresentationPriority.Final },
+    secondShot with { PresentationPriority = WorkspacePresentationPriority.CatalogOnly }]);
+Check(capturePresentation.SelectedTab?.Key == routineCapture.Key && capturePresentation.OpenItems.Count == 2,
+    "Explicitly opening a screenshot survives refresh without exposing later routine captures.");
 var finalProjection = ConversationWorkspaceSources.PrioritizeDeliveredOutputs([actualFinal, savedOutput],
     "结果：[最终报告](<D:/work/deliveries/最终报告.md>)；[不存在](missing.md)。");
 var deliveryState = new ConversationWorkTabState();

@@ -242,57 +242,6 @@ impl DocumentWorkRecords {
             "guidance":"Reuse saved analyses first. Read a document record for complete conclusions and original references; revisit originals only for invalidated versions or a specific evidence gap. / 优先复用已存分析；读取文档工作记录取得完整结论与原件引用，仅在版本失效或具体证据缺口时回读原文。"})
     }
 
-    /// Plan only unobserved ranges of tracked output versions; dispatch still belongs to the ordinary tool pipeline.
-    /// 只规划已跟踪产物当前版本的未读范围；真正派发仍走原工具执行链路、作用域校验与回执归档。
-    pub fn missing_readback_plans(&self, targets: &Value, max_chars: u64) -> Vec<Value> {
-        let mut plans = Vec::new();
-        let limit = max_chars.clamp(1, 64_000);
-        for target in array(targets) {
-            let Some(path) = target["path"].as_str().filter(|path| !path.is_empty()) else { continue; };
-            let Some(hash) = valid_hash(&target["sha256"]) else {
-                if target["versionKnown"] == false {
-                    plans.push(json!({"name":"document.read","arguments":{"path":path,"offset":0,"maxChars":limit},
-                        "purpose":"discover-current-output-version","expectedSha256":Value::Null}));
-                }
-                continue;
-            };
-            if target["versionCheckRequired"] == true {
-                plans.push(json!({"name":"filesystem.stat","arguments":{"path":path},
-                    "purpose":"verify-current-output-version","expectedSha256":hash}));
-                continue;
-            }
-            if target["readBackComplete"] == true { continue; }
-            let matching: Vec<&Value> = self.records.values().filter(|record| {
-                record["active"] == true && text(&record["source"]["path"]) == path &&
-                    valid_hash(&record["sourceVersion"]["sha256"])
-                        .is_some_and(|observed| observed.eq_ignore_ascii_case(hash))
-            }).collect();
-            let ranges: Vec<&Value> = matching.iter().flat_map(|record| array(&record["readRanges"]))
-                .filter(|range| range["locator"]["extraction"]["complete"] != false).collect();
-            if let Some(plan) = pdf_readback_plan(path, hash, &ranges, limit) {
-                plans.push(plan);
-                continue;
-            }
-            if ranges.iter().any(|range| range["locator"]["extraction"]["format"] == "pdf") {
-                continue;
-            }
-            let total = target["totalCharacters"].as_u64().or_else(||
-                ranges.iter().rev().find_map(|range| range["totalCharacters"].as_u64()));
-            let mut spans: Vec<(u64, u64)> = array(&target["readRanges"]).iter().filter_map(|range|
-                range.as_array().and_then(|range| range.first()?.as_u64().zip(range.get(1)?.as_u64())))
-                .collect();
-            spans.extend(ranges.iter().filter_map(|range| {
-                (range["unit"] == "utf16" && range["totalCharacters"].as_u64() == total)
-                    .then(|| range["start"].as_u64().zip(range["end"].as_u64())).flatten()
-            }));
-            let gap = total.map(|total| first_unread_span(total, &spans)).unwrap_or(Some((0, limit)));
-            if let Some((start, end)) = gap.filter(|(start, end)| start < end && *start <= 33_554_432) {
-                plans.push(readback_plan(path, hash, start, end, limit));
-            }
-        }
-        plans
-    }
-
     /// A trusted current file version invalidates old analysis without deleting the archived observations.
     /// 可信当前文件版本让旧分析立即失效；原始观察与历史归档保持完整。
     pub async fn observe_output_version(&mut self, journal: &TaskJournal, receipt: &Value) -> Result<bool> {
@@ -410,58 +359,6 @@ fn valid_hash(value: &Value) -> Option<&str> {
     value.as_str().filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-fn first_unread_span(total: u64, spans: &[(u64, u64)]) -> Option<(u64, u64)> {
-    let mut sorted: Vec<(u64, u64)> = spans.iter().copied()
-        .filter(|(start, end)| start <= end && *end <= total).collect();
-    sorted.sort_unstable();
-    let mut covered = 0;
-    for (start, end) in sorted {
-        if start > covered { return Some((covered, start)); }
-        covered = covered.max(end);
-    }
-    (covered < total).then_some((covered, total))
-}
-
-fn readback_plan(path: &str, hash: &str, start: u64, end: u64, limit: u64) -> Value {
-    json!({"name":"document.read","arguments":{"path":path,"offset":start,"maxChars":limit.min(end - start)},
-        "purpose":"complete-current-output-readback","expectedSha256":hash,
-        "missingRange":{"unit":"utf16","start":start,"end":end}})
-}
-
-fn pdf_readback_plan(path: &str, hash: &str, ranges: &[&Value], limit: u64) -> Option<Value> {
-    let page_count = ranges.iter().find_map(|range| {
-        let extraction = &range["locator"]["extraction"];
-        (extraction["format"] == "pdf").then(|| extraction["pageCount"].as_u64()).flatten()
-    })?;
-    let mut windows: BTreeMap<(u64, u64, u64), Vec<(u64, u64)>> = BTreeMap::new();
-    for range in ranges {
-        let extraction = &range["locator"]["extraction"];
-        if extraction["format"] != "pdf" || extraction["pageCount"].as_u64() != Some(page_count) { continue; }
-        let window = &extraction["pageWindow"];
-        if let Some(((first, last), total)) = window["startPage"].as_u64().zip(window["endPage"].as_u64())
-            .zip(range["totalCharacters"].as_u64()).filter(|((first, last), _)| *first > 0 && first <= last && *last <= page_count)
-            && let Some(span) = range["start"].as_u64().zip(range["end"].as_u64()) {
-            windows.entry((first, last, total)).or_default().push(span);
-        }
-    }
-    let mut covered_pages = Vec::new();
-    for (&(first, last, total), spans) in &windows {
-        if let Some((start, end)) = first_unread_span(total, spans) {
-            if start > 33_554_432 { continue; }
-            let mut plan = readback_plan(path, hash, start, end, limit);
-            plan["arguments"]["startPage"] = json!(first);
-            plan["arguments"]["endPage"] = json!(last);
-            return Some(plan);
-        }
-        covered_pages.push((first - 1, last));
-    }
-    let (first, last) = first_unread_span(page_count, &covered_pages)?;
-    if first >= 1_000_000 { return None; }
-    let end_page = (first + 100).min(last).min(1_000_000);
-    Some(json!({"name":"document.read","arguments":{"path":path,"offset":0,"maxChars":limit,
-        "startPage":first + 1,"endPage":end_page},"purpose":"complete-current-output-readback",
-        "expectedSha256":hash,"missingRange":{"unit":"pages","start":first + 1,"end":last}}))
-}
 fn invalid(message: &str) -> GatewayError {
     GatewayError::new("INVALID_DOCUMENT_PROGRESS", message, 409)
 }
@@ -685,52 +582,6 @@ mod tests {
     use super::*;
     use crate::storage::{sqlite_connections, task_repository::*};
     use std::path::PathBuf;
-
-    #[test]
-    fn document_readback_gap_plans_fill_docx_head_and_xlsx_tail_without_repeating_ranges() {
-        let mut records = DocumentWorkRecords::default();
-        let hash = "a".repeat(64);
-        let source = json!({"path":"/work/guide.docx","sha256":hash,"offset":3600,"nextOffset":6008,"totalCharacters":6008});
-        let record = records.observed_record("document.read", &source, &reference()).unwrap();
-        records.records.insert(text(&record["sourceIdentity"]).to_owned(), record);
-        let targets = json!([
-            {"path":"/work/guide.docx","sha256":hash,"totalCharacters":6008},
-            {"path":"/work/check.xlsx","sha256":hash,"totalCharacters":3731,"readRanges":[[0,3000]]}
-        ]);
-        let plans = records.missing_readback_plans(&targets, 12000);
-        assert_eq!(plans.len(), 2);
-        assert_eq!(plans[0]["arguments"], json!({"path":"/work/guide.docx","offset":0,"maxChars":3600}));
-        assert_eq!(plans[1]["arguments"], json!({"path":"/work/check.xlsx","offset":3000,"maxChars":731}));
-        let small = records.missing_readback_plans(&targets, 1000);
-        assert_eq!(small[0]["arguments"]["maxChars"], 1000);
-        let mut covered = targets;
-        covered[0]["readRanges"] = json!([[0,3600]]);
-        covered[1]["readRanges"] = json!([[0,3731]]);
-        assert!(records.missing_readback_plans(&covered, 12000).is_empty());
-    }
-
-    #[test]
-    fn document_readback_gap_plans_require_current_hash_and_never_accept_recorded_analysis_as_reading() {
-        let mut records = DocumentWorkRecords::default();
-        let source = json!({"path":"/work/deck.pptx","sha256":"a".repeat(64),"offset":0,"nextOffset":100,"totalCharacters":100});
-        let mut old = records.observed_record("document.read", &source, &reference()).unwrap();
-        old["analysis"] = json!({"state":"recorded","conclusions":["model says complete"]});
-        records.records.insert(text(&old["sourceIdentity"]).to_owned(), old);
-        let mut targets = json!([{"path":"/work/deck.pptx","sha256":"b".repeat(64)}]);
-        let plans = records.missing_readback_plans(&targets, 12000);
-        assert_eq!(plans[0]["arguments"], json!({"path":"/work/deck.pptx","offset":0,"maxChars":12000}));
-        assert_eq!(plans[0]["expectedSha256"], "b".repeat(64));
-        targets[0]["versionCheckRequired"] = json!(true);
-        let plans = records.missing_readback_plans(&targets, 12000);
-        assert_eq!(plans[0]["name"], "filesystem.stat");
-        assert_eq!(plans[0]["arguments"], json!({"path":"/work/deck.pptx"}));
-        targets[0]["sha256"] = Value::Null;
-        assert!(records.missing_readback_plans(&targets, 12000).is_empty());
-        targets[0]["versionKnown"] = json!(false);
-        let fallback = records.missing_readback_plans(&targets, 12000);
-        assert_eq!(fallback[0]["name"], "document.read");
-        assert_eq!(fallback[0]["expectedSha256"], Value::Null);
-    }
 
     #[test]
     fn document_page_windows_complete_only_after_all_pages_and_text_are_read() {

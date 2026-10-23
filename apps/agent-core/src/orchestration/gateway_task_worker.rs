@@ -85,10 +85,6 @@ struct WorkerContext {
     #[serde(default)]
     review_checkpoint: Value,
     #[serde(default)]
-    review_visual_input: bool,
-    #[serde(default)]
-    readback_since: usize,
-    #[serde(default)]
     last_parent_revision: u64,
     #[serde(default)]
     memory_plan_invalidated: bool,
@@ -112,6 +108,7 @@ fn invalidate_child_memory_plan(state:&mut WorkerContext,status:&Value) {
 fn retain_child_tool_intent(state: &mut WorkerContext, content: &str, catalog: &[Value]) -> bool {
     let requested = task::unexecuted_tool_names(content);
     let mut names = state.review_checkpoint["unexecutedToolIntent"]["names"].as_array().cloned().unwrap_or_default();
+    names.retain(|name| name != "kynxa_task");
     for requested in requested {
         let logical = catalog.iter().find(|tool| tool["name"].as_str().is_some_and(|name|
             name == requested || crate::models::protocol::wire_name(name) == requested))
@@ -211,20 +208,10 @@ async fn restore_completion_proofs(root: &std::path::Path, conversation: &str, r
 }
 
 fn current_readback(state: &WorkerContext, visual: bool) -> Vec<Value> {
-    let last_mutation = state.receipts.iter().rposition(|saved| {
-        let name = saved["call"]["name"].as_str().unwrap_or("");
-        task::successful_completion_receipt(&saved["result"]) && saved["observation"] != true
-            && !name.starts_with("task.") && saved["visualAvailable"] != true
-            && !task::receipt_is_readback(name, &saved["result"]["content"])
-    }).unwrap_or(0);
-    state.receipts.iter().skip(last_mutation.max(state.readback_since)).filter(|saved| {
-        verified_completion_receipt(saved)
-            && if visual { saved["visualDeliveredToModel"] == true } else {
-                saved["visualDeliveredToModel"] == true || task::receipt_is_readback(
-                    saved["call"]["name"].as_str().unwrap_or(""), &saved["result"]["content"])
-            }
-    }).map(|saved| json!({"toolCallId":saved["call"]["id"],"resultRef":saved["result"]["resultRef"],
-        "visual":saved["visualDeliveredToModel"]==true})).collect()
+    super::completion_evidence::readbacks(&completion_evidence_records(state), visual)
+        .filter_map(|proof| state.receipts.iter().find(|saved| saved["call"]["id"] == proof["id"])
+            .map(|saved| json!({"toolCallId":proof["id"],"resultRef":saved["result"]["resultRef"],
+                "visual":proof["visualObserved"]==true}))).collect()
 }
 
 /// Rebuild version-bound validation from owned receipts, not model claims.
@@ -245,8 +232,8 @@ fn execution_validation(state: &WorkerContext, goal: &str) -> Value {
 fn review_instruction(state: &WorkerContext, requires_readback: bool, requires_visual: bool) -> String {
     let requirements: Vec<Value> = state.acceptance_requirements.iter().enumerate().map(|(index, item)|
         json!({"requirementId":format!("requirement-{}",index + 1),"item":item})).collect();
-    let instruction = format!("Broker: assess the actual saved output against EVERY original requirement. Prefer a standalone <kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[],\"met\":[{{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"actual successful call ID\"]}}]}}</kynxa_task>. Use continue and a concrete changed strategy for any remaining gap, or use available native tools to resolve that gap now. A malformed previous review is not completion. Tool calls use the formal protocol; never simulate DSML, XML or JSON calls as ordinary text. Match each reference to the requested action, actual target, current version and read range. A write proves existence, not content or visual quality. Readback required={requires_readback}, image observation required={requires_visual}; evaluate only content or images actually observed. Genuine external/user/config blockers may use blocked; implementation difficulty is not such a blocker. Do not idle or repeat output to fill time.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nCurrent readback evidence: {}\nCurrent visual observations: {}\nUnresolved execution checks: {}",
-        json!(requirements),json!(completion_evidence(state)),json!(current_readback(state,false)),json!(current_readback(state,true)),
+    let instruction = format!("Broker: {} Readback required={requires_readback}, image observation required={requires_visual}.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nCurrent readback evidence: {}\nCurrent visual observations: {}\nUnresolved execution checks: {}",
+        task::COMPLETION_REVIEW_CONTRACT,json!(requirements),json!(completion_evidence(state)),json!(current_readback(state,false)),json!(current_readback(state,true)),
         gateway_loop::unresolved_check_summary(&execution_validation(state, "")));
     if state.review_attempts == 0 && state.review_checkpoint["remaining"].as_array().is_none_or(Vec::is_empty) {
         return instruction;
@@ -1347,7 +1334,6 @@ async fn execute_loop(
                     saved["visualDeliveredToModel"] = json!(true);
                 }
             }
-            if state.review_pending { state.review_visual_input = body_has_images && !delivered_visual_ids.is_empty(); }
             context_repairs = 0;
             state.generated_tokens += response.usage["output_tokens"]
                 .as_u64()
@@ -1414,7 +1400,8 @@ async fn execute_loop(
                 state.segment_tool_base=state.tool_calls;
                 checkpoint(run,journal,state,"tool-segment-renewed").await?;
             }
-            let observation = crate::tools::policy::is_read_only_call(name,&call["arguments"]);
+            let control_correction = task::native_task_control_receipt(call, &state.acceptance_requirements);
+            let observation = control_correction.is_some() || crate::tools::policy::is_read_only_call(name,&call["arguments"]);
             let selection = if tools::workspace_path_tool(name,&call["arguments"]) {
                 tools::select_workspace_context(&ctx,&call["arguments"]).await
             } else { Ok(ctx.clone()) };
@@ -1453,7 +1440,9 @@ async fn execute_loop(
                     )
                 })?;
             let previous=if early_approval.is_none(){previous_operation(journal,call,state.rounds).await?}else{None};
-            let mut receipt = if state.memory_plan_invalidated {
+            let mut receipt = if let Some(control) = control_correction {
+                control
+            } else if state.memory_plan_invalidated {
                 if let Some(previous)=previous {previous} else {
                     let skipped=gateway_loop::tool_execution_receipt(Ok(gateway_loop::memory_replanning_result()));
                     if early_approval.is_some() {
@@ -1811,7 +1800,7 @@ async fn execute_loop(
         state.pending = None;
         state.pending_review = false;
         state.pending_results.clear();
-        let mut inspected = semantic
+        let inspected = semantic
             .apply("task.inspect", &json!({"text":response.content}))
             .unwrap_or(json!({"content":response.content,"state":"unknown"}));
         if response.calls.is_empty() && inspected["source"] == "unexecuted-tool-intent" {
@@ -1866,23 +1855,16 @@ async fn execute_loop(
             return Ok(TaskState::WaitingVerification);
         }
         let needs_verification = requires_verification || !state.changed_files.is_empty();
-        let needs_readback = requires_readback || !state.changed_files.is_empty();
         let execution_check = execution_validation(state,&acceptance_query);
-        if reviewing && inspected["state"]=="complete"
-            && execution_check["pendingValidation"]==true {
-            inspected["unmet"] = json!([format!("Resolve the remaining version-bound execution checks or complete the hash-matched artifact readback. State: {}; checks: {}",
-                execution_check["state"], gateway_loop::unresolved_check_summary(&execution_check))]);
-        }
-        let readback = current_readback(state,false);
-        let visual = current_readback(state,true);
+        let evidence_records = completion_evidence_records(state);
         let decision = semantic.apply("task.decide",&json!({"reply":inspected,"isReview":reviewing,
             "verification":execution_check,
             "hasCalls":false,"outputTruncated":response.output_truncated,"hasUnknownEffects":false,
             "outputContinuations":state.continuations,"requiresVerification":needs_verification,
             "evidenceRequired":needs_verification,"expectedRequirements":state.acceptance_requirements,
-            "validEvidence":completion_evidence(state),"evidenceRecords":completion_evidence_records(state),
-            "requiresReadback":needs_readback,"hasReadback":!readback.is_empty(),
-            "requiresVisualReadback":requires_visual,"hasVisualReadback":!visual.is_empty() && state.review_visual_input,
+            "validEvidence":completion_evidence(state),"evidenceRecords":evidence_records,
+            "requiresReadback":requires_readback,"hasReadback":super::completion_evidence::has_readback(&evidence_records,false),
+            "requiresVisualReadback":requires_visual,"hasVisualReadback":super::completion_evidence::has_readback(&evidence_records,true),
             "reviewAttempts":state.review_attempts,"minimumActiveMs":limits["minActiveMs"].as_u64().unwrap_or(0),
             "activeElapsedMs":run.effective_active_ms(),"remainingRounds":limits["maxRounds"].as_u64().unwrap_or(64)
                 .saturating_sub(state.rounds.saturating_sub(state.segment_round_base))})).map_err(|code| failure(&code,"Child task assessment failed. / 子任务状态评估失败。"))?;
@@ -1890,7 +1872,7 @@ async fn execute_loop(
             Some("review" | "retry-review") => {
                 state.review_pending = true;
                 state.review_attempts += u64::from(reviewing);
-                state.history.push(json!({"role":"user","content":review_instruction(state,needs_readback,requires_visual)}));
+                state.history.push(json!({"role":"user","content":review_instruction(state,requires_readback,requires_visual)}));
                 checkpoint(run,journal,state,"acceptance-review").await?;
                 if reviewing {
                     let mut repair_cancel = run.cancellation.subscribe();
@@ -1923,7 +1905,7 @@ async fn execute_loop(
             Some("final") => { state.acceptance_reviewed = reviewing; }
             _ => {
                 state.review_pending = true;
-                state.history.push(json!({"role":"user","content":review_instruction(state,needs_readback,requires_visual)}));
+                state.history.push(json!({"role":"user","content":review_instruction(state,requires_readback,requires_visual)}));
                 checkpoint(run,journal,state,"repair-task-assessment").await?;
                 continue;
             }
@@ -2056,7 +2038,6 @@ pub async fn execute(
     state.output = super::task::strip_history_records(&state.output);
     if let Some(reason) = input["parentRevision"]["reason"].as_str().filter(|_|input["parentRevision"]["reviewedVersion"].as_u64().unwrap_or(0)>state.last_parent_revision) {
         state.last_parent_revision=input["parentRevision"]["reviewedVersion"].as_u64().unwrap_or(0);
-        state.readback_since=state.receipts.len();
         state.acceptance_reviewed = false;
         state.review_pending = false;
         if state.acceptance_requirements.is_empty() {
@@ -2066,7 +2047,7 @@ pub async fn execute(
         if state.acceptance_requirements.len()>=128 {
             if let Some(last)=state.acceptance_requirements.last_mut() {last.push('\n');last.push_str(&requirement);}
         }else{state.acceptance_requirements.push(requirement);}
-        state.history.push(json!({"role":"user","content":format!("Broker: the parent returned this same delivery for revision: {reason}. Preserve all original requirements, successful operations and saved output. Fix the identified gap, read back the current artifact, and obtain fresh acceptance; do not replay successful writes.")}));
+        state.history.push(json!({"role":"user","content":format!("Broker: the parent returned this same delivery for revision: {reason}. Preserve all original requirements, successful operations and saved output. Fix the identified gap and obtain acceptance using evidence for the affected targets and versions; do not replay successful writes.")}));
     }
     let outcome = execute_loop(&runtime, &parent, &run, &child, context, &input, &mut state).await;
     let _=tokio::time::timeout(Duration::from_secs(2),tool_forwarder).await;

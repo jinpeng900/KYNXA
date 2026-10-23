@@ -8,7 +8,7 @@ use super::{
     gateway_tool_batch,
     gateway_work_progress::{RoundProgress, WorkProgress},
     progress::RunProgress,
-    task::{TaskState, TaskTextProjection},
+    task::{TaskState, TaskTextProjection, completed_output_paths, successful_completion_receipt},
 };
 use crate::{
     gateway_contract::{GatewayError, new_id, now_iso8601},
@@ -46,6 +46,17 @@ const REPEATED_READ_GUIDANCE: &str = "\nBroker read progress: repeated original 
 
 fn native(result: Result<Value, String>) -> Result<Value, GatewayError> {
     result.map_err(|code| GatewayError::new(code, "原生状态检查失败。", 500))
+}
+
+/// Mirror only newly observed stalled rounds into the existing diagnostic counter.
+/// 只把本轮新增停滞写入现有诊断计数；等待不增长，有进展时也不倒扣累计数。
+fn observe_work_progress(work: &mut WorkProgress, progress: &mut RunProgress, round: &RoundProgress)
+    -> super::gateway_work_progress::WorkProgressPlan {
+    let before = work.stagnant_rounds();
+    let plan = work.observe_round(round);
+    let added = plan.no_progress_rounds.saturating_sub(before);
+    if added > 0 { let _ = progress.apply("progress.noProgress", &json!({"count":added})); }
+    plan
 }
 
 pub(super) struct LiveMemoryProjection {
@@ -239,18 +250,6 @@ fn requires_task_verification(state: &LoopState) -> bool {
     state.acceptance_requirements.iter().any(|requirement| super::task::requires_execution_verification(requirement))
 }
 
-fn has_task_readback(state: &LoopState) -> bool {
-    completion_transcript(state).iter().flat_map(|round| round["observations"].as_array().into_iter().flatten())
-        .any(|observation| observation["verifiedSuccess"] == true && observation["verifiedReadback"] == true
-            && observation["mutationSequence"].as_u64().unwrap_or(0) == state.mutation_sequence)
-}
-
-/// Running commands and nonzero exits do not prove completion.
-/// 运行中的命令和非零退出码不能证明完成。
-fn successful_completion_receipt(receipt: &Value) -> bool {
-    super::task::successful_completion_receipt(receipt)
-}
-
 /// Reused legacy receipts use today's error semantics without rewriting their original content.
 /// 复用旧回执时按当前错误语义判断，原始正文保持不变。
 pub(super) fn normalize_reused_receipt(name: &str, receipt: &mut Value) {
@@ -258,12 +257,6 @@ pub(super) fn normalize_reused_receipt(name: &str, receipt: &mut Value) {
         receipt["isError"] = json!(true);
         receipt["status"] = json!("error");
     }
-}
-
-/// Register output paths only from committed file-write receipts.
-/// 仅凭已提交的文件写入回执登记产物路径。
-fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> {
-    super::task::completed_output_paths(name, receipt)
 }
 
 fn completion_evidence_needs_restore(observation: &Value) -> bool {
@@ -393,15 +386,13 @@ fn completion_review_instruction(state: &LoopState) -> String {
     if unresolved_user_steering(state) {
         return format!("Broker: resolve the latest real user steering BEFORE enforcing older acceptance checks or duration. Encode continue, deliver-existing or stop in the normal footer. Deliver-existing returns saved work without further checking or certifying the original requirements; stop acknowledges withdrawal. Neither requires completion evidence. Missing control is not consent to keep the old scope. Native tools remain available after the current instruction is resolved.{}", steering_revision_instruction(state));
     }
-    let max_references = super::task::MAX_COMPLETION_REFERENCES_PER_ITEM;
     let requirements = state.acceptance_requirements.iter().enumerate().map(|(index, requirement)|
         json!({"requirementId":format!("requirement-{}", index + 1),"item":requirement})).collect::<Vec<_>>();
     let verification = state.progress.verification();
-    let instruction = format!("Broker: compare the original requested work with the saved complete output and actual receipts, checking each explicit requirement. Prefer a standalone <kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[],\"met\":[{{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"a verified call ID or committed output path\"]}}]}}</kynxa_task>. Choose complete, continue or blocked. For complete, cover EVERY listed requirementId with genuine successful evidence (at most {max_references} concise references per item); never substitute failed, running, unknown, rejected or merely requested calls, or input paths. Match evidence to each requirement's action, actual target, version and read range. A write proves existence, not content or visual quality; cite the matching observation or check. If any requirement is unmet, choose continue and a concrete next action, or use available native tools to resolve the actual gap now. Tool calls use the formal protocol; never simulate calls as ordinary DSML, XML or JSON text. Do useful work, never idle or repeat greetings to fill time. A finite answer is complete when delivered. blocked requires an actual user-input, authorization, external or resource blocker. Avoid repeating the public delivery during review.\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nBroker validation: {}", json!(requirements), json!(task_evidence(&completion_transcript(state))),
+    let instruction = format!("Broker: {}\nExpected acceptance requirements: {}\nVerified completion evidence: {}\nBroker validation: {}", super::task::COMPLETION_REVIEW_CONTRACT, json!(requirements), json!(task_evidence(&completion_transcript(state))),
         json!({"state":verification["state"],"pendingValidation":verification["pendingValidation"],
             "unresolvedChecks":unresolved_check_summary(&verification),
             "latestCheck":verification["receipts"].as_array().and_then(|receipts|receipts.last())}));
-    let instruction = instruction + " The public delivery must agree with this assessment: if it identifies still-unfinished original requirements or defers required next steps, choose continue and a concrete execution action. Distinguish original requirements from optional suggestions; prior operations alone do not certify all requested quality goals.";
     let instruction = instruction + &steering_revision_instruction(state);
     // Supply detailed identities only for a failed assessment; normal reviews keep their small-window budget.
     // 仅在验收未通过时补充详细身份，普通验收不挤占小窗口预算。
@@ -513,7 +504,7 @@ fn checkpoint_completion_review(state: &mut LoopState, pending: bool, evidence: 
 /// Textual call syntax is navigation only; resolution requires the formal dispatch pipeline.
 /// 调用语法文本仅作导航，须经正式派发核对结果，仍可复用相同操作的成功回执。
 fn retain_unexecuted_tool_intent(state: &mut LoopState, requested: &[String], catalog: &[Value], round: u64) -> bool {
-    let names = requested.iter().filter_map(|requested| catalog.iter().find(|tool|
+    let names = requested.iter().filter(|name| name.as_str() != "kynxa_task").filter_map(|requested| catalog.iter().find(|tool|
         tool["name"].as_str().is_some_and(|name| name == requested
             || crate::models::protocol::wire_name(name) == *requested))
         .and_then(|tool| tool["name"].as_str()).map(str::to_owned)).collect::<Vec<_>>();
@@ -521,6 +512,7 @@ fn retain_unexecuted_tool_intent(state: &mut LoopState, requested: &[String], ca
     if !state.review_checkpoint.is_object() { state.review_checkpoint = json!({}); }
     let mut pending = state.review_checkpoint["unexecutedToolIntent"]["names"].as_array()
         .cloned().unwrap_or_default();
+    pending.retain(|name| name != "kynxa_task");
     for name in names { if !pending.contains(&json!(name)) { pending.push(json!(name)); } }
     state.review_checkpoint["unexecutedToolIntent"] = json!({"names":pending,"round":round});
     state.review_checkpoint["pending"] = json!(false);
@@ -533,7 +525,8 @@ fn retain_unexecuted_tool_intent(state: &mut LoopState, requested: &[String], ca
 }
 
 pub(super) fn has_unexecuted_tool_intent(checkpoint: &Value) -> bool {
-    checkpoint["unexecutedToolIntent"]["names"].as_array().is_some_and(|names| !names.is_empty())
+    checkpoint["unexecutedToolIntent"]["names"].as_array()
+        .is_some_and(|names| names.iter().any(|name| name.as_str().is_some_and(|name| name != "kynxa_task")))
 }
 
 pub(super) fn settle_unexecuted_tool_intent(checkpoint: &mut Value, name: &str, receipt: &Value) {
@@ -666,12 +659,9 @@ fn replanned_action(checkpoint: &mut Value, selected: &[Value], proposed: &Value
     Some(json!({"name":proposed["name"],"arguments":proposed["arguments"],"purpose":"execute-replanned-action"}))
 }
 
-/// Resolve proof gaps with safe reads or capability lookup, not repeated assessments.
-/// 证据不足时执行安全补读或能力查找，不重复空验收。
-fn completion_progress_plan(state: &mut LoopState, targets: &Value, max_chars: u64, proposed: &Value) -> Option<Value> {
-    if let Some(plan) = state.documents.missing_readback_plans(targets, max_chars).into_iter().next() {
-        return Some(plan);
-    }
+/// Dispatch a concrete correction from the review, without sweeping every output.
+/// 执行验收提出的具体修正，不遍读所有产物。
+fn completion_progress_plan(state: &mut LoopState, proposed: &Value) -> Option<Value> {
     let decision = cached_completion_review(state)?;
     if decision["action"] != "resume" || decision["minimumActive"] == true { return None; }
     let progress = state.progress.summary();
@@ -2497,9 +2487,42 @@ async fn restore_root_work_context(
             source["checkpointSemanticSummary"] = summary;
         }
     }
+    let mut saved_progress = context["runProgress"].clone();
+    if !saved_progress.is_object() {
+        let completion = &state.assistant["ToolRun"]["taskCompletion"];
+        if completion["receipts"].as_array().is_some_and(|receipts| !receipts.is_empty()) {
+            saved_progress = json!({"validationReceipts":completion["receipts"]});
+            for field in ["mutationRevision", "checkedMutationRevision"] {
+                if let Some(value) = completion.get(field) { saved_progress[field] = value.clone(); }
+            }
+            for (field, source) in [("latestCodeVersion", "latestSnapshot"), ("validatedCodeVersion", "validatedSnapshot")] {
+                if let Some(value) = completion["codeVersionCoverage"].get(source) { saved_progress[field] = value.clone(); }
+            }
+        }
+    }
+    let legacy_host_debt = saved_progress.get("codeMutationRevision").is_none()
+        && saved_progress["unclassifiedTerminalEffects"].as_u64().is_some_and(|count| count > 0)
+        && ["uncertainMutations", "requiredChecks", "validationReceipts"].iter()
+            .all(|field| saved_progress[*field].as_array().is_none_or(Vec::is_empty))
+        && ["latestCodeVersion", "validatedCodeVersion"].iter().all(|field|
+            saved_progress[*field]["files"].as_array().is_none_or(Vec::is_empty)
+                && saved_progress[*field]["fileCount"].as_u64().unwrap_or(0) == 0);
+    // Only old unclassified host debt or missing check identity needs supplemental archives.
+    // 仅旧宿主待分类项或缺失的检查身份补读归档，新检查点不额外回读已压缩调用。
+    let required_reference_count = references.len();
+    for activity in state.assistant["ToolActivities"].as_array().into_iter().flatten().filter(|activity|
+        matches!(activity["name"].as_str(), Some("terminal.run" | "terminal.host.run" | "terminal.host.start" | "skill.run"))
+            && (legacy_host_debt || saved_progress["validationReceipts"].as_array().into_iter().flatten()
+                .any(|receipt| receipt["checkId"].as_str().is_none() && receipt["toolCallId"] == activity["toolCallId"]))) {
+        let reference = &activity["resultRef"];
+        if reference["id"].is_string() && reference["sha256"].is_string() && reference["bytes"].is_u64() {
+            references.push(reference.clone());
+        }
+    }
+    let mut legacy_calls = Vec::new();
     let mut seen = HashSet::new();
     let mut verified_knowledge_reads = checked_document_knowledge;
-    for reference in references {
+    for (reference_index, reference) in references.into_iter().enumerate() {
         if *cancellation.borrow() {
             return Err(GatewayError::new("ABORT_ERR", "任务恢复已取消。", 499));
         }
@@ -2511,16 +2534,33 @@ async fn restore_root_work_context(
         let id = reference["id"].as_str().unwrap().to_owned();
         // Verify private attachments internally; exclude their bodies from public results and archives.
         // 私有附件仅内部核验，正文不进入公开结果和归档。
-        let archive =
-            tokio::task::spawn_blocking(move || data::load_private_tool_result(&root, &chat, &id))
-                .await
-                .map_err(|_| invalid())??;
+        let classification_only = reference_index >= required_reference_count;
+        let loaded = tokio::task::spawn_blocking(move || data::load_private_tool_result(&root, &chat, &id))
+            .await.map_err(|_| invalid())?;
+        // Missing optional legacy evidence retains the old debt; it must not reject an otherwise valid checkpoint.
+        // 可选旧证据不可读时保留原待核验项，不拒绝其余有效检查点。
+        let archive = match loaded {
+            Ok(archive) => archive,
+            Err(_) if classification_only => continue,
+            Err(error) => return Err(error.into()),
+        };
         if archive["conversationId"] != run.conversation_id
             || archive["id"] != reference["id"]
             || archive["sha256"] != reference["sha256"]
             || archive["bytes"] != reference["bytes"]
         {
+            if classification_only { continue; }
             return Err(invalid());
+        }
+        if archive["requestId"] == run.request_id
+            && let Some(activity) = state.assistant["ToolActivities"].as_array().into_iter().flatten()
+                .find(|activity| activity["toolCallId"] == archive["toolCallId"] && activity["name"] == archive["toolName"]
+                    && activity["resultRef"] == reference
+                    && matches!(activity["name"].as_str(), Some("terminal.run" | "terminal.host.run" | "terminal.host.start" | "skill.run"))) {
+            legacy_calls.push(json!({"call":{"id":activity["toolCallId"],"name":activity["name"],"arguments":activity["arguments"]},
+                "result":{"status":activity["status"],"executed":activity["executed"] != false,
+                    "isError":activity["status"] != "completed" || tools::explicit_tool_error(archive["toolName"].as_str().unwrap_or(""), &archive["canonical"]),
+                    "content":archive["canonical"]},"output":archive["canonical"],"validationScope":{"cwd":ctx.workdir}}));
         }
         if archive["toolName"] == "knowledge.read" {
             if let Some(source_ref) = archive["canonical"]["sourceRef"].as_str() {
@@ -2660,27 +2700,15 @@ async fn restore_root_work_context(
     if let Some(requirements) = context["acceptanceRequirements"].as_array() {
         state.acceptance_requirements = requirements.iter().filter_map(Value::as_str).map(str::to_owned).collect();
     }
-    let mut saved_progress = context["runProgress"].clone();
-    if !saved_progress.is_object() {
-        let completion = &state.assistant["ToolRun"]["taskCompletion"];
-        if completion["receipts"].as_array().is_some_and(|receipts| !receipts.is_empty()) {
-            saved_progress = json!({"validationReceipts":completion["receipts"]});
-            for field in ["mutationRevision", "checkedMutationRevision"] {
-                if let Some(value) = completion.get(field) { saved_progress[field] = value.clone(); }
-            }
-            for (field, source) in [("latestCodeVersion", "latestSnapshot"), ("validatedCodeVersion", "validatedSnapshot")] {
-                if let Some(value) = completion["codeVersionCoverage"].get(source) { saved_progress[field] = value.clone(); }
-            }
-        }
-    }
     if saved_progress.is_object() {
         // Restore checks from owned checkpoints or formal broker receipts, never model prose.
         // 从自有检查点或正式执行回执恢复检查状态，不采信模型文字。
-        let legacy_calls = state.assistant["ToolActivities"].as_array().into_iter().flatten()
-            .filter(|activity| super::progress::validation_call(&json!({"name":activity["name"],"arguments":activity["arguments"]})))
-            .map(|activity| json!({"call":{"id":activity["toolCallId"],"name":activity["name"],"arguments":activity["arguments"]},
-                "output":activity["result"].as_str().and_then(|text|serde_json::from_str::<Value>(text).ok()).unwrap_or(Value::Null),
-                "validationScope":{"cwd":ctx.workdir}})).collect::<Vec<_>>();
+        // Existing checkpoints can predate diagnostic wiring; recover the known lower bound once.
+        // 旧检查点可能尚未接入诊断计数，只补齐已知停滞下界，不在每轮重复累加。
+        if let Some(diagnostics) = saved_progress.get_mut("diagnostics").filter(|value| value.is_object()) {
+            diagnostics["noProgressRounds"] = json!(diagnostics["noProgressRounds"].as_u64().unwrap_or(0)
+                .max(state.work_progress.stagnant_rounds()));
+        }
         native(state.progress.apply("progress.restoreValidation", &json!({"state":saved_progress,"legacyCalls":legacy_calls})))?;
     }
     state.work_context_reference = reference;
@@ -5184,16 +5212,19 @@ async fn execute(
                 .task
                 .apply("task.reviewResult", &json!({"value":inspected}));
             state.acceptance_review_revision = Some(acceptance_revision(&state));
+            let verification = state.progress.verification();
+            let transcript = completion_transcript(&state);
+            let evidence_records = task_evidence_records(&transcript, &verification);
             let decision=native(state.task.apply("task.decide",&json!({"reply":inspected,"isReview":true,"hasCalls":!response.calls.is_empty(),"outputTruncated":response.output_truncated,"reviewAttempts":review_attempts,
                 "remainingRounds":last_round.saturating_sub(round),"minimumActiveMs":minimum_active_ms,
                 "activeElapsedMs":effective_work_ms(&run, state.started),"evidenceRequired":review_evidence_required,
                 "requiresVerification":requires_task_verification(&state),
-                "verification":state.progress.verification(),
+                "verification":verification,
                 "requiresReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_result_readback(goal)),
-                "hasReadback":has_task_readback(&state),
+                "hasReadback":super::completion_evidence::has_readback(&evidence_records, false),
                 "requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
-                "hasVisualReadback":state.visual_readback_delivered,
-                "expectedRequirements":state.acceptance_requirements,"validEvidence":task_evidence(&completion_transcript(&state)),"evidenceRecords":task_evidence_records(&completion_transcript(&state), &state.progress.verification())})))?;
+                "hasVisualReadback":super::completion_evidence::has_readback(&evidence_records, true),
+                "expectedRequirements":state.acceptance_requirements,"validEvidence":task_evidence(&transcript),"evidenceRecords":evidence_records})))?;
             state.push_transcript_round(json!({"round":round,"text":"","calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
             match decision["action"].as_str() {
                 Some("retry-review") => {
@@ -5288,9 +5319,7 @@ async fn execute(
         if response.calls.is_empty() && !response.output_truncated && requires_task_verification(&state)
             && !unresolved_user_steering(&state)
             && supports_tools && !tools_closed && planned_continuation(&protocol_name, &[], &[]).is_some() {
-            let targets = native(state.progress.apply("progress.documentReadbackTargets", &json!({})))?;
-            if let Some(plan) = completion_progress_plan(&mut state, &targets,
-                input_budget.saturating_mul(2).clamp(512,16000), &task_status["action"]) {
+            if let Some(plan) = completion_progress_plan(&mut state, &task_status["action"]) {
                 let call = json!({"id":new_id(),"name":plan["name"],"arguments":plan["arguments"],
                     "unavailable":!state.selected.iter().any(|tool|tool["name"]==plan["name"])});
                 response.calls = vec![call];
@@ -5360,19 +5389,23 @@ async fn execute(
                 && cached_completion_review(&state).is_some_and(|cached| cached["action"] == "resume" && cached["minimumActive"] != true) {
                 // Check inline proof fixes locally; stale reviews cannot schedule another review.
                 // 本地核对内联证据修正，旧验收不再触发新验收。
+                let verification = state.progress.verification();
+                let transcript = completion_transcript(&state);
+                let evidence_records = task_evidence_records(&transcript, &verification);
                 let inline = native(state.task.apply("task.decide", &json!({"reply":task_status,"isReview":true,
                     "requiresVerification":requires_task_verification(&state),"evidenceRequired":true,
-                    "verification":state.progress.verification(),
+                    "verification":verification,
                     "requiresReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_result_readback(goal)),
-                    "hasReadback":has_task_readback(&state),"requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
-                    "hasVisualReadback":state.visual_readback_delivered,"expectedRequirements":state.acceptance_requirements,
-                    "validEvidence":task_evidence(&completion_transcript(&state)),"evidenceRecords":task_evidence_records(&completion_transcript(&state), &state.progress.verification())})))?;
+                    "hasReadback":super::completion_evidence::has_readback(&evidence_records, false),"requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
+                    "hasVisualReadback":super::completion_evidence::has_readback(&evidence_records, true),"expectedRequirements":state.acceptance_requirements,
+                    "validEvidence":task_evidence(&transcript),"evidenceRecords":evidence_records})))?;
                 if inline["action"] == "final" {
                     state.acceptance_reviewed = true;
                     let _ = state.task.apply("task.reviewResult", &json!({"value":task_status}));
                     decision = inline;
                 } else {
-                    let _ = state.work_progress.observe_round(&RoundProgress { execution_without_action:true, ..Default::default() });
+                    observe_work_progress(&mut state.work_progress, &mut state.progress,
+                        &RoundProgress { execution_without_action:true, ..Default::default() });
                     let remaining = state.review_checkpoint["cachedReview"]["decision"]["remaining"].clone();
                     let notice = format!("Broker: unchanged evidence still leaves these requirements: {remaining}. Perform the next actual tool action or change the implementation strategy. Do not narrate another assessment. Reuse saved outputs and receipts; a genuine complete inline marker must map each acceptance ID to actual evidence. If native tool dispatch is not being emitted, return a standalone private <kynxa_task>{{\"state\":\"continue\",\"next\":\"concrete step\",\"action\":{{\"name\":\"a currently loaded tool name\",\"arguments\":{{}}}}}}</kynxa_task> with the actual tool arguments. The broker will validate and execute this action through the normal authorization and receipt pipeline; do not replay successful or unknown effects.");
                     append_control_notice(&mut state,"completionExecutionNotice",Some(&notice));
@@ -5562,7 +5595,8 @@ async fn execute(
             let operation_id = gateway_tool_batch::operation_id(&version_context, call, round);
             let mut tool_execution_ms = 0u64;
             let mut operation_dispatched = false;
-            let is_observation = crate::tools::policy::is_read_only_call(name, &call["arguments"])
+            let control_correction = super::task::native_task_control_receipt(call, &state.acceptance_requirements);
+            let is_observation = control_correction.is_some() || crate::tools::policy::is_read_only_call(name, &call["arguments"])
                 || matches!(name, "tool.load" | "task.document" | "context.compact");
             let _workspace_write = if workspace_failure.is_none() && !is_observation && !name.starts_with("task.") {
                 Some(tokio::select! {
@@ -5623,8 +5657,8 @@ async fn execute(
                     .push(activity.clone());
                 state.save(&runtime, &run, "streaming", None).await?;
             }
-            let mut definition_failure = workspace_failure.map(|error|json!({"status":"error","executed":false,"isError":true,
-                "code":error.code,"content":error.response()}));
+            let mut definition_failure = control_correction.or_else(|| workspace_failure.map(|error|json!({"status":"error","executed":false,"isError":true,
+                "code":error.code,"content":error.response()})));
             if definition_failure.is_none() && saved.is_null()
                 && (effect_state["hasUnknownEffects"] != true || is_observation) && prefetch.is_none() {
                 definition_failure = failure_correction;
@@ -6142,7 +6176,7 @@ async fn execute(
         } else {
             0
         };
-        let work_plan = state.work_progress.observe_round(&round_progress);
+        let work_plan = observe_work_progress(&mut state.work_progress, &mut state.progress, &round_progress);
         if work_plan.correction_due {
             state.broker_note(&format!("Work stalled: {}. Use saved analyses to produce the requested artifact; stop repeating directory or capability listings. Read only a specific missing saved fact. Report the actual output and remaining gap.",serde_json::to_value(&work_plan).unwrap_or(Value::Null)));
         }
@@ -6340,13 +6374,14 @@ async fn execute(
     })
     .await
     .map_err(|_| GatewayError::new("EVIDENCE_WORKER_FAILED", "证据核对线程退出。", 500))?? };
+    let evidence_records = task_evidence_records(&completion_transcript(&state), &state.progress.verification());
     let mut completion=native(state.progress.apply("progress.completion",&json!({"interrupted":stopped.is_some(),"code":stopped.as_ref().map(|error|&error.code),"unknownEffects":effects["hasUnknownEffects"],"modelTaskState":task_status,"evidenceValidation":evidence_validation,
         "effectfulWork":current_effectful_work(&state),"requiresVerification":requires_task_verification(&state),
         "acceptanceReviewed":state.acceptance_reviewed,
         "requiresReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_result_readback(goal)),
-        "hasReadback":has_task_readback(&state),
+        "hasReadback":super::completion_evidence::has_readback(&evidence_records, false),
         "requiresVisualReadback":state.acceptance_requirements.iter().any(|goal|super::task::requires_visual_observation(goal)),
-        "hasVisualReadback":state.visual_readback_delivered})))?;
+        "hasVisualReadback":super::completion_evidence::has_readback(&evidence_records, true)})))?;
     if state.assistant["UserTaskDirective"]["stop"] == true {
         completion["completionState"] = json!("partial");
         completion["userStopped"] = json!(true);
@@ -6419,6 +6454,27 @@ async fn execute(
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
+
+    #[test]
+    fn stalled_work_updates_existing_diagnostics_once_and_ignores_waits() {
+        let mut work = WorkProgress::default();
+        let mut progress = RunProgress::default();
+        for expected in 1..=3 {
+            observe_work_progress(&mut work, &mut progress,
+                &RoundProgress { execution_without_action:true, ..Default::default() });
+            assert_eq!(progress.apply("progress.diagnostics", &json!({})).unwrap()["noProgressRounds"], expected);
+        }
+        observe_work_progress(&mut work, &mut progress,
+            &RoundProgress { waiting_only:true, work_calls:1, ..Default::default() });
+        assert_eq!(work.stagnant_rounds(), 3);
+        observe_work_progress(&mut work, &mut progress,
+            &RoundProgress { artifact_updated:true, ..Default::default() });
+        assert_eq!(work.stagnant_rounds(), 0);
+        observe_work_progress(&mut work, &mut progress,
+            &RoundProgress { execution_without_action:true, ..Default::default() });
+        assert_eq!(progress.apply("progress.diagnostics", &json!({})).unwrap()["noProgressRounds"], 4);
+        assert!(!has_unexecuted_tool_intent(&json!({"unexecutedToolIntent":{"names":["kynxa_task"]}})));
+    }
 
     #[test]
     fn completion_review_cache_requires_current_evidence_and_valid_assessment() {

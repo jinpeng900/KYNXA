@@ -162,16 +162,27 @@ public partial class App
                 ResultRef: reference);
             assistantMessage.ToolActivities = [receipt];
             _shell.ActiveMessages.Single(row => row.Message.Id == assistantMessage.Id).Refresh();
-            await WaitAsync(() => screenshots.Items.Count == 1 && tabs.HasOpenTabs,
-                "a formal-shaped completed receipt is discovered and tabbed while the preview is hidden");
+            await WaitAsync(() => screenshots.Items.Count == 1 && tabs.HasItems && !tabs.HasOpenTabs,
+                "a completed internal screenshot is catalogued without opening a preview tab");
             await SettleAsync();
             Check(screenshots.Items[0].ConversationId == _gateway.WorkChatId && screenshots.Items[0].MessageId == assistantMessage.Id &&
                 screenshots.Items[0].Tool.ResultRef == reference && _gateway.ScreenshotReads == readsBeforeDiscovery && !WorkPanelVisible,
                 "compact resource discovery retains stable message/chat/result identity without reading or decoding an image");
             ResizeInDips(1440, 900);
+            await WaitAsync(() => Element<Grid>("MainRegion").ActualWidth >= 900, "the Shell returns to a wide layout");
+            await SettleAsync();
+            Check(!WorkPanelVisible && !tabs.HasOpenTabs && _gateway.ScreenshotReads == readsBeforeDiscovery &&
+                NativeUi.Descendants<Image>(screenshots).All(image => image.Source is null),
+                "restoring a wide layout does not open or read an internal screenshot");
+            NativeUi.Invoke(Element<Button>("OpenWorkPanelButton"));
+            await WaitAsync(() => WorkPanelVisible && NativeUi.IsVisible(Element<TextBlock>("WorkTabEmptyHint")),
+                "the user can open the workspace to reach catalogued screenshots");
+            Check(_gateway.ScreenshotReads == readsBeforeDiscovery &&
+                tabs.Reopen(tabs.Items.Single(tab => tab.Kind == "screenshot").Key),
+                "opening the empty workspace does not read an image; the user explicitly opens its retained screenshot");
             await WaitAsync(() => WorkPanelVisible && screenshots.IsLoaded &&
                 NativeUi.Descendants<Image>(screenshots).Any(image => image.Source is not null),
-                "restoring wide layout automatically displays the already discovered screenshot through the real archive client");
+                "explicit screenshot opening loads its saved image through the real archive client");
             await SettleAsync();
             Check(_gateway.ScreenshotReads == readsBeforeDiscovery + 1 && Math.Abs(Element<Border>("WorkContextPanel").ActualWidth - 432) < 2,
                 "synchronous resource opening fetches exactly one synthetic archive and restores the saved preview width");

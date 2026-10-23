@@ -117,16 +117,38 @@ pub(super) fn bind_validation(proof: &mut Value, verification: &Value) {
 /// 标记过期目标，保留历史执行事实。
 pub(super) fn current(records: &[Value]) -> Vec<Value> {
     let mut latest = HashMap::new();
-    let mut greatest_sequence = 0;
-    for record in records {
-        greatest_sequence = greatest_sequence.max(record["mutationSequence"].as_u64().unwrap_or(0));
+    let mut changes = HashMap::new();
+    let (mut last_mutation, mut last_opaque) = (None, None);
+    let mut sequence = 0_u64;
+    for (index, record) in records.iter().enumerate() {
+        let next_sequence = record["mutationSequence"].as_u64().unwrap_or(sequence);
+        let mutating = record["mutating"] == true;
+        // A sequence gap represents a change whose receipt scope is unavailable.
+        // 修改序号有缺口时，不能假定未保留的回执只改了某个已知目标。
+        if next_sequence > sequence.saturating_add(u64::from(mutating)) {
+            last_opaque = Some(index);
+            last_mutation = Some(index);
+        }
+        sequence = sequence.max(next_sequence);
+        if mutating {
+            last_mutation = Some(index);
+            if !has_target_scope(record) { last_opaque = Some(index); }
+        }
         for target in record["targets"].as_array().into_iter().flatten() {
-            if let (Some(identity), Some(version)) = (target["identity"].as_str(), version_key(&target["version"])) {
-                latest.insert((target["kind"].as_str().unwrap_or(""), identity), version);
-            }
+            let Some(identity) = target["identity"].as_str().filter(|identity| !identity.is_empty()) else {
+                if mutating { last_opaque = Some(index); }
+                continue;
+            };
+            let key = (target["kind"].as_str().unwrap_or(""), identity);
+            let version = version_key(&target["version"]);
+            if let Some(version) = &version { latest.insert(key, version.clone()); }
+            if mutating { changes.insert(key, (index, version)); }
         }
     }
-    records.iter().filter(|record| record.is_object()).map(|record| {
+    records.iter().enumerate().filter(|(_, record)| record.is_object()).map(|(index, record)| {
+        let observation_current = record["observationCurrent"] != false
+            && !last_opaque.is_some_and(|changed| changed > index)
+            && (has_target_scope(record) || !last_mutation.is_some_and(|changed| changed > index));
         let mut record = record.clone();
         let validation_current = record["validation"]["passed"] == true
             && record["validation"]["coversObservedRevision"] == true
@@ -141,16 +163,18 @@ pub(super) fn current(records: &[Value]) -> Vec<Value> {
         if let Some(targets) = record["targets"].as_array_mut() {
             for target in targets {
                 let matches = target["identity"].as_str().is_some_and(|identity| {
-                    let known = latest.get(&(target["kind"].as_str().unwrap_or(""), identity));
-                    known.is_none_or(|latest| version_key(&target["version"]).as_ref() == Some(latest))
+                    let key = (target["kind"].as_str().unwrap_or(""), identity);
+                    let version = version_key(&target["version"]);
+                    latest.get(&key).is_none_or(|latest| version.as_ref() == Some(latest))
+                        && changes.get(&key).is_none_or(|(changed, changed_version)| *changed <= index
+                            || version.is_some() && version == *changed_version)
                 });
                 target["current"] = json!(inherited && matches);
                 any_current |= inherited && matches;
             }
         }
         let no_targets = record["targets"].as_array().is_none_or(Vec::is_empty);
-        let observation_current = record["mutationSequence"].as_u64().is_none_or(|sequence| sequence == greatest_sequence);
-        record["observationCurrent"] = json!(!no_targets || observation_current || validation_current);
+        record["observationCurrent"] = json!(observation_current || validation_current);
         record["current"] = json!(if no_targets {
             inherited
         } else { any_current });
@@ -160,6 +184,27 @@ pub(super) fn current(records: &[Value]) -> Vec<Value> {
 
 fn has_kind(record: &Value, kind: &str) -> bool {
     record["kinds"].as_array().into_iter().flatten().any(|value| value == kind)
+}
+
+fn has_target_scope(record: &Value) -> bool {
+    // Image-file hashes identify the container, not the depicted scene or window.
+    // 图片文件哈希只标识图片容器，不能冒充画面中的场景或窗口版本。
+    record["targets"].as_array().is_some_and(|targets| !targets.is_empty() && targets.iter().all(|target|
+        target["identity"].as_str().is_some_and(|identity| !identity.is_empty())
+            && (!has_kind(record, "visual") || matches!(target["kind"].as_str(), Some("source" | "source-ref" | "url"))
+                && version_key(&target["version"]).is_some())))
+}
+
+/// Read the current() projection without cloning it; delivered images survive review rounds.
+/// 只读 current() 的有效投影，不重复复制；已投递的有效图片可跨审查轮复用。
+pub(super) fn readbacks(records: &[Value], visual: bool) -> impl Iterator<Item = &Value> {
+    records.iter().filter(move |record| record["current"] == true && record["observationCurrent"] == true
+        && (has_kind(record, "visual") && record["visualObserved"] == true
+            || !visual && ["observed-content", "observed-state", "validation"].iter().any(|kind| has_kind(record, kind))))
+}
+
+pub(super) fn has_readback(records: &[Value], visual: bool) -> bool {
+    readbacks(records, visual).next().is_some()
 }
 
 fn annotated_call_reference(reference: &str, id: &str) -> bool {
@@ -604,6 +649,67 @@ mod tests {
         assert!(supports_claim(&claim(&["run"]),"执行命令",&[command.clone(),next.clone()]));
         command["kinds"]=json!(["execution","observed-state"]);
         assert!(!supports_claim(&claim(&["run"]),"检查软件状态",&[command,next]));
+    }
+
+    #[test]
+    fn scoped_observations_survive_unrelated_changes_but_not_target_revisions() {
+        let mut read = receipt("filesystem.read", "read-a", json!({"path":"C:/work/a.txt","sha256":"a".repeat(64),"content":"body"}));
+        read["mutationSequence"] = json!(0);
+        let mut image = receipt("mcp.fixture.look", "scene-image", json!({"sourceId":"scene-main","sourceVersion":1,
+            "content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]}));
+        image["mutationSequence"] = json!(0); image["visualObserved"] = json!(true);
+        let mut log = receipt("filesystem.write", "save-log", json!({"path":"C:/work/log.txt","sha256":"b".repeat(64),"bytes":5}));
+        log["mutationSequence"] = json!(1); log["mutating"] = json!(true);
+        let mut records = vec![read, image, log];
+        assert!(supports_claim(&claim(&["read-a"]), "read a.txt", &records));
+        assert!(has_readback(&current(&records), true));
+        let mut changed = receipt("filesystem.write", "change-a", json!({"path":"C:/work/a.txt","sha256":"c".repeat(64),"bytes":5}));
+        changed["mutationSequence"] = json!(2); changed["mutating"] = json!(true);
+        records.push(changed);
+        assert!(!supports_claim(&claim(&["read-a"]), "read a.txt", &records));
+        assert!(has_readback(&current(&records), true));
+        let mut scene = receipt("mcp.fixture.execute_blender_code", "change-scene", json!({"sourceId":"scene-main","sourceVersion":2}));
+        scene["mutationSequence"] = json!(3); scene["mutating"] = json!(true);
+        records.push(scene);
+        assert!(!has_readback(&current(&records), true));
+        assert_eq!(current(&current(&records)), current(&records));
+    }
+
+    #[test]
+    fn opaque_changes_and_unversioned_target_writes_invalidate_old_observations() {
+        let mut read = receipt("filesystem.read", "read-a", json!({"path":"C:/work/a.txt","sha256":"a".repeat(64),"content":"body"}));
+        read["mutationSequence"] = json!(0);
+        let mut opaque = receipt("terminal.host.run", "unknown-scope", json!({"exitCode":0}));
+        opaque["mutationSequence"] = json!(1); opaque["mutating"] = json!(true);
+        let records = current(&[read.clone(), opaque]);
+        assert!(!has_readback(&records, false));
+        assert!(!supports_claim(&claim(&["read-a"]), "read a.txt", &records));
+        assert!(supports_claim(&claim(&["read-a"]), "执行操作", &records));
+        let mut changed = receipt("filesystem.write", "unversioned-write", json!({"path":"C:/work/a.txt","bytes":5}));
+        changed["mutationSequence"] = json!(1); changed["mutating"] = json!(true);
+        assert!(!has_readback(&current(&[read.clone(), changed]), false));
+        let mut missing = receipt("filesystem.read", "read-after-gap", json!({"path":"C:/work/b.txt","sha256":"b".repeat(64)}));
+        missing["mutationSequence"] = json!(2); missing["mutating"] = json!(false);
+        assert!(!supports_claim(&claim(&["read-a"]), "read a.txt", &[read, missing]));
+    }
+
+    #[test]
+    fn visual_proof_requires_delivery_and_container_paths_do_not_scope_the_scene() {
+        let mut log = receipt("filesystem.write", "save-log", json!({"path":"C:/work/log.txt","sha256":"b".repeat(64),"bytes":5}));
+        log["mutationSequence"] = json!(1); log["mutating"] = json!(true);
+        for name in ["browser.screenshot", "filesystem.read"] {
+            for source in [json!({}), json!({"path":"C:/work/render.png","sha256":"a".repeat(64)})] {
+                let mut content = source;
+                content["content"] = json!([{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]);
+                let mut image = receipt(name, "image", content);
+                image["mutationSequence"] = json!(0);
+                assert!(!has_readback(&current(&[image.clone()]), true));
+                image["visualObserved"] = json!(true);
+                let restored = current(&[image.clone()]);
+                assert!(has_readback(&restored, true));
+                assert!(!has_readback(&current(&[image, log.clone()]), true));
+            }
+        }
     }
 
     #[test]

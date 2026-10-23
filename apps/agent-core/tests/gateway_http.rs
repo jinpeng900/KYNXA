@@ -47,6 +47,7 @@ struct Provider {
     parallel_cycle: Arc<std::sync::atomic::AtomicBool>,
     buffered_cycle: Arc<std::sync::atomic::AtomicBool>,
     readback_gap_cycle: Arc<std::sync::atomic::AtomicBool>,
+    readback_gap_required: Arc<std::sync::atomic::AtomicBool>,
     readback_gap_step: Arc<AtomicUsize>,
     annotated_evidence_cycle: Arc<std::sync::atomic::AtomicBool>,
     resume_generation: Arc<AtomicUsize>,
@@ -56,6 +57,7 @@ struct Provider {
     native_stop_emissions: Arc<AtomicUsize>,
     dsml_review_cycle: Arc<std::sync::atomic::AtomicBool>,
     native_review_cycle: Arc<std::sync::atomic::AtomicBool>,
+    native_completion_control: Arc<std::sync::atomic::AtomicBool>,
     dsml_review_emissions: Arc<AtomicUsize>,
     memory_approval_target: Arc<Mutex<Option<String>>>,
 }
@@ -80,7 +82,7 @@ fn is_completion_review_request(request: &Value) -> bool {
         .rev().filter_map(|message| message["content"].as_str())
         .find(|content| content.starts_with("Runtime control completionReviewNotice [")
             || content.starts_with("Broker: compare the original requested work"))
-        .is_some_and(|content| content.contains("Broker: compare the original requested work"))
+        .is_some_and(|content| content.contains("Expected acceptance requirements: "))
 }
 
 /// The mock reviews only the broker's actual checklist and verified receipts, without inventing evidence.
@@ -88,7 +90,8 @@ fn is_completion_review_request(request: &Value) -> bool {
 fn completion_review_reply(request: &Value, reason: &str) -> Value {
     let note = request["messages"].as_array().unwrap().iter().rev()
         .filter_map(|message| message["content"].as_str())
-        .find(|content| content.contains("Broker: compare the original requested work")).unwrap();
+        .find(|content| content.contains("Expected acceptance requirements: ")
+            && content.contains("Verified completion evidence: ")).unwrap();
     let requirements: Value = serde_json::from_str(note.split("Expected acceptance requirements: ").nth(1).unwrap()
         .lines().next().unwrap()).unwrap();
     let evidence: Value = serde_json::from_str(note.split("Verified completion evidence: ").nth(1).unwrap()
@@ -255,8 +258,16 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
                     item["evidence"].as_array_mut().unwrap().push(json!("dsml-native-stat: 已核对当前文件元数据"));
                 }
             }
-            reply["content"] = json!(format!("<kynxa_task>{assessment}</kynxa_task>"));
-            reply
+            if state.native_completion_control.load(Ordering::Acquire) && !has_receipt("native-completion-control") {
+                // A misplaced completion control is metadata, never an external capability to discover or execute.
+                // 放错通道的完成控制仍是元数据，不能当作外部能力去搜索或执行。
+                json!({"role":"assistant","content":"核对已保存的成果。","tool_calls":[{
+                    "id":"native-completion-control","type":"function","function":{
+                        "name":"kynxa_task","arguments":assessment.to_string()}}]})
+            } else {
+                reply["content"] = json!(format!("<kynxa_task>{assessment}</kynxa_task>"));
+                reply
+            }
         } else if resume_generation > 0 && !has_receipt(&resumed_call_id) {
             call(&resumed_call_id, "filesystem.stat", json!({"path":"annotated-result.txt"}))
         } else if !has_receipt("annotated-write") {
@@ -278,10 +289,16 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
         let context_followup = messages.iter().filter(|message| message["role"] == "user")
             .filter_map(|message| message["content"].as_str()).any(|content| content.contains("只根据刚才的内容"));
         let gap_step = state.readback_gap_step.load(Ordering::Acquire);
-        let recovered_gap = messages.iter().filter(|message| message["role"] == "tool")
+        let requires_readback = state.readback_gap_required.load(Ordering::Acquire);
+        let read_windows = messages.iter().filter(|message| message["role"] == "tool")
             .filter_map(|message| serde_json::from_str::<Value>(message["content"].as_str()?).ok())
-            .any(|receipt| receipt["offset"] == 0 && receipt["nextOffset"].as_u64().is_some_and(|end| end >= 3000)
-                && receipt["path"].as_str().is_some_and(|path| path.ends_with("gap-output.md")))
+            .filter(|receipt| receipt["path"].as_str().is_some_and(|path| path.ends_with("gap-output.md")))
+            .collect::<Vec<_>>();
+        let head_read = read_windows.iter().any(|receipt| receipt["offset"] == 0
+            && receipt["nextOffset"].as_u64().is_some_and(|end| end >= 3000));
+        let tail_read = read_windows.iter().any(|receipt| receipt["offset"].as_u64().is_some_and(|start| start <= 4000)
+            && receipt["nextOffset"].as_u64().is_some_and(|end| end >= 4800));
+        let recovered_gap = head_read && tail_read
             || messages.iter().filter_map(|message| message["content"].as_str()).filter_map(|content| {
                 let marker = "Saved document work: ";
                 let start = content.find(marker)? + marker.len();
@@ -291,23 +308,31 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
         let call = |id: &str, name: &str, arguments: Value| json!({"role":"assistant","content":"继续处理当前文档。",
             "tool_calls":[{"id":id,"type":"function","function":{
                 "name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":arguments.to_string()}}]});
+        let missing_read = || if !head_read {
+            call("gap-head", "document.read", json!({"path":"gap-output.md","offset":0,"maxChars":3000}))
+        } else {
+            call("gap-tail", "document.read", json!({"path":"gap-output.md","offset":4000,"maxChars":1000}))
+        };
         let message = if context_followup {
             json!({"role":"assistant","content":"已保留原文档和成功回执；摘要：文件已生成，缺口已补齐。"})
         } else if is_completion_review_request(&body) {
-            completion_review_reply(&body, "The real generated document and its current readback are recorded")
+            completion_review_reply(&body, "Assess only the requested write or full read against the actual receipts")
         } else if gap_step == 0 {
             state.readback_gap_step.store(1, Ordering::Release);
             call("gap-write", "filesystem.write", json!({"path":"gap-output.md","content":"检索和恢复记录。".repeat(600),"expectedHash":null}))
-        } else if gap_step == 1 {
+        } else if requires_readback && gap_step == 1 {
             state.readback_gap_step.store(2, Ordering::Release);
             call("gap-read", "document.read", json!({"path":"gap-output.md","offset":3000,"maxChars":1000}))
+        } else if !requires_readback {
+            json!({"role":"assistant","content":"文档已生成。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[]}</kynxa_task>"})
         } else if recovered_gap {
             json!({"role":"assistant","content":"文档已生成，当前版本的未读范围已补齐。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"保留原写入并完成实际回读\"}</kynxa_task>"})
-        } else {
+        } else if gap_step == 2 {
             // A valid but premature completion used to alternate reviews and prose without filling the real gap.
             // 合法但提前的完成声明曾使验收和空话反复循环；夹具必须由真实缺口回读推进，不能靠轮次结束。
+            state.readback_gap_step.store(3, Ordering::Release);
             json!({"role":"assistant","content":"文档已保存。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"模型自报完成但实际回读有缺口\"}</kynxa_task>"})
-        };
+        } else { missing_read() };
         let has_calls = message["tool_calls"].is_array();
         return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"} else {"stop"}}],
             "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
@@ -736,6 +761,7 @@ impl Fixture {
             parallel_cycle: Default::default(),
             buffered_cycle: Default::default(),
             readback_gap_cycle: Default::default(),
+            readback_gap_required: Default::default(),
             readback_gap_step: Default::default(),
             annotated_evidence_cycle: Default::default(),
             resume_generation: Default::default(),
@@ -745,6 +771,7 @@ impl Fixture {
             native_stop_emissions: Default::default(),
             dsml_review_cycle: Default::default(),
             native_review_cycle: Default::default(),
+            native_completion_control: Default::default(),
             dsml_review_emissions: Default::default(),
             memory_approval_target: Default::default(),
         };
@@ -2394,6 +2421,7 @@ async fn skill_pagination_correction_keeps_context_and_request_live_with_compati
 async fn acceptance_readback_gap_executes_real_missing_reads_without_repeating_writes_or_summary_work() {
     let fixture = Fixture::new(false, false).await;
     fixture.provider.readback_gap_cycle.store(true, Ordering::Release);
+    fixture.provider.readback_gap_required.store(true, Ordering::Release);
     let mut input = fixture.request("生成 gap-output.md 文档并完整回读当前文件，然后给我简短结果。");
     input["userMessageId"] = json!(new_id());
     let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
@@ -2413,8 +2441,11 @@ async fn acceptance_readback_gap_executes_real_missing_reads_without_repeating_w
     let activities = saved["ToolActivities"].as_array().unwrap();
     assert_eq!(activities.iter().filter(|activity| activity["name"] == "filesystem.write").count(), 1,
         "gap recovery must retain the original successful write");
-    assert!(activities.iter().filter(|activity| activity["name"] == "document.read" && activity["status"] == "completed").count() >= 2,
-        "a generated path or repeated acceptance is not a real readback");
+    assert_eq!(activities.iter().filter(|activity| activity["name"] == "document.read" && activity["status"] == "completed")
+        .filter_map(|activity| activity["toolCallId"].as_str()).collect::<Vec<_>>(), ["gap-read", "gap-head", "gap-tail"],
+        "the model must fill both actual gaps without repeating the already-read window");
+    assert_eq!(fixture.provider.readback_gap_step.load(Ordering::Acquire), 3,
+        "premature completion must not skip the missing reads needed by the full-read requirement");
     assert_eq!(std::fs::read_to_string(fixture.root.join("work/gap-output.md")).unwrap(), "检索和恢复记录。".repeat(600));
     let mut followup = fixture.request("只根据刚才的内容给我一句摘要，不要读取或修改文件。");
     followup["userMessageId"] = json!(new_id());
@@ -2435,6 +2466,27 @@ async fn acceptance_readback_gap_executes_real_missing_reads_without_repeating_w
         activities.iter().all(|activity| activity["name"] == "context.compact")),
         "context budgeting may compact history but must not start external work for this follow-up");
     assert!(messages.last().unwrap()["Content"].as_str().unwrap().contains("摘要："));
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acceptance_readback_gap_plain_generation_does_not_force_output_readback() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.readback_gap_cycle.store(true, Ordering::Release);
+    let mut input = fixture.request("生成 gap-output.md 文档，然后给我简短结果。");
+    input["userMessageId"] = json!(new_id());
+    let response: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["type"], "completed", "{response}");
+    assert_eq!(response["taskCompletion"]["completionState"], "completed", "{response}");
+    assert_eq!(response["taskCompletion"]["documentValidation"]["pending"], true,
+        "unread output remains an honest coverage fact without adding a requirement");
+    let messages = fixture.messages().await;
+    let activities = messages.last().unwrap()["ToolActivities"].as_array().unwrap();
+    assert_eq!(activities.iter().filter(|activity| activity["name"] == "filesystem.write" && activity["status"] == "completed").count(), 1);
+    assert!(!activities.iter().any(|activity| matches!(activity["name"].as_str(), Some("filesystem.read" | "document.read"))),
+        "plain generation must not trigger an automatic output read: {activities:?}");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/gap-output.md")).unwrap(), "检索和恢复记录。".repeat(600));
     fixture.close().await;
 }
 
@@ -2942,6 +2994,38 @@ async fn submit_live_steering(fixture: &Fixture,
             "Live steering failed; status={}, code={}, state={:?}.", status.as_u16(), error["code"], task.state);
     }
     unreachable!();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_completion_control_uses_acceptance_without_external_discovery_or_repeating_effects() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.annotated_evidence_cycle.store(true, Ordering::Release);
+    fixture.provider.native_completion_control.store(true, Ordering::Release);
+    let mut input = fixture.request("生成 annotated-result.txt 文件并回读当前内容，然后简短回复。");
+    input["userMessageId"] = json!(new_id());
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url)).json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let stream = tokio::time::timeout(Duration::from_secs(30), response.text()).await
+        .expect("Completion metadata must reach acceptance instead of entering tool discovery.").unwrap();
+    let events = event_values(&mut stream.as_bytes().to_vec());
+    let completed = events.iter().find(|event| event["type"] == "completed").expect(&stream);
+    assert_eq!(completed["taskCompletion"]["completionState"], "completed", "{completed}");
+    assert_settled_public_segments(&events);
+    assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))), "{stream}");
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    let operations = repository.operations(&task.task_id).unwrap();
+    assert_eq!(operations.len(), 2, "Completion control cannot add a dispatch or replay successful work: {operations:?}");
+    for name in ["filesystem.write", "filesystem.read"] {
+        assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name
+            && operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded).count(), 1);
+    }
+    let requests = fixture.provider.requests.lock().await.clone();
+    assert!(requests.len() <= 6, "This fixture has two operations and one completion; protocol repair cannot become a review loop.");
+    assert!(!requests.iter().any(|request| request["messages"].to_string().contains("TOOL_NOT_DISCOVERED")),
+        "An internal completion control must not be misreported as a missing external tool.");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
+    fixture.close().await;
 }
 
 async fn review_execution_preserves_successful_effects(literal: bool) {

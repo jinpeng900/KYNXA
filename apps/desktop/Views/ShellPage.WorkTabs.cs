@@ -91,7 +91,8 @@ public sealed partial class ShellPage
         foreach (var source in ScreenshotPanel.Items)
             if (source.ConversationId == ActiveChatId)
                 screenshots[(source.MessageId, source.Tool.ToolCallId)] =
-                    new(ScreenshotTabKey(source), "screenshot", $"{UiText.Get("截图")} {++imageNumber}");
+                    new(ScreenshotTabKey(source), "screenshot", $"{UiText.Get("截图")} {++imageNumber}",
+                        PresentationPriority: WorkspacePresentationPriority.CatalogOnly);
         var items = new List<ConversationWorkTab>();
         WorkspaceResources? resources = ActiveChatId is Guid conversation ? ResourcesFor(conversation) : null;
         foreach (var message in ActiveMessages)

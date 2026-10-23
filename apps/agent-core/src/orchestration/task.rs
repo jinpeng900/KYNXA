@@ -146,8 +146,26 @@ pub(crate) fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> 
 /// Discovery and orchestration maintenance establish no external outcome by themselves.
 /// 发现目录与编排维护本身不能证明外部目标已经达成。
 pub(crate) fn is_completion_evidence_tool(name: &str) -> bool {
-    !matches!(name, "tool.search" | "tool.load" | "context.compact" | "task.describe" | "task.status" | "task.wait")
+    !matches!(name, "kynxa_task" | "tool.search" | "tool.load" | "context.compact" | "task.describe" | "task.status" | "task.wait")
 }
+
+/// Repair a reserved control sent as a native tool without creating an execution or guessing evidence bindings.
+/// 内部控制误发为原生工具时只纠正协议，不执行操作，也不猜测证据与要求的对应关系。
+pub(crate) fn native_task_control_receipt(call: &Value, requirements: &[String]) -> Option<Value> {
+    if call["name"] != "kynxa_task" { return None; }
+    let value = &call["arguments"];
+    let encoded = value.to_string();
+    let footer = (encoded.chars().count() <= 16384 && valid_footer(value))
+        .then(|| format!("<kynxa_task>{encoded}</kynxa_task>"));
+    Some(json!({"status":"error","isError":true,"executed":false,"code":"TASK_CONTROL_NOT_TOOL",
+        "content":{"notice":"kynxa_task is private completion control, not a discoverable tool. Nothing executed. Do not search, load or replay it. Return the assessment as one standalone <kynxa_task> JSON footer in your next answer. The broker will check the existing receipts; this correction is not completion evidence. Each met entry must identify its requirement and contain an evidence array of exact successful call IDs; a bare list of IDs cannot identify which requirement is satisfied. Preserve completed work; do not add optional improvements or new checks to the user's acceptance scope.",
+            "footer":footer,"expectedRequirements":requirements.iter().enumerate().map(|(index,item)|
+                json!({"requirementId":format!("requirement-{}",index+1),"item":item})).collect::<Vec<_>>()}}))
+}
+
+/// Root and child reviews share the same scope and evidence rules.
+/// 根任务和子任务共用验收范围与证据规则。
+pub(crate) const COMPLETION_REVIEW_CONTRACT: &str = "Assess only the user's current explicit requirements against saved results and real receipts. Return a standalone <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[],\"met\":[{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"exact successful call ID\"]}]}</kynxa_task>; kynxa_task is not a native tool. Cover each listed requirement with evidence matching its action, target and current version. A write proves existence; use existing readback or visual evidence only when the requirement calls for that quality. Optional improvements and extra audits are not completion gates. If a required fact is missing, name that specific target or failed check and choose continue with a concrete next step; available native tools remain usable. Repair reference formatting from saved receipts without repeating successful work or searching for internal control names. Use blocked only for a real user-input, authorization, external or resource blocker. Do not repeat the public delivery, pad time or add verification just because this is a review.";
 
 /// Explicit external actions and current-source questions require actual execution evidence; prose does not.
 /// 明确外部动作与当下来源问题须有真实执行证据；问候、文案、解释和纯运算不额外触发工具验收。
@@ -1042,6 +1060,7 @@ pub(super) fn unexecuted_tool_names(text: &str) -> Vec<String> {
         let Some(closing) = close.find(&text[opening.end()..]) else { continue; };
         for call in invoke.captures_iter(&text[opening.end()..opening.end() + closing.start()]) {
             let name = call[1].to_owned();
+            if name == "kynxa_task" { continue; }
             if !names.contains(&name) { names.push(name); }
         }
     }
@@ -1334,6 +1353,29 @@ fn javascript_whitespace(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_completion_control_repairs_protocol_without_certifying_or_guessing_evidence() {
+        let requirements = vec!["Save the requested report".to_owned()];
+        let assessment = json!({"state":"complete","met":[{"requirementId":"requirement-1",
+            "item":requirements[0],"evidence":["real-write"]}]});
+        let correction = native_task_control_receipt(&json!({"id":"control","name":"kynxa_task","arguments":assessment}), &requirements).unwrap();
+        assert_eq!(correction["code"], "TASK_CONTROL_NOT_TOOL");
+        assert_eq!(correction["executed"], false);
+        assert!(!successful_completion_receipt(&correction));
+        let mut state = TaskState::default();
+        let parsed = state.inspect(correction["content"]["footer"].as_str().unwrap());
+        assert_eq!(parsed["met"], assessment["met"]);
+        let decision = state.decide(&json!({"reply":parsed,"isReview":true,"evidenceRequired":true,
+            "expectedRequirements":requirements,"validEvidence":[]}));
+        assert_eq!(decision["action"], "resume", "repaired syntax cannot invent the referenced receipt");
+        let malformed = native_task_control_receipt(&json!({"name":"kynxa_task","arguments":{
+            "state":"complete","met":["real-write"]}}), &requirements).unwrap();
+        assert!(malformed["content"]["footer"].is_null(), "bare IDs must not be guessed into requirement mappings");
+        assert!(native_task_control_receipt(&json!({"name":"mcp.example.kynxa_task"}), &requirements).is_none());
+        let names = unexecuted_tool_names("<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"kynxa_task\">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>");
+        assert!(names.is_empty(), "internal control is not a pending business operation");
+    }
 
     #[test]
     fn literal_dsml_invocations_are_unexecuted_even_with_a_complete_footer() {
