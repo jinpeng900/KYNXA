@@ -28,20 +28,3 @@ jobs:
       # The Rust core needs no Node; packaged Node serves MCP and verified sandbox skills.
       # Rust 核心不依赖 Node；随包 Node 用于 MCP 和已核验的沙箱技能。
       - run: node tools/development/check-architecture.mjs
-
-  packaging-guards:
-    name: Windows packaging guards
-    runs-on: windows-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      # These offline checks need no SDK or private assets; build, deployment and GUI checks run separately.
-      # 这些离线检查无需 SDK 或私有资源；构建、部署和界面需单独验证。
-      - name: Reject incomplete MCP caches
-        shell: powershell
-        run: ./tests/native-runtime-smoke/check-mcp-cache.ps1
-      - name: Check deployment path boundaries
-        shell: powershell
-        run: ./tests/native-runtime-smoke/check-deployment-paths.ps1

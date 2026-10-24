@@ -56,9 +56,18 @@ node_modules/
 # Rust 资源服务构建产物，仅由打包步骤收录准备好的运行文件。
 /apps/resource-service/target/
 
-# Machine-specific benchmark inputs, indexes and results remain local; portable runners live in tools/development.
-# 本机评测输入、索引与结果保留本地；可移植的评测入口位于 tools/development。
+# Benchmark inputs, indexes and results remain local.
+# 评测输入、索引与结果保留本地。
 /test/
+
+# Keep standalone tests and fixtures local; production sources remain tracked.
+# 独立测试和夹具只留本地，生产源码继续纳入版本管理。
+/tests/
+/apps/**/tests/
+*_tests.rs
+/apps/mock-backend/
+/tools/development/fixtures/unified-agent/
+/tools/development/evaluate-unified-retrieval.mjs
 
 # Local design archives and generated design documents stay outside the source repository.
 # 本机设计归档和生成的设计文档保留本地，不进入源码仓库。

@@ -2,6 +2,10 @@
 
 当前正式链路为 WinUI/C# 桌面 → Rust HTTP/SSE 网关及 Agent 核心 → 模型、检索/存储和 C# ToolHost，独立 Rust 资源服务负责硬件准入。生产入口为 `apps/agent-core/src/bin/kynxa-gateway.rs`，随包入口为 `runtime/agent/kynxa-gateway.exe`；私有 Node 仅供扩展 MCP 和已核验的 JS Skill 使用，WebView 前端脚本继续负责呈现。开发与维护同时遵循版本化的 [kynxa-development](../../.agents/skills/kynxa-development/SKILL.md) 和 [kynxa-code-standards](../../.agents/skills/kynxa-code-standards/SKILL.md)，调用与打包边界见 [原生网关架构](../../docs/architecture/native-gateway.md)。
 
+## 文档视图的按需启动与释放
+
+空工作区加载不启动文档 WebView 环境；首次打开时分别创建文档与本地 HTML 环境，继续保持配置目录及原生消息桥隔离。初始化失败后，原标签的刷新会重建失败控制器，不再复用失败任务或注册重复事件。后台准备不因切换停止，完成的闲置页面降低内存目标并尝试挂起；切回恢复正常目标、原 DOM 与阅读位置。缓存淘汰和显式关闭共用原关闭入口，同时释放工作对象对旧视图的引用。网页自动化和终端后台会话不因文档资源回收而关闭，首次打开文档仍需承担环境初始化开销。
+
 ## 代码与纯文本框的独立复制
 
 普通 Markdown 围栏（包括未指定语言、`text`、`plaintext`、JSON、命令、配置及未知语言）和缩进代码块共用 `Resources/Transcript/content-blocks.js/css`。每框顶部左侧显示语言／文本类型，右侧常显独立复制按钮；操作栏位于源码上方，使用共享字体、配色及圆角。长类型名显示省略号，不挤出复制按钮。只有模型原文已标记为代码块的内容会成框，普通段落、引用、列表和行内代码不自动转成框。

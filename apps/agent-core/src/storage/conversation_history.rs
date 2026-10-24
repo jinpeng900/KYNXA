@@ -12,6 +12,7 @@ const MIB: usize = 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 128 * MIB;
 const MAX_INDEX_BYTES: usize = 64 * MIB;
 const MAX_CACHE_BYTES: usize = 96 * MIB;
+const MAX_PROJECTION_BYTES: usize = 32 * MIB;
 static HISTORY_CACHE: Mutex<Vec<(String, Arc<HistoryIndex>)>> = Mutex::new(Vec::new());
 
 #[derive(Clone)]
@@ -19,6 +20,8 @@ struct RecordRange {
     offset: u64,
     length: usize,
     streaming: bool,
+    projection: Option<Arc<Value>>,
+    projection_bytes: usize,
 }
 #[derive(Clone)]
 struct HistoryIndex {
@@ -30,6 +33,7 @@ struct HistoryIndex {
     identities: HashMap<String, (usize, String)>,
     bytes: usize,
     has_streaming: bool,
+    projection_bytes: usize,
 }
 #[derive(Serialize, Deserialize)]
 struct Cursor {
@@ -158,6 +162,8 @@ fn build_index(
             offset,
             length: count,
             streaming: status.status == Some("streaming"),
+            projection: None,
+            projection_bytes: 0,
         };
         if let Some((position, saved_role)) = positions.get(&id) {
             if *saved_role != role {
@@ -199,6 +205,7 @@ fn build_index(
         records,
         identities: positions,
         has_streaming,
+        projection_bytes: 0,
     })
 }
 
@@ -206,6 +213,7 @@ fn build_index(
 /// 完成的读取仅保留来源身份与指定记录，最终复核时短时重开文件，不阻止目录所有者移动会话。
 pub(crate) struct HistoryRead {
     pub messages: Vec<String>,
+    pub projected_messages: Vec<Value>,
     source: Option<managed_files::StableFileVersion>,
     index: Option<Arc<HistoryIndex>>,
     root: std::path::PathBuf,
@@ -275,13 +283,17 @@ impl HistoryRead {
                 identities: HashMap::new(),
                 bytes: 0,
                 has_streaming: false,
+                projection_bytes: 0,
             });
         let range = RecordRange {
             offset: index.file_bytes,
             length: event.len(),
             streaming: status.status == Some("streaming"),
+            projection: None,
+            projection_bytes: 0,
         };
         if let Some((position, _)) = index.identities.get(&id) {
+            index.projection_bytes -= index.records[*position].projection_bytes;
             index.records[*position] = range;
         } else {
             let position = index.records.len();
@@ -300,7 +312,8 @@ impl HistoryRead {
                 .identities
                 .iter()
                 .map(|(id, (_, role))| id.capacity() + role.capacity())
-                .sum::<usize>();
+                .sum::<usize>()
+            + index.projection_bytes;
         let receipt = json!({"appended":true,"hash":index.snapshot});
         let index = Arc::new(index);
         let owner = managed_files::digest(self.path.to_string_lossy().as_bytes());
@@ -308,6 +321,7 @@ impl HistoryRead {
         self.source = Some(reader.into_version());
         self.index = Some(index);
         self.messages = vec![raw_message.to_owned()];
+        self.projected_messages.clear();
         Ok(receipt)
     }
     pub fn message_ids(&self) -> Vec<String> {
@@ -352,13 +366,25 @@ pub(crate) fn read_latest(
     message_ids: Option<&HashSet<String>>,
     user_only: bool,
 ) -> Result<HistoryRead, ContractError> {
-    read_snapshot(root, location, message_ids, user_only, true)
+    read_snapshot(root, location, message_ids, user_only, true, None)
+}
+
+/// Reuse normalized message bodies inside the versioned offset cache, without changing raw journals.
+/// 在已有版本化偏移缓存内复用规范化消息，不改写正式原文日志。
+/// Projectors share one storage representation; transport filtering and live scope checks stay with callers.
+/// 投影器共用同一存储消息表示；公开字段过滤与即时范围核验仍由调用方负责。
+pub(crate) fn read_projected(
+    root: &Path,
+    location: &Value,
+    project: fn(&str) -> Result<Value, ContractError>,
+) -> Result<HistoryRead, ContractError> {
+    read_snapshot(root, location, None, false, true, Some(project))
 }
 
 /// Use the log-version index for catalog message IDs without decoding all bodies.
 /// 目录消息身份复用日志版本索引，不解码全部正文。
 pub(crate) fn read_metadata(root: &Path, location: &Value) -> Result<HistoryRead, ContractError> {
-    read_snapshot(root, location, None, false, false)
+    read_snapshot(root, location, None, false, false, None)
 }
 
 fn read_snapshot(
@@ -367,6 +393,7 @@ fn read_snapshot(
     message_ids: Option<&HashSet<String>>,
     user_only: bool,
     include_messages: bool,
+    project: Option<fn(&str) -> Result<Value, ContractError>>,
 ) -> Result<HistoryRead, ContractError> {
     conversation_logs::check_cancelled()?;
     let path = conversation_logs::directory(root, location)?.join("events.jsonl");
@@ -380,6 +407,7 @@ fn read_snapshot(
     };
     let mut result = HistoryRead {
         messages: Vec::new(),
+        projected_messages: Vec::new(),
         source: None,
         index: None,
         root: root.to_path_buf(),
@@ -415,9 +443,16 @@ fn read_snapshot(
     };
     selected.sort_unstable();
     selected.dedup();
+    let mut updated_index: Option<HistoryIndex> = None;
     for position in selected {
         conversation_logs::check_cancelled()?;
         let range = &index.records[position];
+        if project.is_some() {
+            if let Some(message) = &range.projection {
+                result.projected_messages.push(message.as_ref().clone());
+                continue;
+            }
+        }
         reader
             .file
             .seek(SeekFrom::Start(range.offset))
@@ -429,44 +464,50 @@ fn read_snapshot(
             .map_err(conversation_logs::io_error)?;
         let raw = std::str::from_utf8(&bytes).map_err(|_| invalid("历史编码无效。"))?;
         let event: Event<'_> = serde_json::from_str(raw).map_err(|_| invalid("历史事件无效。"))?;
-        result.messages.push(event.message.get().to_string());
+        if let Some(project) = project {
+            let message = project(event.message.get())?;
+            let bytes = projection_bytes(&message).saturating_add(2 * std::mem::size_of::<usize>());
+            let retained = updated_index.as_ref().unwrap_or(index.as_ref());
+            if retained.projection_bytes.saturating_add(bytes) <= MAX_PROJECTION_BYTES
+                && retained.bytes.saturating_add(bytes) <= MAX_CACHE_BYTES
+            {
+                let updated = updated_index.get_or_insert_with(|| index.as_ref().clone());
+                updated.records[position].projection = Some(Arc::new(message.clone()));
+                updated.records[position].projection_bytes = bytes;
+                updated.projection_bytes += bytes;
+                updated.bytes += bytes;
+            }
+            result.projected_messages.push(message);
+        } else {
+            result.messages.push(event.message.get().to_string());
+        }
     }
     reader.verify()?;
     result.source = Some(reader.into_version());
     result.index = Some(index);
     result.verify()?;
+    if let Some(index) = updated_index {
+        let index = Arc::new(index);
+        cache_index(&owner, &index)?;
+        result.index = Some(index);
+    }
     Ok(result)
 }
 
-pub(crate) fn verify_snapshot(
-    root: &Path,
-    location: &Value,
-    snapshot: &Value,
-) -> Result<(), ContractError> {
-    let path = conversation_logs::directory(root, location)?.join("events.jsonl");
-    let Some(mut reader) = managed_files::open_reader(root, &path, u64::MAX)? else {
-        return if snapshot.is_null() {
-            Ok(())
-        } else {
-            Err(changed())
-        };
+fn projection_bytes(value: &Value) -> usize {
+    let heap = match value {
+        Value::String(text) => text.capacity(),
+        Value::Array(items) => items.capacity().saturating_mul(std::mem::size_of::<Value>())
+            .saturating_add(items.iter().map(|item| projection_bytes(item)
+                .saturating_sub(std::mem::size_of::<Value>())).sum::<usize>()),
+        // Conservatively charge ordered-map entries and buckets, not only serialized text length.
+        // 保守计入有序映射条目和桶的管理开销，不只计算序列化后的文本长度。
+        Value::Object(fields) => fields.len().saturating_mul(192)
+            .saturating_add(fields.iter().map(|(key, value)| key.capacity()
+                .saturating_add(projection_bytes(value))).sum::<usize>()),
+        _ => 0,
     };
-    let owner = managed_files::digest(path.to_string_lossy().as_bytes());
-    let index = HISTORY_CACHE
-        .lock()
-        .map_err(|_| invalid("历史缓存锁失效。"))?
-        .iter()
-        .find(|(key, index)| key == &owner && snapshot.as_str() == Some(index.snapshot.as_str()))
-        .map(|(_, index)| Arc::clone(index))
-        .ok_or_else(changed)?;
-    if let Some(token) = &index.version_token {
-        if reader.version_token()?.as_ref() != Some(token) {
-            return Err(changed());
-        }
-    } else if source_hash(&mut reader)? != index.snapshot {
-        return Err(changed());
-    }
-    reader.verify()
+    std::mem::size_of::<Value>().saturating_add(heap)
 }
 
 fn indexed(
@@ -511,6 +552,9 @@ fn indexed(
 }
 
 fn cache_index(owner: &str, index: &Arc<HistoryIndex>) -> Result<(), ContractError> {
+    if index.bytes > MAX_CACHE_BYTES {
+        return Ok(());
+    }
     let mut cache = HISTORY_CACHE
         .lock()
         .map_err(|_| invalid("历史缓存锁失效。"))?;
@@ -575,6 +619,12 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation != "storage.history.page" {
         return Err(invalid("未知历史分页操作。"));
     }
+    read_page(arguments).map(|(page, _)| page)
+}
+
+/// Keep each page's source proof outside the evictable cache until its caller finishes scope checks.
+/// 分页来源凭证独立于可淘汰缓存保留，直至调用方完成归属核验。
+pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), ContractError> {
     conversation_logs::check_cancelled()?;
     let root = Path::new(arguments["root"].as_str().unwrap_or(""));
     let path = conversation_logs::directory(root, &arguments["location"])?.join("events.jsonl");
@@ -613,9 +663,13 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             return Err(changed());
         }
         return Ok(
-            json!({"rawMessages":[],"totalMessages":0,"hasMore":false,"nextCursor":null,
+            (json!({"rawMessages":[],"totalMessages":0,"hasMore":false,"nextCursor":null,
             "hasNewer":false,"newerCursor":null,"startIndex":0,"endIndex":0,
             "snapshot":null,"returnedBytes":0,"byteBudgetExceeded":false,"hasStreamingMessages":false}),
+            HistoryRead {
+                messages: Vec::new(), projected_messages: Vec::new(), source: None, index: None,
+                root: root.to_path_buf(), path,
+            }),
         );
     };
     let index = indexed(&mut reader, &owner)?;
@@ -712,13 +766,15 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     } else {
         None
     };
-    Ok(
-        json!({"rawMessages":messages,"totalMessages":index.records.len(),"hasMore":start>0,
+    let page = json!({"rawMessages":messages,"totalMessages":index.records.len(),"hasMore":start>0,
         "nextCursor":next,"hasNewer":newer_cursor.is_some(),"newerCursor":newer_cursor,
         "startIndex":start,"endIndex":end,
         "snapshot":snapshot,"returnedBytes":bytes,"byteBudgetExceeded":bytes>maximum_bytes,
-        "hasStreamingMessages":index.has_streaming}),
-    )
+        "hasStreamingMessages":index.has_streaming});
+    Ok((page, HistoryRead {
+        messages: Vec::new(), projected_messages: Vec::new(), source: Some(reader.into_version()),
+        index: Some(index), root: root.to_path_buf(), path,
+    }))
 }
 
 #[cfg(test)]
@@ -728,6 +784,148 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_HISTORY: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static PROJECTED_RECORDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn project_test_message(raw: &str) -> Result<Value, ContractError> {
+        PROJECTED_RECORDS.with(|count| count.set(count.get() + 1));
+        serde_json::from_str(raw).map_err(|_| invalid("测试消息无效。"))
+    }
+
+    #[test]
+    fn history_pages_verify_evicted_and_over_budget_sources_without_caching_them() {
+        let root = std::env::temp_dir().join(format!("kynxa-history-page-budget-{}", uuid::Uuid::new_v4()));
+        let location = json!({"Id":"page-budget","ProjectId":null});
+        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = ["first", "second"].iter().map(|id| format!(
+            "{{\"version\":1,\"type\":\"message.upsert\",\"message\":{{\"Id\":\"{id}\",\"Role\":\"user\",\"Content\":\"{id}\",\"Status\":\"completed\"}}}}\n"
+        )).collect::<String>();
+        fs::write(&path, &original).unwrap();
+        let owner = managed_files::digest(path.to_string_lossy().as_bytes());
+        let (page, mut snapshot) = read_page(&json!({"root":root,"location":location,"limit":1})).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(page["rawMessages"][0].as_str().unwrap()).unwrap()["Id"], "second");
+        let mut oversized = snapshot.index.as_deref().unwrap().clone();
+        oversized.bytes = MAX_CACHE_BYTES + 1;
+        let oversized = Arc::new(oversized);
+        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        cache_index(&owner, &oversized).unwrap();
+        assert!(!HISTORY_CACHE.lock().unwrap().iter().any(|(key, _)| key == &owner),
+            "An over-budget index must remain outside the shared cache.");
+        snapshot.index = Some(oversized);
+        snapshot.verify().unwrap();
+        let (previous, mut previous_snapshot) = read_page(&json!({
+            "root":root,"location":location,"limit":1,"cursor":page["nextCursor"]
+        })).unwrap();
+        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        previous_snapshot.verify().unwrap();
+        assert_eq!(previous["snapshot"], page["snapshot"]);
+        assert_eq!(serde_json::from_str::<Value>(previous["rawMessages"][0].as_str().unwrap()).unwrap()["Id"], "first");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_pages_without_cache_still_reject_changed_replaced_and_new_sources() {
+        let root = std::env::temp_dir().join(format!("kynxa-history-page-proof-{}", uuid::Uuid::new_v4()));
+        let location = json!({"Id":"page-proof","ProjectId":null});
+        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let arguments = json!({"root":root,"location":location});
+        let (_, mut absent) = read_page(&arguments).unwrap();
+        let original = "{\"version\":1,\"type\":\"message.upsert\",\"message\":{\"Id\":\"source\",\"Role\":\"user\",\"Content\":\"before\",\"Status\":\"completed\"}}\n";
+        fs::write(&path, original).unwrap();
+        assert_eq!(absent.verify().unwrap_err().code(), "CONVERSATION_HISTORY_CHANGED");
+        let owner = managed_files::digest(path.to_string_lossy().as_bytes());
+        let (_, mut replaced) = read_page(&arguments).unwrap();
+        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::rename(&path, path.with_extension("previous")).unwrap();
+        fs::write(&path, original).unwrap();
+        OpenOptions::new().write(true).open(&path).unwrap()
+            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        assert_eq!(replaced.verify().unwrap_err().code(), "MEMORY_CONFLICT");
+        let (_, mut changed_snapshot) = read_page(&arguments).unwrap();
+        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        // Exercise the byte-verified fallback even on Windows volumes with observable change stamps.
+        // 即使 Windows 卷提供变更时间，也覆盖缺少该标识时的完整字节核验。
+        Arc::make_mut(changed_snapshot.index.as_mut().unwrap()).version_token = None;
+        fs::write(&path, original.replace("before", "after!")).unwrap();
+        OpenOptions::new().write(true).open(&path).unwrap()
+            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        assert_eq!(changed_snapshot.verify().unwrap_err().code(), "CONVERSATION_HISTORY_CHANGED");
+        let (_, mut removed) = read_page(&arguments).unwrap();
+        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(removed.verify().unwrap_err().code(), "CONVERSATION_HISTORY_CHANGED");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn projected_bodies_reuse_unchanged_records_and_refresh_only_the_appended_message() {
+        let root = std::env::temp_dir().join(format!("kynxa-history-projected-{}", uuid::Uuid::new_v4()));
+        let location = json!({"Id":"projected-chat","ProjectId":null});
+        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = ["first", "second"].iter().map(|id| format!(
+            "{{\"version\":1,\"type\":\"message.upsert\",\"message\":{{\"Id\":\"{id}\",\"Role\":\"user\",\"Content\":\"{id}\",\"Status\":\"completed\"}}}}\n"
+        )).collect::<String>();
+        fs::write(&path, &original).unwrap();
+        PROJECTED_RECORDS.with(|count| count.set(0));
+        let first = read_projected(&root, &location, project_test_message).unwrap();
+        assert_eq!(PROJECTED_RECORDS.with(|count| count.get()), 2);
+        let mut second = read_projected(&root, &location, project_test_message).unwrap();
+        assert_eq!(second.projected_messages, first.projected_messages);
+        assert_eq!(PROJECTED_RECORDS.with(|count| count.get()), 2,
+            "An unchanged read must not decode or normalize the same message bodies again.");
+        let before = Arc::clone(first.index.as_ref().unwrap().records[0].projection.as_ref().unwrap());
+        second.append_message(&json!({"Id":"second","Role":"user","Content":"updated","Status":"completed"}).to_string(), false).unwrap();
+        let third = read_projected(&root, &location, project_test_message).unwrap();
+        assert_eq!(PROJECTED_RECORDS.with(|count| count.get()), 3);
+        assert_eq!(third.projected_messages[0]["Content"], "first");
+        assert_eq!(third.projected_messages[1]["Content"], "updated");
+        assert!(Arc::ptr_eq(&before, third.index.as_ref().unwrap().records[0].projection.as_ref().unwrap()));
+        assert!(third.index.as_ref().unwrap().bytes >= third.index.as_ref().unwrap().projection_bytes);
+        assert!(third.index.as_ref().unwrap().projection_bytes <= MAX_PROJECTION_BYTES);
+        assert!(fs::read(&path).unwrap().starts_with(original.as_bytes()));
+        let raw = read_latest(&root, &location, None, false).unwrap();
+        assert_eq!(raw.messages.len(), 2);
+        assert_eq!(serde_json::from_str::<Value>(&raw.messages[1]).unwrap()["Content"], "updated");
+        assert!(first.index.as_ref().unwrap().records[0].projection.is_some());
+        assert!(third.index.as_ref().unwrap().records[1].projection.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn projected_bodies_recheck_external_edit_identity_and_missing_sources() {
+        let root = std::env::temp_dir().join(format!("kynxa-history-projected-version-{}", uuid::Uuid::new_v4()));
+        let location = json!({"Id":"version-chat","ProjectId":null});
+        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "{\"version\":1,\"type\":\"message.upsert\",\"message\":{\"Id\":\"user-message\",\"Role\":\"user\",\"Content\":\"before\",\"Status\":\"completed\"}}\n";
+        fs::write(&path, original).unwrap();
+        let mut first = read_projected(&root, &location, project_test_message).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, original.replace("before", "after!")).unwrap();
+        OpenOptions::new().write(true).open(&path).unwrap()
+            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        assert!(first.verify().is_err());
+        let mut second = read_projected(&root, &location, project_test_message).unwrap();
+        assert_eq!(second.projected_messages[0]["Content"], "after!");
+        fs::rename(&path, path.with_extension("previous")).unwrap();
+        fs::write(&path, original).unwrap();
+        OpenOptions::new().write(true).open(&path).unwrap()
+            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        assert!(second.verify().is_err());
+        let mut third = read_projected(&root, &location, project_test_message).unwrap();
+        assert_eq!(third.projected_messages[0]["Content"], "before");
+        assert!(!Arc::ptr_eq(second.index.as_ref().unwrap(), third.index.as_ref().unwrap()));
+        fs::remove_file(&path).unwrap();
+        assert!(third.verify().is_err());
+        assert!(read_projected(&root, &location, project_test_message).unwrap().projected_messages.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn indexed_append_keeps_exact_log_hash_ids_and_conflict_checks() {

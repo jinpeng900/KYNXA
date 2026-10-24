@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[path = "gateway_protocol/history_cache.rs"]
+mod history_cache;
+
 use super::{
     capabilities, context_control,
     gateway::ModelError,
@@ -941,6 +944,17 @@ pub fn history_projection(
 /// Runtime broker messages replay only through the verified route, never through generic public history.
 /// 运行时代理消息仅在已核验路由内回放，不经通用公开历史取得系统权威。
 fn history_projection_for_origin(
+    name: &str,
+    formal_history: &[Value],
+    available_tools: &[String],
+    runtime_origin: Option<&Value>,
+) -> Result<HistoryProjection, ModelError> {
+    history_cache::project(name, formal_history, available_tools, runtime_origin, || {
+        build_history_projection(name, formal_history, available_tools, runtime_origin)
+    })
+}
+
+fn build_history_projection(
     name: &str,
     formal_history: &[Value],
     available_tools: &[String],

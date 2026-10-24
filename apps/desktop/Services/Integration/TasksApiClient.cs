@@ -35,8 +35,8 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
     private readonly Func<CancellationToken, Task> _ensureReady;
     private readonly bool _ownsHttp;
 
-    public TasksApiClient() : this(new HttpClient { BaseAddress = ModelGatewayService.Address,
-        Timeout = Timeout.InfiniteTimeSpan }, ModelGatewayService.EnsureReadyAsync, ownsHttp: true) { }
+    public TasksApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan),
+        ModelGatewayService.EnsureReadyAsync, ownsHttp: true) { }
 
     public TasksApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttp = false)
     {

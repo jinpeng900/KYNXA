@@ -26,8 +26,36 @@ static CANCELLATIONS: OnceLock<Mutex<HashMap<String, (std::path::PathBuf, Arc<At
 static INDEX_WORKERS: OnceLock<
     Mutex<HashMap<std::path::PathBuf, Vec<std::thread::JoinHandle<()>>>>,
 > = OnceLock::new();
-static BACKGROUND_GATES: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<Mutex<()>>>>> =
+#[derive(Default)]
+struct IndexingGate {
+    execution: Mutex<()>,
+    recovered: Mutex<bool>,
+}
+static BACKGROUND_GATES: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<IndexingGate>>>> =
     OnceLock::new();
+
+fn indexing_gate(root: &Path) -> Result<Arc<IndexingGate>, ContractError> {
+    let mut gates = BACKGROUND_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| gateway::error("索引队列状态失效。", "RETRIEVAL_BUSY", 503))?;
+    Ok(gates.entry(root.to_path_buf()).or_default().clone())
+}
+
+/// Recover old jobs before the first new job; a delayed startup cannot retire current workers.
+/// 首次创建新作业前结算旧作业，延迟启动不能把本次运行的作业判为中断。
+fn ensure_jobs_recovered(config: &GatewayConfig) -> Result<(), ContractError> {
+    let gate = indexing_gate(&config.data_root)?;
+    let mut recovered = gate
+        .recovered
+        .lock()
+        .map_err(|_| gateway::error("索引恢复状态失效。", "RETRIEVAL_BUSY", 503))?;
+    if !*recovered {
+        job_plan(config, "recover", json!({"resumable":false}))?;
+        *recovered = true;
+    }
+    Ok(())
+}
 struct BackgroundOwner {
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -614,7 +642,7 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
         return Ok(json!({"started":true,"reused":true}));
     }
     storage::gateway_memory::resume_candidates(&config.data_root)?;
-    job_plan(config, "recover", json!({"resumable":false}))?;
+    ensure_jobs_recovered(config)?;
     let root = config.data_root.clone();
     storage::gateway_memory::set_indexer(
         &root,
@@ -904,6 +932,11 @@ pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
     }
     storage::gateway_memory::drain_candidates(&config.data_root)?;
     if let Some(active) = ACTIVE_PROJECTS.get() { active.lock().unwrap().remove(&config.data_root); }
+    if let Some(gates) = BACKGROUND_GATES.get() {
+        gates.lock()
+            .map_err(|_| gateway::error("索引队列状态失效。", "RETRIEVAL_BUSY", 503))?
+            .remove(&config.data_root);
+    }
     Ok(())
 }
 fn nested_mount(root: &str, candidate: &str) -> bool {
@@ -1315,6 +1348,9 @@ pub fn bind_work(
     Ok(binding)
 }
 fn job_plan(config: &GatewayConfig, operation: &str, input: Value) -> Result<Value, ContractError> {
+    if operation == "create" {
+        ensure_jobs_recovered(config)?;
+    }
     gateway::with_catalog(&config.data_root, |_, _| {
         let path = config.data_root.join("Retrieval/jobs.json");
         let (value, hash) = gateway::read_json(&config.data_root, &path, 16 * 1024 * 1024)?;
@@ -1424,10 +1460,10 @@ fn rebuild_internal(
     let config = config.clone();
     let settings = current;
     let index_root = config.data_root.clone();
+    let gate = indexing_gate(&index_root)?;
     let worker = std::thread::Builder::new().name("kynxa-corpus-index".to_string()).spawn(move|| {
         let _runtime=runtime.as_ref().map(tokio::runtime::Handle::enter);
-        let gate={let mut gates=BACKGROUND_GATES.get_or_init(Default::default).lock().unwrap();gates.entry(config.data_root.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone()};
-        let _queue=gate.lock().unwrap();
+        let _queue=gate.execution.lock().unwrap();
         if cancel.load(Ordering::Acquire){CANCELLATIONS.get().unwrap().lock().unwrap().remove(&id);return;}
         let _=job_update(&config,&id,json!({"status":"running","startedAt":gateway::now()}));
         let result={let _scope=cancellation.enter();if let Some(maintenance)=maintenance.filter(|attempt|attempt.semantic_only){run_semantic_retry(&config,&settings,maintenance.coverage,&cancel)}else{run_index(&config,&id,&settings,&cancel)}};
@@ -2425,6 +2461,92 @@ mod gateway_tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delayed_startup_recovery_preserves_new_jobs_and_resets_after_drain() {
+        let workspace = Workspace::new();
+        let root = &workspace.config.data_root;
+        let old_id = gateway::new_id();
+        let new_id = gateway::new_id();
+        let old_project = gateway::new_id();
+        gateway::load_catalog(root).unwrap();
+        gateway::commit_json(
+            root,
+            &root.join("Retrieval/jobs.json"),
+            &json!({"schemaVersion":1,"jobs":[{"jobId":old_id,"projectId":old_project,
+                "status":"running","completedSources":0,"totalSources":0,"createdAt":gateway::now()}]}),
+            None,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+
+        // Hold real background initialization until HTTP-style job creation has reached its transaction.
+        // 让真实后台初始化晚于新作业事务，固定复现 HTTP 就绪后首次创建的竞争顺序。
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let startup_config = workspace.config.clone();
+        let startup = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            blocked.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            start_background(&startup_config)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entering)
+            .await.unwrap().unwrap();
+        let created = job_plan(&workspace.config, "create", json!({"resumeAutomatic":false,
+            "job":{"jobId":new_id,"projectId":null,"status":"queued",
+                "completedSources":0,"totalSources":0,"createdAt":gateway::now()}})).unwrap();
+        assert_eq!(created["jobId"], new_id);
+        assert_eq!(job_plan(&workspace.config, "get", json!({"jobId":old_id})).unwrap()["error"],
+            "INDEX_JOB_INTERRUPTED");
+        release.send(()).unwrap();
+        assert_eq!(startup.await.unwrap().unwrap()["started"], true);
+        assert_eq!(start_background(&workspace.config).unwrap()["reused"], true);
+        let current = job_plan(&workspace.config, "get", json!({"jobId":new_id})).unwrap();
+        assert_eq!(current["status"], "queued");
+        assert!(current.get("error").is_none());
+
+        let gate = indexing_gate(root).unwrap();
+        assert!(*gate.recovered.lock().unwrap());
+        let cleanup = workspace.config.clone();
+        tokio::task::spawn_blocking(move || drain_background(&cleanup))
+            .await.unwrap().unwrap();
+        let reloaded_gate = indexing_gate(root).unwrap();
+        assert!(!Arc::ptr_eq(&gate, &reloaded_gate));
+        assert!(!*reloaded_gate.recovered.lock().unwrap());
+        ensure_jobs_recovered(&workspace.config).unwrap();
+        assert_eq!(job_plan(&workspace.config, "get", json!({"jobId":new_id})).unwrap()["error"],
+            "INDEX_JOB_INTERRUPTED");
+        drain_background(&workspace.config).unwrap();
+    }
+
+    #[test]
+    fn failed_startup_recovery_blocks_creation_and_allows_repaired_retry() {
+        let workspace = Workspace::new();
+        let root = &workspace.config.data_root;
+        gateway::load_catalog(root).unwrap();
+        let path = root.join("Retrieval/jobs.json");
+        let invalid = json!({"schemaVersion":99,"jobs":[]});
+        gateway::commit_json(root, &path, &invalid, None, 16 * 1024 * 1024).unwrap();
+        let create = json!({"resumeAutomatic":false,"job":{"jobId":gateway::new_id(),
+            "projectId":null,"status":"queued","completedSources":0,"totalSources":0,
+            "createdAt":gateway::now()}});
+        assert_eq!(job_plan(&workspace.config, "create", create.clone()).unwrap_err().code(),
+            "UNSUPPORTED_RETRIEVAL_SCHEMA");
+        let gate = indexing_gate(root).unwrap();
+        assert!(!*gate.recovered.lock().unwrap());
+        let (unchanged, hash) = gateway::read_json(root, &path, 16 * 1024 * 1024).unwrap();
+        assert_eq!(unchanged.unwrap(), invalid);
+        gateway::commit_json(root, &path, &json!({"schemaVersion":1,"jobs":[]}),
+            hash.as_deref(), 16 * 1024 * 1024).unwrap();
+        // A running corpus worker owns only execution, so admission does not wait for its whole scan.
+        // 正在扫描的作业只持执行锁，新作业准入不必等待整次扫描结束。
+        let _execution = gate.execution.lock().unwrap();
+        assert_eq!(job_plan(&workspace.config, "create", create.clone()).unwrap()["jobId"],
+            create["job"]["jobId"]);
+        assert!(*gate.recovered.lock().unwrap());
+        drop(_execution);
+        drain_background(&workspace.config).unwrap();
+    }
+
     #[test]
     fn incremental_scan_reuses_unchanged_file_and_respects_shared_budget() {
         let workspace = Workspace::new();

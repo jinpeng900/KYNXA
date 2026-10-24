@@ -14,6 +14,8 @@
 
 根、子任务共用 `gateway_model_request` 的模型就绪／准入／派发／结算阶段及 `ModelRequestOutcome`，共用 `gateway_tool_execution` 的回执、操作状态、只读分类、证据归档恢复和专用派发，以及 `gateway_live_memory` 的实时撤销投影。摘要执行器也由共享模型模块提供，两端不各自复制准入和计量闭包。旧实现删除后直接调用所属共享模块，不保留经主循环转发的接口。
 
+可选索引启动由 `gateway/startup.rs` 接线，复用原存储准入与关闭顺序；E5 原生初始化仍归推理所有者。历史规范化投影复用已有版本缓存，不另建正式来源。桌面网关客户端使用 `Services/Integration/GatewayHttpClient.cs` 复用回环传输，各自保留超时、认证头、取消和所有权；远端代理及文档浏览器的隔离规则不变。
+
 根循环内部按准备、恢复、模型轮、工具轮和交付划分，`LoopState` 使用上下文、工具、验收、交付、视觉、缓存、转录七个组合；子循环按准备、模型会话、工具轮、压缩、验收划分；模型会话只持运行时状态，`WorkerContext` 保留持久字段。根验收状态与证明恢复归 `acceptance`，根初始证据／历史／附件组装归 `preparation/inputs`；工具派发和回执投影分开时仍保持同一工作区锁范围。各自身份、权限、委派和交付策略留在原所有者，原检查点字段及子任务 `WorkerContext` 序列化保持，不把文件拆分误称为统一任务循环。
 
 完成决定使用 `TaskDecisionInput`／`TaskDecision`，回执事实与证明身份分别由 `ToolExecutionReceipt` 和 `CompletionProof` 约束；MCP／供应商动态载荷及公开 JSON 继续保留原合同。根、子同次评审共用 `CompletionEvidenceSet`，不得另建账本或跨新操作沿用旧投影。成功及观察引用必须通过真实回执合同；保留权限、版本、排队、引导、暂停恢复、记忆撤销和缓存行为，不以重做操作补回输出。第二批源码接入及统一短验证状态见[实施清单](../../../../docs/team/pending-fixes.md)，不能用历史测试成绩代替本次验证。

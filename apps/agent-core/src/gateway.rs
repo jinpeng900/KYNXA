@@ -25,6 +25,8 @@ use std::{
     time::Duration,
 };
 
+mod startup;
+
 fn response(result: Result<(u16, Value), GatewayError>) -> Response {
     let (status, value) = match result {
         Ok(result) => result,
@@ -921,10 +923,6 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
         config.migration_lock_path()?,
         Arc::new(GatewayConfig::from_environment),
     )?;
-    if config.inference_library.is_file() {
-        crate::models::gateway_inference::initialize_runtime(&config.inference_library)
-            .map_err(GatewayError::from)?;
-    }
     let resource = config
         .application_root
         .join("runtime/resource/kynxa-resource-service.exe");
@@ -938,26 +936,10 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
     crate::resources::gateway::install(
         crate::resources::gateway::ResourceService::start(&resource).await?,
     );
+    // The embedding owner initializes its native DLL on demand; cloud readiness does not load ORT.
+    // 嵌入模型所有者按需初始化原生 DLL；云端聊天就绪不等待 ORT 装载。
     crate::retrieval::gateway_embedding::install_runtime(tokio::runtime::Handle::current());
-    let background_config = config.clone();
-    let prepared = tokio::task::spawn_blocking(move || {
-        crate::retrieval::gateway::start_background(&background_config)
-    })
-    .await;
-    if let Err(error) = prepared
-        .as_ref()
-        .map_err(|_| GatewayError::new("INDEX_START_FAILED", "后台资料服务未启动。", 503))
-        .and_then(|result| {
-            result.as_ref().map_err(|error| {
-                GatewayError::new(error.code(), error.message(), error.status_code())
-            })
-        })
-    {
-        eprintln!(
-            "{}",
-            json!({"code":error.code,"message":error.message,"lexicalReadAvailable":true})
-        );
-    }
+    let indexing_startup = startup::schedule_indexing(lifecycle.clone());
     println!(
         "{}",
         json!({"service":"kynxa-model-gateway","runtime":"rust","port":listener.local_addr()?.port(),"nodeRuntime":false})
@@ -975,6 +957,9 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
     axum::serve(listener, router_with_lifecycle(lifecycle))
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            // Settle the owned startup admission before draining its retrieval workers.
+            // 先结算本次启动准入，再清退它创建的检索作业，避免退出后才启动。
+            let _ = indexing_startup.await;
             shutdown.shutdown().await;
         })
         .await?;

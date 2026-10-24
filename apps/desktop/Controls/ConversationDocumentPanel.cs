@@ -182,11 +182,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _address.KeyDown += AddressKeyDown;
         _browserOptions.Click += (_, _) => ShowWebsiteDataMenu();
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
-        Loaded += (_, _) =>
-        {
-            _loaded.TrySetResult();
-            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => _ = WarmPreviewEnvironmentAsync());
-        };
+        Loaded += (_, _) => _loaded.TrySetResult();
         AppearanceService.Changed += AppearanceChanged;
         UiText.LanguageChanged += LanguageChanged;
         SetToolbarMode(false); ApplyAppearance();
@@ -434,7 +430,13 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (_activeKey is not { } key) return;
         if (_documentWork.Remove(key, out var previous)) CloseDocumentWork(previous);
         _documents.Remove(key);
-        if (_views.TryGetValue(key, out var view)) view.RenderedSignature = null;
+        if (_views.TryGetValue(key, out var view))
+        {
+            // A failed controller must be recreated; reusing its failed task cannot retry initialization.
+            // 初始化失败须重建控制器；复用失败任务无法真正重试，也不能重复注册旧控制器的事件。
+            if (view.Initialization is { IsFaulted: true } or { IsCanceled: true }) CloseView(key);
+            else view.RenderedSignature = null;
+        }
         _current = null;
         OpenCachedOrRead();
     }
@@ -643,8 +645,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         var browser = view.Browser;
         _viewport.Children.Insert(0, browser);
-        _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
-        var environment = await _previewEnvironment;
+        var environment = await GetDocumentEnvironmentAsync(website: false);
         if (_disposed || view.Closed) return;
         await browser.EnsureCoreWebView2Async(environment);
         if (_disposed || view.Closed) return;
@@ -774,8 +775,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _viewport.Children.Insert(0, browser);
         // Local HTML remains an isolated document renderer, without browser automation or a native message bridge.
         // 本地 HTML 保持独立文档视图，不开放浏览器自动化或原生消息桥。
-        _websiteEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspaceHtml"));
-        await browser.EnsureCoreWebView2Async(await _websiteEnvironment);
+        await browser.EnsureCoreWebView2Async(await GetDocumentEnvironmentAsync(website: true));
         if (_disposed || view.Closed) return;
         var core = browser.CoreWebView2;
         core.Settings.AreHostObjectsAllowed = false; core.Settings.IsWebMessageEnabled = false;
@@ -1023,8 +1023,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 && !item.BackgroundPreparing && item.Initialization?.IsCompleted != false)
                 .OrderBy(item => item.LastUsed).FirstOrDefault();
             if (oldest is null) break;
-            _views.Remove(oldest.Key); oldest.Closed = true;
-            _viewport.Children.Remove(oldest.Browser); oldest.Browser.Close();
+            CloseView(oldest.Key);
         }
     }
 
@@ -1180,21 +1179,22 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         finally { Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", overriddenFolder); }
     }
 
-    private async Task WarmPreviewEnvironmentAsync()
+    private static async Task<CoreWebView2Environment> GetDocumentEnvironmentAsync(bool website)
     {
-        if (_disposed || _previewEnvironment is not null) return;
-        Task<CoreWebView2Environment>? preparation = null;
+        // Create only when a document is opened; HTML keeps its separate browser profile.
+        // 打开文档时才创建环境；HTML 继续使用独立的浏览器配置目录。
+        var preparation = website
+            ? _websiteEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspaceHtml"))
+            : _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
         try
         {
-            // Warm only the shared environment at low priority; chat and startup never wait for it.
-            // 低优先级预热共享环境，不创建文档控制器，聊天和启动无需等待。
-            preparation = _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
-            await preparation;
+            return await preparation;
         }
-        catch (Exception error)
+        catch
         {
-            if (ReferenceEquals(_previewEnvironment, preparation)) _previewEnvironment = null;
-            Debug.WriteLine($"Workspace environment warmup: {error.GetType().Name}");
+            if (website && ReferenceEquals(_websiteEnvironment, preparation)) _websiteEnvironment = null;
+            if (!website && ReferenceEquals(_previewEnvironment, preparation)) _previewEnvironment = null;
+            throw;
         }
     }
     private static Button QuietIcon(string glyph, string label)
@@ -1283,6 +1283,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         try
         {
             if (view.Closed || view.Active || view.Preparing || view.BackgroundPreparing || view.Browser.CoreWebView2 is not { } core) return;
+            core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
             await core.TrySuspendAsync();
             // A fast switch may select this view before its earlier suspend operation has completed.
             // 快速切回可能早于旧挂起完成；以最新选择恢复，不能让晚到的挂起冻结当前页面。
@@ -1303,6 +1304,10 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         if (!_views.Remove(key, out var view)) return;
         view.Closed = true; view.Ready.TrySetCanceled(); view.Rendered.TrySetCanceled(); view.Navigated.TrySetCanceled();
+        if (view.Work is { } work && ReferenceEquals(work.View, view)) work.View = null;
+        view.Work = null;
+        if (ReferenceEquals(_document, view.Browser)) _document = null;
+        if (ReferenceEquals(_website, view.Browser)) _website = null;
         _viewport.Children.Remove(view.Browser); view.Browser.Close();
     }
 

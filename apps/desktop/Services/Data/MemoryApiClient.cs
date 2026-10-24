@@ -25,11 +25,8 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
     private readonly Func<CancellationToken, Task> _ensureGatewayReady;
     private readonly bool _ownsHttpClient;
 
-    public MemoryApiClient() : this(new HttpClient
-    {
-        BaseAddress = ModelGatewayService.Address,
-        Timeout = TimeSpan.FromSeconds(30)
-    }, ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
+    public MemoryApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(30)),
+        ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
 
     public MemoryApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)
     {

@@ -319,7 +319,7 @@ public sealed partial class ShellPage
                 progress.IsActive = true; progress.Visibility = Visibility.Visible;
                 Message(UiText.Get("正在准备迁移，请保持应用打开…"));
                 await ModelGatewayService.EnsureReadyAsync();
-                using var http = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(5) };
+                using var http = GatewayHttpClient.Create(address, TimeSpan.FromSeconds(5));
                 var health = await http.GetFromJsonAsync<StorageHealth>("/health");
                 if (health?.StorageProtocol != 1 || string.IsNullOrWhiteSpace(health.ModelDataHome)) throw new InvalidOperationException(UiText.Get("当前网关版本不支持存储迁移，请关闭旧网关并重新打开 KYNXA。"));
                 string expectedModels = ApplicationPaths.ModelHome;

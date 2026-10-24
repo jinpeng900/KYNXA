@@ -14,6 +14,8 @@ Version 1.7.1 updates the first stable 1.7 release with fixes for queued message
 
 Validation uses focused Rust, HTTP/SSE, and Windows UI checks. These checks cover the exercised paths, not every model, website, installation scenario, or large-library retrieval workload. Earlier results remain in the [1.5.3 patch notes](docs/releases/1.5.3.md).
 
+Standalone tests, fixtures, and evaluation scripts are kept locally and excluded from current Git revisions. A fresh clone supports production builds and the source architecture check; full test commands require the locally retained test files. See the [validation guide](.agents/skills/kynxa-development/references/validation.md).
+
 ## Capabilities in the 1.7.1 package
 
 | Area | Current capabilities |

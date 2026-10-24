@@ -19,7 +19,7 @@ public sealed record ChromeWorkspaceState(string? Url, string? Title, bool CanGo
 public sealed class ChromeWorkspaceApiClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http = new() { BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient _http = GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan);
 
     public async Task<ChromeWorkspacePage> OpenAsync(Guid conversationId, Uri address, CancellationToken token)
     {

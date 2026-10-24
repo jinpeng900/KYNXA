@@ -14,10 +14,8 @@ public sealed class WorkspacePreviewApiClient : IDisposable
     private readonly Func<CancellationToken, Task> _ensureReady;
     private readonly bool _ownsHttp;
 
-    public WorkspacePreviewApiClient() : this(new HttpClient
-    {
-        BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan
-    }, ModelGatewayService.EnsureReadyAsync, true) { }
+    public WorkspacePreviewApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan),
+        ModelGatewayService.EnsureReadyAsync, true) { }
 
     public WorkspacePreviewApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttp = false)
     {

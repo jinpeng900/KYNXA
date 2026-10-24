@@ -10,7 +10,6 @@
   "sourceScopes": [
     "apps/desktop",
     "apps/desktop-preview",
-    "apps/mock-backend",
     "apps/shared",
     "apps/tool-host",
     "apps/resource-service",
@@ -35,6 +34,11 @@
     "target",
     "tests",
     ".git"
+  ],
+  "localTestFiles": [
+    "apps/agent-core/src/orchestration/gateway_task_worker_tests.rs",
+    "apps/agent-core/src/retrieval/gateway_legacy_word_tests.rs",
+    "apps/agent-core/src/storage/native_services_tests.rs"
   ],
   "ownershipRules": [
     {
@@ -70,6 +74,7 @@
         "apps/agent-core/src/transport.rs",
         "apps/agent-core/src/service_cancellation.rs",
         "apps/agent-core/src/gateway.rs",
+        "apps/agent-core/src/gateway/startup.rs",
         "apps/agent-core/src/gateway_contract.rs",
         "apps/agent-core/src/document_formats.rs",
         "apps/agent-core/src/gateway_storage.rs"
@@ -82,10 +87,6 @@
     },
     {
       "prefix": "apps/desktop-preview/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/mock-backend/",
       "role": "A"
     },
     {
@@ -234,6 +235,7 @@
     }
   ],
   "testAttribution": {
+    "localOnly": true,
     "strategy": "Direct test source/Compile Include resolve to implementation owners; native unit tests remain with the owning Rust modules / 直接测试源码或 Compile Include 映射实现负责人；原生单元测试归所属 Rust 模块",
     "fallbackRole": "A",
     "fallbackMeaning": "Fixtures or integration checks without direct owned sources are coordinated by A, not automatically assigned to data / 无直接主责源码的夹具或集成检查由 A 协调，不统一归数据负责人",
@@ -325,6 +327,7 @@
         "bin/kynxa-cache-replay.rs",
         "file_identity.rs",
         "gateway.rs",
+        "gateway/startup.rs",
         "main.rs",
         "models/gateway.rs",
         "models/gateway_config.rs",
@@ -432,11 +435,9 @@
         "retrieval/gateway_legacy_office.rs",
         "retrieval/gateway_legacy_word.rs",
         "retrieval/gateway_legacy_powerpoint.rs",
-        "retrieval/gateway_legacy_word_tests.rs",
         "retrieval/gateway_spreadsheets.rs",
         "storage/task_repository.rs",
         "orchestration/gateway_task_http.rs",
-        "orchestration/gateway_task_worker_tests.rs",
         "orchestration/gateway_document_progress.rs",
         "storage/task_repository_cleanup.rs",
         "gateway_storage.rs",
@@ -572,6 +573,14 @@
           "purpose": "Loopback HTTP/SSE, lifecycle composition / 回环 HTTP/SSE 与生命周期组合"
         },
         {
+          "path": "gateway/startup.rs",
+          "allowedDomains": [
+            "orchestration",
+            "retrieval"
+          ],
+          "purpose": "Optional indexing startup under existing storage admission / 原存储准入内的可选索引启动"
+        },
+        {
           "path": "gateway_contract.rs",
           "allowedDomains": [
             "models",
@@ -697,6 +706,13 @@
             "storage"
           ],
           "purpose": "Provider wire encoding and verified private history attachments / 供应商编码与核验私有历史附件"
+        },
+        {
+          "path": "models/gateway_protocol/history_cache.rs",
+          "allowedDomains": [
+            "models"
+          ],
+          "purpose": "Versioned private protocol projection cache adapter / 版本化私有协议投影缓存接线"
         },
         {
           "path": "models/gateway_stream.rs",
@@ -1041,13 +1057,6 @@
           "purpose": "MS-PPT active slides and notes across saves / MS-PPT 跨保存活动幻灯片与备注"
         },
         {
-          "path": "retrieval/gateway_legacy_word_tests.rs",
-          "allowedDomains": [
-            "storage"
-          ],
-          "purpose": "Independent legacy Word fixtures and malformed-input checks / 独立旧 Word 样本与无效输入检查"
-        },
-        {
           "path": "retrieval/gateway_spreadsheets.rs",
           "allowedDomains": [
             "storage"
@@ -1065,16 +1074,6 @@
             "storage"
           ],
           "purpose": "Authorized task HTTP projections over Hub / 对 Hub 进行获授权的任务 HTTP 投影"
-        },
-        {
-          "path": "orchestration/gateway_task_worker_tests.rs",
-          "allowedDomains": [
-            "models",
-            "storage",
-            "tools",
-            "retrieval"
-          ],
-          "purpose": "cfg(test)-only native Worker integration fixtures / 仅 cfg(test) 编译的原生 Worker 集成夹具"
         },
         {
           "path": "storage/task_repository_cleanup.rs",

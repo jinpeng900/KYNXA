@@ -55,8 +55,7 @@ public sealed record LocalModelsSnapshot
 public sealed class LocalModelsApiClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http = new(new SocketsHttpHandler { UseProxy = !ModelGatewayService.Address.IsLoopback })
-        { BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient _http = GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan);
 
     public async Task<LocalModelsSnapshot> ReadAsync(CancellationToken token = default)
     {

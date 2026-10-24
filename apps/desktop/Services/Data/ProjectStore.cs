@@ -19,7 +19,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
 {
     // Bound cold catalog/history recovery time while respecting caller cancellation.
     // 冷启动恢复及正式历史校验有等待上限，仍支持调用方取消。
-    private readonly HttpClient _httpClient = new() { BaseAddress = ModelGatewayService.Address, Timeout = TimeSpan.FromMinutes(2) };
+    private readonly HttpClient _httpClient = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromMinutes(2));
     private readonly SemaphoreSlim _requestGate = new(1, 1);
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private int? _revision;

@@ -40,29 +40,19 @@ public sealed class ModelApiClient : IDisposable
         return value;
     }
 
-    // Preparation and chat clients share local keep-alive connections.
-    // 准备和聊天共用本地长连接；仅回环地址跳过代理，远程网关仍遵循系统配置。
-    private static readonly SocketsHttpHandler LocalTransport = new()
-        { UseProxy = false, PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5) };
     private readonly HttpClient _httpClient;
     private readonly Func<CancellationToken, Task> _ensureReady;
     private readonly bool _ownsHttpClient;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public ModelApiClient() : this(CreateHttpClient(), ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
+    public ModelApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromMinutes(5)),
+        ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
 
     internal ModelApiClient(HttpClient httpClient, Func<CancellationToken, Task> ensureReady, bool ownsHttpClient = false)
     {
         _httpClient = httpClient;
         _ensureReady = ensureReady;
         _ownsHttpClient = ownsHttpClient;
-    }
-
-    private static HttpClient CreateHttpClient()
-    {
-        var address = ModelGatewayService.Address;
-        return new HttpClient(address.IsLoopback ? LocalTransport : new SocketsHttpHandler(), disposeHandler: !address.IsLoopback)
-        { BaseAddress = address, Timeout = TimeSpan.FromMinutes(5) };
     }
 
     public async Task<ModelProvider[]> ListAsync(CancellationToken cancellationToken = default)

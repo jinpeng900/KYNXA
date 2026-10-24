@@ -132,11 +132,21 @@ function staticReferences(source) {
 }
 
 const sourceFiles = [];
+const localTestFiles = new Set();
+for (const path of manifest.localTestFiles ?? []) {
+  if (path.includes('\\') || path.split('/').includes('..') || !path.endsWith('_tests.rs') ||
+      !manifest.sourceScopes.some(scope => path.startsWith(`${scope}/`)) || localTestFiles.has(path)) {
+    violations.push({ code: 'INVALID_LOCAL_TEST_FILE', source: path });
+    continue;
+  }
+  localTestFiles.add(path);
+}
 for (const scope of manifest.sourceScopes) {
   if (!scope.startsWith('apps/')) throw new Error(`Source scope must be inside apps: ${scope}`);
   sourceFiles.push(...(await listFiles(resolve(repositoryRoot, scope), manifest.excludedDirectoryNames, manifest.includedSourceDirectories ?? []))
-    .filter(path => manifest.sourceExtensions.includes(extname(path)) || (manifest.resourceScopes ?? []).some(resource =>
-      toRepositoryPath(path).startsWith(`${resource.root}/`) && resource.extensions.includes(extname(path)))));
+    .filter(path => !localTestFiles.has(toRepositoryPath(path)) &&
+      (manifest.sourceExtensions.includes(extname(path)) || (manifest.resourceScopes ?? []).some(resource =>
+        toRepositoryPath(path).startsWith(`${resource.root}/`) && resource.extensions.includes(extname(path))))));
 }
 const ownerCounts = Object.fromEntries(Object.keys(manifest.roles).map(role => [role, 0]));
 for (const path of sourceFiles) {
@@ -168,9 +178,19 @@ for (const path of scriptFiles) {
 // Tests inherit their direct implementation dependencies; cross-domain tests retain all relevant owners.
 // 测试继承直接实现依赖的负责人；跨域测试保留所有相关角色。
 const testSuites = new Map();
+const missingLocalTestRoots = [];
 let testSourceCount = 0;
 for (const testRoot of manifest.testAttribution.roots) {
-  for (const path of await listFiles(resolve(repositoryRoot, testRoot), ['node_modules', 'bin', 'obj', '.git'])) {
+  try { await stat(resolve(repositoryRoot, testRoot)); }
+  catch (error) {
+    // Local test files are optional; missing production scopes still fail above.
+    // 本地测试可不提供；前面的生产目录缺失仍然报错。
+    if (!manifest.testAttribution.localOnly || error.code !== 'ENOENT') throw error;
+    missingLocalTestRoots.push(testRoot);
+    continue;
+  }
+  const testFiles = await listFiles(resolve(repositoryRoot, testRoot), ['node_modules', 'bin', 'obj', '.git']);
+  for (const path of testFiles) {
     if (!['.mjs', '.csproj'].includes(extname(path))) continue;
     testSourceCount++;
     const suite = `${testRoot}/${relative(resolve(repositoryRoot, testRoot), path).split(sep)[0]}`;
@@ -196,6 +216,7 @@ const report = {
   relativeModuleReferences: relativeModuleCount,
   relativeResourceReferences: relativeResourceCount,
   testSourceOrProjectFiles: testSourceCount,
+  missingLocalTestRoots,
   testSuiteAssignments: testAssignments.length,
   testAssignmentsByRole: Object.fromEntries(Object.keys(manifest.roles).map(role =>
     [role, testAssignments.filter(assignment => assignment.roles.includes(role)).length])),

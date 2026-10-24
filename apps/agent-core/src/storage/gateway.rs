@@ -342,18 +342,35 @@ fn public_message_raw(raw: &str) -> Result<String, ContractError> {
 }
 
 pub(crate) fn read_messages_at(root: &Path, location: &Value) -> Result<Vec<Value>, ContractError> {
-    let mut read = read_raw_snapshot(root, location)?;
-    let messages = read
-        .messages
-        .iter()
-        .map(|raw| {
-            let parsed = serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
-                .map_err(|_| error("消息日志无效。", "INVALID_CONVERSATION_DATA", 400))?;
-            normalize_message(&parsed)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut read = read_projected_snapshot(root, location, project_history_message)?;
     read.verify()?;
-    Ok(messages)
+    Ok(read.projected_messages)
+}
+
+fn project_history_message(raw: &str) -> ContractResult {
+    let parsed = serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
+        .map_err(|_| error("消息日志无效。", "INVALID_CONVERSATION_DATA", 400))?;
+    normalize_message(&parsed)
+}
+
+fn project_conversation_message(raw: &str) -> ContractResult {
+    let parsed = serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
+        .map_err(|_| error("历史消息损坏。", "CORRUPT_CONVERSATION", 500))?;
+    normalize_message(&parsed)
+}
+
+fn read_projected_snapshot(
+    root: &Path,
+    location: &Value,
+    project: fn(&str) -> ContractResult,
+) -> Result<conversation_history::HistoryRead, ContractError> {
+    match conversation_history::read_projected(root, location, project) {
+        Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
+            read_messages_recovering(root, location)?;
+            conversation_history::read_projected(root, location, project)
+        }
+        result => result,
+    }
 }
 pub(crate) fn read_raw_snapshot(
     root: &Path,
@@ -424,13 +441,17 @@ fn read_messages_recovering(root: &Path, location: &Value) -> Result<Vec<Value>,
         .map(|index| decoded[index.as_u64().unwrap() as usize].clone())
         .collect())
 }
-fn history_page_recovering(root: &Path, location: &Value, arguments: &Value) -> ContractResult {
-    match conversation_history::apply("storage.history.page", arguments) {
+fn history_page_recovering(
+    root: &Path,
+    location: &Value,
+    arguments: &Value,
+) -> Result<(Value, conversation_history::HistoryRead), ContractError> {
+    match conversation_history::read_page(arguments) {
         Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
             // Reuse the formal byte-preserving recovery transaction before creating a page snapshot.
             // 生成分页快照前复用正式日志的保字节恢复事务；旧游标仍按新快照正常拒绝。
             read_messages_recovering(root, location)?;
-            conversation_history::apply("storage.history.page", arguments)
+            conversation_history::read_page(arguments)
         }
         result => result,
     }
@@ -438,20 +459,11 @@ fn history_page_recovering(root: &Path, location: &Value, arguments: &Value) -> 
 pub fn read_messages(root: &Path, id: &str, public: bool) -> Result<Vec<Value>, ContractError> {
     let catalog = load_catalog(root)?;
     let location = locate(&catalog, id)?;
-    let mut read = read_raw_snapshot(root, &location)?;
-    let messages = read
-        .messages
-        .iter()
-        .map(|raw| {
-            let value = serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
-                .map_err(|_| error("历史消息无效。", "CORRUPT_CONVERSATION", 500))?;
-            normalize_message(&value)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut read = read_projected_snapshot(root, &location, project_conversation_message)?;
     with_catalog(root, |current, _| {
         verify_catalog_sources(&catalog, current, &[id.to_string()])?;
         read.verify()?;
-        Ok(messages
+        Ok(read.projected_messages
             .into_iter()
             .map(|message| {
                 if public {
@@ -1315,27 +1327,19 @@ pub fn read_model_messages(root: &Path, id: &str) -> Result<Vec<Value>, Contract
             .find(|(path, _)| path == root).map(|(_, observer)| observer.clone());
         #[cfg(test)]
         if let Some(observer) = observer.as_ref() { observer("before"); }
-        let messages = read_messages_at(root, &locate(catalog, id)?)?;
+        let mut read = read_projected_snapshot(root, &locate(catalog, id)?, project_history_message)?;
         #[cfg(test)]
         if let Some(observer) = observer.as_ref() { observer("after"); }
         let (current, _) = prepared_conversation_catalog(root, id)?;
         verify_catalog_sources(catalog, &current, &[id.to_string()])?;
-        Ok(messages)
+        read.verify()?;
+        Ok(read.projected_messages)
     })
 }
 pub fn read_conversation(root: &Path, id: &str) -> ContractResult {
     let document = load_catalog(root)?;
     let location = locate(&document, id)?;
-    let mut read = read_raw_snapshot(root, &location)?;
-    let messages = read
-        .messages
-        .iter()
-        .map(|raw| {
-            let value: Value = serde_json::from_str(&raw_json::scalar_projection(raw))
-                .map_err(|_| error("历史消息损坏。", "CORRUPT_CONVERSATION", 500))?;
-            normalize_message(&value)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut read = read_projected_snapshot(root, &location, project_conversation_message)?;
     with_catalog(root, |current, _| {
         verify_catalog_sources(&document, current, &[id.to_string()])?;
         read.verify()?;
@@ -1346,7 +1350,7 @@ pub fn read_conversation(root: &Path, id: &str) -> ContractResult {
         relationship["sessionDirectory"] = json!(conversation_logs::directory(root, &location)?);
         Ok(
             json!({"conversationId":relationship["conversationId"],"projectId":relationship["projectId"],
-            "relationship":relationship,"revision":current["Revision"],"messages":messages}),
+            "relationship":relationship,"revision":current["Revision"],"messages":read.projected_messages}),
         )
     })
 }
@@ -2033,7 +2037,7 @@ pub fn handle_text(
             if let Some(cursor) = query_value(query, "cursor") {
                 args["cursor"] = json!(cursor);
             }
-            let mut page = history_page_recovering(root, &location, &args)?;
+            let (mut page, mut snapshot) = history_page_recovering(root, &location, &args)?;
             let messages = page["rawMessages"]
                 .as_array()
                 .unwrap()
@@ -2052,7 +2056,7 @@ pub fn handle_text(
             let current = read_current_catalog(root)?
                 .ok_or_else(|| error("聊天归属已改变，请重新读取。", "WORKSPACE_CHANGED", 409))?;
             verify_catalog_sources(&catalog, &current, &[parts[2].to_string()])?;
-            conversation_history::verify_snapshot(root, &location, &page["snapshot"])?;
+            snapshot.verify()?;
             Ok((200, format!("{{{}}}", fields.join(","))))
         })());
     }
@@ -2215,6 +2219,7 @@ mod gateway_tests {
         let chat = new_id();
         ensure_conversation(&root, &chat, "External scope change").unwrap();
         upsert_message(&root, &chat, &json!({"Id":new_id(),"Role":"user","Content":"saved"})).unwrap();
+        assert_eq!(read_model_messages(&root, &chat).unwrap().len(), 1);
         let changed_root = root.clone();
         MODEL_READ_OBSERVERS.lock().unwrap().push((root.clone(), Arc::new(move |phase| {
             if phase != "after" { return; }
@@ -2227,6 +2232,25 @@ mod gateway_tests {
         let projected = read_model_messages(&root, &chat);
         MODEL_READ_OBSERVERS.lock().unwrap().retain(|(path, _)| path != &root);
         assert_eq!(projected.unwrap_err().code(), "WORKSPACE_CHANGED");
+    }
+    #[test]
+    fn model_history_projection_cache_rechecks_external_log_changes_before_returning() {
+        let workspace = Workspace::new();
+        let root = workspace.0.clone();
+        let chat = new_id();
+        ensure_conversation(&root, &chat, "External history change").unwrap();
+        upsert_message(&root, &chat, &json!({"Id":new_id(),"Role":"user","Content":"original"})).unwrap();
+        assert_eq!(read_model_messages(&root, &chat).unwrap()[0]["Content"], "original");
+        let path = root.join("Chats").join(&chat).join("events.jsonl");
+        MODEL_READ_OBSERVERS.lock().unwrap().push((root.clone(), Arc::new(move |phase| {
+            if phase != "after" { return; }
+            let raw = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, raw.replace("original", "external")).unwrap();
+        })));
+        let projected = read_model_messages(&root, &chat);
+        MODEL_READ_OBSERVERS.lock().unwrap().retain(|(path, _)| path != &root);
+        assert!(projected.is_err(), "A warmed body cache must not publish a superseded log snapshot.");
+        assert_eq!(read_model_messages(&root, &chat).unwrap()[0]["Content"], "external");
     }
     #[test]
     fn public_numbers_preserve_integer_compatibility_without_changing_raw_logs() {
@@ -2956,7 +2980,7 @@ pub fn handle(
                 if let Some(cursor) = query_value(query, "cursor") {
                     args["cursor"] = json!(cursor);
                 }
-                let mut page = history_page_recovering(root, &location, &args)?;
+                let (mut page, mut snapshot) = history_page_recovering(root, &location, &args)?;
                 let messages = page["rawMessages"]
                     .as_array()
                     .unwrap()
@@ -2974,7 +2998,7 @@ pub fn handle(
                 page["conversationId"] = location["Id"].clone();
                 with_catalog(root, |current, _| {
                     verify_catalog_sources(&document, current, &[id.to_string()])?;
-                    conversation_history::verify_snapshot(root, &location, &page["snapshot"])
+                    snapshot.verify()
                 })?;
                 Ok((200, page))
             })());

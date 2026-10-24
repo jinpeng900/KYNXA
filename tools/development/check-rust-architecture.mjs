@@ -184,16 +184,16 @@ function moduleDeclarations(tokens) {
   const declarations = [];
   for (let index = 0; index < tokens.length; index++) {
     if (tokens[index].kind !== 'identifier' || tokens[index].value !== 'mod' || tokens[index + 1]?.kind !== 'identifier' || tokens[index + 2]?.value !== ';') continue;
-    let explicitPath;
+    let explicitPath, testOnly = false;
     // A path attribute may precede visibility/cfg attributes; inspect only the current declaration prefix.
     // path 属性可以位于可见性或 cfg 属性之前；只检查当前声明的前缀，避免借用上一项的路径。
     for (let cursor = index - 1; cursor >= 0 && ![';', '{', '}'].includes(tokens[cursor].value); cursor--) {
       if (tokens[cursor].kind === 'identifier' && tokens[cursor].value === 'path' && tokens[cursor + 1]?.value === '=' && tokens[cursor + 2]?.kind === 'string') {
         explicitPath = tokens[cursor + 2].value;
-        break;
       }
+      if (tokens.slice(cursor, cursor + 7).map(token => token.value).join('') === '#[cfg(test)]') testOnly = true;
     }
-    declarations.push({ module: tokens[index + 1].value, explicitPath });
+    declarations.push({ module: tokens[index + 1].value, explicitPath, testOnly });
   }
   return declarations;
 }
@@ -243,6 +243,7 @@ async function isFile(path) {
  * 使用主责清单声明的原生核心边界检查结构，不再维护第二份负责人配置。 */
 export async function checkRustArchitecture({ repositoryRoot, manifest, sourceFiles }) {
   const violations = [];
+  const localTestFiles = new Set((manifest.localTestFiles ?? []).map(path => resolve(repositoryRoot, path)));
   let sourceFileCount = 0, moduleReferences = 0, domainReferences = 0, dependencyCount = 0, integrationModuleCount = 0, integrationReferences = 0, executionModuleCount = 0;
   const domainDependencies = {};
   for (const application of manifest.rustApps ?? []) {
@@ -334,6 +335,10 @@ export async function checkRustArchitecture({ repositoryRoot, manifest, sourceFi
         for (const candidate of candidates) {
           if (await isFile(candidate)) { target = candidate; break; }
         }
+        // Only declared cfg(test) modules may be absent from a production-only checkout.
+        // 只有清单内且受 cfg(test) 保护的模块才允许不随生产源码提供。
+        if (declaration.testOnly && candidates.some(candidate => isInside(rustRoot, candidate) && localTestFiles.has(candidate)) &&
+            (!target || localTestFiles.has(target))) continue;
         if (!target || extname(target) !== '.rs') violations.push({ code: 'RUST_MODULE_TARGET_MISSING', source, module: declaration.module });
         else if (!isInside(rustRoot, target)) violations.push({ code: 'RUST_MODULE_SCOPE_ESCAPE', source, target: toRelativePath(repositoryRoot, target) });
         else if (!sourceFiles.includes(target)) violations.push({ code: 'RUST_MODULE_TARGET_NOT_INVENTORIED', source, target: toRelativePath(repositoryRoot, target) });

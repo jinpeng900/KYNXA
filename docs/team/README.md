@@ -28,7 +28,7 @@ agent-core、official-tools、desktop、shared、tool-host 分别指 apps 下的
 | D 工具 | `kynxa_team/d-tools` | agent-core `src/tools/service_*` 与 `gateway_mcp.rs` / `gateway_browser.rs` / `gateway_web.rs` / `gateway_process.rs`；official-tools 静态清单/Skills、tool-host `Desktop/Terminal/Sandbox/Native/`、desktop `Services/Tools/`、shared `Tools/` |
 | E 数据 | `kynxa_team/e-data` | agent-core `src/storage/gateway.rs` / `gateway_memory.rs` / `conversation_history.rs` 与正式日志/事务，`src/retrieval/gateway_index.rs` / `gateway_embedding.rs` / `gateway_documents.rs` / `gateway_structure.rs` / `gateway_tools.rs`；desktop `Services/Data/`、shared `Memory/`（含 `RetrievalApiContracts.cs`） |
 
-完整文件归属以 [主责清单](module-ownership.json) 为准；A 维护 `apps/mock-backend/`、`apps/desktop-preview/` 和公共构建配置，ToolHost 根 `Program.cs` 与工程文件也归 A，原生功能归 D。预览服务和 Node 架构检查仅用于开发，不随正式后端发货。`src/bin` 是实际 Rust 源码入口，不因通用 `bin` 排除规则漏掉。
+完整文件归属以 [主责清单](module-ownership.json) 为准；A 维护 `apps/desktop-preview/` 和公共构建配置，ToolHost 根 `Program.cs` 与工程文件也归 A，原生功能归 D。旧 `apps/mock-backend/` 与独立测试只保留本地，不再随 Git 分发；测试主责元数据继续供本地协作使用。预览服务和 Node 架构检查仅用于开发，不随正式后端发货。`src/bin` 是实际 Rust 源码入口，不因通用 `bin` 排除规则漏掉。
 
 桌面由 `Services/Integration/ModelGatewayService.cs` 启动随包原生网关。开发手动启动使用 `tools/development/start-native-gateway.ps1`，先构建桌面及原生随包资产；测试必须传独立 Data、模型/扩展目录和端口，不能启动另一个网关写日常数据。
 
