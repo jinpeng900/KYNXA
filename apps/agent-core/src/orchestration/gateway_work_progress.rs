@@ -671,6 +671,32 @@ mod tests {
     }
 
     #[test]
+    fn long_work_with_new_evidence_keeps_running_and_unchanged_correction_survives_resume() {
+        let mut work = WorkProgress::default();
+        for _ in 0..24 {
+            assert!(work.observe_round(&RoundProgress {work_calls:1, new_read_range:true,
+                ..Default::default()}).made_progress);
+            for _ in 0..2 {
+                assert!(!work.observe_round(&RoundProgress {execution_without_action:true,
+                    ..Default::default()}).wait_for_user);
+            }
+        }
+        let correction = work.observe_round(&RoundProgress {execution_without_action:true,
+            ..Default::default()});
+        assert!(correction.correction_due);
+        let mut restored: WorkProgress = serde_json::from_value(serde_json::to_value(work).unwrap()).unwrap();
+        assert!(!restored.observe_round(&RoundProgress {work_calls:1, waiting_only:true,
+            ..Default::default()}).wait_for_user);
+        assert!(restored.observe_round(&RoundProgress {execution_without_action:true,
+            ..Default::default()}).wait_for_user);
+        restored.resume_after_user_instruction();
+        assert!(restored.observe_round(&RoundProgress {work_calls:1, artifact_updated:true,
+            ..Default::default()}).made_progress);
+        assert!(!restored.observe_round(&RoundProgress {execution_without_action:true,
+            ..Default::default()}).wait_for_user);
+    }
+
+    #[test]
     fn text_rounds_do_not_erase_source_completion_and_fake_later_progress() {
         let mut work = WorkProgress::default();
         assert!(work.observe_round(&RoundProgress {completed_source_count:2,..Default::default()}).made_progress);

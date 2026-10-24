@@ -40,35 +40,37 @@ impl FinalDelivery<'_> {
         let continuing = stopped.as_ref().is_some_and(|error| internal_recovery_required(&error.code))
             && !*cancellation.borrow() && run.journal.is_some();
         if let Some(error) = stopped.clone().filter(|_| !continuing) {
-            if state.content().is_empty() {
-                state.assistant["Content"] = json!(format!(
-                    "{} 已完成的操作和回执已保存，可继续核对原任务。",
-                    error.message
-                ));
-            } else if recoverable_step_failure(&error.code) {
+            let round = state.delivery.segments.last()
+                .and_then(|segment| segment["round"].as_u64())
+                .unwrap_or(0).saturating_add(1).min(MAX_MESSAGE_ROUNDS);
+            if state.pending_delivery_matches_blocker(&task_status) {
+                state.publish_buffered_delivery(run, round, &new_id()).await;
+            } else {
+                // An unreviewed completion draft is not a valid result of a stopped task.
+                // 未验收的完成草稿不能充当停止结果；原草稿仍保留在此前检查点中。
+                state.delivery.pending_delivery.clear();
+                state.delivery.delivery_continuing = false;
+                if let Some(checkpoint) = state.completion.review_checkpoint.as_object_mut() {
+                    checkpoint.remove("pendingDelivery");
+                }
                 let notice = format!(
-                    "\n\n当前步骤受阻：{} 已完成的操作和回执已保存；上述中间内容不表示原任务已完成。",
+                    "{}任务未完成：{} 已有进度和成功回执已保存；中间内容不表示原任务已完成。",
+                    if state.content().is_empty() { "" } else { "\n\n" },
                     error.message
                 );
                 let id = new_id();
-                let round = state.delivery.segments
-                    .last()
-                    .and_then(|segment| segment["round"].as_u64())
-                    .unwrap_or(0)
-                    .saturating_add(1)
-                    .min(MAX_MESSAGE_ROUNDS);
                 state.begin_segment(round, &id);
                 state.append(&notice, "", round, &id);
-                if let Some(segment) = state.delivery.segments.last_mut() {
-                    segment["phase"] = json!("final_answer");
+                if let Some(last) = state.delivery.segments.last_mut() {
+                    last["phase"] = json!("final_answer");
+                    last["isAnswerContinuation"] = json!(false);
                 }
                 run.emit(json!({"type":"assistant_segment","segment":state.segment(&id),"toolStreamProtocol":3})).await;
             }
         }
         let effects = native(state.tools.effects.apply("effects.state", &json!({})))?;
         let user_stopped = state.assistant["UserTaskDirective"]["stop"] == true;
-        let work_suspended = *cancellation.borrow()
-            || stopped.as_ref().is_some_and(|error| error.code == "TASK_CONTINUATION_NO_PROGRESS");
+        let work_suspended = *cancellation.borrow() || stopped.is_some() && !continuing;
         let response_only = super::super::task::response_only_scope(&state.assistant["CurrentWorkScope"]);
         let settled_limitation = super::super::task::genuine_blocker(&task_status);
         let final_version = if user_stopped || work_suspended || response_only || settled_limitation || final_received && state.completion.acceptance_reviewed {
@@ -101,7 +103,7 @@ impl FinalDelivery<'_> {
         .map_err(|_| GatewayError::new("EVIDENCE_WORKER_FAILED", "证据核对线程退出。", 500))?? };
         let review = completion_review(&state);
         let evidence_records = &review.records;
-        let current_status = if response_only && final_received && stopped.is_none() && !settled_limitation {
+        let current_status = if response_only && final_received && stopped.is_none() {
             json!({"state":"complete","source":"current-turn-response","unmet":[]})
         } else { task_status };
         let broker_final = final_received && stopped.is_none() && state.completion.acceptance_reviewed
@@ -111,9 +113,9 @@ impl FinalDelivery<'_> {
             "brokerDecision":if broker_final {json!("final")} else {Value::Null},
             "effectfulWork":current_effectful_work(&state),"requiresVerification":requires_task_verification(&state),
             "acceptanceReviewed":state.completion.acceptance_reviewed,
-            "requiresReadback":state.completion.acceptance_requirements.iter().any(|goal|super::super::task::requires_result_readback(goal)),
+            "requiresReadback":!response_only && state.completion.acceptance_requirements.iter().any(|goal|super::super::task::requires_result_readback(goal)),
             "hasReadback":super::super::completion_evidence::has_readback(&evidence_records, false),
-            "requiresVisualReadback":state.completion.acceptance_requirements.iter().any(|goal|super::super::task::requires_visual_observation(goal)),
+            "requiresVisualReadback":!response_only && state.completion.acceptance_requirements.iter().any(|goal|super::super::task::requires_visual_observation(goal)),
             "hasVisualReadback":super::super::completion_evidence::has_readback(&evidence_records, true)}), &validation_scope);
         completion["workStage"] = state.assistant["CurrentWorkScope"]["stage"].clone();
         if response_only { completion["backgroundGoalCertified"] = json!(false); }
@@ -139,7 +141,11 @@ impl FinalDelivery<'_> {
         ));
         // Separate reply delivery from task success; retain failures in TaskCompletion.
         // 回复交付与任务成功分开，失败原因保留在 TaskCompletion。
-        let reply_interrupted = stopped.is_some() && !continuing || *cancellation.borrow();
+        let reply_interrupted = super::super::gateway_runtime::reply_interrupted(
+            stopped.as_ref().map_or("", |error| error.code.as_str()), *cancellation.borrow());
+        if !continuing && !reply_interrupted {
+            state.publish_final_segment(run).await;
+        }
         if !continuing {
             // Delivery is being committed, not still generated; completion waits for durable settlement.
             // 答复进入正式保存，已非继续生成；成功终态仍须等待持久化结算。
@@ -160,7 +166,7 @@ impl FinalDelivery<'_> {
             )
             .await?;
         if !continuing {
-            if !reply_interrupted {
+            if !reply_interrupted && stopped.is_none() && completion["completionState"] == "completed" {
                 if completion["completionState"] == "completed" && state.completion.acceptance_reviewed {
                     if let Some(journal) = &run.journal {
                         let observations = completion_transcript(&state).iter()

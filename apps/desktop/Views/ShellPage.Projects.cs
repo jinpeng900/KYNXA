@@ -32,6 +32,7 @@ public sealed partial class ShellPage
         if (!_projectLifetimeAttached)
         {
             _projectLifetimeAttached = true;
+            App.Window.AppWindow.Closing += MainWindow_Closing;
             App.Window.Closed += (_, _) =>
             {
                 _projectViewClosed = true;
@@ -59,7 +60,6 @@ public sealed partial class ShellPage
             RebuildStandaloneRows();
             _projectsReady = true;
             RenderProjects();
-            App.Window.AppWindow.Closing += SaveBeforeClosing;
         }
         catch (Exception error)
         {
@@ -383,6 +383,7 @@ public sealed partial class ShellPage
         try { await action(); }
         catch (Exception error)
         {
+            if (_savingOnClose || _projectViewClosed) return;
             _undoSidebarChange = null;
             ProjectNotice.IsOpen = false;
             // Roll back visible metadata to the last successfully saved catalog.
@@ -390,6 +391,7 @@ public sealed partial class ShellPage
             try
             {
                 var catalog = await _projectStore.LoadMetadataAsync();
+                if (_savingOnClose || _projectViewClosed) return;
                 PreservePendingPresentations(catalog);
                 _projects = catalog.Projects;
                 _standaloneChats = catalog.Chats;
@@ -404,13 +406,17 @@ public sealed partial class ShellPage
         finally
         {
             _projectActionPending = false;
-            UpdateSendButtonState();
+            if (!_savingOnClose && !_projectViewClosed) UpdateSendButtonState();
         }
     }
 
     private async Task ShowProjectErrorAsync(string title, string message)
     {
-        if (_savingOnClose) { _closeError = message; return; }
+        if (_savingOnClose || _projectViewClosed)
+        {
+            System.Diagnostics.Debug.WriteLine($"Project operation during exit: {title}");
+            return;
+        }
         await DialogPresentation.ShowAsync(new ContentDialog
         {
             XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = UiText.Get("知道了")

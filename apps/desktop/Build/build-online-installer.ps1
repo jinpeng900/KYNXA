@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory,
     [string]$ReleaseManifestPath,
-    [string]$PackageVersion = '1.7.1',
+    [string]$PackageVersion = '1.8.0',
     [string]$CompilerPath,
     [switch]$AllowUnpublished
 )

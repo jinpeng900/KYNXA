@@ -67,6 +67,49 @@ impl CompletionState {
     }
 }
 
+impl LoopState {
+    /// Bind an unpublished public draft to the same facts used by completion review.
+    /// 未发布的公开草稿沿用验收事实版本，不另建结果或执行账本。
+    pub(in crate::orchestration::gateway_loop) fn bind_pending_delivery(&mut self, assessment: &Value) {
+        if self.delivery.pending_delivery.is_empty() {
+            if let Some(checkpoint) = self.completion.review_checkpoint.as_object_mut() {
+                checkpoint.remove("pendingDelivery");
+            }
+            return;
+        }
+        let binding = json!({
+            "contentHash":crate::retrieval::gateway_index::hash(&self.delivery.pending_delivery),
+            "revision":acceptance_revision(self),
+            "assessment":{
+                "source":assessment["source"],"state":assessment["state"],
+                "blocker":assessment["blocker"],"reason":assessment["reason"],
+                "feasibility":assessment["feasibility"],
+            },
+        });
+        if !self.completion.review_checkpoint.is_object() {
+            self.completion.review_checkpoint = json!({});
+        }
+        self.completion.review_checkpoint["pendingDelivery"] = binding;
+    }
+
+    fn pending_delivery_is_current(&self) -> bool {
+        let binding = &self.completion.review_checkpoint["pendingDelivery"];
+        !self.delivery.pending_delivery.is_empty()
+            && binding["contentHash"] == crate::retrieval::gateway_index::hash(&self.delivery.pending_delivery)
+            && binding["revision"] == json!(acceptance_revision(self))
+    }
+
+    /// A stopped task may publish its matching limitation, never an unaccepted completion claim.
+    /// 停止只可直接发布本轮对应的受阻结论，不能把未验收完成声明当终稿。
+    pub(in crate::orchestration::gateway_loop) fn pending_delivery_matches_blocker(&self, assessment: &Value) -> bool {
+        let saved = &self.completion.review_checkpoint["pendingDelivery"]["assessment"];
+        self.pending_delivery_is_current()
+            && assessment["state"] == "blocked" && task::genuine_blocker(assessment)
+            && ["source", "state", "blocker", "reason", "feasibility"].iter()
+                .all(|field| saved[*field] == assessment[*field])
+    }
+}
+
 /// Borrow public observations in original execution order for a single review.
 /// 按原执行顺序借用公开观察，供同次评审使用。
 fn completion_observations(state: &LoopState) -> impl Iterator<Item = &Value> {
@@ -117,8 +160,11 @@ pub(super) fn restored_completion_projection(state: &LoopState) -> Vec<Value> {
 pub(super) fn reconcile_restored_delivery(state: &mut LoopState, before: &[Value]) {
     let after = restored_completion_projection(state);
     let evidence_changed = before != after.as_slice();
-    let revising_delivery = state.assistant["Status"] == "completed";
-    if !evidence_changed && state.delivery.pending_delivery.is_empty() && !revising_delivery { return; }
+    let revising_delivery = unresolved_user_steering(state);
+    let unbound_delivery = !state.delivery.pending_delivery.is_empty() && !state.pending_delivery_is_current();
+    // Retain only a draft bound to unchanged evidence, requirements and authority.
+    // 只保留绑定当前证据、要求与权限的草稿，旧的无版本完成声明不能复用。
+    if !evidence_changed && !revising_delivery && !unbound_delivery { return; }
     let changed = after.iter().filter(|item| !before.contains(item)).map(|item| json!({"id":item["id"],
         "tool":item["tool"],"verifiedSuccess":item["verifiedSuccess"],
         "verificationPending":item["completionProofVerification"] == "pending"})).collect::<Vec<_>>();
@@ -127,10 +173,11 @@ pub(super) fn reconcile_restored_delivery(state: &mut LoopState, before: &[Value
             "verificationPending":item["completionProofVerification"] == "pending"})).collect::<Vec<_>>();
     let successes = after.iter().filter(|item| item["verifiedSuccess"] == true)
         .map(|item| json!({"id":item["id"],"tool":item["tool"],"resultRef":item["ref"]})).collect::<Vec<_>>();
-    // Drafts lack an evidence revision; their immutable checkpoint keeps the original text.
-    // 草稿未绑定证据版本，原文仍保存在不可变检查点中。
+    // Superseded drafts remain in their immutable checkpoint, not the current delivery buffer.
+    // 被替代的草稿保留在不可变检查点中，不继续留在当前交付缓冲。
     let correction = json!({"evidenceChanged":evidence_changed,"changedReceipts":changed,
         "requestedDeliveryRevision":revising_delivery,
+        "unboundDelivery":unbound_delivery,
         "supersededDelivery":!state.delivery.pending_delivery.is_empty(),"sourceCheckpoint":state.context.work_context_reference,
         "supersededDeliveryHash":crate::retrieval::gateway_index::hash(&state.delivery.pending_delivery)});
     state.delivery.pending_delivery.clear();
@@ -139,7 +186,7 @@ pub(super) fn reconcile_restored_delivery(state: &mut LoopState, before: &[Value
         "pending":false,"evidenceRequired":true,"attempts":0,"restorationCorrection":correction,
     }));
     let _ = state.task.apply("task.resumed", &json!({}));
-    state.broker_note(&format!("Broker recovery correction: the saved acceptance assessment and unpublished delivery draft are superseded. Generate a fresh public response from the current verified receipts and original requirements; do not reuse an old draft's failure or unmet-item claims. Earlier output and original checkpoints remain historical records. Historical unsuccessful or unverified receipts: {}. Verified successful receipts already present: {}. Corrected receipt assessments: {}. These records describe their original operations, not whether a connection is available now; an earlier connection failure does not invalidate a later successful operation. Preserve completed work and do not repeat successful effects or reread complete archives merely to regenerate the answer. In the updated public response, explicitly retract earlier public claims contradicted by these receipts. Reassess unfinished items against the original authorized scope and continue required work; completed operations alone do not certify every requested quality goal. Preserve prior output as history without presenting its superseded state claims as current.",
+    state.broker_note(&format!("Broker: the previous draft and assessment are superseded; use current requirements and verified receipts. Historical failed/unverified receipts: {}. Preserved successful receipts: {}. Corrected receipt facts: {}. These describe earlier operations, not current service availability. Continue only remaining authorized work, reuse successful results and verify missing facts, then report the actual result. Keep prior output as history; do not repeat operations, reread complete archives or add optional audits.",
         json!(historical_failures), json!(successes), state.completion.review_checkpoint["restorationCorrection"]["changedReceipts"]));
 }
 
@@ -599,6 +646,7 @@ mod tests {
         let receipt = json!({"status":"completed","executed":true,"isError":false,"content":{"path":"C:/fixture/scene.blend"}});
         state.tools.effects.apply("effects.observe", &json!({"call":call,"result":receipt,"observation":false,"workspaceRoot":"C:/fixture"})).unwrap();
         state.tools.effects.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
+        state.bind_pending_delivery(&json!({"source":"model-task-state","state":"complete"}));
         let original_assistant = state.assistant.clone();
         let original_history = state.context.history.clone();
         let original_segments = state.delivery.segments.clone();
@@ -627,16 +675,76 @@ mod tests {
         let history_length = state.context.history.len();
         reconcile_restored_delivery(&mut state, &corrected);
         assert_eq!(state.context.history.len(), history_length, "an unchanged restore without a draft needs no new notice");
-        // A second restore must also discard an unbound draft when the old proof was already corrected.
-        // 旧证据已纠正时，再次恢复也不能复用未绑定证据版本的草稿。
-        state.delivery.pending_delivery = "Another saved unversioned draft".into();
+        state.delivery.pending_delivery = "Old unbound draft claims everything was completed.".into();
         state.completion.review_checkpoint["pending"] = json!(true);
         state.completion.acceptance_reviewed = true;
         reconcile_restored_delivery(&mut state, &corrected);
         assert!(state.delivery.pending_delivery.is_empty() && !state.completion.acceptance_reviewed);
         assert_eq!(state.completion.review_checkpoint["restorationCorrection"]["evidenceChanged"], false);
-        assert_eq!(state.completion.review_checkpoint["restorationCorrection"]["supersededDelivery"], true);
+        assert_eq!(state.completion.review_checkpoint["restorationCorrection"]["unboundDelivery"], true);
+        let complete = json!({"source":"model-task-state","state":"complete"});
+        state.delivery.pending_delivery = "Current version is ready for its normal acceptance review.".into();
+        state.bind_pending_delivery(&complete);
+        let current_draft = state.delivery.pending_delivery.clone();
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert_eq!(state.delivery.pending_delivery, current_draft);
+        assert!(!state.pending_delivery_matches_blocker(&complete));
+        let original_requirements = state.completion.acceptance_requirements.clone();
+        for changed in ["requirements", "authority", "body"] {
+            state.delivery.pending_delivery = current_draft.clone();
+            state.bind_pending_delivery(&complete);
+            match changed {
+                "requirements" => state.completion.acceptance_requirements.push("A new user requirement".into()),
+                "authority" => state.context.runtime_snapshot = Some(json!({"source":{"authorityHash":"changed-authority"}})),
+                _ => state.delivery.pending_delivery.push_str(" Changed after binding."),
+            }
+            reconcile_restored_delivery(&mut state, &corrected);
+            assert!(state.delivery.pending_delivery.is_empty(), "A changed {changed} cannot reuse the old draft.");
+            state.completion.acceptance_requirements = original_requirements.clone();
+            state.context.runtime_snapshot = None;
+        }
+        let history_length = state.context.history.len();
+        // An unchanged blocked draft is still the original result, not a new execution request.
+        // 证据未变的受阻草稿仍是原结果，不是新的执行要求。
+        let blocked = json!({"source":"model-task-state","state":"blocked","blocker":"authorization",
+            "reason":"The requested operation was denied by the execution environment."});
+        state.task.apply("task.reviewResult", &json!({"value":blocked})).unwrap();
+        state.delivery.pending_delivery = "Operation was not executed because authorization was denied.".into();
+        state.completion.review_checkpoint["pending"] = json!(false);
+        state.completion.review_checkpoint["attempts"] = json!(3);
+        let revision = acceptance_revision(&state);
+        cache_completion_review(&mut state.completion.review_checkpoint, &revision,
+            &json!({"action":"interrupt","reviewed":true,"code":"TASK_AUTHORIZATION_REQUIRED"}), &blocked);
+        state.bind_pending_delivery(&blocked);
+        let binding = state.completion.review_checkpoint["pendingDelivery"].clone();
+        checkpoint_completion_review(&mut state, false, true, 3);
+        cache_completion_review(&mut state.completion.review_checkpoint, &revision,
+            &json!({"action":"interrupt","reviewed":true,"code":"TASK_AUTHORIZATION_REQUIRED"}), &blocked);
+        assert_eq!(state.completion.review_checkpoint["pendingDelivery"], binding);
+        assert!(state.pending_delivery_matches_blocker(&blocked));
+        let mut different_blocker = blocked.clone();
+        different_blocker["reason"] = json!("Another operation now requires a different authorization.");
+        assert!(!state.pending_delivery_matches_blocker(&different_blocker));
+        let saved_draft = state.delivery.pending_delivery.clone();
+        let saved_assessment = state.completion.review_checkpoint.clone();
+        let saved_task = state.task.apply("task.state", &json!({})).unwrap();
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert_eq!(state.delivery.pending_delivery, saved_draft);
+        assert_eq!(state.completion.review_checkpoint, saved_assessment);
+        assert_eq!(state.task.apply("task.state", &json!({})).unwrap(), saved_task);
+        assert_eq!(state.context.history.len(), history_length);
         assert_eq!(state.assistant, original_assistant);
+        state.assistant["Status"] = json!("completed");
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert_eq!(state.delivery.pending_delivery, saved_draft, "a completed message alone cannot revoke its draft");
+        assert_eq!(state.completion.review_checkpoint, saved_assessment);
+        assert_eq!(state.task.apply("task.state", &json!({})).unwrap(), saved_task);
+        state.assistant = original_assistant.clone();
+        state.assistant["LatestUserSteering"] = json!({"userMessageId":"actual-user-revision","text":"Revise the requested output."});
+        reconcile_restored_delivery(&mut state, &corrected);
+        assert!(state.delivery.pending_delivery.is_empty());
+        assert_eq!(state.completion.review_checkpoint["restorationCorrection"]["requestedDeliveryRevision"], true);
+        state.assistant = original_assistant.clone();
         let saved_transcript = state.transcript.rounds.clone();
         let saved_review = state.completion.review_checkpoint.clone();
         state.assistant["Status"] = json!("completed");

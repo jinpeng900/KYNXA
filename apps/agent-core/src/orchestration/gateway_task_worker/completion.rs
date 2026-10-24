@@ -74,15 +74,19 @@ pub(super) async fn finish_round(phase: ReviewPhase<'_>) -> Result<ReviewOutcome
         return Ok(ReviewOutcome::Continue);
     }
     if !response.calls.is_empty() {
+        if let Some(fields) = state.review_checkpoint.as_object_mut() { fields.remove("reviewFormatRepair"); }
         return Ok(ReviewOutcome::Continue);
     }
     let needs_verification = !response_only && (requires_verification
         || task::scope_allows_mutation(&ctx.config["currentWorkScope"]) && !state.changed_files.is_empty());
+    let execution_intent = task::continuation_needs_progress(&ctx.config["currentWorkScope"],
+        state.tool_calls > 0 || !state.result_sources.is_empty(), needs_verification);
     let review = ChildCompletionReview::new(state, &acceptance_query);
     let decision = semantic.decide_typed(&task::TaskDecisionInput {
         reply: inspected.clone(), is_review: reviewing, verification: review.verification.clone(),
         has_calls: false, output_truncated: response.output_truncated,
-        execution_intent: needs_verification, response_only,
+        execution_intent, response_only,
+        current_work_scope: ctx.config["currentWorkScope"].clone(),
         output_continuations: state.continuations, requires_verification: needs_verification,
         evidence_required: needs_verification, expected_requirements: state.acceptance_requirements.clone(),
         valid_evidence: review.valid_evidence.clone(), evidence_records: Some(review.records.clone()),
@@ -93,17 +97,33 @@ pub(super) async fn finish_round(phase: ReviewPhase<'_>) -> Result<ReviewOutcome
             .saturating_sub(state.rounds.saturating_sub(state.segment_round_base))),
         ..Default::default()
     }).into_value();
-    // Entering review or returning its valid next step is a phase transition, not a failed execution attempt.
-    // 进入验收或按有效结论返回执行属于阶段切换，不能算作未执行成功的一轮。
-    if !response_only && !response.output_truncated
-        && (decision["action"] == "retry-review" || !reviewing && decision["action"] == "resume") {
+    let format_notice = if decision["action"] == "retry-review" {
+        let repair = task::review_format_repair(&mut state.review_checkpoint, &response.content,
+            response.output_truncated, response.usage["completion_tokens"].as_u64().unwrap_or(0));
+        if repair["action"] == "wait" {
+            state.review_pending = false;
+            state.acceptance_reviewed = false;
+            checkpoint(run,journal,state,"review-format-await-user").await?;
+            return Err(failure("TASK_COMPLETION_REVIEW_INVALID",repair["reason"].as_str().unwrap_or("Review format is unchanged. / 核验格式未改善。")));
+        }
+        repair["reason"].as_str().map(str::to_owned)
+    } else {
+        if let Some(fields) = state.review_checkpoint.as_object_mut() { fields.remove("reviewFormatRepair"); }
+        None
+    };
+    // Format repair has its own measured progress; it is not failed execution work.
+    // 格式修正独立衡量进展，不计作执行失败；只读调查仍检查真实执行进展。
+    if execution_intent && !response.output_truncated
+        && matches!(decision["action"].as_str(), Some("review" | "resume")) {
         observe_unexecuted_response(run,journal,state).await?;
     }
     match decision["action"].as_str() {
         Some("review" | "retry-review") => {
             state.review_pending = true;
             state.review_attempts += u64::from(reviewing);
-            state.history.push(json!({"role":"user","content":review_instruction(state,&review,requires_readback,requires_visual)}));
+            let mut instruction = review_instruction(state,&review,requires_readback,requires_visual);
+            if let Some(notice) = format_notice { instruction.push('\n'); instruction.push_str(&notice); }
+            state.history.push(json!({"role":"user","content":instruction}));
             checkpoint(run,journal,state,"acceptance-review").await?;
             if reviewing {
                 let mut repair_cancel = run.cancellation.subscribe();
@@ -124,9 +144,15 @@ pub(super) async fn finish_round(phase: ReviewPhase<'_>) -> Result<ReviewOutcome
             checkpoint(run,journal,state,"continue-unmet-acceptance").await?;
             return Ok(ReviewOutcome::Continue);
         }
-        Some("interrupt") if task::genuine_blocker(&inspected) => {
-            let code = task::blocker_code(&inspected);
-            return Err(failure(code,inspected["reason"].as_str().unwrap_or("A real external condition is required. / 需要外部条件。")));
+        Some("interrupt") => {
+            state.review_pending = false;
+            state.acceptance_reviewed = false;
+            state.acceptance_review = inspected.clone();
+            checkpoint(run,journal,state,"execution-await-user").await?;
+            let code = decision["code"].as_str().unwrap_or("TASK_CONTINUATION_NO_PROGRESS");
+            return Err(failure(code,inspected["reason"].as_str()
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or("The task needs a changed condition or a new instruction; saved work is retained. / 任务需条件变化或新指令，已有工作已保留。")));
         }
         Some("final") => { state.acceptance_reviewed = reviewing; }
         _ => {
@@ -201,6 +227,8 @@ async fn observe_unexecuted_response(run: &Arc<RequestRun>, journal: &Arc<TaskJo
         state.history.push(json!({"role":"user","content":"Broker: repeating the same plan added no new evidence. Use the native protocol for an actual unmet action, or deliver the result already supported by receipts. Do not replay successful effects."}));
     }
     if let Some(error) = gateway_tool_execution::progress_interruption(&plan) {
+        state.review_pending = false;
+        state.acceptance_reviewed = false;
         checkpoint(run,journal,state,"unchanged-response-await-user").await?;
         return Err(error);
     }

@@ -13,7 +13,6 @@ internal sealed class MainWindowTrayService : IDisposable
     private const uint CloseMessage = 0x0010;
     private const uint QueryEndSessionMessage = 0x0011;
     private const uint EndSessionMessage = 0x0016;
-    private const uint ShowWindowMessage = 0x0018;
     private const uint NonClientDestroyMessage = 0x0082;
     private const uint TrayCallbackMessage = 0x8000 + 73;
     private const nuint SubclassId = 0x4B595452;
@@ -47,7 +46,7 @@ internal sealed class MainWindowTrayService : IDisposable
 
     public void Restore()
     {
-        if (_isDisposed) return;
+        if (_isDisposed || _exitRequested) return;
         // Restore the existing shell, including its draft, streaming replies and workspace instances.
         // 恢复原有界面，保留草稿、流式回复及工作区实例，不重新创建窗口。
         ShowWindow(_windowHandle, IsIconic(_windowHandle) ? 9 : 5);
@@ -57,11 +56,10 @@ internal sealed class MainWindowTrayService : IDisposable
 
     public void RequestExit()
     {
-        if (_isDisposed || _sessionEnding) return;
-        if (!IsWindowVisible(_windowHandle)) Restore();
+        if (_isDisposed || _sessionEnding || _exitRequested) return;
         _exitRequested = true;
-        // Reuse the existing cancellable save/cleanup flow; never terminate the shared gateway.
-        // 复用现有可取消的保存与清理流程，不终止共享网关。
+        // Explicit exit also closes a hidden window without bringing it back to the foreground.
+        // 明确退出时直接关闭隐藏窗口，不再重新弹到前台；共享网关保持独立。
         SendMessage(_windowHandle, CloseMessage, 0, 0);
     }
 
@@ -71,7 +69,6 @@ internal sealed class MainWindowTrayService : IDisposable
         {
             if (message == QueryEndSessionMessage) _sessionEnding = true;
             else if (message == EndSessionMessage && wParam == 0) _sessionEnding = false;
-            else if (message == ShowWindowMessage && wParam != 0 && !_sessionEnding) _exitRequested = false;
             else if (message == CloseMessage && !_sessionEnding && !_exitRequested && EnsureTrayIcon())
             {
                 // Intercept before AppWindow.Closing: a tray close must not pause replies or save as an exit.
@@ -103,8 +100,8 @@ internal sealed class MainWindowTrayService : IDisposable
         }
 
         nint result = DefSubclassProc(window, message, wParam, lParam);
-        // A synchronous exit veto keeps the window usable and close-to-tray enabled.
-        // 数据迁移等操作拒绝退出后，窗口仍可用，下次点 X 仍关闭到托盘。
+        // A native close veto must keep the ordinary close-to-tray route available.
+        // 原生关闭被拒绝时，普通关闭到托盘仍须可用。
         if (message == CloseMessage && _exitRequested && !_isDisposed && IsWindowVisible(window)) _exitRequested = false;
         return result;
     }

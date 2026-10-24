@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <Version>1.7.0</Version>
+    <Version>1.8.0</Version>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <!-- Keep the SDK projection aligned with its bundled original license provenance.
          固定 SDK 投影包，使其与随包许可来源记录保持一致。 -->

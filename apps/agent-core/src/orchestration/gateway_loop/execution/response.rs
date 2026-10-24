@@ -103,6 +103,7 @@ impl Execution {
                     if self.prepared.state.delivery.delivery_continuing { self.prepared.state.delivery.pending_delivery.push_str(text); }
                     else { self.prepared.state.delivery.pending_delivery = text.to_owned(); }
                     self.prepared.state.delivery.delivery_continuing = response.output_truncated;
+                    self.prepared.state.bind_pending_delivery(&inspected);
                 } else {
                     self.prepared.state.delivery.delivery_continuing = false;
                     let brief = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
@@ -270,17 +271,39 @@ impl Execution {
             let decision = self.prepared.state.task.decide_typed(&review.decision_input(&self.prepared.state.completion.acceptance_requirements, TaskDecisionInput {
                 reply: inspected.clone(), is_review: true, has_calls: !response.calls.is_empty(),
                 response_only: crate::orchestration::task::response_only_scope(&self.prepared.state.assistant["CurrentWorkScope"]),
+                current_work_scope: self.prepared.state.assistant["CurrentWorkScope"].clone(),
                 output_truncated: response.output_truncated, review_attempts: self.rounds.review_attempts,
                 remaining_rounds: Some(self.rounds.last_round.saturating_sub(round)), minimum_active_ms: self.rounds.minimum_active_ms,
                 active_elapsed_ms: effective_work_ms(&self.run, self.prepared.state.started), evidence_required: self.rounds.review_evidence_required,
                 requires_verification: requires_task_verification(&self.prepared.state), ..Default::default()
             })).into_value();
             self.prepared.state.push_transcript_round(json!({"round":round,"text":"","calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
+            if decision["action"] == "retry-review" {
+                let repair = crate::orchestration::task::review_format_repair(
+                    &mut self.prepared.state.completion.review_checkpoint, &response.content,
+                    response.output_truncated, response.usage["completion_tokens"].as_u64()
+                        .or_else(||response.usage["output_tokens"].as_u64()).unwrap_or(0));
+                if repair["action"] == "wait" {
+                    self.rounds.stopped = Some(GatewayError::new("TASK_COMPLETION_REVIEW_INVALID",
+                        repair["reason"].as_str().unwrap_or("验收格式仍未改善，原任务与回执已保存。"), 409));
+                    self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
+                    return Ok(PhaseOutcome::Stop);
+                }
+            } else if let Some(fields) = self.prepared.state.completion.review_checkpoint.as_object_mut() {
+                fields.remove("reviewFormatRepair");
+            }
+            if response.calls.is_empty()
+                && let Some(error) = self.continuation_interruption(&decision, response.output_truncated) {
+                self.rounds.stopped = Some(error);
+                self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
+                return Ok(PhaseOutcome::Stop);
+            }
             match decision["action"].as_str() {
                 Some("retry-review") => {
                     self.rounds.review_attempts += 1;
                     let review_instruction = completion_review_instruction(&self.prepared.state);
                     append_control_notice(&mut self.prepared.state, "completionReviewNotice", Some(&review_instruction));
+                    self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
                     return Ok(PhaseOutcome::Continue);
                 }
                 Some("resume") => {
@@ -299,6 +322,7 @@ impl Execution {
                     let notice = format!("Broker: remaining current requirements: {remaining}. If they remain feasible and authorized, take the specific missing action or use existing evidence. Do not turn a plan, optional improvement or already satisfied check into new work. If the target is demonstrably impossible or a necessary capability is unavailable after reasonable alternatives, report the supported limitation with feasibility basis and alternatives instead of repeating attempts. Preserve successful effects.");
                         append_control_notice(&mut self.prepared.state, "completionExecutionNotice", Some(&notice));
                     }
+                    self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
                     return Ok(PhaseOutcome::Continue);
                 }
                 Some("final") => {
@@ -334,17 +358,7 @@ impl Execution {
                         return Ok(PhaseOutcome::Stop);
                     }
                     self.rounds.final_evidence_validation = Some(current);
-                    if !self.prepared.state.delivery.pending_delivery.is_empty() {
-                        let delivery = std::mem::take(&mut self.prepared.state.delivery.pending_delivery);
-                        self.prepared.state.delivery.delivery_continuing = false;
-                        let delivery_id = new_id();
-                        let phase = self.prepared.state.begin_segment(round, &delivery_id);
-                        self.run.emit(json!({"type":"assistant_segment","segment":phase,"toolStreamProtocol":3})).await;
-                        self.run.emit(json!({"type":"text_delta","delta":delivery,"segmentId":delivery_id})).await;
-                        self.prepared.state.append(&delivery, "", round, &delivery_id);
-                        if let Some(last) = self.prepared.state.delivery.segments.last_mut() { last["phase"] = json!("final_answer"); }
-                        self.run.emit(json!({"type":"assistant_segment","segment":self.prepared.state.segment(&delivery_id),"toolStreamProtocol":3})).await;
-                    }
+                    self.prepared.state.publish_buffered_delivery(&self.run, round, &new_id()).await;
                     if let Some(last) = self.prepared.state.delivery.segments.last_mut() {
                         last["phase"] = json!("final_answer");
                         last["isAnswerContinuation"] = json!(false);
@@ -451,8 +465,11 @@ impl Execution {
                 reply: self.rounds.task_status.clone(), has_calls: false, output_truncated: response.output_truncated,
                 output_continuations: self.rounds.output_continuations, supports_task_markers: self.prepared.supports_tools,
                 steered_task: !self.prepared.state.applied_steering_ids.is_empty(), effectful_work: current_effectful_work(&self.prepared.state),
-                execution_intent: requires_task_verification(&self.prepared.state) || current_effectful_work(&self.prepared.state),
+                execution_intent: crate::orchestration::task::continuation_needs_progress(
+                    &self.prepared.state.assistant["CurrentWorkScope"], !self.prepared.state.context.result_sources.is_empty(),
+                    requires_task_verification(&self.prepared.state)),
                 response_only: crate::orchestration::task::response_only_scope(&self.prepared.state.assistant["CurrentWorkScope"]),
+                current_work_scope: self.prepared.state.assistant["CurrentWorkScope"].clone(),
                 requires_verification: requires_task_verification(&self.prepared.state),
                 remaining_rounds: Some(self.rounds.last_round.saturating_sub(round)), ..Default::default()
             }).into_value();
@@ -464,6 +481,7 @@ impl Execution {
                 let inline = self.prepared.state.task.decide_typed(&review.decision_input(&self.prepared.state.completion.acceptance_requirements, TaskDecisionInput {
                     reply: self.rounds.task_status.clone(), is_review: true,
                     response_only: crate::orchestration::task::response_only_scope(&self.prepared.state.assistant["CurrentWorkScope"]),
+                    current_work_scope: self.prepared.state.assistant["CurrentWorkScope"].clone(),
                     requires_verification: requires_task_verification(&self.prepared.state), evidence_required: true,
                     ..Default::default()
                 })).into_value();
@@ -506,6 +524,11 @@ impl Execution {
                     _ => decision = inline,
                 }
             }
+            if let Some(error) = self.continuation_interruption(&decision, response.output_truncated) {
+                self.rounds.stopped = Some(error);
+                self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
+                return Ok(PhaseOutcome::Stop);
+            }
             if decision["action"] == "resume" {
                 if self.prepared.state.generated.saturating_sub(self.rounds.segment_initial_generated) >= self.prepared.limits["maxGeneratedTokens"].as_u64().unwrap_or(1048576) {
                     self.rounds.stopped = Some(GatewayError::new(
@@ -540,12 +563,14 @@ impl Execution {
                 self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
                 return Ok(PhaseOutcome::Continue);
             }
-            if decision["action"] == "interrupt" && self.rounds.task_status["state"] != "blocked" {
+            if decision["action"] == "interrupt" {
                 self.rounds.stopped = Some(GatewayError::new(
                     decision["code"]
                         .as_str()
                         .unwrap_or("TASK_CONTINUATION_NO_PROGRESS"),
-                    "继续执行没有取得新的进展，已有结果保留。",
+                    self.rounds.task_status["reason"].as_str()
+                        .filter(|reason| !reason.trim().is_empty())
+                        .unwrap_or("继续执行没有取得新的进展，已有结果保留。"),
                     409,
                 ));
                 return Ok(PhaseOutcome::Stop);
@@ -581,15 +606,8 @@ impl Execution {
                 return Ok(PhaseOutcome::Stop);
             }
             self.rounds.final_evidence_validation = Some(freshness);
-            if buffered_delivery && !self.prepared.state.delivery.pending_delivery.is_empty() {
-                let delivery = std::mem::take(&mut self.prepared.state.delivery.pending_delivery);
-                self.prepared.state.delivery.delivery_continuing = false;
-                let phase = self.prepared.state.begin_segment(round, &segment);
-                self.run.emit(json!({"type":"assistant_segment","segment":phase,"toolStreamProtocol":3})).await;
-                self.run.emit(json!({"type":"text_delta","delta":delivery,"segmentId":segment})).await;
-                self.prepared.state.append(&delivery, "", round, &segment);
-                if let Some(last) = self.prepared.state.delivery.segments.last_mut() { last["phase"] = json!("final_answer"); }
-                self.run.emit(json!({"type":"assistant_segment","segment":self.prepared.state.segment(&segment),"toolStreamProtocol":3})).await;
+            if buffered_delivery {
+                self.prepared.state.publish_buffered_delivery(&self.run, round, &segment).await;
             }
             if let Some(last) = self.prepared.state.delivery.segments.last_mut() {
                 last["phase"] = json!("final_answer");
@@ -597,6 +615,24 @@ impl Execution {
             }
             self.rounds.final_received = true;
             return Ok(PhaseOutcome::Stop);
+    }
+
+    /// Continue only while evidence can advance; reuse checkpointed correction state for text-only loops.
+    /// 仅在证据仍可推进时续作；纯文字空转复用检查点中的纠偏状态，不另设轮次上限。
+    fn continuation_interruption(&mut self, decision: &Value, output_truncated: bool) -> Option<GatewayError> {
+        if output_truncated || !crate::orchestration::task::continuation_needs_progress(
+                &self.prepared.state.assistant["CurrentWorkScope"], !self.prepared.state.context.result_sources.is_empty(),
+                requires_task_verification(&self.prepared.state))
+            || !matches!(decision["action"].as_str(), Some("resume" | "review")) {
+            return None;
+        }
+        let plan = observe_work_progress(&mut self.prepared.state.work_progress, &mut self.prepared.state.progress,
+            &RoundProgress {execution_without_action:true, ..Default::default()});
+        if plan.correction_due {
+            append_control_notice(&mut self.prepared.state, "continuationProgressNotice", Some(
+                "Broker: these text-only turns added no new evidence, artifact version or read range. Resolve the specific unmet requirement with an authorized native action or a genuinely different method. Reuse successful receipts. If a necessary condition is missing, report the explicit blocker and its basis; do not repeat the same conclusion or claim completion."));
+        }
+        crate::orchestration::gateway_tool_execution::progress_interruption(&plan)
     }
 
     pub(super) async fn dispatch_tools(&mut self, round: u64, observed: ObservedRound, broker_planned_call: Value) -> Result<PhaseOutcome<()>, GatewayError> {

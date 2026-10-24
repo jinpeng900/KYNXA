@@ -95,6 +95,16 @@ pub(crate) fn response_only_scope(scope: &Value) -> bool {
     matches!(scope["stage"].as_str(), Some("plan" | "explain" | "read-only"))
 }
 
+/// Read-only investigation can stagnate too; planning and ordinary prose need no execution gate.
+/// 只读调查同样可能空转；方案与普通正文不增加执行门槛。
+pub(crate) fn continuation_needs_progress(scope: &Value, has_tool_work: bool, verification_required: bool) -> bool {
+    match scope["stage"].as_str() {
+        Some("plan" | "explain") => false,
+        Some("read-only") => true,
+        _ => has_tool_work || verification_required,
+    }
+}
+
 pub(crate) fn scope_allows_mutation(scope: &Value) -> bool {
     !matches!(scope["stage"].as_str(), Some("plan" | "explain" | "read-only"))
 }
@@ -271,7 +281,7 @@ pub(crate) fn native_task_control_receipt(call: &Value, requirements: &[String])
 
 /// Root and child reviews share the same scope and evidence rules.
 /// 根任务和子任务共用验收范围与证据规则。
-pub(crate) const COMPLETION_REVIEW_CONTRACT: &str = "Assess only the user's current explicit requirements against saved results and real receipts. Return a standalone <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[],\"met\":[{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"exact successful call ID\"]}]}</kynxa_task>; kynxa_task is not a native tool. Cover each listed requirement with evidence matching its action, target and current version. A write proves existence; use existing readback or visual evidence only when the requirement calls for that quality. Optional improvements and extra audits are not completion gates. If a required fact is missing, name that specific target or failed check and choose continue with a concrete next step; available native tools remain usable. Repair reference formatting from saved receipts without repeating successful work or searching for internal control names. Use blocked for a real user-input, authorization, external or resource blocker. If requirements are logically impossible or a necessary capability is confirmed unavailable, use blocker impossible or unsupported with feasibility {basis: specific facts or reasoning, alternatives: reasonable alternatives and their limits}. Ordinary difficulty or a first failed method does not establish impossibility. Complete feasible current requirements without optional work. Do not repeat the public delivery, pad time or add verification just because this is a review.";
+pub(crate) const COMPLETION_REVIEW_CONTRACT: &str = "Assess only the user's current explicit requirements against saved results and real receipts. Return a standalone <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[],\"met\":[{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"exact successful call ID\"]}]}</kynxa_task>; kynxa_task is not a native tool. Cover each listed requirement with evidence matching its action, target and current version. A write proves existence; use existing readback or visual evidence only when the requirement calls for that quality. Optional improvements and extra audits are not completion gates. If a required fact is missing, name that specific target or failed check and choose continue with a concrete next step; available native tools remain usable. Repair reference formatting from saved receipts without repeating successful work or searching for internal control names. For a real blocker, return a standalone <kynxa_task>{\"state\":\"blocked\",\"blocker\":\"authorization\",\"reason\":\"specific observed refusal and affected target\",\"next\":\"the required authorization condition changes\",\"unmet\":[\"unfinished current requirement\"]}</kynxa_task>. Put the category in the top-level blocker field: user-input, authorization, external or resource. Tie the reason to an actual receipt or clearly missing condition; a first failure or ordinary implementation difficulty is not an external blocker. Save the result and wait for user continuation when that condition prevents further work; do not issue more model requests to repeat the same blocked conclusion. If requirements are logically impossible or a necessary capability is confirmed unavailable, use blocker impossible or unsupported with feasibility {basis: specific facts or reasoning, alternatives: reasonable alternatives and their limits}. Ordinary difficulty or a first failed method does not establish impossibility. Complete feasible current requirements without optional work. Do not repeat the public delivery, pad time or add verification just because this is a review.";
 
 /// Explicit external actions and current-source questions require actual execution evidence; prose does not.
 /// 明确外部动作与当下来源问题须有真实执行证据；问候、文案、解释和纯运算不额外触发工具验收。
@@ -609,6 +619,7 @@ pub struct TaskDecisionInput {
     pub supports_task_markers: bool,
     pub execution_intent: bool,
     pub response_only: bool,
+    pub current_work_scope: Value,
     pub output_continuations: u64,
     pub steered_task: bool,
     pub steered_tool_task: bool,
@@ -625,6 +636,7 @@ impl Default for TaskDecisionInput {
             requires_verification: false, requires_readback: false, has_readback: false,
             requires_visual_readback: false, has_visual_readback: false, summarize_only: false,
             recovery_final: false, supports_task_markers: true, execution_intent: true, response_only: false,
+            current_work_scope: Value::Null,
             output_continuations: 0, steered_task: false, steered_tool_task: false, effectful_work: false,
         }
     }
@@ -659,6 +671,7 @@ impl TaskDecisionInput {
             supports_task_markers: value["supportsTaskMarkers"] != false,
             execution_intent: value["executionIntent"] != false,
             response_only: boolean_field(value, "responseOnly"),
+            current_work_scope: value["currentWorkScope"].clone(),
             output_continuations: value["outputContinuations"].as_u64().unwrap_or(0),
             steered_task: boolean_field(value, "steeredTask"),
             steered_tool_task: boolean_field(value, "steeredToolTask"),
@@ -825,6 +838,11 @@ impl TaskState {
                 }
                 if let Some(blocker) = value.get("blocker") {
                     status["blocker"] = blocker.clone();
+                } else if let Some(blocker) = labeled_reason_blocker(value) {
+                    // Models sometimes put the structured label inside reason; accept only a leading known label.
+                    // 模型有时把结构标签写进 reason；只接受开头的已知标签，不做措辞猜测。
+                    status["blocker"] = json!(blocker);
+                    status["blockerSource"] = json!("reason-label");
                 }
                 if let Some(met) = value.get("met") {
                     status["met"] = met.clone();
@@ -913,6 +931,20 @@ impl TaskState {
         // Future steps in a plan are not authorization to execute them; truncation still continues text.
         // 方案中的后续步骤不代表获准执行；正文被截断时仍正常续写。
         if input.response_only && !has_calls && !input.output_truncated {
+            if matches!(input.current_work_scope["stage"].as_str(), Some("plan" | "explain")) {
+                // The current prose is delivered; a footer cannot promote its future work into execution.
+                // 本轮方案或解释已交付；尾部声明不能把后续工作升级为当前执行要求。
+                return TaskDecision::Final { reviewed: false };
+            }
+            if state == "blocked" && genuine_blocker(reply) {
+                return TaskDecision::Interrupt { code: blocker_code(reply), reviewed: input.is_review };
+            }
+            if remaining.is_empty() && input.execution_intent
+                && input.current_work_scope["stage"] == "read-only"
+                && matches!(state, "continue" | "blocked") {
+                let next = string_field(reply, "next").trim_matches(javascript_whitespace);
+                if !next.is_empty() { remaining.push(next.to_owned()); }
+            }
             if !remaining.is_empty() {
                 return TaskDecision::Resume { reviewed: input.is_review, exhausted_budget: exhausted,
                     remaining: Some(remaining), minimum_active: false,
@@ -1341,6 +1373,17 @@ fn explicit_unmet_work(reply: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Read a leading `blocker: kind` label from reason when the structured field is absent.
+/// 结构字段缺失时，只读取 reason 开头的 `blocker: 类型` 标签。
+fn labeled_reason_blocker(value: &Value) -> Option<&'static str> {
+    if string_field(value, "state") != "blocked" { return None; }
+    static LABEL: OnceLock<Regex> = OnceLock::new();
+    let label = LABEL.get_or_init(|| Regex::new(r"(?i)^\s*blocker\s*[:：=]\s*([a-z-]+)")
+        .expect("static blocker label expression"));
+    let kind = label.captures(string_field(value, "reason"))?.get(1)?.as_str().to_ascii_lowercase();
+    ["user-input", "authorization", "external", "resource"].into_iter().find(|known| *known == kind)
+}
+
 /// Only a declared external condition ends a task as blocked; plain difficulty does not.
 /// 只有声明的外部条件才能以受阻结束任务；单纯的实现困难不算。
 pub(crate) fn genuine_blocker(reply: &Value) -> bool {
@@ -1573,6 +1616,88 @@ fn boolean_field(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Repair control syntax separately from task execution; retain only measurable format progress.
+/// 控制格式修正独立于任务执行，仅保留可核对的格式进展。
+pub(crate) fn review_format_repair(checkpoint: &mut Value, text: &str, output_truncated: bool, output_tokens: u64) -> Value {
+    let (stage, mut issues, characters) = review_format_diagnostics(text);
+    if output_truncated { issues.push("provider-output-truncated".into()); }
+    if issues.is_empty() {
+        if let Some(fields) = checkpoint.as_object_mut() { fields.remove("reviewFormatRepair"); }
+        return json!({"action":"valid","reason":"Control format is valid."});
+    }
+    let previous = &checkpoint["reviewFormatRepair"];
+    let previous_issues = previous["issues"].as_array().cloned().unwrap_or_default();
+    let changed_format = stage > previous["stage"].as_u64().unwrap_or(0)
+        || stage == previous["stage"].as_u64().unwrap_or(0)
+            && issues.len() < previous_issues.len()
+            && issues.iter().all(|issue| previous_issues.contains(&json!(issue)));
+    let smaller_footer = characters > 16384 && previous["characters"].as_u64()
+        .is_some_and(|before| before > characters);
+    let longer_truncated_output = output_truncated && output_tokens > previous["outputTokens"].as_u64().unwrap_or(0);
+    let first = !previous.is_object();
+    let may_repair = first || changed_format || smaller_footer || longer_truncated_output;
+    let high_water_tokens = output_tokens.max(previous["outputTokens"].as_u64().unwrap_or(0));
+    let mut saved = previous.clone();
+    if first || changed_format || smaller_footer {
+        saved = json!({"stage":stage,"issues":issues,"characters":characters});
+    }
+    saved["outputTokens"] = json!(high_water_tokens);
+    if !checkpoint.is_object() { *checkpoint = json!({}); }
+    checkpoint["reviewFormatRepair"] = saved;
+    let reason = format!("Review control format: {}. {}", issues.join(", "),
+        if may_repair { "Return one standalone single-line footer with valid fields; preserve saved work and receipts." }
+        else { "The previous correction did not improve this format or its truncated output; saved work awaits user continuation." });
+    json!({"action":if may_repair {"repair"} else {"wait"},"reason":reason})
+}
+
+fn review_format_diagnostics(text: &str) -> (u64, Vec<String>, u64) {
+    let Some(start) = text.rfind("<kynxa_task>") else { return (0, vec!["missing-footer".into()], 0); };
+    let prefix = &text[..start];
+    let after = &text[start + "<kynxa_task>".len()..];
+    let Some(end) = after.find("</kynxa_task>") else { return (1, vec!["unclosed-footer".into()], 0); };
+    let body = &after[..end];
+    let characters = body.chars().count() as u64;
+    let mut issues = Vec::new();
+    if !prefix.rsplit('\n').next().unwrap_or("").bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+        issues.push("footer-not-standalone".into());
+    }
+    if in_fence(prefix) { issues.push("footer-inside-code-fence".into()); }
+    if !after[end + "</kynxa_task>".len()..].trim_matches(javascript_whitespace).is_empty() {
+        issues.push("trailing-content-after-footer".into());
+    }
+    if body.contains('\n') { issues.push("multiline-footer".into()); }
+    if characters > 16384 { issues.push("footer-too-large".into()); }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        issues.push("invalid-json".into()); return (2, issues, characters);
+    };
+    let Some(object) = value.as_object() else {
+        issues.push("footer-not-object".into()); return (3, issues, characters);
+    };
+    let state = string_field(&value, "state");
+    let valid_state = matches!(state, "complete" | "continue" | "blocked");
+    if !valid_footer(&value) {
+        // Reuse the real schema for each field; prose changes cannot invent repair progress.
+        // 逐字段复用真实格式校验；改写正文不能制造格式修复进展。
+        for key in ["state", "steeringRevision", "action", "met", "unmet", "blocker", "feasibility", "next", "reason"] {
+            if let Some(field) = object.get(key) {
+                let mut probe = json!({"state":if valid_state {state} else {"complete"},"next":"current step","reason":"observed condition"});
+                probe[key] = field.clone();
+                if !valid_footer(&probe) { issues.push(format!("invalid-{key}")); }
+            }
+        }
+        if !valid_state && !object.contains_key("state") { issues.push("missing-state".into()); }
+        if state == "continue" && string_field(&value, "next").trim_matches(javascript_whitespace).is_empty() {
+            issues.push("missing-next".into());
+        }
+        if state == "blocked" && string_field(&value, "reason").trim_matches(javascript_whitespace).is_empty() {
+            issues.push("missing-reason".into());
+        }
+        if user_work_disposition(&value).is_err() { issues.push("invalid-user-control".into()); }
+    }
+    let stage = if !valid_state {4} else if valid_footer(&value) {6} else {5};
+    (stage, issues, characters)
+}
+
 fn valid_footer(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
@@ -1732,7 +1857,9 @@ mod work_scope_contract_tests {
         assert!(scope_allows_call(&scope, "filesystem.read", true));
         let decision = TaskState::default().decide_typed(&TaskDecisionInput {
             response_only: true, execution_intent: false, effectful_work: true,
-            reply: json!({"state":"continue","source":"model-task-state","next":"Write the future document"}),
+            current_work_scope: scope.clone(),
+            reply: json!({"state":"continue","source":"model-task-state","next":"Write the future document",
+                "unmet":["等待用户确认方案后开始搜集与写作"]}),
             ..Default::default()
         });
         assert_eq!(decision.into_value()["action"], "final");
@@ -1785,6 +1912,104 @@ mod work_scope_contract_tests {
     }
 
     #[test]
+    fn a_blocker_label_inside_reason_interrupts_instead_of_resuming() {
+        let mut task = TaskState::default();
+        let reply = task.inspect(&format!("删除未执行。\n<kynxa_task>{}</kynxa_task>", json!({
+            "state":"blocked","next":"","reason":"blocker: authorization — 递归删除外部归档被策略禁止",
+            "unmet":["删除外部归档"]})));
+        assert_eq!(reply["blocker"], "authorization", "{reply}");
+        for is_review in [false, true] {
+            let decision = task.decide_typed(&TaskDecisionInput {
+                reply:reply.clone(), is_review, execution_intent:true, ..Default::default()
+            }).into_value();
+            assert_eq!(decision["action"], "interrupt");
+            assert_eq!(decision["code"], "TASK_AUTHORIZATION_REQUIRED");
+        }
+        let free = task.inspect("<kynxa_task>{\"state\":\"blocked\",\"reason\":\"It may need some authorization later\"}</kynxa_task>");
+        assert!(free.get("blocker").is_none(), "Only a leading label is structured: {free}");
+    }
+
+    #[test]
+    fn declared_external_conditions_yield_the_same_saved_wait_in_execution_and_review() {
+        let mut task = TaskState::default();
+        for (kind, code) in [("authorization", "TASK_AUTHORIZATION_REQUIRED"),
+            ("user-input", "TASK_INPUT_REQUIRED"), ("external", "TASK_EXTERNAL_WAIT"),
+            ("resource", "RESOURCE_ADMISSION_REQUIRED")] {
+            let reply = task.inspect(&format!("当前条件未满足，已保留进度。\n<kynxa_task>{}</kynxa_task>",
+                json!({"state":"blocked","blocker":kind,"reason":"An observed required condition is unavailable.",
+                    "next":"Continue after the required condition changes.","unmet":["current action"]})));
+            for is_review in [false, true] {
+                let decision = task.decide_typed(&TaskDecisionInput {
+                    reply:reply.clone(), is_review, execution_intent:true, ..Default::default()
+                }).into_value();
+                assert_eq!(decision["action"], "interrupt", "{decision}");
+                assert_eq!(decision["code"], code, "{decision}");
+            }
+        }
+    }
+
+    #[test]
+    fn review_format_repairs_follow_actual_syntax_and_field_improvements() {
+        let mut checkpoint = json!({"savedReceipt":"retained"});
+        for text in ["ordinary text", "<kynxa_task>{bad}</kynxa_task>",
+            "<kynxa_task>{\"state\":\"complete\",\"met\":false,\"unmet\":false}</kynxa_task>",
+            "<kynxa_task>{\"state\":\"complete\",\"met\":[],\"unmet\":false}</kynxa_task>"] {
+            assert_eq!(review_format_repair(&mut checkpoint,text,false,20)["action"],"repair");
+        }
+        let valid = "<kynxa_task>{\"state\":\"complete\",\"met\":[],\"unmet\":[]}</kynxa_task>";
+        assert_eq!(review_format_repair(&mut checkpoint,valid,false,20)["action"],"valid");
+        assert!(checkpoint.get("reviewFormatRepair").is_none());
+        assert_eq!(checkpoint["savedReceipt"],"retained");
+        assert_eq!(review_format_repair(&mut checkpoint,"plain first draft",false,20)["action"],"repair");
+        assert_eq!(review_format_repair(&mut checkpoint,"different words without a footer",false,40)["action"],"wait");
+    }
+
+    #[test]
+    fn truncated_review_repair_requires_real_output_progress() {
+        let mut checkpoint = Value::Null;
+        let text = "<kynxa_task>{\"state\":\"complete\"}</kynxa_task>";
+        assert_eq!(review_format_repair(&mut checkpoint,text,true,100)["action"],"repair");
+        assert_eq!(review_format_repair(&mut checkpoint,text,true,200)["action"],"repair");
+        assert_eq!(review_format_repair(&mut checkpoint,text,true,200)["action"],"wait");
+        assert_eq!(review_format_repair(&mut checkpoint,text,false,200)["action"],"valid");
+    }
+
+    #[test]
+    fn readonly_work_uses_execution_progress_without_forcing_plain_answers_into_review() {
+        assert!(continuation_needs_progress(&json!({"stage":"read-only"}),false,false));
+        assert!(continuation_needs_progress(&json!({"stage":"execute"}),true,false));
+        assert!(!continuation_needs_progress(&json!({"stage":"execute"}),false,false));
+        for stage in ["plan","explain"] {
+            assert!(!continuation_needs_progress(&json!({"stage":stage}),true,true));
+        }
+        let reply = json!({"state":"blocked","source":"model-task-state","blocker":"authorization",
+            "reason":"The current source requires authorization.","unmet":["read the source"]});
+        let decision = TaskState::default().decide_typed(&TaskDecisionInput {
+            reply,response_only:true,execution_intent:true,..Default::default()
+        }).into_value();
+        assert_eq!(decision["code"],"TASK_AUTHORIZATION_REQUIRED");
+    }
+
+    #[test]
+    fn readonly_next_step_continues_investigation_but_plan_next_is_not_execution() {
+        let task = TaskState::default();
+        for state in ["continue", "blocked"] {
+            let mut input = TaskDecisionInput::from_value(&json!({
+                "responseOnly":true,"executionIntent":true,"currentWorkScope":{"stage":"read-only"},
+                "reply":{"state":state,"source":"model-task-state","next":"Read the missing source range",
+                    "reason":"One source still needs reading","unmet":[]}
+            }));
+            let decision = task.decide_typed(&input).into_value();
+            assert_eq!(decision["action"],"resume", "{decision}");
+            assert_eq!(decision["remaining"],json!(["Read the missing source range"]));
+            for scope in [json!({"stage":"plan"}),json!({"stage":"explain"}),Value::Null] {
+                input.current_work_scope = scope;
+                assert_eq!(task.decide_typed(&input).into_value()["action"],"final");
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_or_impossible_needs_a_specific_basis_while_ordinary_difficulty_continues() {
         let mut task = TaskState::default();
         for (kind, expected) in [("impossible", "TASK_INFEASIBLE"), ("unsupported", "TASK_CAPABILITY_UNAVAILABLE")] {
@@ -1807,22 +2032,43 @@ mod work_scope_contract_tests {
 
     #[test]
     fn a_future_next_step_cannot_extend_a_finite_answer_but_real_text_truncation_can() {
-        let mut input = TaskDecisionInput {execution_intent:false,
-            reply:json!({"state":"continue","next":"Optional implementation later"}),..Default::default()};
-        assert_eq!(TaskState::default().decide_typed(&input).into_value()["action"], "final");
-        input.output_truncated = true;
-        assert_eq!(TaskState::default().decide_typed(&input).into_value()["action"], "resume");
-        input.output_truncated = false;
-        input.verification = json!({"state":"checks-failed","pendingValidation":true});
-        input.minimum_active_ms = 3_600_000;
-        input.active_elapsed_ms = 1;
-        input.reply["unmet"] = json!(["Read the requested source and finish the missing current section"]);
-        for stage in ["plan", "read-only"] {
-            input.response_only = response_only_scope(&json!({"stage":stage}));
-            let decision = TaskState::default().decide_typed(&input).into_value();
+        let task = TaskState::default();
+        for stage in ["plan", "explain"] {
+            let scope = json!({"stage":stage,"request":"先说方案，你打算怎么做，架构怎样"});
+            let mut input = TaskDecisionInput {
+                response_only:response_only_scope(&scope),
+                execution_intent:continuation_needs_progress(&scope,true,true), current_work_scope:scope,
+                reply:json!({"state":"continue","source":"model-task-state",
+                    "next":"搜集一手文献并撰写MD文档","unmet":["等待用户确认方案后开始搜集与写作"]}),
+                verification:json!({"state":"checks-failed","pendingValidation":true}),
+                minimum_active_ms:3_600_000, active_elapsed_ms:1, effectful_work:true,
+                ..Default::default()
+            };
+            for is_review in [false, true] {
+                input.is_review = is_review;
+                assert_eq!(task.decide_typed(&input).into_value()["action"], "final", "{stage}");
+            }
+            input.is_review = false;
+            input.output_truncated = true;
+            assert_eq!(task.decide_typed(&input).into_value()["action"], "resume", "{stage}");
+            input.output_truncated = false;
+            input.reply["state"] = json!("blocked");
+            input.reply["blocker"] = json!("authorization");
+            assert_eq!(task.decide_typed(&input).into_value()["action"], "final", "{stage}");
+        }
+        for stage in ["read-only", "execute"] {
+            let scope = json!({"stage":stage,"request":"Read the source and report the current findings"});
+            let input = TaskDecisionInput {
+                response_only:response_only_scope(&scope),
+                execution_intent:continuation_needs_progress(&scope,true,true), current_work_scope:scope,
+                reply:json!({"state":"continue","source":"model-task-state",
+                    "unmet":["Read the requested source and finish the missing current section"]}),
+                ..Default::default()
+            };
+            let decision = task.decide_typed(&input).into_value();
             assert_eq!(decision["action"], "resume");
             assert_ne!(decision["minimumActive"], true);
-            assert_eq!(decision["remaining"], input.reply["unmet"]);
+            if stage == "read-only" { assert_eq!(decision["remaining"], input.reply["unmet"]); }
         }
     }
 }

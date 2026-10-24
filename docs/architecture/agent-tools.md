@@ -291,7 +291,7 @@ KYNXA 安装目录/
 
 ## 文件与终端工具
 
-`filesystem.list/read/search/stat/write/edit/delete/mkdir` 支持目录、UTF-8 文本和 SHA-256 版本检查。创建文件要求 `expectedHash: null`；替换、编辑和删除文件要求刚读取的准确 hash。编辑只替换唯一匹配，写入使用临时文件与原子替换。删除仅支持单个文件或空目录，不支持递归删除。用户授权的宿主路径先通过 `bindLocalPath` 绑定 canonical 真实目标，再按真实工作范围决定理由与审批；审批后和执行前以 `revalidateLocalPathBinding` 复核，链接改指向则拒绝旧授权。只读文件操作可读取硬链接，修改操作仍拒绝；应用管理目录、技能快照和 AppContainer 复制继续采用严格链接检查。设备、网络共享、歧义路径和文件替代流仍拒绝；查询、结果、文件大小和遍历都有上限。
+`filesystem.list/read/search/stat/write/edit/delete/mkdir` 支持目录、UTF-8 文本和 SHA-256 版本检查。创建文件要求 `expectedHash: null`；替换、编辑和删除文件要求刚读取的准确 hash。编辑只替换唯一匹配，写入使用临时文件与原子替换。`filesystem.delete` 仅支持单个文件或空目录；用户明确要求删除目录树时，可经现行权限允许的 `terminal.host.run` 执行精确目标删除，这不是全局递归删除禁令。工作文件夹是默认位置，明确授权的外部目标也在本次范围内，不能据此扩大到相邻路径；Full 不增加逐次审批。文件工具的宿主路径先通过 `bindLocalPath` 绑定 canonical 真实目标，再按真实工作范围决定理由与审批；审批后和执行前以 `revalidateLocalPathBinding` 复核，链接改指向则拒绝旧授权。只读文件操作可读取硬链接，修改操作仍拒绝；应用管理目录、技能快照和 AppContainer 复制继续采用严格链接检查。设备、网络共享、歧义路径和文件替代流仍拒绝；查询、结果、文件大小和遍历都有上限。
 
 `terminal.run` 由独立 .NET `KYNXA.ToolHost` 创建 Windows AppContainer，使用 Job Object 管理最多 16 个进程、单进程 256 MiB/总计 768 MiB 内存上限、时间及输出限制。命令在临时工作副本中运行，没有网络能力，副本不会自动写回真实工作。正式 Data、模型凭据、链接和常见敏感/庞大目录不进入快照；精确匹配的应用管理工作目录仍能正常复制。完成后清理请求副本。
 

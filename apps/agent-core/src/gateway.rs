@@ -427,7 +427,7 @@ async fn handle(
         return response(Ok((200, health)));
     }
     let control = method == Method::POST
-        && (["/api/chat/cancel", "/api/agent/approvals"].contains(&uri.path())
+        && (["/api/chat/cancel", "/api/chat/pause", "/api/agent/approvals"].contains(&uri.path())
             || uri.path().starts_with("/api/tasks/")
                 && uri.path().ends_with("/control")
                 && serde_json::from_slice::<Value>(&bytes)
@@ -667,6 +667,13 @@ async fn handle_request(
                 }
             }
         };
+    }
+    if path == "/api/chat/pause" && method == Method::POST {
+        return response(runtime.pause(
+            body["conversationId"].as_str().unwrap_or(""),
+            body["requestId"].as_str().unwrap_or(""),
+            body["taskId"].as_str(),
+        ).await.map(|value| (200, value)));
     }
     if path == "/api/chat/cancel" && method == Method::POST {
         return response(

@@ -186,7 +186,10 @@ public sealed partial class ShellPage
                     isSubmitted = true;
                     await foreach (var update in updates)
                     {
-                        if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
+                        // Exit blocks new dispatches while the existing stream awaits its pause acknowledgement.
+                        // 退出阻止新派发；已有观察保留到暂停受理，窗口关闭后不再处理界面事件。
+                        if (_projectViewClosed || _chatClosing && !_savingOnClose ||
+                            !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
                         if (pending.WaitingReplyAnchorId is not null && update.Type is "reasoning_delta" or "text_delta"
                             or "assistant_segment" or "content_snapshot") continue;
                         if (pending.WaitingReplyAnchorId is Guid expectedReply && (update.Type is "completed" or "cancelled" or "failed")

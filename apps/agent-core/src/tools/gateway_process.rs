@@ -1612,6 +1612,57 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    #[ignore = "requires a built KYNXA_TEST_TOOLHOST_EXE; executes only an owned temporary directory"]
+    async fn real_toolhost_full_mode_deletes_only_the_explicit_external_temporary_tree() {
+        let executable = std::env::var_os("KYNXA_TEST_TOOLHOST_EXE")
+            .expect("Set KYNXA_TEST_TOOLHOST_EXE to the actual built ToolHost executable");
+        assert!(Path::new(&executable).is_file());
+        let (mut ctx, _sender) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let outside = root.join("authorized-external");
+        let target = outside.join("remove-only-this");
+        std::fs::create_dir_all(target.join("nested")).unwrap();
+        std::fs::write(target.join("nested/old.txt"), "disposable").unwrap();
+        let neighbor = outside.join("keep-neighbor.txt");
+        let workspace = ctx.workdir.join("keep-workspace.txt");
+        let data = ctx.data_home.join("keep-data.txt");
+        for path in [&neighbor, &workspace, &data] { std::fs::write(path, "retained").unwrap(); }
+
+        // Verify the resolved deletion target belongs only to this newly created fixture root.
+        // 先核验解析后的删除目标，仅限本次新建的临时夹具根，不接触真实归档或产品数据。
+        let resolved_target = std::fs::canonicalize(&target).unwrap();
+        assert!(resolved_target.starts_with(std::fs::canonicalize(&root).unwrap()));
+        assert!(!resolved_target.starts_with(std::fs::canonicalize(&ctx.workdir).unwrap()));
+        assert!(!resolved_target.starts_with(std::fs::canonicalize(&ctx.data_home).unwrap()));
+        let literal = target.to_str().unwrap().replace('\'', "''");
+        let input = json!({"shell":"powershell","cwd":outside,"timeoutMs":10000,
+            "reason":"Delete only the explicitly selected external temporary test tree; preserve its neighbors and workspace",
+            "script":format!("$ErrorActionPreference = 'Stop'\nRemove-Item -LiteralPath '{literal}' -Recurse -Force -ErrorAction Stop\nif (Test-Path -LiteralPath '{literal}') {{ throw 'Target still exists' }}\nWrite-Output 'external-target-removed'")});
+        ctx.toolhost_exe = executable.into();
+        ctx.permission_mode = "ask".into();
+        let pending = super::super::gateway::execute("terminal.host.run", input.clone(), &ctx).await.unwrap();
+        assert_eq!(pending["requiresApproval"], true, "{pending}");
+        assert!(target.join("nested/old.txt").is_file(), "Ask mode must not dispatch the command");
+
+        ctx.permission_mode = "full".into();
+        assert!(!ctx.approved, "Full must use its own authority, not a fabricated approval");
+        let receipt = super::super::gateway::execute("terminal.host.run", input, &ctx).await.unwrap();
+        assert_eq!(receipt["value"]["completed"], true, "{receipt}");
+        assert_eq!(receipt["value"]["exitCode"], 0, "{receipt}");
+        assert_eq!(receipt["isError"], false, "{receipt}");
+        assert_eq!(std::fs::canonicalize(receipt["value"]["cwd"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&outside).unwrap());
+        assert!(receipt["value"]["stdout"].as_str().unwrap().contains("external-target-removed"));
+        assert!(!target.exists());
+        for path in [&neighbor, &workspace, &data] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "retained", "{}", path.display());
+        }
+        shutdown_checked(&ctx).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn receipt_real_toolhost_discovery_and_terminal_output_cross_the_gateway_adapter() {
         let Some(executable) = std::env::var_os("KYNXA_TEST_TOOLHOST_EXE") else {
             return;

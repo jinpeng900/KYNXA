@@ -20,7 +20,7 @@ pub(super) struct ToolProgressOutcome {
 
 pub(super) fn progress_interruption(plan: &WorkProgressPlan) -> Option<GatewayError> {
     plan.wait_for_user.then(||GatewayError::new("TASK_CONTINUATION_NO_PROGRESS",
-        "Progress is saved. The corrected route still produced no new evidence; continue or retry to try again. / 进度已保存，纠偏后仍在重复同一结果；发送继续或点击重试可接着做。",409))
+        "No new result is available; unfinished work and existing outputs are saved. / 暂无新的有效结果，未完成工作和已有成果已保存。",409))
 }
 
 /// Successful dispatch alone is not a changed artifact; native file preconditions and hashes are authoritative.

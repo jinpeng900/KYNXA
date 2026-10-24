@@ -114,6 +114,26 @@ public sealed class ModelApiClient : IDisposable
             throw new InvalidDataException(UiText.Get("任务取消结果尚未确认，请查看任务状态。"));
     }
 
+    /// <summary>Pause the accepted request, including acceptance before its first streamed identity.</summary>
+    /// <remarks>按稳定身份暂停已受理请求，覆盖首个流事件之前；不取消原任务或等待模型收尾。</remarks>
+    public async Task PauseReplyAsync(Guid conversationId, Guid requestId, Guid? taskId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (conversationId == Guid.Empty || requestId == Guid.Empty || taskId == Guid.Empty)
+            throw new ArgumentException("A saved chat request is required.");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(3));
+        // Exit contacts the current gateway directly; it must not start a new service to close the desktop.
+        // 退出直接联系当前网关，不能为了关闭桌面另行启动服务。
+        using var response = await _httpClient.PostAsJsonAsync("/api/chat/pause",
+            new { conversationId, requestId, taskId }, deadline.Token).ConfigureAwait(false);
+        var receipt = await ReadAsync<JsonElement>(response, deadline.Token).ConfigureAwait(false);
+        if (!receipt.TryGetProperty("paused", out var paused) || paused.ValueKind != JsonValueKind.True ||
+            !receipt.TryGetProperty("pendingAcceptance", out var pending) || pending.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+            taskId is Guid expected && (!receipt.TryGetProperty("taskId", out var accepted) || !accepted.TryGetGuid(out var actual) || actual != expected))
+            throw new InvalidDataException(UiText.Get("任务暂停结果尚未确认，请查看任务状态。"));
+    }
+
     public async IAsyncEnumerable<ChatStreamEvent> StreamReplyAsync(ChatRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -146,7 +166,8 @@ public sealed class ModelApiClient : IDisposable
     }
 
     private sealed record ChatRunStatus(Guid ConversationId, Guid RequestId, string Status,
-        JsonElement? Result, ChatStreamEvent? ReplyAnchor = null, ToolActivity[]? Tools = null);
+        JsonElement? Result, ChatStreamEvent? ReplyAnchor = null, ToolActivity[]? Tools = null,
+        string? DurableTaskState = null, ulong? DurableTaskVersion = null);
 
     private sealed record StoredReply(Guid Id, string Role, string Content, string Status, string? Reasoning,
         string? Error, DateTimeOffset CreatedAt, long DurationMs, AssistantSegment[]? AssistantSegments,
@@ -225,11 +246,9 @@ public sealed class ModelApiClient : IDisposable
                 try { status = await ReadDurableRunStatusAsync(conversationId, requestId, durableTask, cancellationToken).ConfigureAwait(false); }
                 catch (Exception error) when (CanRecoverObservation(error) && !cancellationToken.IsCancellationRequested) { }
             }
-            if (status?.Status != "completed" || status.Result is not { ValueKind: JsonValueKind.Object } result) continue;
+            if (status?.Status != "completed") continue;
 
-            // The terminal projection is authoritative, but it still passes the same identity and segment validator.
-            // 正式终态可以补回遗漏回复；仍通过同一身份和段落校验，不能把读取失败当成成功。
-            var recovered = await ReadTerminalProjectionAsync(status, result, cancellationToken).ConfigureAwait(false);
+            var recovered = await RecoverTerminalProjectionAsync(status, taskId, cancellationToken).ConfigureAwait(false);
             if (recovered is null) continue;
             foreach (var item in recovered)
             {
@@ -268,11 +287,54 @@ public sealed class ModelApiClient : IDisposable
     private static bool CanRecoverObservation(Exception error)
     {
         if (error is GatewayApiException { ErrorCode: "MODEL_CREDIT_EXHAUSTED" or "MODEL_AUTHENTICATION_FAILED"
-            or "MODEL_ENDPOINT_NOT_FOUND" }) return false;
-        return error is InvalidDataException or JsonException or EndOfStreamException or OperationCanceledException
+            or "MODEL_ENDPOINT_NOT_FOUND" or "CHAT_TERMINAL_PROTOCOL_INVALID" }) return false;
+        return error is HttpRequestException or InvalidDataException or JsonException or EndOfStreamException or OperationCanceledException
             or KeyNotFoundException or FormatException || error is InvalidOperationException and not GatewayApiException
             || error is GatewayApiException gateway && (gateway.ErrorCode is "CHAT_RUN_NOT_FOUND" or "TASK_STREAM_NOT_READY"
                 or "CHAT_REPLAY_CAPACITY_EXCEEDED" || (int)gateway.StatusCode >= 500);
+    }
+
+    private async Task<List<ChatStreamEvent>?> RecoverTerminalProjectionAsync(ChatRunStatus status, Guid? taskId,
+        CancellationToken cancellationToken)
+    {
+        if (status.Result is { ValueKind: JsonValueKind.Object } result)
+        {
+            var recovered = await ReadTerminalProjectionAsync(status, result, cancellationToken).ConfigureAwait(false);
+            if (recovered is not null) return recovered;
+        }
+
+        // A closed request is immutable. Try its formal message, never resubmit its user prompt.
+        // 已结束请求的结果不再生成；只尝试恢复原正式消息，不重发提示词或重做操作。
+        try
+        {
+            taskId ??= await FindDurableTaskAsync(status.ConversationId, status.RequestId, cancellationToken).ConfigureAwait(false);
+            if (taskId is Guid savedTask)
+            {
+                var durable = await ReadDurableRunStatusAsync(status.ConversationId, status.RequestId, savedTask, cancellationToken).ConfigureAwait(false);
+                if (durable.Status == "completed" && durable.Result is { ValueKind: JsonValueKind.Object } storedResult)
+                {
+                    var recovered = await ReadTerminalProjectionAsync(durable, storedResult, cancellationToken).ConfigureAwait(false);
+                    if (recovered is not null) return recovered;
+                }
+                if (durable.Status == "running" && durable.DurableTaskState is not ("completed" or "partial" or "failed" or "cancelled"))
+                    return null;
+                System.Diagnostics.Debug.WriteLine($"Invalid terminal reply: request={status.RequestId:D}; task={savedTask:D}; state={durable.DurableTaskState}; version={durable.DurableTaskVersion}");
+            }
+        }
+        catch (Exception error) when (!cancellationToken.IsCancellationRequested &&
+            (error is HttpRequestException or OperationCanceledException or EndOfStreamException ||
+                error is GatewayApiException gateway && (int)gateway.StatusCode >= 500))
+        {
+            // A transport failure may recover; invalid data in a settled reply cannot recover by rereading it.
+            // 传输失败仍可重连；已结算回复中的错误数据不能靠反复读取自己恢复。
+            return null;
+        }
+        catch (Exception error) when (error is InvalidDataException or JsonException or KeyNotFoundException or FormatException)
+        {
+            System.Diagnostics.Debug.WriteLine($"Terminal reply recovery: {error.GetType().Name}");
+        }
+        throw new GatewayApiException(UiText.Get("答复显示数据有误，已保留原文和任务记录。"),
+            System.Net.HttpStatusCode.BadGateway, "CHAT_TERMINAL_PROTOCOL_INVALID");
     }
 
     private async Task<ChatRunStatus> ReadRunStatusAsync(Guid conversationId, Guid requestId, CancellationToken cancellationToken)
@@ -325,9 +387,11 @@ public sealed class ModelApiClient : IDisposable
             || task.TryGetProperty("parentTaskId", out var parent) && parent.ValueKind != JsonValueKind.Null)
             throw new InvalidDataException(UiText.Get("任务接口返回的范围或版本无效。"));
         string? taskState = task.GetProperty("state").GetString();
+        ulong? taskVersion = task.TryGetProperty("version", out var version) && version.TryGetUInt64(out var savedVersion)
+            ? savedVersion : null;
         bool waitingForUser = taskState is "paused" or "waiting-config" or "waiting-verification";
         if (!waitingForUser && taskState is not ("completed" or "partial" or "failed" or "cancelled"))
-            return new(conversationId, requestId, "running", null);
+            return new(conversationId, requestId, "running", null, DurableTaskState: taskState, DurableTaskVersion: taskVersion);
 
         // After restart, restore terminal state only from the matching durable task and message.
         // 重启后仅用同一持久任务和正式消息补齐终态，不重做原请求。
@@ -366,13 +430,13 @@ public sealed class ModelApiClient : IDisposable
                     ? new("reply_anchor", conversationId, requestId, reply.CreatedAt, TaskId: taskId,
                         RootRequestTaskId: taskId, ReplyMessageId: reply.Id, UserMessageId: userId) : null;
                 return new(conversationId, requestId, "completed", JsonSerializer.SerializeToElement(terminal, JsonOptions),
-                    anchor, reply.ToolActivities);
+                    anchor, reply.ToolActivities, taskState, taskVersion);
             }
             if (!page.TryGetProperty("hasMore", out var hasMore) || hasMore.ValueKind != JsonValueKind.True
                 || !page.TryGetProperty("nextCursor", out var nextCursor) || nextCursor.ValueKind != JsonValueKind.String) break;
             cursor = nextCursor.GetString();
         }
-        return new(conversationId, requestId, "running", null);
+        return new(conversationId, requestId, "running", null, DurableTaskState: taskState, DurableTaskVersion: taskVersion);
     }
 
     private static async Task<List<ChatStreamEvent>?> ReadTerminalProjectionAsync(ChatRunStatus status, JsonElement result,
@@ -398,7 +462,11 @@ public sealed class ModelApiClient : IDisposable
             await foreach (var item in ChatStreamReader.ReadAsync(stream, status.ConversationId, status.RequestId, cancellationToken)
                 .ConfigureAwait(false)) events.Add(item);
         }
-        catch (Exception error) when (error is InvalidDataException or JsonException) { return null; }
+        catch (Exception error) when (error is InvalidDataException or JsonException)
+        {
+            System.Diagnostics.Debug.WriteLine($"Terminal reply validation: {error.GetType().Name}: {error.Message}");
+            return null;
+        }
         return events.Count > 0 && events[^1].Type is "completed" or "interrupted" or "error" ? events : null;
     }
 

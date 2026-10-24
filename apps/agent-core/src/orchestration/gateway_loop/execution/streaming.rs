@@ -3,6 +3,52 @@
 
 use super::*;
 
+impl LoopState {
+    /// Publish the terminal phase without rewriting a closed segment's body or identity.
+    /// 发布最终阶段，不改已关闭分段的正文或身份，保证终态与实际事件一致。
+    pub(in crate::orchestration::gateway_loop) async fn publish_final_segment(&mut self, run: &RequestRun) {
+        if self.delivery.segments.last().is_none_or(|segment| segment["status"] == "interrupted") {
+            let round = self.delivery.segments.last().and_then(|segment| segment["round"].as_u64())
+                .unwrap_or(0).saturating_add(1);
+            let id = new_id();
+            self.begin_segment(round, &id);
+            self.append("", "", round, &id);
+        }
+        if let Some(last) = self.delivery.segments.last_mut() {
+            last["phase"] = json!("final_answer");
+            last["status"] = json!("completed");
+            last["isAnswerContinuation"] = json!(false);
+            let segment = last.clone();
+            run.emit(json!({"type":"assistant_segment","segment":segment,"toolStreamProtocol":3})).await;
+        }
+    }
+
+    /// Publish only a settled public draft; review text never enters this buffer.
+    /// 只发布已进入收尾的公开草稿；验收内部文字不进入这个缓冲。
+    pub(in crate::orchestration::gateway_loop) async fn publish_buffered_delivery(
+        &mut self,
+        run: &RequestRun,
+        round: u64,
+        segment: &str,
+    ) {
+        if self.delivery.pending_delivery.is_empty() { return; }
+        let delivery = std::mem::take(&mut self.delivery.pending_delivery);
+        if let Some(checkpoint) = self.completion.review_checkpoint.as_object_mut() {
+            checkpoint.remove("pendingDelivery");
+        }
+        self.delivery.delivery_continuing = false;
+        let phase = self.begin_segment(round, segment);
+        run.emit(json!({"type":"assistant_segment","segment":phase,"toolStreamProtocol":3})).await;
+        run.emit(json!({"type":"text_delta","delta":delivery,"segmentId":segment})).await;
+        self.append(&delivery, "", round, segment);
+        if let Some(last) = self.delivery.segments.last_mut() {
+            last["phase"] = json!("final_answer");
+            last["isAnswerContinuation"] = json!(false);
+        }
+        run.emit(json!({"type":"assistant_segment","segment":self.segment(segment),"toolStreamProtocol":3})).await;
+    }
+}
+
 impl Execution {
     pub(super) async fn request_round(&mut self, round: u64, prepared: PreparedRound) -> Result<PhaseOutcome<ModelRound>, GatewayError> {
         let PreparedRound { output, input_budget, schemas, declared_tools, tools_closed, summarized_work_changed } = prepared;

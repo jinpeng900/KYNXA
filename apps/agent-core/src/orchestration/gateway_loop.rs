@@ -238,38 +238,6 @@ fn missing_public_answer(raw: &str, projected: &str, has_calls: bool) -> bool {
 }
 
 
-/// Internal failures may block work, but must preserve final progress delivery.
-/// 内部故障可阻塞工作，但须保留最终进展交付；连接故障和用户取消另行处理。
-fn recoverable_step_failure(code: &str) -> bool {
-    matches!(
-        code,
-        "MODEL_TOOL_CALL_INVALID"
-            | "MODEL_TOOL_ARGUMENT_INVALID"
-            | "MODEL_TOOL_IDENTITY_INVALID"
-            | "MODEL_TOOL_OUTPUT_TRUNCATED"
-            | "MODEL_LOCAL_TOOL_GRAMMAR_REJECTED"
-            | "MODEL_TOOL_SCHEMA_REJECTED"
-            | "MODEL_RESPONSE_INCOMPLETE"
-            | "MODEL_PREPARATION_WAIT_TIMEOUT"
-            | "INVALID_TOOL_CALL_INDEX"
-            | "MODEL_STREAM_INCOMPLETE"
-            | "CONTEXT_IRREDUCIBLE_INPUT"
-            | "MODEL_CONTEXT_LIMIT_REJECTED"
-            | "CONTEXT_CHECKPOINT_FAILED"
-            | "TOOL_CONTEXT_BUDGET_EXCEEDED"
-            | "SUMMARY_RUNTIME_LOCK_FAILED"
-            | "EVIDENCE_SOURCE_CHANGED"
-            | "EVIDENCE_WORKER_FAILED"
-            | "TASK_CONTINUATION_NO_PROGRESS"
-            | "TASK_BLOCKED"
-            | "TOOL_RUN_CALL_LIMIT"
-            | "TOOL_RUN_ROUND_LIMIT"
-            | "TOOL_RUN_MESSAGE_ROUND_LIMIT"
-            | "MODEL_HISTORY_ECHO"
-            | "TASK_COMPLETION_REVIEW_INVALID"
-    )
-}
-
 /// Network transport recovery and ordinary storage boundaries continue the same accepted task.
 /// 网络传输恢复及普通存储续段沿用原任务；其他中断等待用户明确继续。
 fn internal_recovery_required(code: &str) -> bool {
@@ -406,7 +374,7 @@ struct LoopState {
 fn runtime_authority(ctx: &tools::GatewayToolContext, permission: &str, memory: &str) -> String {
     crate::models::runtime_context::fingerprint(&json!([
         permission, memory, ctx.workdir, ctx.project_id,
-        ctx.config["workspaceMounts"], ctx.config["defaultMountId"]
+        ctx.config["workspaceMounts"], ctx.config["defaultMountId"], ctx.config["effectiveRulesFingerprint"]
     ]))
 }
 
@@ -1353,39 +1321,79 @@ impl LoopState {
     }
 }
 
-/// Settle only the cancelled reply after preserving its existing text and verified tool receipts.
-/// 保留既有正文与已核验工具回执后，仅结算被取消回复的状态。
-fn settle_cancelled_message(
+/// Save the escaped failure without losing published text or successful operation receipts.
+/// 保存流程外逸错误，保留已发布正文与成功操作回执。
+fn settle_failed_reply(
     root: &std::path::Path,
     conversation: &str,
     request: &str,
     expected_reply: &str,
     reason: &str,
+    code: &str,
+    interrupted: bool,
     duration_ms: Option<u64>,
-) -> Result<Option<String>, crate::storage::ContractError> {
+) -> Result<Option<Value>, crate::storage::ContractError> {
     let messages = match data::read_model_messages(root, conversation) {
         Ok(messages) => messages,
         Err(error) if error.code() == "CONVERSATION_NOT_FOUND" => return Ok(None),
         Err(error) => return Err(error),
     };
-    let Some(message) = messages.iter().rev().find(|message| {
+    let message = messages.iter().rev().find(|message| {
         message["Role"] == "assistant" && message["Id"] == expected_reply
             && (message["RequestId"] == request || message["Id"] == request)
-    }) else { return Ok(None) };
-    if message["Status"] != "streaming" { return Ok(Some(expected_reply.to_owned())); }
-    let mut segments = message["AssistantSegments"].as_array().cloned().unwrap_or_default();
-    for segment in &mut segments {
-        if segment["status"] == "streaming" { segment["status"] = json!("interrupted"); }
+    });
+    if message.is_none() && messages.iter().any(|message| message["Id"] == expected_reply) {
+        return Ok(None);
     }
-    // Patch status only; storage preserves text, sources and receipts without replay.
-    // 仅补状态，存储合并时保留正文、来源和回执，不重放操作。
-    let mut settled = json!({"Id":expected_reply,"Status":"interrupted",
-        "Error":reason,"AssistantSegments":segments});
+    if interrupted && message.is_some_and(|message| message["Status"] != "streaming") {
+        return Ok(message.cloned());
+    }
+    let mut settled = message.cloned().unwrap_or_else(|| json!({
+        "Id":expected_reply,"RequestId":request,"Role":"assistant","Content":"","Reasoning":""
+    }));
+    let mut segments = settled["AssistantSegments"].as_array().cloned().unwrap_or_default();
+    for segment in &mut segments {
+        if segment["status"] == "streaming" {
+            segment["status"] = json!(if interrupted { "interrupted" } else { "completed" });
+        }
+    }
+    if !interrupted {
+        let content = settled["Content"].as_str().unwrap_or("");
+        let notice = format!("任务未完成：{reason} 已有进度和回执已保留。");
+        settled["Content"] = json!(format!("{content}{}{notice}", if content.is_empty() { "" } else { "\n\n" }));
+        let round = segments.last().and_then(|segment| segment["round"].as_u64()).unwrap_or(0).saturating_add(1);
+        let order = segments.iter().chain(settled["ToolActivities"].as_array().into_iter().flatten())
+            .filter_map(|item| item["order"].as_u64()).max().unwrap_or(0).saturating_add(1);
+        // Timeline order includes tools; appending after a final segment also violates the stored contract.
+        // 时间线顺序包含工具；最终分段后也不能再增加分段，均须遵守正式存储合同。
+        let append_to_last = segments.last().is_some_and(|segment| segment["phase"] == "final_answer")
+            || segments.len() >= super::segments::MAX_MESSAGE_SEGMENTS
+            || round > crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64
+            || order > super::segments::MAX_SEGMENT_ORDER;
+        if append_to_last {
+            if let Some(segment) = segments.last_mut() {
+                segment["content"] = json!(format!("{}\n\n{notice}", segment["content"].as_str().unwrap_or("")));
+                segment["status"] = json!("completed");
+            }
+        } else {
+            segments.push(json!({"id":new_id(),"round":round,"order":order,
+                "phase":"final_answer","status":"completed","content":notice,"reasoning":"","reasoningDurationMs":0}));
+        }
+    }
+    // Preserve the original ToolRun ledger; an ordinary failure completes delivery, never the task.
+    // 原 ToolRun 账本保留；普通失败正常交付答复，不认证任务完成。
+    if !settled["ToolRun"].is_object() { settled["ToolRun"] = json!({}); }
+    if !settled["ToolRun"]["taskCompletion"].is_object() { settled["ToolRun"]["taskCompletion"] = json!({}); }
+    settled["ToolRun"]["taskCompletion"]["completionState"] = json!("partial");
+    settled["ToolRun"]["taskCompletion"]["code"] = json!(code);
+    settled["Status"] = json!(if interrupted { "interrupted" } else { "completed" });
+    settled["Error"] = json!(if interrupted { reason } else { "" });
+    settled["AssistantSegments"] = json!(segments);
     if let Some(duration_ms) = duration_ms {
         settled["DurationMs"] = json!(duration_ms);
     }
     data::upsert_message(root, conversation, &settled)?;
-    Ok(Some(expected_reply.to_owned()))
+    Ok(Some(settled))
 }
 
 /// Finish the request stream after the model/tool pipeline has saved its authoritative result.
@@ -1430,6 +1438,7 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
         }
     };
     crate::retrieval::gateway::release_task(&run.conversation_id, &run.request_id);
+    let escaped_reason = result.as_ref().err().map(|error| error.message.clone());
     let mut value = match result {
         Ok(mut value) => {
             value["conversationId"] = json!(run.conversation_id);
@@ -1439,7 +1448,12 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             value
         }
         Err(error) => {
-            json!({"type":if error.code=="ABORT_ERR"{"interrupted"}else{"error"},"error":error.message,"code":error.code,"statusCode":error.status})
+            let interrupted = super::gateway_runtime::reply_interrupted(&error.code, *run.cancellation.borrow());
+            json!({"type":if interrupted{"interrupted"}else{"completed"},
+                "content":format!("任务未完成：{} 已有进度和回执已保留。",error.message),
+                "error":if interrupted {json!(error.message)} else {Value::Null},
+                "code":error.code,"statusCode":error.status,
+                "taskCompletion":{"completionState":"partial","code":error.code}})
         }
     };
     let settled_generation_ms = run.generation_elapsed().await;
@@ -1448,8 +1462,8 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             value["durationMs"] = json!(elapsed);
         }
     }
-    if value["code"] == "ABORT_ERR" || value["type"] == "error" {
-        if run.journal.as_ref().is_some_and(|journal| journal.load_current()
+    if let Some(failure_reason) = escaped_reason {
+        if value["code"] == "ABORT_ERR" && run.journal.as_ref().is_some_and(|journal| journal.load_current()
             .is_ok_and(|task| task.state == crate::storage::task_repository::TaskState::Paused))
         {
             value["code"] = json!("TASK_PAUSED");
@@ -1466,11 +1480,20 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             let conversation = run.conversation_id.clone();
             let request = run.request_id.clone();
             let reply = expected_reply.clone();
-            let reason = value["error"].as_str().unwrap_or("任务已停止，已有进度保留。").to_owned();
-            let saved = tokio::task::spawn_blocking(move || settle_cancelled_message(&root, &conversation, &request, &reply, &reason, settled_generation_ms)).await;
+            let reason = value["error"].as_str().filter(|text| !text.is_empty()).unwrap_or(&failure_reason).to_owned();
+            let code = value["code"].as_str().unwrap_or("").to_owned();
+            let interrupted = super::gateway_runtime::reply_interrupted(&code, *run.cancellation.borrow());
+            let saved = tokio::task::spawn_blocking(move || settle_failed_reply(&root, &conversation, &request, &reply, &reason, &code, interrupted, settled_generation_ms)).await;
             match saved {
                 Ok(Ok(reply)) => {
-                    if let Some(reply) = reply { value["replyMessageId"] = json!(reply); }
+                    if let Some(reply) = reply {
+                        value["replyMessageId"] = reply["Id"].clone();
+                        value["content"] = reply["Content"].clone();
+                        value["reasoning"] = reply["Reasoning"].clone();
+                        value["assistantSegments"] = reply["AssistantSegments"].clone();
+                        value["taskCompletion"] = reply["ToolRun"]["taskCompletion"].clone();
+                        value["toolStreamProtocol"] = json!(3);
+                    }
                     break;
                 }
                 _ => {
@@ -1483,6 +1506,10 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             }
         }
     }
+    value["conversationId"] = json!(run.conversation_id);
+    value["requestId"] = json!(run.request_id);
+    value["role"] = json!("assistant");
+    if value["createdAt"].is_null() { value["createdAt"] = json!(now_iso8601()); }
     if let Some(journal) = &run.journal {
         use crate::storage::task_repository::TaskState;
         if value["code"] == "ABORT_ERR"
@@ -2029,7 +2056,7 @@ mod preparation_tests {
         data::upsert_message(&root, &conversation, &json!({"Id":reply,"RequestId":request,"Role":"assistant",
             "Status":"streaming","Content":"Current partial output.","AssistantSegments":[completed,pending],"ToolActivities":receipts})).unwrap();
         let before = data::read_model_messages(&root, &conversation).unwrap();
-        assert_eq!(settle_cancelled_message(&root, &conversation, &request, &reply, "User stopped.", Some(12_345)).unwrap(), Some(reply.clone()));
+        assert_eq!(settle_failed_reply(&root, &conversation, &request, &reply, "User stopped.", "ABORT_ERR", true, Some(12_345)).unwrap().unwrap()["Id"], reply);
         let after = data::read_model_messages(&root, &conversation).unwrap();
         let previous = after.iter().find(|message| message["Id"] == request).unwrap();
         assert_eq!(previous, before.iter().find(|message| message["Id"] == request).unwrap());
@@ -2041,7 +2068,47 @@ mod preparation_tests {
         assert_eq!(settled["AssistantSegments"][0], completed);
         assert_eq!(settled["AssistantSegments"][1]["status"], "interrupted");
         assert_eq!(settled["AssistantSegments"][1]["content"], "Current partial output.");
-        assert!(settle_cancelled_message(&root, &conversation, &new_id(), &reply, "Wrong request.", Some(99_999)).unwrap().is_none());
+        assert!(settle_failed_reply(&root, &conversation, &new_id(), &reply, "Wrong request.", "ABORT_ERR", true, Some(99_999)).unwrap().is_none());
+
+        // An execution blocker is a completed reply with an unfinished task, not a lost stream.
+        // 执行受阻正常交付回复但任务未完成，不当作丢失消息流。
+        let blocked_reply = new_id();
+        let original_run = json!({"version":1,"effects":{"receipts":["keep-original"]},
+            "diagnostics":{"modelRequests":2},"taskCompletion":{"completionState":"partial","unmet":["next step"]}});
+        data::upsert_message(&root, &conversation, &json!({"Id":blocked_reply,"RequestId":request,"Role":"assistant",
+            "Status":"streaming","Content":"Published progress.","AssistantSegments":[pending],
+            "ToolRun":original_run,"ToolActivities":receipts})).unwrap();
+        let settled = settle_failed_reply(&root, &conversation, &request, &blocked_reply,
+            "Authorization is required.", "TASK_AUTHORIZATION_REQUIRED", false, Some(15_000)).unwrap().unwrap();
+        assert_eq!(settled["Status"], "completed");
+        assert_eq!(settled["Error"], "");
+        assert!(settled["Content"].as_str().unwrap().starts_with("Published progress."));
+        assert!(settled["Content"].as_str().unwrap().contains("Authorization is required."));
+        assert_eq!(settled["ToolActivities"], receipts);
+        assert_eq!(settled["ToolRun"]["effects"], original_run["effects"]);
+        assert_eq!(settled["ToolRun"]["diagnostics"], original_run["diagnostics"]);
+        assert_eq!(settled["ToolRun"]["taskCompletion"]["unmet"], original_run["taskCompletion"]["unmet"]);
+        assert_eq!(settled["ToolRun"]["taskCompletion"]["completionState"], "partial");
+        assert_eq!(settled["ToolRun"]["taskCompletion"]["code"], "TASK_AUTHORIZATION_REQUIRED");
+        assert!(settled["AssistantSegments"].as_array().unwrap().iter().all(|segment| segment["status"] == "completed"));
+        assert_eq!(settled["AssistantSegments"][0]["id"], pending["id"]);
+        assert_eq!(settled["AssistantSegments"][1]["order"], 4);
+        assert_eq!(settled["AssistantSegments"][1]["round"], 3);
+        assert_eq!(settled["AssistantSegments"][1]["phase"], "final_answer");
+        assert_eq!(settled["AssistantSegments"][1]["reasoningDurationMs"], 0);
+        let missing_model_reply = new_id();
+        let prepared = settle_failed_reply(&root, &conversation, &request, &missing_model_reply,
+            "Choose a model before sending.", "MODEL_NOT_CONFIGURED", false, Some(1)).unwrap().unwrap();
+        assert_eq!(prepared["Status"], "completed");
+        assert_eq!(prepared["RequestId"], request);
+        assert_eq!(prepared["ToolRun"]["taskCompletion"]["completionState"], "partial");
+        let repeated = settle_failed_reply(&root, &conversation, &request, &missing_model_reply,
+            "Model is still unavailable.", "MODEL_NOT_CONFIGURED", false, Some(2)).unwrap().unwrap();
+        assert_eq!(repeated["AssistantSegments"].as_array().unwrap().len(), 1);
+        assert_eq!(repeated["AssistantSegments"][0]["id"], prepared["AssistantSegments"][0]["id"]);
+        assert!(repeated["Content"].as_str().unwrap().contains("Choose a model before sending."));
+        assert!(repeated["Content"].as_str().unwrap().contains("Model is still unavailable."));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

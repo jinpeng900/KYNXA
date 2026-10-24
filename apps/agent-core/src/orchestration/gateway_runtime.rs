@@ -27,6 +27,8 @@ const MAXIMUM_SAFE_ELAPSED_MS: u64 = 9_007_199_254_740_991;
 const MAXIMUM_ACTIVE_REQUESTS: usize = 64;
 const MAXIMUM_COMPLETED_REQUESTS: usize = 64;
 const COMPLETED_REQUEST_RETENTION: Duration = Duration::from_secs(30 * 60);
+const PENDING_PAUSE_RETENTION: Duration = Duration::from_secs(5 * 60);
+const MAXIMUM_PENDING_PAUSES: usize = 128;
 const STREAM_BATCH_DELAY: Duration = Duration::from_millis(32);
 const STREAM_BATCH_BYTES: usize = 32 * 1024;
 const STREAM_BATCH_EVENTS: usize = 128;
@@ -36,6 +38,13 @@ const STREAM_BATCH_EVENTS: usize = 128;
 pub(crate) fn automatic_network_recovery(code: &str) -> bool {
     matches!(code, "MODEL_NETWORK_FAILED" | "MODEL_RESPONSE_READ_FAILED"
         | "MODEL_RESPONSE_TIMEOUT" | "MODEL_IDLE_TIMEOUT" | "MODEL_STREAM_INCOMPLETE")
+}
+
+/// Execution may stop normally; only cancellation or transport loss interrupts the reply.
+/// 执行可以正常收尾；仅用户取消或网络中断将回复标为中断。
+pub(crate) fn reply_interrupted(code: &str, cancelled: bool) -> bool {
+    cancelled || matches!(code, "ABORT_ERR" | "TASK_PAUSED" | "TASK_CANCELLED")
+        || automatic_network_recovery(code)
 }
 
 #[derive(Default)]
@@ -706,6 +715,10 @@ struct Approval {
     expires: Instant,
     deadline_code: &'static str,
 }
+struct PendingPause {
+    conversation_id: String,
+    expires: Instant,
+}
 pub struct GatewayRuntime {
     pub config: GatewayConfig,
     pub tools: Arc<ToolRuntime>,
@@ -719,6 +732,7 @@ pub struct GatewayRuntime {
     request_slots: Arc<Semaphore>,
     conversations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     approvals: Mutex<RuntimeApprovals>,
+    pending_pauses: Mutex<HashMap<String, PendingPause>>,
     execution_tasks: AtomicUsize,
     extension_prewarm_scheduled: AtomicBool,
     background_cancellation: watch::Sender<bool>,
@@ -762,6 +776,7 @@ impl GatewayRuntime {
             request_slots: Arc::new(Semaphore::new(MAXIMUM_ACTIVE_REQUESTS)),
             conversations: Default::default(),
             approvals: Default::default(),
+            pending_pauses: Default::default(),
             execution_tasks: AtomicUsize::new(0),
             extension_prewarm_scheduled: AtomicBool::new(false),
             background_cancellation: watch::channel(false).0,
@@ -1010,6 +1025,10 @@ impl GatewayRuntime {
             runs.remove(&request_id);
         }
         drop(runs);
+        if self.pending_pauses.lock().await.get(&request_id)
+            .is_some_and(|pending| pending.conversation_id != conversation) {
+            return Err(GatewayError::new("TASK_SCOPE_DENIED", "暂停请求不属于当前聊天。", 403));
+        }
         // Reserve before accepting persistent work; concurrent starts cannot bypass active admission.
         // 持久接受任务前预留活动名额；并发新请求不能越过准入，完成缓存不占执行名额。
         let queue_full = || GatewayError::new("CHAT_QUEUE_FULL", "当前任务队列已满，已有任务继续运行。", 429);
@@ -1037,6 +1056,13 @@ impl GatewayRuntime {
             &fingerprint,
         )
         .await?;
+        // Acceptance and an early window-exit pause share this request gate; no model starts between them.
+        // 接受与窗口退出暂停共用请求锁；正式接受后先保存暂停，再考虑模型派发。
+        let pending_pause = self.pending_pauses.lock().await.remove(&request_id);
+        if pending_pause.is_some() {
+            self.pause_accepted_task(task).await?;
+            return Err(GatewayError::new("TASK_CONTROLLED", "任务已暂停，输入和进度已保存。", 409));
+        }
         use crate::storage::task_repository::TaskState;
         if request_slot.is_none() && task.state != TaskState::Completed { return Err(queue_full()); }
         let request_slot = if task.state == TaskState::Completed { None } else { request_slot };
@@ -1136,6 +1162,69 @@ impl GatewayRuntime {
         completed.sort_unstable_by_key(|(_, finished)| *finished);
         let excess = completed.len().saturating_sub(MAXIMUM_COMPLETED_REQUESTS);
         for (id, _) in completed.into_iter().take(excess) { runs.remove(&id); }
+    }
+    /// Pause this root and its children through formal task control, including acceptance in flight.
+    /// 通过正式任务控制暂停当前根任务与子任务，也覆盖仍在接受中的退出请求。
+    pub async fn pause(self: &Arc<Self>, conversation: &str, request: &str, task_id: Option<&str>) -> Result<Value, GatewayError> {
+        let conversation = checked_id(&json!(conversation), "conversationId")?;
+        let request = checked_id(&json!(request), "requestId")?;
+        let task_id = task_id.map(|id| checked_id(&json!(id), "taskId")).transpose()?;
+        let gate = self.conversation_gate(&format!("accept:{request}")).await;
+        let _acceptance = gate.lock().await;
+        if task_id.is_none() && self.runs.lock().await.get(&request).is_some_and(|run| run.conversation_id != conversation) {
+            return Err(GatewayError::new("TASK_SCOPE_DENIED", "暂停请求不属于当前聊天。", 403));
+        }
+        let task = if let Some(id) = task_id.as_deref() {
+            Some(self.tasks.metadata(id).await?)
+        } else {
+            let root = self.config.data_root.clone();
+            let saved_conversation = conversation.clone();
+            let saved_request = request.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::storage::task_repository::TaskRepository::open(&root)?
+                    .find_by_request_id(&saved_conversation, &saved_request)
+            }).await.map_err(|_| GatewayError::new("TASK_LOOKUP_FAILED", "已保存任务暂不可读取。", 503))??
+        };
+        if let Some(task) = task {
+            if task.scope.conversation_id != conversation || task.parent_task_id.is_some()
+                || task_id.is_none() && task.request_id != request {
+                return Err(GatewayError::new("TASK_SCOPE_DENIED", "只能暂停本聊天的对应主任务。", 403));
+            }
+            self.pending_pauses.lock().await.remove(&request);
+            return self.pause_accepted_task(task).await;
+        }
+        let mut pending = self.pending_pauses.lock().await;
+        if let Some(existing) = pending.get(&request) {
+            if existing.conversation_id != conversation {
+                return Err(GatewayError::new("TASK_SCOPE_DENIED", "暂停请求不属于当前聊天。", 403));
+            }
+        } else {
+            pending.retain(|_, intent| intent.expires > Instant::now());
+            if pending.len() >= MAXIMUM_PENDING_PAUSES {
+                return Err(GatewayError::new("CHAT_PAUSE_QUEUE_FULL", "接受中的暂停请求过多，请重试。", 429));
+            }
+        }
+        pending.insert(request, PendingPause { conversation_id: conversation, expires: Instant::now() + PENDING_PAUSE_RETENTION });
+        Ok(json!({"paused":true,"pendingAcceptance":true}))
+    }
+
+    async fn pause_accepted_task(&self, mut task: crate::storage::task_repository::TaskRecord) -> Result<Value, GatewayError> {
+        use crate::storage::task_repository::TaskControl;
+        for attempt in 0..2 {
+            // Settled replies need no state rewrite; duplicate exit notifications remain idempotent.
+            // 已结算回复无需改写状态；重复退出通知也不重开任务或重复执行。
+            if task.state == TaskState::Paused || task.state.is_terminal() {
+                return Ok(json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":task.state}));
+            }
+            match self.tasks.control(&task.task_id, task.version, TaskControl::Pause).await {
+                Ok(value) => return Ok(json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":value["task"]["state"]})),
+                Err(error) if attempt == 0 && error.code == "TASK_CONFLICT" => {
+                    task = self.tasks.metadata(&task.task_id).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
     }
     pub async fn cancel(&self, conversation: &str, request: &str) -> Result<Value, GatewayError> {
         let run = self
@@ -1723,6 +1812,19 @@ mod generation_timing_tests {
     use super::*;
 
     #[test]
+    fn execution_blockers_do_not_interrupt_reply_delivery() {
+        for code in ["TASK_AUTHORIZATION_REQUIRED", "TASK_CAPABILITY_UNAVAILABLE",
+            "TASK_CONTINUATION_NO_PROGRESS", "TASK_COMPLETION_REVIEW_INVALID", "MODEL_NOT_CONFIGURED"] {
+            assert!(!reply_interrupted(code, false), "{code}");
+            assert!(reply_interrupted(code, true), "{code}");
+        }
+        for code in ["ABORT_ERR", "TASK_PAUSED", "TASK_CANCELLED", "MODEL_NETWORK_FAILED",
+            "MODEL_RESPONSE_TIMEOUT", "MODEL_STREAM_INCOMPLETE"] {
+            assert!(reply_interrupted(code, false), "{code}");
+        }
+    }
+
+    #[test]
     fn generation_timing_requires_a_real_start_and_preserves_restored_duration() {
         assert_eq!(generation_elapsed_ms(None, None), None);
         assert_eq!(generation_elapsed_ms(Some(12_345), None), Some(12_345));
@@ -1881,6 +1983,74 @@ mod approval_tests {
         Arc::get_mut(&mut run).unwrap().journal = Some(journal);
         let _ = run.stream_owner.set(Arc::downgrade(&run));
         run
+    }
+
+    #[tokio::test]
+    async fn window_exit_pause_before_acceptance_is_durable_before_any_dispatch() {
+        let (runtime, root) = runtime();
+        let input = json!({"conversationId":new_id(),"requestId":new_id(),
+            "userMessageId":new_id(),"message":"Create the requested report"});
+        let conversation = input["conversationId"].as_str().unwrap();
+        let request = input["requestId"].as_str().unwrap();
+        assert_eq!(runtime.pause(conversation, request, None).await.unwrap(),
+            json!({"paused":true,"pendingAcceptance":true}));
+        let error = runtime.begin(input.clone()).await.err().unwrap();
+        assert_eq!(error.code, "TASK_CONTROLLED");
+        let repository = crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root).unwrap();
+        let task = repository.find_by_request_id(conversation, request).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Paused);
+        assert!(task.input_reference.is_some());
+        assert_eq!(task.usage.model_requests, 0);
+        assert!(repository.operations(&task.task_id).unwrap().is_empty());
+        assert_eq!(runtime.execution_tasks.load(Ordering::Acquire), 0);
+        assert_eq!(runtime.begin(input.clone()).await.err().unwrap().code, "TASK_CONTROLLED");
+        let duplicate = runtime.pause(conversation, request, Some(&task.task_id)).await.unwrap();
+        assert_eq!(duplicate["taskId"], task.task_id);
+        assert_eq!(duplicate["pendingAcceptance"], false);
+        assert_eq!(repository.load(&task.task_id).unwrap().version, task.version);
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(repository); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn window_exit_pause_keeps_root_receipts_and_checkpoint_and_rejects_other_chats() {
+        use crate::storage::task_repository::{OperationEffect, OperationIntent, OperationState};
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let id = new_id();
+        journal.record_operation(&OperationIntent { operation_id:id.clone(),tool_call_id:new_id(),
+            tool_name:"filesystem.read".into(),input_sha256:"a".repeat(64),input_reference:None,
+            effect:OperationEffect::Observation }).unwrap();
+        journal.dispatch_operation(&id).unwrap();
+        journal.finish_operation(&id, OperationState::Succeeded, Some(json!({"resultId":"saved-result"})), None).unwrap();
+        let checkpoint = journal.checkpoint_from_chat(&new_id(), &run.request_id, None,
+            json!({"next":"continue remaining requirement"})).await.unwrap();
+        runtime.task_runs.lock().unwrap().insert(journal.task_id().to_owned(), Arc::downgrade(&run));
+        let before = journal.load_current().unwrap();
+        assert_eq!(runtime.pause(&new_id(), &run.request_id, Some(journal.task_id())).await.unwrap_err().code,
+            "TASK_SCOPE_DENIED");
+        assert_eq!(journal.load_current().unwrap().version, before.version);
+        // A restored observer can have a new reply request; the original root identity remains authoritative.
+        // 恢复观察可使用新回复请求号；原根任务身份仍是暂停目标。
+        let observer_request = new_id();
+        let paused = runtime.pause(&run.conversation_id, &observer_request, Some(journal.task_id())).await.unwrap();
+        assert_eq!(paused["paused"], true);
+        assert_eq!(paused["taskId"], journal.task_id());
+        assert_eq!(journal.load_current().unwrap().state, TaskState::Paused);
+        assert!(*run.cancellation.borrow());
+        let operations = journal.repository().operations(journal.task_id()).unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].state, OperationState::Succeeded);
+        assert_eq!(operations[0].result_reference.as_ref().unwrap()["resultId"], "saved-result");
+        assert_eq!(journal.latest_checkpoint().unwrap().unwrap().checkpoint_id, checkpoint.checkpoint_id);
+        let version = journal.load_current().unwrap().version;
+        runtime.pause(&run.conversation_id, &run.request_id, Some(journal.task_id())).await.unwrap();
+        assert_eq!(journal.load_current().unwrap().version, version);
+        assert_eq!(runtime.execution_tasks.load(Ordering::Acquire), 0);
+        journal.finish(TaskState::Paused, Some("fixture-paused")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

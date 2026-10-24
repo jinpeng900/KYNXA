@@ -1,12 +1,12 @@
 # 桌面运行时打包
 
-适用版本：Windows x64 首个正式版 **KYNXA 1.7**（安装发行版本 `1.7.0`）。当前入口见 [文档索引](../../../docs/README.md) 和 [1.7 版本说明](../../../docs/releases/1.7.md)。修改版本配置不会自动重命名或更新旧安装 EXE。
+适用版本：Windows x64 正式版 **KYNXA 1.8**（安装发行版本 `1.8.0`）。当前入口见 [文档索引](../../../docs/README.md) 和 [1.8 版本说明](../../../docs/releases/1.8.md)。修改版本配置不会自动重命名或更新旧安装 EXE。
 
-Windows 包身份内部版本为 `1.70.0.0`，用于保持相对旧 `1.65.0.0` 的升级顺序；对外产品与安装版本使用 `1.7`／`1.7.0`。本版公开分发仅安装包 ZIP 与资源 ZIP，普通用户解压安装包后运行其中的 EXE；不单独分发 EXE、在线入口或维护清单。
+Windows 包身份内部版本为 `1.80.0.0`，用于保持相对旧 `1.70.1.0`、`1.65.0.0` 的升级顺序；对外产品与安装版本使用 `1.8`／`1.8.0`。本版公开分发仅安装包 ZIP 与资源 ZIP，普通用户解压安装包后运行其中的 EXE；不单独分发 EXE、在线入口、校验旁文件或维护清单。
 
 面向普通用户的 EXE 安装包使用 `build-installer.ps1 -OutputDirectory <输出目录>` 生成。此入口发布 Windows x64 Release 自包含应用，再编译 Inno Setup 安装器；它只生成文件，不启动或安装生成的 EXE。安装器支持软件、数据、用户工具目录及中英文界面，E5、私有 Node/MCP、Chromium 和运行依赖随基础包提供，勾选的对话模型交由首次启动后的 Rust 模型管理器下载。
 
-默认生成的安装文件名为 `KYNXA-1.7.0-windows-x64-setup.exe`，打入公开的 `KYNXA-1.7.0-windows-x64-setup.zip`；同版本运行资源文件名为 `KYNXA-1.7.0-windows-x64-resources.zip`。生成的 EXE、资源 ZIP 与本机模型保留在忽略的输出目录或独立分发目录；仓库只维护源码、Markdown 开发说明和依赖清单，旧设计压缩包与生成文档不再纳入 Git。在线安装构建工具仍供维护者使用，本版不分发在线入口。
+默认生成的安装文件名为 `KYNXA-1.8.0-windows-x64-setup.exe`，打入公开的 `KYNXA-1.8.0-windows-x64-setup.zip`；同版本运行资源文件名为 `KYNXA-1.8.0-windows-x64-resources.zip`。生成的 EXE、资源 ZIP 与本机模型保留在忽略的输出目录或独立分发目录；仓库只维护源码、Markdown 开发说明和依赖清单，旧设计压缩包与生成文档不再纳入 Git。在线安装构建工具仍供维护者使用，本版不分发在线入口。
 
 完整基础包不依赖安装时的外网连接；可选模型以及安装包本身的联网下载分别复用 Rust 模型管理器和 `RuntimeDownloads.psm1`，支持原站、明确发布的 GitHub 资产、国内镜像和独立来源断点。输出目录带有安装包下载入口及版本清单，详情见[离线安装与多来源下载](../../../docs/architecture/offline-installer.md)。
 
@@ -80,7 +80,7 @@ powershell -NoProfile -File apps/desktop/Build/prepare-native-runtime.ps1 -Asset
 
 ## 固定资源包与离线源码构建
 
-维护者先按默认 `Full` 准备一次完整资源，再从 `artifacts/runtime/native-desktop/win-x64/asset-files.txt` 导出；该清单缺失时使用 `bundle-files.txt`。导出会加入现有 VC 缓存的明确 DLL 与许可证白名单，不加入下载归档、Rust `target`、Cargo/NuGet 缓存、用户 Data 或模型账号。ZIP 旁生成整包 `.sha256`，包内 `resource-pack.json` 记录每份文件摘要和当前原生库、E5、MCP 锁定清单的版本摘要。
+维护者先按默认 `Full` 准备一次完整资源，再从 `artifacts/runtime/native-desktop/win-x64/asset-files.txt` 导出；该清单缺失时使用 `bundle-files.txt`。导出会加入现有 VC 缓存的明确 DLL 与许可证白名单，不加入下载归档、Rust `target`、Cargo/NuGet 缓存、用户 Data 或模型账号。ZIP 旁生成的 `.sha256` 仅供维护核对，不作为单独的公开附件；包内 `resource-pack.json` 记录每份文件摘要和当前原生库、E5、MCP 锁定清单的版本摘要。
 
 ```powershell
 # 维护者：只处理已准备好的本地资源，不进行下载或编译。

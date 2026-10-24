@@ -137,7 +137,7 @@ public sealed partial class ShellPage
             var about = new StackPanel { Spacing = 12 };
             about.Children.Add(new TextBlock { Text = "KYNXA", FontFamily = font, FontSize = 22,
                 Foreground = AppearanceService.GetBrush("KynxaTextBrush") });
-            about.Children.Add(new TextBlock { Text = typeof(ShellPage).Assembly.GetName().Version?.ToString(2) ?? "1.7",
+            about.Children.Add(new TextBlock { Text = typeof(ShellPage).Assembly.GetName().Version?.ToString(2) ?? "1.8",
                 FontFamily = font, FontSize = 14, Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush") });
             return SettingsWorkspace.ScrollPage(about);
         }, font);
