@@ -21,6 +21,7 @@ h1, h2, h3, h4 { line-height: 1.4; margin: 1.3em 0 .6em; }
 h1 { font-size: 1.65em; } h2 { font-size: 1.35em; } h3 { font-size: 1.16em; }
 p { margin: .7em 0; }
 a { color: inherit; text-underline-offset: 3px; }
+button { font: inherit; color: inherit; border: 0; background: transparent; cursor: pointer; }
 pre { padding: 12px; border: 1px solid var(--appearance-border); border-radius: 9px;
   background: var(--appearance-sidebar); overflow-x: auto; white-space: pre; overflow-wrap: normal; }
 pre.plain-text { font-family: var(--ui-font); font-size: 15px; line-height: 1.75; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -30,6 +31,7 @@ table { border-collapse: collapse; min-width: max-content; max-width: 100%; }
 th, td { padding: 7px 10px; border: 1px solid var(--appearance-border); text-align: left; }
 th { background: var(--appearance-soft); }
 .table-scroll { overflow-x: auto; }
+body[data-preview-kind='delimited'] td { white-space: pre-wrap; vertical-align: top; }
 blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--appearance-border); color: var(--appearance-secondary); }
 img { max-width: 100%; height: auto; }
 .image-view { display: flex; min-height: 200px; justify-content: center; align-items: flex-start; }

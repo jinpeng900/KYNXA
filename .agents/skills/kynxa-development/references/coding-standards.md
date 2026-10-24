@@ -12,6 +12,12 @@
 
 新增后端计算、状态、协议和实际执行使用 Rust，放入已有领域模块。纯规则只能使用 `module-ownership.json` 的 `rustApps[].allowedDomainDependencies`，保持禁止循环与禁止反向依赖 I/O 层；跨域执行接线须逐文件登记 `integrationModules` 的 `allowedDomains`，真实网络、文件、线程和推理执行须列入 `executionModules`。名称叫 `gateway_*` 不会自动获得跨域权限，不通过宽泛前缀放行。UI 继续使用 C#/XAML/WebView2，启动与构建接线使用 PowerShell；开发工具可使用 Node；安装包的私有 Node 仅用于 MCP 和已核验的 JS Skill，不承担正式后端职责。迁移以行为兼容、单一规则来源和真实调用接线验收，不以行数或文件数量替代工程结果。
 
+根、子任务共用 `gateway_model_request` 的模型就绪／准入／派发／结算阶段及 `ModelRequestOutcome`，共用 `gateway_tool_execution` 的回执、操作状态、只读分类、证据归档恢复和专用派发，以及 `gateway_live_memory` 的实时撤销投影。摘要执行器也由共享模型模块提供，两端不各自复制准入和计量闭包。旧实现删除后直接调用所属共享模块，不保留经主循环转发的接口。
+
+根循环内部按准备、恢复、模型轮、工具轮和交付划分，`LoopState` 使用上下文、工具、验收、交付、视觉、缓存、转录七个组合；子循环按准备、模型会话、工具轮、压缩、验收划分；模型会话只持运行时状态，`WorkerContext` 保留持久字段。根验收状态与证明恢复归 `acceptance`，根初始证据／历史／附件组装归 `preparation/inputs`；工具派发和回执投影分开时仍保持同一工作区锁范围。各自身份、权限、委派和交付策略留在原所有者，原检查点字段及子任务 `WorkerContext` 序列化保持，不把文件拆分误称为统一任务循环。
+
+完成决定使用 `TaskDecisionInput`／`TaskDecision`，回执事实与证明身份分别由 `ToolExecutionReceipt` 和 `CompletionProof` 约束；MCP／供应商动态载荷及公开 JSON 继续保留原合同。根、子同次评审共用 `CompletionEvidenceSet`，不得另建账本或跨新操作沿用旧投影。成功及观察引用必须通过真实回执合同；保留权限、版本、排队、引导、暂停恢复、记忆撤销和缓存行为，不以重做操作补回输出。第二批源码接入及统一短验证状态见[实施清单](../../../../docs/team/pending-fixes.md)，不能用历史测试成绩代替本次验证。
+
 ## 当前语言与入口
 
 先按下表确定改动归属，再查实际调用方。详细 Rust 操作关系复用 [原生网关调用图](../../../../docs/architecture/native-gateway.md#代码入口与调用关系)，不在技能中另维护一份业务账本或完整文件清单。

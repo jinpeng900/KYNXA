@@ -17,6 +17,8 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ProjectTreeEntry.cs" Link="ProjectTreeEntry.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ProjectTreeReconciler.cs" Link="ProjectTreeReconciler.cs" />
     <Compile Include="../../apps/desktop/Views/ShellPage.ProjectRendering.cs" Link="ShellPage.ProjectRendering.cs" />
@@ -35,5 +37,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="Contracts/ChatApiContracts.cs" />
   </ItemGroup>
 </Project>

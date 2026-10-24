@@ -31,7 +31,7 @@ public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessag
     public Visibility ReasoningVisibility => Message.Reasoning.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ReasoningBodyVisibility => _isReasoningExpanded ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ErrorVisibility => Message.Status is "error" or "interrupted" || Message.Error.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility RetryVisibility => _canRetry && ToolActivities.Count == 0 && Message.Status is "error" or "interrupted" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility RetryVisibility => _canRetry && Message.Status is "error" or "interrupted" ? Visibility.Visible : Visibility.Collapsed;
 
     public void SetRetryAllowed(bool allowed)
     {

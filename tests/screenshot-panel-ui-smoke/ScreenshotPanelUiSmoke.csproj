@@ -22,6 +22,7 @@
     <Compile Include="../../apps/desktop/Controls/MountedWorkspaceHeader.cs" Link="MountedWorkspaceHeader.cs" />
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationWorkTabState.cs" Link="ConversationWorkTabState.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotLoader.cs" Link="ConversationScreenshotLoader.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
     <Compile Include="../../apps/desktop/Views/ScreenshotViewerWindow.cs" Link="ScreenshotViewerWindow.cs" />

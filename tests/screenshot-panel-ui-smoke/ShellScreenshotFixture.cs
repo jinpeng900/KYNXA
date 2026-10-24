@@ -27,7 +27,10 @@ namespace KYNXA_Desktop.Views
         public Task? ResultClosed => _toolResultClosed?.Task;
 
         public ShellPage(IAgentApi api, Guid conversation, IReadOnlyList<ConversationMessageViewModel> messages)
-        { _agentApiClient = api; ActiveChatId = conversation; ActiveMessages = messages; }
+        {
+            _agentApiClient = api; ActiveChatId = conversation; ActiveMessages = messages;
+            ScreenshotPanel.ShowConversation(conversation, messages);
+        }
         public void OpenScreenshot(ToolResultRequest request) => ToolResultRequested(ScreenshotPanel, request);
         public void ChangeConversation(Guid conversation)
         { ActiveChatId = conversation; ConversationMessages.NotifyConversationChanged(); }

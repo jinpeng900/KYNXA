@@ -32,14 +32,20 @@ fn extension(path: &Path) -> String {
     path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase()
 }
 
+fn document_kind(path: &Path) -> String {
+    crate::document_formats::detect(path).map(|format| format.name.to_owned()).unwrap_or_else(|| extension(path))
+}
+
 fn format(path: &Path) -> (&'static str, &'static str) {
-    match extension(path).as_str() {
+    match document_kind(path).as_str() {
         "md" | "markdown" | "mdown" => ("markdown", "text/markdown; charset=utf-8"),
         "mmd" | "mermaid" => ("mermaid", "text/plain; charset=utf-8"),
         "pdf" => ("pdf", "application/pdf"),
         "docx" => ("docx", DOCX_MIME),
         "pptx" => ("pptx", PPTX_MIME),
         "xlsx" => ("xlsx", XLSX_MIME),
+        "csv" => ("delimited", "text/csv; charset=utf-8"),
+        "tsv" => ("delimited", "text/tab-separated-values; charset=utf-8"),
         "png" => ("image", "image/png"),
         "jpg" | "jpeg" => ("image", "image/jpeg"),
         "gif" => ("image", "image/gif"),
@@ -48,13 +54,14 @@ fn format(path: &Path) -> (&'static str, &'static str) {
         "svg" => ("image", "image/svg+xml"),
         "tif" | "tiff" => ("image", "image/tiff"),
         "html" | "htm" | "xhtml" => ("html", "text/html; charset=utf-8"),
-        "zip" | "tar" | "gz" | "tgz" | "bz2" => ("archive", "text/plain; charset=utf-8"),
+        "zip" | "tar" | "gzip" | "tar.gz" | "bzip2" | "tar.bz2" => ("archive", "text/plain; charset=utf-8"),
         _ => ("text", "text/plain; charset=utf-8"),
     }
 }
 
 fn is_office(path: &Path) -> bool {
-    matches!(extension(path).as_str(), "doc" | "docx" | "ppt" | "pptx" | "odt" | "odp" | "rtf" | "xls" | "xlsx" | "ods")
+    matches!(document_kind(path).as_str(), "doc" | "docx" | "ppt" | "pptx" | "odt" | "odp" | "rtf" | "xls" | "xlsx" | "ods"
+        | "xlsb" | "fodt" | "fodp" | "fods" | "epub")
 }
 
 fn complex_field(instruction: &str) -> bool {
@@ -208,14 +215,14 @@ fn docx_fallback(bytes: &[u8]) -> Result<Option<&'static str>, GatewayError> {
 /// The caller owns file or attachment authorization; this decision never opens the supplied path.
 /// 调用方负责文件或附件授权；此判断仅读取传入字节，路径仅用于识别格式，不读取其指向的文件。
 pub(crate) fn docx_direct_preview(path: &Path, bytes: &[u8]) -> Result<bool, GatewayError> {
-    if extension(path) != "docx" { return Ok(false); }
+    if document_kind(path) != "docx" { return Ok(false); }
     Ok(docx_fallback(bytes)?.is_none())
 }
 
 /// File and immutable attachment callers keep their existing authorization before this byte-only check.
 /// 文件与不可变附件调用方先完成各自授权；此检查只使用已读取字节，不扩展路径访问权限。
 pub(crate) fn office_direct_preview(path: &Path, bytes: &[u8]) -> Result<bool, GatewayError> {
-    match extension(path).as_str() {
+    match document_kind(path).as_str() {
         "docx" => docx_direct_preview(path, bytes),
         kind @ ("pptx" | "xlsx") => Ok(office_package_fallback(bytes, kind)?.is_none()),
         _ => Ok(false),
@@ -271,9 +278,115 @@ fn page_text(result: &mut Value, text: &str, arguments: &Value) -> Result<(), Ga
     Ok(())
 }
 
+fn preview_text(bytes: &[u8]) -> Result<String, GatewayError> {
+    let invalid = || failure("PREVIEW_FORMAT_UNSUPPORTED", "此文件不是可直接预览的文本或已支持文档。", 422);
+    for (bom, little_endian) in [(&[0xff, 0xfe][..], true), (&[0xfe, 0xff][..], false)] {
+        if let Some(bytes) = bytes.strip_prefix(bom) {
+            if bytes.len() % 2 != 0 { return Err(invalid()); }
+            let units = bytes.chunks_exact(2).map(|pair| if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else { u16::from_be_bytes([pair[0], pair[1]]) }).collect::<Vec<_>>();
+            return String::from_utf16(&units).map_err(|_| invalid());
+        }
+    }
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    // Legacy text uses the existing decoder; binary payloads must not become plausible garbled text.
+    // 旧编码复用现有解码器；二进制不能被当成似是而非的乱码正文。
+    if bytes.iter().any(|byte| *byte == 0 || (*byte < 0x20 && !matches!(*byte, 9..=13))) { return Err(invalid()); }
+    if let Ok(text) = std::str::from_utf8(bytes) { return Ok(text.to_owned()); }
+    encoding_rs::GBK.decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|text| text.into_owned()).ok_or_else(invalid)
+}
+
+fn delimited_row(source: &str, delimiter: char) -> Option<Vec<String>> {
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut quoted = false;
+    let mut chars = source.trim_end_matches(['\r', '\n']).chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' if quoted && chars.peek() == Some(&'"') => { cell.push('"'); chars.next(); }
+            '"' if quoted || cell.is_empty() => quoted = !quoted,
+            value if value == delimiter && !quoted => {
+                if cells.len() >= 16_383 { return None; }
+                cells.push(std::mem::take(&mut cell));
+            }
+            value => cell.push(value),
+        }
+    }
+    if quoted { return None; }
+    cells.push(cell);
+    Some(cells)
+}
+
+/// A table page ends between records; quoted newlines and UTF-16 cursors survive pagination unchanged.
+/// 表格只在记录间分页，保留引号内换行及 UTF-16 游标，不拆开一条记录。
+fn page_delimited(result: &mut Value, text: &str, delimiter: char, arguments: &Value) -> Result<(), GatewayError> {
+    let offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
+    let maximum = arguments["maxChars"].as_u64().unwrap_or(64000).clamp(1, 1024 * 1024) as usize;
+    let total = text.encode_utf16().count();
+    let mut rows = Vec::new();
+    let (mut record_byte, mut record_units, mut units) = (0, 0, 0);
+    let (mut first_byte, mut last_byte, mut next_offset) = (None, 0, offset);
+    let (mut quoted, mut field_start) = (false, true);
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        units += character.len_utf16();
+        match character {
+            '"' if quoted && chars.peek().is_some_and(|(_, next)| *next == '"') => {
+                chars.next(); units += 1;
+            }
+            '"' if quoted || field_start => { quoted = !quoted; field_start = false; }
+            value if value == delimiter && !quoted => field_start = true,
+            '\r' | '\n' if !quoted => {
+                if character == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                    chars.next(); units += 1;
+                }
+                let end = chars.peek().map(|(index, _)| *index).unwrap_or(text.len());
+                if record_units >= offset {
+                    if record_units == offset { first_byte = Some(record_byte); }
+                    if first_byte.is_none() { return Err(failure("INVALID_TOOL_ARGUMENTS", "表格游标须位于记录边界。", 400)); }
+                    let raw = &text[record_byte..end];
+                    let Some(row) = (raw.len() <= 1024 * 1024).then(|| delimited_row(raw, delimiter)).flatten() else {
+                        result["kind"] = json!("text");
+                        result["notice"] = json!("单条记录过大或引号不完整，显示原始文本，内容未丢弃。");
+                        return page_text(result, text, arguments);
+                    };
+                    rows.push(row); last_byte = end; next_offset = units;
+                    if units.saturating_sub(offset) >= maximum || rows.len() >= 1000 { break; }
+                }
+                record_byte = end; record_units = units; field_start = true;
+            }
+            _ => field_start = false,
+        }
+        if index + character.len_utf8() == text.len() && record_byte < text.len() && record_units >= offset {
+            if record_units == offset { first_byte = Some(record_byte); }
+            let Some(row) = (text.len() - record_byte <= 1024 * 1024)
+                .then(|| delimited_row(&text[record_byte..], delimiter)).flatten() else {
+                result["kind"] = json!("text");
+                result["notice"] = json!("表格引号不完整，显示原始文本，内容未丢弃。");
+                return page_text(result, text, arguments);
+            };
+            rows.push(row); last_byte = text.len(); next_offset = total;
+        }
+    }
+    if offset > total || first_byte.is_none() && offset < total {
+        return Err(failure("INVALID_TOOL_ARGUMENTS", "表格游标须位于记录边界。", 400));
+    }
+    result["text"] = json!(&text[first_byte.unwrap_or(text.len())..last_byte.max(first_byte.unwrap_or(text.len()))]);
+    result["rows"] = json!(rows);
+    result["delimiter"] = json!(delimiter.to_string());
+    result["offset"] = json!(offset);
+    result["nextOffset"] = if next_offset < total { json!(next_offset) } else { Value::Null };
+    result["hasMore"] = json!(next_offset < total);
+    result["totalCharacters"] = json!(total);
+    result["offsetUnit"] = json!("utf16-code-units");
+    Ok(())
+}
+
 fn archive_listing(path: &Path, bytes: &[u8]) -> Result<String, GatewayError> {
     let mut entries = Vec::new();
-    if extension(path) == "zip" {
+    if document_kind(path) == "zip" {
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|_| failure("DOCUMENT_PARSE_FAILED", "ZIP 目录无法读取。", 422))?;
         for index in 0..archive.len().min(20000) {
@@ -283,9 +396,9 @@ fn archive_listing(path: &Path, bytes: &[u8]) -> Result<String, GatewayError> {
         }
         if archive.len() > entries.len() { entries.push("… 目录项超过本次显示范围。".into()); }
     } else {
-        let reader: Box<dyn Read + '_> = match extension(path).as_str() {
-            "gz" | "tgz" => Box::new(flate2::read::GzDecoder::new(bytes)),
-            "bz2" => Box::new(bzip2::read::BzDecoder::new(bytes)),
+        let reader: Box<dyn Read + '_> = match document_kind(path).as_str() {
+            "gzip" | "tar.gz" => Box::new(flate2::read::GzDecoder::new(bytes)),
+            "bzip2" | "tar.bz2" => Box::new(bzip2::read::BzDecoder::new(bytes)),
             _ => Box::new(Cursor::new(bytes)),
         };
         let mut archive = tar::Archive::new(reader);
@@ -372,7 +485,8 @@ pub(crate) async fn office_pdf(path: &Path, version: &str, source_bytes: &[u8], 
 pub(super) async fn open(arguments: Value, path: PathBuf, binding: Value, context: &GatewayToolContext) -> Result<Value, GatewayError> {
     let source = path.clone();
     let read_binding = binding.clone();
-    let source_format = extension(&path);
+    let source_format = document_kind(&path);
+    let delimiter = if extension(&path) == "tsv" { '\t' } else { ',' };
     let inspect_office = matches!(source_format.as_str(), "docx" | "pptx" | "xlsx")
         && arguments["_metadataOnly"] != true && arguments["representation"] != "pdf";
     let (bytes, version, direct_fallback) = tokio::task::spawn_blocking(move || {
@@ -403,7 +517,12 @@ pub(super) async fn open(arguments: Value, path: PathBuf, binding: Value, contex
     }
     if matches!(kind, "pdf" | "image" | "html") || matches!(kind, "docx" | "pptx" | "xlsx")
         && direct_fallback.is_none() && arguments["representation"] != "pdf" {
-        result["contentUrl"] = json!(content_url(context, &path, &version, false));
+        let mut address = content_url(context, &path, &version, false);
+        if matches!(extension(&path).as_str(), "tif" | "tiff") {
+            address.push_str("&representation=png");
+            result["mimeType"] = json!("image/png");
+        }
+        result["contentUrl"] = json!(address);
     } else if is_office(&path) {
         if let Some(reason) = direct_fallback { result["directPreviewFallback"] = json!(reason); }
         match office_pdf(&path, &version, &bytes, context).await {
@@ -440,12 +559,10 @@ pub(super) async fn open(arguments: Value, path: PathBuf, binding: Value, contex
         }).await.map_err(|_| failure("PREVIEW_WORKER_FAILED", "目录预览分页未完成。", 500))??;
     } else {
         result = tokio::task::spawn_blocking(move || {
-            let text = if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe]) {
-                crate::tools::service_source_reading::decode(bytes, "utf-16le")
-            } else {
-                crate::tools::service_source_reading::decode(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes), "utf-8")
-            }.map_err(|_| failure("PREVIEW_FORMAT_UNSUPPORTED", "此文件不是可直接预览的文本或已支持文档。", 422))?;
-            page_text(&mut result, &text, &arguments)?;
+            let text = preview_text(&bytes)?;
+            if kind == "delimited" {
+                page_delimited(&mut result, &text, delimiter, &arguments)?;
+            } else { page_text(&mut result, &text, &arguments)?; }
             Ok::<_, GatewayError>(result)
         }).await.map_err(|_| failure("PREVIEW_WORKER_FAILED", "文本预览解码未完成。", 500))??;
     }
@@ -481,7 +598,101 @@ pub(crate) async fn preview(arguments: Value, context: &GatewayToolContext) -> R
     Ok(result)
 }
 
+fn image_png(bytes: &[u8]) -> Result<Vec<u8>, GatewayError> {
+    use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
+    let invalid = || failure("PREVIEW_IMAGE_INVALID", "图片预览无法解码，原文件保持不变。", 422);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(32768);
+    limits.max_image_height = Some(32768);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|_| invalid())?;
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(|_| invalid())?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > 64_000_000 || decoder.total_bytes() > 256 * 1024 * 1024 {
+        return Err(failure("PREVIEW_IMAGE_LIMIT", "图片超过预览解码容量，原文件保持不变。", 413));
+    }
+    let orientation = decoder.orientation().map_err(|_| invalid())?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|_| invalid())?;
+    image.apply_orientation(orientation);
+    let mut encoded = Cursor::new(Vec::new());
+    image.write_to(&mut encoded, ImageFormat::Png).map_err(|_| invalid())?;
+    Ok(encoded.into_inner())
+}
+
+async fn convert_image(bytes: Vec<u8>, context: &GatewayToolContext) -> Result<Vec<u8>, GatewayError> {
+    static CONVERSIONS: OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let mut cancellation = context.cancellation.clone();
+    let workers = CONVERSIONS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2))).clone();
+    let permit = tokio::select! {
+        permit = workers.acquire_owned() => permit.map_err(|_| failure("PREVIEW_IMAGE_UNAVAILABLE", "图片转换暂不可用。", 503))?,
+        _ = super::gateway::wait_for_cancellation(&mut cancellation) =>
+            return Err(failure("TOOL_CANCELLED", "图片预览已取消。", 409)),
+    };
+    // The blocking decoder owns its slot until it exits, including cancellation of its caller.
+    // 阻塞解码器退出前一直持有名额，调用方取消不能提前释放实际占用。
+    tokio::task::spawn_blocking(move || { let _permit = permit; image_png(&bytes) }).await
+        .map_err(|_| failure("PREVIEW_WORKER_FAILED", "图片转换未完成。", 500))?
+}
+
+/// Inline web images share the existing public-fetch policy, never page credentials or a general gateway proxy.
+/// 文内网络图片复用公共下载策略，不携带页面凭据，也不成为任意网关代理。
+async fn remote_image(address: &str, context: &GatewayToolContext) -> Result<WorkspaceContent, GatewayError> {
+    check_cancelled(context)?;
+    static READS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    let mut cancellation = context.cancellation.clone();
+    let _permit = tokio::select! {
+        permit = READS.get_or_init(|| tokio::sync::Semaphore::new(4)).acquire() =>
+            permit.map_err(|_| failure("PREVIEW_IMAGE_UNAVAILABLE", "图片读取暂不可用。", 503))?,
+        _ = super::gateway::wait_for_cancellation(&mut cancellation) =>
+            return Err(failure("TOOL_CANCELLED", "图片读取已取消。", 409)),
+    };
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let downloaded = tokio::select! {
+        result = super::gateway_web::download_public(address, 16 * 1024 * 1024, 30000, &cancelled) => result?,
+        _ = super::gateway::wait_for_cancellation(&mut cancellation) =>
+            return Err(failure("TOOL_CANCELLED", "图片读取已取消。", 409)),
+    };
+    let version = downloaded.response_hash;
+    let bytes = downloaded.bytes;
+    if downloaded.media_type == "image/svg+xml" {
+        let mut reader = quick_xml::Reader::from_reader(bytes.as_slice());
+        loop {
+            match reader.read_event() {
+                Ok(quick_xml::events::Event::Start(element) | quick_xml::events::Event::Empty(element))
+                    if element.local_name().as_ref() == b"svg" => break,
+                Ok(quick_xml::events::Event::Decl(_) | quick_xml::events::Event::Comment(_)) => continue,
+                Ok(quick_xml::events::Event::Text(text)) if text.iter().all(u8::is_ascii_whitespace) => continue,
+                _ => return Err(failure("PREVIEW_IMAGE_INVALID", "图片链接没有返回有效的 SVG。", 422)),
+            }
+        }
+        // The common binary response already gives SVG a script-free, network-free CSP.
+        // 共用二进制响应已为 SVG 设置禁止脚本和网络的 CSP。
+        return Ok(WorkspaceContent { bytes, mime_type:"image/svg+xml", version });
+    }
+    let format = image::guess_format(&bytes)
+        .map_err(|_| failure("PREVIEW_IMAGE_INVALID", "图片链接未返回支持的图片内容。", 415))?;
+    if !matches!(format,
+        image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Gif | image::ImageFormat::WebP
+        | image::ImageFormat::Bmp | image::ImageFormat::Tiff) {
+        return Err(failure("PREVIEW_IMAGE_INVALID", "图片链接未返回支持的图片内容。", 415));
+    }
+    if format == image::ImageFormat::Tiff {
+        let bytes = convert_image(bytes, context).await?;
+        return Ok(WorkspaceContent { bytes, mime_type:"image/png", version });
+    }
+    let (width, height) = image::ImageReader::with_format(Cursor::new(&bytes), format).into_dimensions()
+        .map_err(|_| failure("PREVIEW_IMAGE_INVALID", "图片头部无法解码。", 422))?;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 64_000_000 {
+        return Err(failure("PREVIEW_IMAGE_LIMIT", "图片超过预览解码容量。", 413));
+    }
+    Ok(WorkspaceContent { bytes, mime_type:format.to_mime_type(), version })
+}
+
 pub(crate) async fn content(arguments: &Value, context: &GatewayToolContext) -> Result<WorkspaceContent, GatewayError> {
+    if let Some(address) = arguments["imageUrl"].as_str() {
+        return remote_image(address, context).await;
+    }
     let requested = arguments["path"].as_str().ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "缺少预览文件路径。", 400))?;
     let expected = arguments["version"].as_str().filter(|value| !value.is_empty())
         .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "缺少预览文件版本。", 400))?;
@@ -506,6 +717,10 @@ pub(crate) async fn content(arguments: &Value, context: &GatewayToolContext) -> 
         .map_err(|_| failure("PREVIEW_WORKER_FAILED", "预览内容读取未完成。", 500))??;
     if version != expected { return Err(failure("TOOL_FILE_CONFLICT", "文件已变化，请刷新预览。", 409)); }
     let (kind, mime_type) = format(&path);
+    if kind == "image" && (matches!(extension(&path).as_str(), "tif" | "tiff") || arguments["representation"] == "png") {
+        let bytes = convert_image(bytes, context).await?;
+        return Ok(WorkspaceContent { bytes, mime_type:"image/png", version });
+    }
     if arguments["representation"] == "pdf" && is_office(&path) {
         let cached = converted_path(context, &version);
         let bytes = tokio::fs::read(cached).await
@@ -719,5 +934,62 @@ mod tests {
         for name in ["legacy.doc", "slides.ppt", "slides.pptx", "sheet.xlsx"] {
             assert!(is_office(Path::new(name)));
         }
+    }
+
+    #[test]
+    fn preview_aliases_and_legacy_text_reuse_the_existing_formats() {
+        for (name, kind) in [("plan.docm", "docx"), ("template.dotx", "docx"), ("show.ppsx", "pptx"),
+            ("sheet.xlsm", "xlsx"), ("sheet.xltx", "xlsx"), ("rows.csv", "delimited"),
+            ("rows.tsv", "delimited"), ("bundle.tar.gz", "archive"), ("book.cbz", "archive")] {
+            assert_eq!(format(Path::new(name)).0, kind, "{name}");
+        }
+        assert!(is_office(Path::new("book.epub")));
+        let (gbk, _, _) = encoding_rs::GBK.encode("中文表格");
+        assert_eq!(preview_text(&gbk).unwrap(), "中文表格");
+        let mut big_endian = vec![0xfe, 0xff];
+        for unit in "中文😀".encode_utf16() { big_endian.extend_from_slice(&unit.to_be_bytes()); }
+        assert_eq!(preview_text(&big_endian).unwrap(), "中文😀");
+        assert!(preview_text(b"binary\0content").is_err());
+    }
+
+    #[test]
+    fn delimited_preview_pages_whole_quoted_records_with_utf16_offsets() {
+        let source = "姓名,说明,空列\r\n\"中文😀\",\"两行\n第二行，含逗号,和\"\"引号\"\"\",\r\n最后,完成,";
+        let mut first = json!({"kind":"delimited"});
+        page_delimited(&mut first, source, ',', &json!({"maxChars":1})).unwrap();
+        assert_eq!(first["rows"], json!([["姓名", "说明", "空列"]]));
+        let mut second = json!({"kind":"delimited"});
+        page_delimited(&mut second, source, ',', &json!({"offset":first["nextOffset"],"maxChars":1})).unwrap();
+        assert_eq!(second["rows"], json!([["中文😀", "两行\n第二行，含逗号,和\"引号\"", ""]]));
+        let mut last = json!({"kind":"delimited"});
+        page_delimited(&mut last, source, ',', &json!({"offset":second["nextOffset"]})).unwrap();
+        assert_eq!(last["rows"], json!([["最后", "完成", ""]]));
+        assert_eq!(last["hasMore"], false);
+        assert_eq!(format!("{}{}{}", first["text"].as_str().unwrap(), second["text"].as_str().unwrap(), last["text"].as_str().unwrap()), source);
+        assert!(page_delimited(&mut last, source, ',', &json!({"offset":1})).is_err());
+        let mut tsv = json!({"kind":"delimited"});
+        page_delimited(&mut tsv, "A\tB\n1\t\"2\t3\"", '\t', &json!({})).unwrap();
+        assert_eq!(tsv["rows"], json!([["A", "B"], ["1", "2\t3"]]));
+    }
+
+    #[tokio::test]
+    async fn tiff_preview_converts_authorized_bytes_and_retains_the_original_version() {
+        let (context, _cancel) = super::super::gateway::test_context();
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 3, image::Rgb([20, 130, 240])));
+        let mut encoded = Cursor::new(Vec::new());
+        image.write_to(&mut encoded, image::ImageFormat::Tiff).unwrap();
+        let original = encoded.into_inner();
+        std::fs::write(context.workdir.join("picture.tiff"), &original).unwrap();
+        let preview = preview(json!({"path":"picture.tiff"}), &context).await.unwrap();
+        assert_eq!(preview["kind"], "image");
+        assert_eq!(preview["mimeType"], "image/png");
+        assert!(preview["contentUrl"].as_str().unwrap().contains("representation=png"));
+        let converted = content(&json!({"path":"picture.tiff","version":preview["version"],"representation":"png"}), &context).await.unwrap();
+        assert_eq!(converted.mime_type, "image/png");
+        assert_eq!(image::load_from_memory(&converted.bytes).unwrap().to_rgb8(), image.to_rgb8());
+        assert_eq!(std::fs::read(context.workdir.join("picture.tiff")).unwrap(), original);
+        assert_eq!(content(&json!({"path":"picture.tiff","version":"stale"}), &context).await.err().unwrap().code, "TOOL_FILE_CONFLICT");
+        assert!(content(&json!({"imageUrl":"http://127.0.0.1/private.png"}), &context).await.is_err());
+        std::fs::remove_dir_all(context.workdir.parent().unwrap()).unwrap();
     }
 }

@@ -10,5 +10,6 @@
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
   </ItemGroup>
 </Project>

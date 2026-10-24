@@ -157,6 +157,16 @@ pub struct AttemptToken {
     pub execution_version: u64,
 }
 
+/// Caller-proven implicit budget floors are applied only inside the fenced takeover transaction.
+/// 调用方核实的隐式预算下限，只在带版本校验的接管事务内应用。
+#[derive(Clone, Debug)]
+pub struct TaskAttemptBudgetExtension {
+    pub task_id: String,
+    pub expected_version: u64,
+    pub min_model_requests: u64,
+    pub min_execution_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskAttempt {
@@ -231,37 +241,6 @@ pub struct TaskOperation {
     pub updated_at_ms: i64,
 }
 
-/// Verification kind written when the user accepts that an unverifiable outcome stays unknown.
-/// 用户确认无法核验的结果保持未知时写入的核验类型；它不是成功回执，也不授权重放。
-pub const UNKNOWN_ACKNOWLEDGED_KIND: &str = "user-acknowledged-unknown";
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TaskOperationIdentity {
-    pub task_id: String,
-    pub operation_id: String,
-}
-
-impl TaskOperation {
-    /// The operation stays unknown, but the user accepted continuing without a verified receipt.
-    /// 操作仍是结果未知，但用户已确认在没有核验回执的情况下继续。
-    pub fn is_unknown_acknowledged(&self) -> bool {
-        self.state == OperationState::Unknown
-            && self
-                .verification_reference
-                .as_ref()
-                .is_some_and(|reference| reference["kind"] == UNKNOWN_ACKNOWLEDGED_KIND)
-    }
-
-    /// Unsettled non-observation effects block recovery until verified or acknowledged by the user.
-    /// 未结算的非观察副作用在核验或用户确认前阻塞恢复；已确认的未知结果不再阻塞。
-    pub fn blocks_recovery(&self) -> bool {
-        matches!(self.state, OperationState::Unknown | OperationState::Dispatched)
-            && self.intent.effect != OperationEffect::Observation
-            && !self.is_unknown_acknowledged()
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCheckpoint {
@@ -333,27 +312,4 @@ pub struct ModelRequestReservation {
     pub verification_reference: Option<Value>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ModelReservationIdentity {
-    pub task_id: String,
-    pub reservation_id: String,
-}
-
-pub const UNKNOWN_MODEL_COST_ACKNOWLEDGED_KIND: &str = "user-acknowledged-unknown-cost";
-
-impl ModelRequestReservation {
-    pub fn is_unknown_acknowledged(&self) -> bool {
-        self.state == ModelReservationState::Unknown && self.verification_reference.as_ref()
-            .is_some_and(|reference| reference["kind"] == UNKNOWN_MODEL_COST_ACKNOWLEDGED_KIND)
-    }
-
-    /// Acknowledged unknown costs retain their reservation and uncertainty, but no longer block recovery.
-    /// 用户确认的未知成本保留预约与不确定性，只解除恢复阻挡，不伪造派发、token 或成功状态。
-    pub fn blocks_recovery(&self) -> bool {
-        matches!(self.state, ModelReservationState::Reserved | ModelReservationState::Unknown)
-            && !self.is_unknown_acknowledged()
-    }
 }

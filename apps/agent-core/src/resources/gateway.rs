@@ -296,10 +296,13 @@ impl ResourceService {
         ttl_ms: u64,
     ) -> Result<ResourceLease, GatewayError> {
         if result["status"] != "granted" {
+            let code = result["reason"].as_str().unwrap_or("RESOURCE_INVALID_RECEIPT");
+            let capacity = matches!(code, "RESOURCE_PRESSURE" | "RESOURCE_WAIT_TIMEOUT" | "RESOURCE_QUEUE_FULL" | "RESOURCE_LEASE_LIMIT");
             return Err(GatewayError::new(
-                result["reason"].as_str().unwrap_or("RESOURCE_PRESSURE"),
-                "当前硬件资源不足，等待或暂停后台任务后可继续。",
-                503,
+                code,
+                if capacity { "当前硬件资源不足，正在等待可用资源。" }
+                else { "资源请求未通过协议校验，已有进度已保留。" },
+                if code == "RESOURCE_INVALID_REQUEST" { 400 } else { 503 },
             ));
         }
         let lease_id = result["leaseId"]
@@ -513,6 +516,18 @@ mod admission_wait_tests {
         .await
         .unwrap_err();
         assert_eq!(failure.code, "RESOURCE_WAIT_TIMEOUT");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_resource_parameters_do_not_enter_the_capacity_wait_loop() {
+        let (_owner, cancellation) = watch::channel(false);
+        let attempts = AtomicUsize::new(0);
+        let receipt = wait_for_resource_response(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Ok(json!({"status":"denied","reason":"RESOURCE_INVALID_REQUEST"})) }
+        }, cancellation).await.unwrap();
+        assert_eq!(receipt["reason"], "RESOURCE_INVALID_REQUEST");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

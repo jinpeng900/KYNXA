@@ -53,10 +53,35 @@ public sealed class WorkspacePreviewApiClient : IDisposable
     /// 为本地文档渲染器读取已授权原件，限制响应体大小，不向页面开放任意网关地址。
     /// </summary>
     public async Task<byte[]> ReadDocumentContentAsync(Uri address, CancellationToken cancellationToken)
+        => (await ReadContentAsync(address, 256 * 1024 * 1024, cancellationToken)).Bytes;
+
+    /// <summary>
+    /// Resolve Markdown images through gateway authorization, never a page-controlled filesystem or network request.
+    /// Markdown 图片由网关授权及取回，不让页面直接访问磁盘或任意网络。
+    /// </summary>
+    public async Task<(byte[] Bytes, string ContentType)> ReadImageContentAsync(Guid conversationId, string path,
+        CancellationToken cancellationToken, Guid? mountId = null)
+    {
+        Uri address;
+        if (Uri.TryCreate(path, UriKind.Absolute, out var remote) && remote.Scheme is "http" or "https")
+            address = ContentAddress($"/agent/workspace/content?conversationId={conversationId:D}&imageUrl={Uri.EscapeDataString(remote.AbsoluteUri)}");
+        else
+        {
+            var preview = await ReadAsync(conversationId, path, cancellationToken: cancellationToken, mountId: mountId);
+            if (preview.Kind != "image" || string.IsNullOrWhiteSpace(preview.ContentUrl))
+                throw new InvalidDataException(UiText.Get("文件预览地址无效。"));
+            address = ContentAddress(preview.ContentUrl);
+        }
+        var image = await ReadContentAsync(address, 16 * 1024 * 1024, cancellationToken);
+        if (image.ContentType is not ("image/png" or "image/jpeg" or "image/gif" or "image/webp" or "image/bmp" or "image/avif" or "image/svg+xml"))
+            throw new InvalidDataException(UiText.Get("文件预览地址无效。"));
+        return image;
+    }
+
+    private async Task<(byte[] Bytes, string ContentType)> ReadContentAsync(Uri address, int maximumBytes, CancellationToken cancellationToken)
     {
         // Match the gateway's source limit; each format separately checks expanded package capacity.
         // 原件上限与网关保持一致；各格式再单独核验解包容量，不沿用 DOCX 限额拦截演示稿和表格。
-        const int maximumBytes = 256 * 1024 * 1024;
         var root = _http.BaseAddress ?? ModelGatewayService.Address;
         string[] segments = address.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         bool attachment = segments is ["api", "conversations", var conversationId, "attachments", var attachmentId, "content"]
@@ -80,7 +105,7 @@ public sealed class WorkspacePreviewApiClient : IDisposable
                 throw new InvalidDataException(UiText.Get("文档较大，正在改用页面预览。"));
             content.Write(buffer, 0, count);
         }
-        return content.ToArray();
+        return (content.ToArray(), response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "application/octet-stream");
     }
 
     public async Task<WorkspacePreviewTarget> ReadChangesAsync(Guid conversationId, CancellationToken cancellationToken = default, Guid? mountId = null)

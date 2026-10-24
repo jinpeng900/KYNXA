@@ -16,6 +16,40 @@ var shot = new ConversationWorkTab("screenshot/message-a/call-a", "screenshot", 
 var terminal = new ConversationWorkTab("terminal/message-a/call-b", "terminal", "PowerShell · 执行中");
 var secondShot = new ConversationWorkTab("screenshot/message-a/call-c", "screenshot", "截图 2");
 
+var restoring = new ConversationWorkTabState();
+restoring.ShowConversation(chatA, [shot, terminal, secondShot]);
+restoring.Select(secondShot.Key);
+restoring.ShowConversation(chatB, [terminal]);
+restoring.ShowConversation(chatA, [terminal], catalogComplete: false);
+Check(restoring.SelectedTab is null && restoring.Items.All(item => item.Kind != "screenshot"),
+    "An incomplete returning catalog hides unavailable images instead of selecting a temporary terminal.");
+restoring.ShowConversation(chatA, [shot, terminal, secondShot]);
+Check(restoring.SelectedTab?.Key == secondShot.Key,
+    "The completed A-B-A catalog restores the user's exact previous screenshot selection.");
+restoring.ShowConversation(chatB, [terminal]);
+restoring.ShowConversation(chatA, [terminal], autoOpenNew: false, catalogComplete: false);
+restoring.ShowConversation(chatA, [shot, terminal, secondShot], autoOpenNew: false);
+Check(restoring.SelectedTab?.Key == secondShot.Key,
+    "Returning an already selected resource is restoration even when automatic opening of new resources is disabled.");
+restoring.ShowConversation(chatB, [terminal]);
+restoring.ShowConversation(chatA, [terminal], catalogComplete: false);
+Check(restoring.Select(terminal.Key), "The user can choose an available tab while screenshot discovery is pending.");
+restoring.ShowConversation(chatA, [shot, terminal, secondShot]);
+Check(restoring.SelectedTab?.Key == terminal.Key, "Late screenshot discovery cannot replace the user's newer tab choice.");
+restoring.Select(secondShot.Key);
+restoring.ShowConversation(chatB, [terminal]);
+restoring.ShowConversation(chatA, [terminal], catalogComplete: false);
+Check(restoring.Close(secondShot.Key), "Closing the current pending selection records the user's explicit close intent.");
+restoring.ShowConversation(chatA, [shot, terminal, secondShot]);
+Check(restoring.SelectedTab?.Key == terminal.Key && restoring.OpenItems.All(item => item.Key != secondShot.Key),
+    "A screenshot closed during discovery stays closed when its receipt returns.");
+restoring.Reopen(secondShot.Key);
+restoring.ShowConversation(chatA, [terminal]);
+Check(restoring.SelectedTab?.Key == terminal.Key, "A complete catalog still falls back when the selected resource truly disappears.");
+restoring.ShowConversation(Guid.NewGuid(), [], catalogComplete: false);
+Check(restoring.SelectedTab is null && !restoring.HasItems && !restoring.Close(secondShot.Key),
+    "A new conversation cannot expose or close the previous chat's pending resource.");
+
 var terminals = new ConversationWorkTabState();
 var terminalOne = new ConversationWorkTab($"terminal/{chatA:D}/{Guid.NewGuid():N}", "terminal", "终端 1", chatA.ToString("D"));
 var terminalTwo = terminalOne with { Key = $"terminal/{chatA:D}/{Guid.NewGuid():N}", Title = "终端 2" };
@@ -176,6 +210,48 @@ Check(ConversationScreenshotSources.Collect(chatA,
     [new(chatA, Guid.NewGuid(), "assistant", [screenshotTools[0] with { Status = "unknown" }])]).Length == 0,
     "Foreign conversations and unknown execution outcomes cannot add sidebar screenshots.");
 
+var originalShot = discoveredScreenshots[0];
+var displayShot = new ToolActivity("present-image", "artifact.open", null, "completed", "Selected result",
+    System.Text.Json.JsonSerializer.Serialize(new { kind = "screenshot", presentation = "workspace", title = "关键结果",
+        sourceResultRef = new { id = originalShot.Tool.ResultRef!.Id, bytes = originalShot.Tool.ResultRef.Bytes, sha256 = originalShot.Tool.ResultRef.Sha256 },
+        sourceToolName = originalShot.Tool.Name, sourceToolCallId = originalShot.Tool.ToolCallId }), ResultRef: screenshotReference);
+var presentedShots = ConversationScreenshotSources.Collect(chatA,
+    [new(chatA, originalShot.MessageId, "assistant", [originalShot.Tool]), new(chatA, Guid.NewGuid(), "assistant", [displayShot])]);
+Check(presentedShots.Length == 1 && presentedShots[0].Title == "关键结果" &&
+    presentedShots[0].PresentationPriority == WorkspacePresentationPriority.Requested && presentedShots[0].TabKey == originalShot.TabKey &&
+    presentedShots[0].Tool.ResultRef == originalShot.Tool.ResultRef,
+    "Explicit image delivery promotes the original screenshot without duplicating its tab, bytes or receipt identity.");
+var deliveredWithoutHistory = ConversationScreenshotSources.Collect(chatA, [new(chatA, Guid.NewGuid(), "assistant", [displayShot])]);
+Check(deliveredWithoutHistory.Length == 1 && deliveredWithoutHistory[0].TabKey == originalShot.TabKey &&
+    deliveredWithoutHistory[0].Tool.ResultRef == originalShot.Tool.ResultRef,
+    "A selected archived image remains loadable when its capture message is outside the current history window.");
+Check(ConversationScreenshotSources.Collect(chatA, [new(chatA, Guid.NewGuid(), "assistant", [displayShot with { Name = "image.retain" }])]).Length == 0 &&
+    ConversationScreenshotSources.Collect(chatA, [new(chatA, Guid.NewGuid(), "assistant", [displayShot with { Status = "unknown" }])]).Length == 0,
+    "Retention and unknown presentation results never expose an image tab.");
+Check(ConversationScreenshotSources.Collect(chatA, [new(chatA, Guid.NewGuid(), "assistant", [displayShot with
+    { Result = displayShot.Result!.Replace("\"bytes\":8192", "\"bytes\":\"invalid\"") }])]).Length == 0,
+    "Malformed presentation references are ignored rather than throwing in the UI projection.");
+var selectedImageState = new ConversationWorkTabState();
+var imageTab = new ConversationWorkTab(originalShot.TabKey, "screenshot", "后台图", PresentationPriority: WorkspacePresentationPriority.CatalogOnly);
+selectedImageState.ShowConversation(chatA, [imageTab]);
+var presentedImageTab = imageTab with { Title = "关键结果", PresentationPriority = WorkspacePresentationPriority.Requested };
+selectedImageState.ShowConversation(chatA, [presentedImageTab]);
+Check(selectedImageState.Items.Count == 1 && selectedImageState.SelectedTab?.Key == imageTab.Key,
+    "Promoting the first useful screenshot opens its existing tab without a second catalog item.");
+selectedImageState.ShowConversation(chatA, [presentedImageTab, terminal]);
+selectedImageState.Select(terminal.Key);
+selectedImageState.ShowConversation(chatA, [presentedImageTab, terminal, secondShot with { PresentationPriority = WorkspacePresentationPriority.CatalogOnly }]);
+Check(selectedImageState.SelectedTab?.Key == terminal.Key && selectedImageState.OpenItems.Count == 2,
+    "Selected image delivery preserves the user's reader and leaves later process captures hidden.");
+selectedImageState.Close(imageTab.Key);
+selectedImageState.ShowConversation(chatA, [presentedImageTab, terminal]);
+Check(selectedImageState.OpenItems.All(tab => tab.Key != imageTab.Key), "Repeated image delivery cannot reopen an explicitly closed tab.");
+var browserImageEnvelope = System.Text.Json.JsonSerializer.SerializeToElement(new { sessionId = "s", tabId = "t",
+    value = new { content = new[] { new { type = "image", mimeType = "image/png", data = "aW1hZ2U=" } } } });
+Check(ConversationScreenshotSources.TryGetImageBlocks(browserImageEnvelope, out var actualImageBlocks) && actualImageBlocks.GetArrayLength() == 1 &&
+    !ConversationScreenshotSources.TryGetImageBlocks(System.Text.Json.JsonSerializer.SerializeToElement(new { value = browserImageEnvelope.GetProperty("value") }), out _),
+    "Image loading unwraps only the actual native browser envelope, never arbitrary nested JSON.");
+
 var documentTabs = new ConversationWorkTabState();
 var document = ConversationWorkspaceSources.File(@"D:\work\报告.md", version: "one");
 var sameDocument = ConversationWorkspaceSources.File(@"d:/work/报告.md", version: "two");
@@ -210,6 +286,10 @@ var redirectedWebsite = System.Text.Json.JsonSerializer.SerializeToElement(new
 Check(ConversationWorkspaceSources.FromTool(write with { Name = "browser.open" }, redirectedWebsite) is { Kind: "browser", Title: "Article" }
     && ConversationWorkspaceSources.FromTool(write with { Name = "computer.launch" }, redirectedWebsite) is { Kind: "browser" },
     "Actual workspace browser receipts open sidebar tabs even when the model initially selected an application tool.");
+var backgroundWebsite = System.Text.Json.JsonSerializer.SerializeToElement(new
+    { kind = "browser", presentation = "background", url = "https://example.org/analysis", sessionId = "actual-session", tabId = "actual-tab" });
+Check(ConversationWorkspaceSources.FromTool(write with { Name = "browser.open" }, backgroundWebsite) is null,
+    "A real background browser session does not create or select a right-workspace tab.");
 var pendingWebsite = System.Text.Json.JsonSerializer.SerializeToElement(new
     { presentation = "workspace", url = "about:blank", path = "https://example.org/loading", navigationCommitted = false });
 Check(ConversationWorkspaceSources.FromTool(write with { Name = "browser.open" }, pendingWebsite)

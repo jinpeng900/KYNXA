@@ -112,10 +112,12 @@ class HarnessControls(unittest.TestCase):
         run = self.bare_run()
         run.arguments.stop_on_summary_rejection = False
         input_value = dict(run.records[0]['input'], runLimits={'maxRounds': 32, 'maxToolCalls': 80})
-        run.resume_record = {'taskId': 'owned-task', 'input': input_value}
         run.records = []
         run.new_chat = Mock(side_effect=AssertionError('replacement chat forbidden'))
-        task = {'taskId': 'owned-task', 'requestId': 'owned-request', 'version': 7, 'state': 'paused'}
+        task = {'taskId': 'owned-task', 'requestId': 'owned-request', 'version': 7, 'state': 'paused',
+                'scope': {'conversationId': 'owned-chat'}, 'goal': 'preserved original goal',
+                'inputReference': {'kind': 'task-input', 'sha256': 'frozen-original-input'}}
+        run.resume_record = {'taskId': 'owned-task', 'input': input_value, 'detail': {'task': dict(task)}}
         run.detail.side_effect = [{'task': task}, {'task': dict(task, state='completed'), 'children': []}]
         events = [{'type': 'started'}, {'type': 'task_started', 'taskId': 'owned-task', 'rootRequestTaskId': 'owned-task'},
                   {'type': 'completed', 'content': 'complete'}]

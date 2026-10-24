@@ -11,7 +11,7 @@ public sealed partial class ShellPage
 
     private bool HasQueuedTaskActivity(Guid chatId)
     {
-        if (_pendingReplies.ContainsKey(chatId) || _resumingTaskConversations.Contains(chatId)) return true;
+        if (_pendingReplies.ContainsKey(chatId)) return true;
         if (_runningTaskRecovery is not { } recovery || recovery.Chat.Id != chatId) return false;
         return recovery.ReadFailed || recovery.Attaching || recovery.ReadTask is { IsCompleted: false }
             || QueueObservedTasks(recovery).Any(task => task.ParentTaskId is null && task.State is "queued" or "running");
@@ -58,7 +58,6 @@ public sealed partial class ShellPage
             queue.Insert(target, move.Prompt);
             RefreshPromptQueue();
         };
-        InitializeUnknownOutcomeCard();
     }
 
     private List<QueuedPrompt> QueueFor(Guid chatId)
@@ -83,7 +82,6 @@ public sealed partial class ShellPage
         var messages = chatId is Guid id && _queuedPrompts.TryGetValue(id, out var queue) ? queue : [];
         PromptQueue.ShowMessages(messages, chatId is Guid active &&
             (HasQueuedTaskActivity(active) || messages.Any(prompt => prompt.IsTaskGuidance)));
-        PresentUnknownOutcome();
     }
 
     private bool TryQueuePrompt()
@@ -152,7 +150,7 @@ public sealed partial class ShellPage
         {
             var queue = QueueFor(chatId);
             if (!await AwaitQueueObservationAsync(chatId, retry: false)) return;
-            if (_chatClosing || _savingOnClose || HasQueuedTaskActivity(chatId) || HasUnknownOutcome(chatId) || queue.Count == 0) return;
+            if (_chatClosing || _savingOnClose || HasQueuedTaskActivity(chatId) || queue.Count == 0) return;
             var prompt = queue[0];
             if (prompt.IsSubmitting || prompt.IsTaskGuidance || FindChat(chatId).Chat is not { } chat) return;
             queue.Remove(prompt);

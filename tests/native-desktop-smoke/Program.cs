@@ -125,11 +125,15 @@ internal static partial class Program
             Check(frame.PixelWidth == screenshot.GetProperty("width").GetInt32() && frame.PixelHeight == screenshot.GetProperty("height").GetInt32(), "Physical client dimensions");
         }
         CheckError(await RequestAsync(new { operation = "desktop", action = "read", windowId = id, processId = pid + 1 }), "DESKTOP_TARGET_CHANGED");
+        await PrepareOwnedInputWindowAsync(window);
+        JsonElement activated = await RequestAsync(Target("activate"));
+        Check(activated.TryGetProperty("activated", out var didActivate) && didActivate.GetBoolean()
+            && GetForegroundWindow() == new WindowInteropHelper(window).Handle,
+            "Synthetic activation and actual owned foreground; actual=" + activated.GetRawText());
         CheckError(await RequestAsync(new { operation = "desktop", action = "click", windowId = id, processId = pid, x = -1, y = 1 }), "DESKTOP_INVALID_COORDINATES");
         CheckError(await RequestAsync(new { operation = "desktop", action = "key", windowId = id, processId = pid, key = "WIN+L" }), "DESKTOP_INVALID_KEY");
         CheckError(await RequestAsync(new { operation = "desktop", action = "type", windowId = id, processId = pid, text = new string('x', 4001) }), "DESKTOP_INVALID_REQUEST");
         CheckError(await RequestAsync(new { operation = "desktop", action = "launch", appPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"), args = new[] { "/c", "echo fixture" } }), "DESKTOP_LAUNCH_BLOCKED");
-        JsonElement activated = await RequestAsync(Target("activate")); Check(activated.GetProperty("activated").GetBoolean(), "Synthetic activation");
         async Task<Point> Coordinates(FrameworkElement element) => await window.Dispatcher.InvokeAsync(() =>
         {
             Point point = element.PointToScreen(new Point(Math.Min(16, element.ActualWidth / 2), element.ActualHeight / 2));
@@ -200,7 +204,7 @@ internal static partial class Program
 
     private static void Check(bool passed, string description) { if (!passed) throw new Exception(description); _checks++; }
     private static void CheckError(JsonElement response, string code) => Check(response.TryGetProperty("error", out JsonElement error)
-        && error.GetProperty("code").GetString() == code, "Expected fail-closed code " + code);
+        && error.GetProperty("code").GetString() == code, "Expected fail-closed code " + code + "; actual=" + response.GetRawText());
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint window, ref NativePoint point);
 }

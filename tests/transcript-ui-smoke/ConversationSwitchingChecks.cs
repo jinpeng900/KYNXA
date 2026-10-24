@@ -8,6 +8,27 @@ namespace TranscriptUiSmoke;
 
 public partial class App
 {
+    // Keep cache/navigation regression checks independent of clipboard and foreground input.
+    // 缓存与导航回归独立运行，不依赖剪贴板或前台输入。
+    private async Task CheckConversationSwitchingOnlyAsync()
+    {
+        var chat = Guid.NewGuid();
+        var rows = new List<ConversationMessageViewModel>
+        {
+            Message(chat, "user", "ISOLATED_NAVIGATION_FIXTURE"),
+            Message(chat, "assistant", "# Cached mathematics\n\n$x^2+y^2$\n\n" +
+                string.Join("\n\n", Enumerable.Repeat("缓存正文 / cached body", 60)) + "\n\nFOLLOW_APPEND")
+        };
+        _transcript.ShowConversation(chat, rows);
+        await WaitAsync("document.querySelector('.katex') !== null && __transcriptSmoke.bottomDistance() < 4", "isolated navigation fixture is rendered");
+        await CheckConversationSwitchingAsync(chat, rows);
+        _metrics["checks"] = _checks;
+        _metrics["mode"] = "conversation-switching";
+        File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"),
+            System.Text.Json.JsonSerializer.Serialize(_metrics, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(_result, $"PASS: {_checks} conversation switching checks.");
+    }
+
     private async Task CheckConversationSwitchingAsync(Guid longChat, List<ConversationMessageViewModel> longRows)
     {
         var html = (IDictionary)typeof(ConversationTranscript).GetField("_html", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(_transcript)!;
@@ -25,9 +46,10 @@ public partial class App
         Check(ReferenceEquals(cachedHtml, html[longRows[1].Message.Id]), "switch reuses cached Markdown HTML");
         Check(await EvalAsync<bool>("document.querySelectorAll('.message')[1] === window.__cachedArticle && document.querySelector('.katex') === window.__cachedMath"),
             "switch restores the same message and KaTeX DOM nodes");
-        await EvalAsync<bool>("(() => { window.__switchMutations = 0; window.__switchObserver = new MutationObserver(records => window.__switchMutations += records.length); window.__switchObserver.observe(document.querySelector('#messages'), { childList:true, subtree:true, attributes:true, characterData:true }); return true; })()");
+        await EvalAsync<bool>("(() => { window.__switchMutations = 0; window.__switchMutationDetails = []; window.__switchObserver = new MutationObserver(records => { window.__switchMutations += records.length; window.__switchMutationDetails.push(...records.slice(0, 40).map(record => ({ type:record.type, tag:record.target.nodeName, classes:record.target.className, attribute:record.attributeName, added:record.addedNodes.length, removed:record.removedNodes.length }))); }); window.__switchObserver.observe(document.querySelector('#messages'), { childList:true, subtree:true, attributes:true, characterData:true }); return true; })()");
         _transcript.ShowConversation(longChat, longRows, openAtBottom: false);
         await Task.Delay(120);
+        _metrics["unchangedConversationMutations"] = await EvalAsync<System.Text.Json.JsonElement>("window.__switchMutationDetails");
         Check(await EvalAsync<int>("window.__switchMutations") == 0, "unchanged conversation does not mutate message DOM");
         await EvalAsync<bool>("(() => { window.__switchObserver.disconnect(); return true; })()");
 

@@ -25,6 +25,7 @@ public partial class App : Application
     private readonly bool _managementLayoutOnly = Environment.GetCommandLineArgs().Contains("--management-layout-only", StringComparer.Ordinal);
     private readonly bool _personalOAuthOnly = Environment.GetCommandLineArgs().Contains("--personal-oauth-only", StringComparer.Ordinal);
     private readonly bool _inlineApprovalOnly = Environment.GetCommandLineArgs().Contains("--inline-approval-only", StringComparer.Ordinal);
+    private readonly bool _dialogPolishOnly = Environment.GetCommandLineArgs().Contains("--dialog-polish-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -81,6 +82,16 @@ public partial class App : Application
     {
         try
         {
+            if (_dialogPolishOnly)
+            {
+                await WaitAsync(() => _root.XamlRoot is not null && _api.Reads == 1 && Button("AgentRefreshButton").IsEnabled,
+                    "dialog fixture loads only isolated configuration");
+                await CheckDialogPolishAsync();
+                Check(_unhandled is null && _api.Connections == 0 && _api.Saves == 0,
+                    "dialog checks preserve configuration and never connect tools");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native tool UI checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_inlineApprovalOnly)
             {
                 await WaitAsync(() => _root.XamlRoot is not null && _api.Reads == 1 && Button("AgentRefreshButton").IsEnabled,
@@ -542,10 +553,10 @@ public partial class App : Application
         Check(presentation.RetryVisibility == Visibility.Visible, "failed text-only replies retain the ordinary retry action");
         message.ToolActivities.Add(new("prior-tool", "file.write", null, "completed", "Already changed a fixture file"));
         presentation.Refresh();
-        Check(presentation.RetryVisibility == Visibility.Collapsed, "failed replies with tool activity hide automatic retry");
+        Check(presentation.RetryVisibility == Visibility.Visible, "failed tool replies expose an explicit same-task retry");
         message.Status = "interrupted";
         presentation.Refresh();
-        Check(presentation.RetryVisibility == Visibility.Collapsed, "interrupted replies with tool activity also hide retry");
+        Check(presentation.RetryVisibility == Visibility.Visible, "interrupted tool replies can resume their original task and receipts");
         message.Status = "streaming";
         Check(!presentation.IsWaiting, "running tool activity replaces the empty waiting state");
         message.ToolActivities.Clear();

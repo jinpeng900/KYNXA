@@ -37,6 +37,8 @@
     <Content Include="../../apps/desktop/Assets/**/*" Link="Assets/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/**/*" Link="Resources/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
+    <Compile Include="../memory-ui-smoke/OwnedWindowActivation.cs" Link="OwnedWindowActivation.cs" />
+    <Compile Include="../memory-ui-smoke/OwnedWinUiWindowActivation.cs" Link="OwnedWinUiWindowActivation.cs" />
     <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
   </ItemGroup>
 </Project>

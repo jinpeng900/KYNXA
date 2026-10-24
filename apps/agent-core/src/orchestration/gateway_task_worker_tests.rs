@@ -2,6 +2,8 @@
 //! 本机模型协议、真实文件副作用及任务自有检查点恢复验证；不使用用户资料或密钥。
 
 use super::*;
+use super::completion::review_instruction;
+use super::tool_round::{archive_receipt, check_write_target, operation_intent, previous_operation};
 use crate::{
     gateway_contract::GatewayConfig,
     storage::task_repository::{NewTask, TaskBudget, TaskControl, TaskRepository, TaskScope, TaskUsage},
@@ -34,20 +36,21 @@ async fn child_existing_blender_proofs_recheck_failures_without_changing_origina
             "completionProof":super::super::completion_evidence::from_receipt(&call,&result)}));
     }
     let original_results = state.receipts.iter().map(|saved| saved["result"].clone()).collect::<Vec<_>>();
-    assert_eq!(completion_evidence_records(&state).len(), 2);
+    assert_eq!(ChildCompletionReview::new(&state, "").records.len(), 2);
     restore_completion_proofs(&root, &chat, &request, &mut state).await;
     assert_eq!(state.receipts[0]["verifiedSuccess"], false);
     assert!(state.receipts[0]["completionProof"].is_null());
     assert_eq!(state.receipts[1]["verifiedSuccess"], true);
     assert!(state.receipts[1]["completionProof"].is_object());
-    assert_eq!(completion_evidence(&state), vec![json!("actual-success")]);
-    let records = completion_evidence_records(&state);
+    let review = ChildCompletionReview::new(&state, "");
+    assert_eq!(review.valid_evidence, vec![json!("actual-success")]);
+    let records = review.records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["id"], "actual-success");
     assert_eq!(state.receipts.iter().map(|saved| saved["result"].clone()).collect::<Vec<_>>(), original_results);
     let mut resumed = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
     restore_completion_proofs(&root, &chat, &request, &mut resumed).await;
-    assert_eq!(completion_evidence(&resumed), vec![json!("actual-success")]);
+    assert_eq!(ChildCompletionReview::new(&resumed, "").valid_evidence, vec![json!("actual-success")]);
     assert_eq!(resumed.receipts[0]["result"], original_results[0]);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -77,16 +80,17 @@ async fn child_pending_proof_verification_survives_checkpoint_and_recovers_only_
         assert_eq!(saved["completionProofVerification"], "pending");
         assert!(saved["completionProof"].is_object());
     }
-    assert!(completion_evidence(&state).is_empty());
-    assert!(completion_evidence_records(&state).is_empty());
-    assert!(current_readback(&state, true).is_empty());
+    let review = ChildCompletionReview::new(&state, "");
+    assert!(review.valid_evidence.is_empty());
+    assert!(review.records.is_empty());
+    assert!(review.visual_readback_refs.is_empty());
     let mut resumed = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
     restore_completion_proofs(&root, &chat, &request, &mut resumed).await;
     assert_eq!(resumed.receipts[0]["verifiedSuccess"], true);
     assert!(resumed.receipts[0].get("completionProofVerification").is_none());
     assert_eq!(resumed.receipts[0]["result"], result);
     assert_eq!(resumed.receipts[1]["completionProofVerification"], "pending");
-    assert_eq!(completion_evidence(&resumed), vec![json!("owned-operation")]);
+    assert_eq!(ChildCompletionReview::new(&resumed, "").valid_evidence, vec![json!("owned-operation")]);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -103,15 +107,17 @@ fn child_readback_reuses_scoped_and_delivered_proofs_across_checkpoint_reviews()
     let read = saved("filesystem.read", "read-a", json!({"path":"C:/work/a.txt","sha256":"a".repeat(64),"content":"body"}), false);
     let log = saved("filesystem.write", "save-log", json!({"path":"C:/work/log.txt","sha256":"b".repeat(64),"bytes":5}), true);
     let mut state = WorkerContext { receipts:vec![read, image.clone(), log], review_pending:true, ..Default::default() };
-    assert!(current_readback(&state, false).iter().any(|proof| proof["toolCallId"] == "read-a"));
-    assert!(current_readback(&state, true).is_empty());
+    let review = ChildCompletionReview::new(&state, "");
+    assert!(review.readback_refs.iter().any(|proof| proof["toolCallId"] == "read-a"));
+    assert!(review.visual_readback_refs.is_empty());
     image["visualDeliveredToModel"] = json!(true);
     state.receipts[1] = image;
     let mut resumed = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
-    assert_eq!(current_readback(&resumed, true)[0]["toolCallId"], "scene-image");
+    assert_eq!(ChildCompletionReview::new(&resumed, "").visual_readback_refs[0]["toolCallId"], "scene-image");
     resumed.receipts.push(saved("terminal.host.run", "opaque-change", json!({"exitCode":0}), true));
-    assert!(current_readback(&resumed, false).is_empty());
-    assert!(current_readback(&resumed, true).is_empty());
+    let review = ChildCompletionReview::new(&resumed, "");
+    assert!(review.readback_refs.is_empty());
+    assert!(review.visual_readback_refs.is_empty());
     assert_eq!(resumed.receipts[..3], state.receipts);
 }
 
@@ -130,18 +136,19 @@ fn child_checkpoint_keeps_unresolved_checks_until_the_corresponding_retry_passes
     let state = WorkerContext { receipts: vec![check("failed-test","cargo test --lib",1),
         check("unrelated-build","cargo build",0)], code_version:snapshot.clone(), ..Default::default() };
     let mut restored = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
-    let verification = execution_validation(&restored, "修复项目代码");
+    let review = ChildCompletionReview::new(&restored, "修复项目代码");
+    let verification = &review.verification;
     assert_eq!(verification["state"], "checks-failed");
     assert_eq!(verification["pendingValidation"], true);
     assert_eq!(verification["needsValidation"], true);
     assert!(verification["unresolvedChecks"].as_array().unwrap().iter()
         .any(|check| check["toolCallId"] == "failed-test"));
-    assert!(review_instruction(&restored, false, false).contains("failed-test"));
-    assert!(!review_instruction(&restored, false, false).contains("Native receipt directory"));
+    assert!(review_instruction(&restored, &review, false, false).contains("failed-test"));
+    assert!(!review_instruction(&restored, &review, false, false).contains("Native receipt directory"));
     restored.review_attempts = 1;
-    assert!(review_instruction(&restored, false, false).contains("Native receipt directory"));
+    assert!(review_instruction(&restored, &review, false, false).contains("Native receipt directory"));
     restored.receipts.push(check("test-retried","cargo test --lib",0));
-    let resolved = execution_validation(&restored, "修复项目代码");
+    let resolved = ChildCompletionReview::new(&restored, "修复项目代码").verification;
     assert_eq!(resolved["state"], "checks-passed");
     assert_eq!(resolved["pendingValidation"], false);
     assert!(resolved["unresolvedChecks"].as_array().unwrap().is_empty());
@@ -154,6 +161,8 @@ struct Provider {
     requests: Arc<Mutex<Vec<Value>>>,
     delay: Arc<AtomicBool>,
     interrupted: Arc<AtomicBool>,
+    hold_third_interrupted: Arc<AtomicBool>,
+    release_interrupted: Arc<tokio::sync::Notify>,
     recovery_final: Arc<AtomicBool>,
     recovery_read_requested: Arc<AtomicBool>,
     recovery_unknown: Arc<AtomicBool>,
@@ -169,15 +178,19 @@ struct Provider {
     review_native_action: Arc<AtomicBool>,
     review_dsml_action: Arc<AtomicBool>,
     review_action_emitted: Arc<AtomicBool>,
-    dsml_optional_claimed: Arc<AtomicBool>,
 }
 async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -> Response {
-    provider.calls.fetch_add(1, Ordering::SeqCst);
+    let call_index = provider.calls.fetch_add(1, Ordering::SeqCst) + 1;
     provider.requests.lock().unwrap().push(request.clone());
     if provider.delay.load(Ordering::Acquire) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     if provider.interrupted.load(Ordering::Acquire) {
+        if call_index >= 3 && provider.hold_third_interrupted.load(Ordering::Acquire) {
+            // Keep the request in flight until explicit cancellation wins, without a timing race.
+            // 保持请求在途，明确测试取消，避免截断响应先结算的计时竞争。
+            provider.release_interrupted.notified().await;
+        }
         let frame = json!({"id":"child-partial","choices":[{"index":0,"delta":{"content":"已保存部分子任务正文。"},"finish_reason":null}]});
         return (
             [("content-type", "text/event-stream")],
@@ -190,6 +203,12 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
         .filter(|text|text.contains("Expected acceptance requirements:") && text.contains("Verified completion evidence:"));
     if let Some(assessment) = assessment {
         provider.review_requests.fetch_add(1,Ordering::AcqRel);
+        let requirements: Vec<Value> = assessment.lines().find_map(|line|line.strip_prefix("Expected acceptance requirements: "))
+            .and_then(|text|serde_json::from_str(text).ok()).unwrap_or_default();
+        let evidence: Vec<Value> = assessment.lines().find_map(|line|line.strip_prefix("Verified completion evidence: "))
+            .and_then(|text|serde_json::from_str(text).ok()).unwrap_or_default();
+        let met: Vec<Value> = requirements.iter().map(|requirement| json!({"requirementId":requirement["requirementId"],
+            "item":requirement["item"].as_str().unwrap_or("").chars().take(100).collect::<String>(),"evidence":evidence.iter().take(8).collect::<Vec<_>>()})).collect();
         if (provider.review_native_action.load(Ordering::Acquire) || provider.review_dsml_action.load(Ordering::Acquire))
             && !provider.review_action_emitted.swap(true, Ordering::AcqRel) {
             let name = crate::models::protocol::wire_name("filesystem.list");
@@ -197,7 +216,8 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
                 tools.iter().any(|tool| tool["function"]["name"] == name)), "Review must retain its authorized tool declarations.");
             assert_ne!(request["tool_choice"], "none");
             let message = if provider.review_dsml_action.load(Ordering::Acquire) {
-                json!({"role":"assistant","content":format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"{name}\">\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">.</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>")})
+                let footer = json!({"state":"continue","next":"Optionally inspect the directory again","unmet":[],"met":met});
+                json!({"role":"assistant","content":format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"{name}\">\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">.</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n<kynxa_task>{footer}</kynxa_task>")})
             } else {
                 json!({"role":"assistant","content":"Check the actual directory before completing acceptance.","tool_calls":[{"id":"review-native-list","type":"function",
                     "function":{"name":name,"arguments":json!({"path":"."}).to_string()}}]})
@@ -208,30 +228,12 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
         if provider.invalid_reviews.fetch_update(Ordering::AcqRel,Ordering::Acquire,|remaining|remaining.checked_sub(1)).is_ok() {
             return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"The previous assessment needs a repaired structured footer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
         }
-        let requirements: Vec<Value> = assessment.lines().find_map(|line|line.strip_prefix("Expected acceptance requirements: "))
-            .and_then(|text|serde_json::from_str(text).ok()).unwrap_or_default();
-        let evidence: Vec<Value> = assessment.lines().find_map(|line|line.strip_prefix("Verified completion evidence: "))
-            .and_then(|text|serde_json::from_str(text).ok()).unwrap_or_default();
-        if provider.review_native_action.load(Ordering::Acquire) || provider.review_dsml_action.load(Ordering::Acquire) {
+        if provider.review_native_action.load(Ordering::Acquire) {
             assert!(evidence.contains(&json!("review-native-list")), "Final acceptance must cite the actual later native result.");
         }
-        let met: Vec<Value> = requirements.iter().map(|requirement| json!({"requirementId":requirement["requirementId"],
-            "item":requirement["item"].as_str().unwrap_or("").chars().take(100).collect::<String>(),"evidence":evidence.iter().take(8).collect::<Vec<_>>()})).collect();
         let footer = if evidence.is_empty() { json!({"state":"continue","next":"Discover the file writer, create the delegated file and read it back.","unmet":["The actual requested operation has not executed."]}) }
             else { json!({"state":"complete","next":"","unmet":[],"met":met}) };
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":format!("<kynxa_task>{footer}</kynxa_task>")},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
-    }
-    if provider.review_dsml_action.load(Ordering::Acquire) && provider.review_action_emitted.load(Ordering::Acquire)
-        && !request["messages"].as_array().into_iter().flatten().any(|message|
-            message["role"] == "tool" && message["tool_call_id"] == "review-native-list") {
-        let message = if !provider.dsml_optional_claimed.swap(true, Ordering::AcqRel) {
-            json!({"role":"assistant","content":"The remaining directory check is merely optional; the old file receipts already prove completion.\n<kynxa_task>{\"state\":\"complete\"}</kynxa_task>"})
-        } else {
-            json!({"role":"assistant","content":"Perform the pending check through the native protocol.","tool_calls":[{"id":"review-native-list","type":"function",
-                "function":{"name":crate::models::protocol::wire_name("filesystem.list"),"arguments":json!({"path":"."}).to_string()}}]})
-        };
-        return Json(json!({"choices":[{"index":0,"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}],
-            "usage":{"prompt_tokens":100,"completion_tokens":20}})).into_response();
     }
     if provider.pure_answer.load(Ordering::Acquire) {
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"你好！"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}})).into_response();
@@ -282,7 +284,7 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
             json!({"role":"assistant","content":"Inspect the current actual state without replaying the earlier operation.","tool_calls":[{"id":"recovery-current-state-read","type":"function","function":{"name":crate::models::protocol::wire_name("filesystem.read"),"arguments":json!({"path":path}).to_string()}}]})
         } else {
             let text = if provider.recovery_unknown.load(Ordering::Acquire) {
-                "The fixture state was read. The original start command remains unknown and was not run again; user acknowledgement does not prove it succeeded."
+                "The fixture state was read. The original start command has no confirmed result and was not run again."
             } else { "The original successful file-write receipt was verified. No write was repeated." };
             json!({"role":"assistant","content":format!("{text}\n<kynxa_task>{{\"state\":\"complete\",\"next\":\"\",\"reason\":\"Actual current-state observation completed\"}}</kynxa_task>")})
         };
@@ -481,7 +483,7 @@ fn child_checkpoint_preserves_failure_guard_and_successful_receipts_together() {
 }
 
 #[tokio::test]
-async fn child_review_native_actions_and_dsml_recovery_preserve_successful_effects() {
+async fn child_reviews_keep_native_calls_but_do_not_execute_proven_optional_text_proposals() {
     for dsml in [false, true] {
         let fixture = Fixture::new().await;
         fixture.provider.review_native_action.store(!dsml, Ordering::Release);
@@ -490,21 +492,25 @@ async fn child_review_native_actions_and_dsml_recovery_preserve_successful_effec
             fixture.runtime.clone(), fixture.parent.clone(), fixture.child.clone(), fixture.context.clone(), fixture.input()))
             .await.expect("A child review must use the normal dispatch channel and finish.").unwrap();
         assert_eq!(result["status"], "completed", "{result}");
-        assert_eq!(fixture.provider.review_requests.load(Ordering::Acquire), 2);
+        assert_eq!(result["brokerDecision"], "final");
+        assert_eq!(result["modelTaskState"]["state"], if dsml {"continue"} else {"complete"});
+        assert_eq!(fixture.provider.review_requests.load(Ordering::Acquire), if dsml {1} else {2});
         let repository = TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
         let operations = repository.operations(&fixture.child.task_id).unwrap();
-        assert_eq!(operations.len(), 4, "DSML creates no operation and original effects must not repeat: {operations:?}");
-        for name in ["filesystem.write", "filesystem.read", "filesystem.list"] {
+        assert_eq!(operations.len(), if dsml {3} else {4}, "Text proposals create no operation and original effects must not repeat: {operations:?}");
+        for name in ["filesystem.write", "filesystem.read"] {
             assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name
                 && operation.state == OperationState::Succeeded).count(), 1);
         }
-        assert_eq!(operations.iter().find(|operation| operation.intent.tool_name == "filesystem.list").unwrap().intent.tool_call_id, "review-native-list");
+        assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == "filesystem.list").count(), usize::from(!dsml));
+        if !dsml {
+            assert_eq!(operations.iter().find(|operation| operation.intent.tool_name == "filesystem.list").unwrap().intent.tool_call_id, "review-native-list");
+        }
         assert!(!operations.iter().any(|operation| operation.intent.tool_name == "tool.result.read"));
         assert_eq!(std::fs::read_to_string(fixture.root.join("work/created.txt")).unwrap(), "真实子任务产物");
-        if dsml { assert!(fixture.provider.dsml_optional_claimed.load(Ordering::Acquire)); }
         let output: Value = serde_json::from_slice(&fixture.parent.journal.as_ref().unwrap().read_blob(&result["outputHistoryRef"]).await.unwrap()).unwrap();
         let checkpoint: WorkerContext = serde_json::from_value(output).unwrap();
-        assert!(!gateway_loop::has_unexecuted_tool_intent(&checkpoint.review_checkpoint));
+        assert!(!task::has_unexecuted_tool_intent(&checkpoint.review_checkpoint));
         fixture.close().await;
     }
 }
@@ -517,11 +523,11 @@ fn child_unexecuted_intent_survives_checkpoint_and_memory_refresh_until_a_real_r
     assert!(retain_child_tool_intent(&mut state, &text, &[json!({"name":"filesystem.list"})]));
     let mut restored = checkpoint_decode(&serde_json::to_vec(&state).unwrap()).unwrap();
     invalidate_child_memory_plan(&mut restored, &json!({"invalidSources":["withdrawn-fixture"]}));
-    assert!(gateway_loop::has_unexecuted_tool_intent(&restored.review_checkpoint));
-    gateway_loop::settle_unexecuted_tool_intent(&mut restored.review_checkpoint, "filesystem.list", &json!({"status":"error","isError":true}));
-    assert!(gateway_loop::has_unexecuted_tool_intent(&restored.review_checkpoint));
-    gateway_loop::settle_unexecuted_tool_intent(&mut restored.review_checkpoint, "filesystem.list", &json!({"status":"completed","executed":true,"isError":false}));
-    assert!(!gateway_loop::has_unexecuted_tool_intent(&restored.review_checkpoint));
+    assert!(task::has_unexecuted_tool_intent(&restored.review_checkpoint));
+    task::settle_unexecuted_tool_intent(&mut restored.review_checkpoint, "filesystem.list", &json!({"status":"error","isError":true}));
+    assert!(task::has_unexecuted_tool_intent(&restored.review_checkpoint));
+    task::settle_unexecuted_tool_intent(&mut restored.review_checkpoint, "filesystem.list", &json!({"status":"completed","executed":true,"isError":false}));
+    assert!(!task::has_unexecuted_tool_intent(&restored.review_checkpoint));
 }
 
 #[tokio::test]
@@ -560,7 +566,11 @@ async fn delegated_model_tool_receipt_loop_uses_private_context_and_actual_file(
     let saved_output:Value=serde_json::from_slice(&fixture.parent.journal.as_ref().unwrap().read_blob(&result["outputHistoryRef"]).await.unwrap()).unwrap();
     assert!(saved_output["output"].as_str().unwrap().contains("Continue delegated work."));
     let saved_state: WorkerContext = serde_json::from_value(saved_output).unwrap();
-    let proofs = completion_evidence_records(&saved_state);
+    let successful_refs = result["successfulOpsRefs"].as_array().unwrap();
+    assert!(!successful_refs.is_empty());
+    assert!(successful_refs.iter().all(|reference| saved_state.receipts.iter().any(|saved|
+        saved["result"]["resultRef"] == *reference && verified_completion_receipt(saved))));
+    let proofs = ChildCompletionReview::new(&saved_state, "").records;
     assert!(proofs.iter().any(|proof| proof["id"] == "child-call-1"
         && proof["kinds"].as_array().unwrap().contains(&json!("committed-output"))));
     assert!(proofs.iter().any(|proof| proof["id"] == "child-call-2"
@@ -1011,11 +1021,11 @@ async fn child_write_scope_and_unknown_dispatch_remain_enforced_on_restart() {
     let mut effects = EffectLedger::default();
     effects.apply("effects.observe", &json!({"call":write,"result":effect_receipt(&receipt),"workspaceRoot":fixture.context.workdir})).unwrap();
     assert_eq!(
-        effects.apply("effects.state", &json!({})).unwrap()["hasUnknownEffects"],
-        true
+        effects.apply("effects.state", &json!({})).unwrap()["unknown"].as_array().unwrap().len(),
+        1
     );
     assert!(!fixture.root.join("work/other.txt").exists());
-    assert!(recovered.record_operation(&operation_intent(&json!({"id":"second-write","name":"filesystem.write","arguments":{"path":"created.txt"}}), false, 1)).is_err());
+    assert!(recovered.record_operation(&operation_intent(&json!({"id":"second-write","name":"filesystem.write","arguments":{"path":"created.txt"}}), false, 1)).is_ok());
     recovered
         .finish(TaskState::WaitingVerification, Some("fixture-ended"))
         .await
@@ -1085,7 +1095,7 @@ async fn recovery_reconciles_original_tool_and_model_receipts_once_without_repla
     let report = recovered.reconcile_receipts().await.unwrap();
     assert_eq!(report["resolvedOperations"], 1, "{report}");
     assert_eq!(report["resolvedReservations"], 1, "{report}");
-    assert!(report["pending"].as_array().unwrap().is_empty(), "{report}");
+    assert!(report["unconfirmed"].as_array().unwrap().is_empty(), "{report}");
     let replay = recovered.reconcile_receipts().await.unwrap();
     assert_eq!(replay["resolvedOperations"], 0);
     assert_eq!(replay["resolvedReservations"], 0);
@@ -1164,7 +1174,7 @@ async fn production_resume_reconciles_steering_copies_and_continues_the_same_roo
     assert_ne!(result["task"]["state"], "waiting-verification", "{result}");
     assert_eq!(result["recovery"]["resolvedOperations"], 1, "{result}");
     assert_eq!(result["recovery"]["resolvedReservations"], 1, "{result}");
-    assert!(result["recovery"]["pending"].as_array().unwrap().is_empty(), "{result}");
+    assert!(result["recovery"]["unconfirmed"].as_array().unwrap().is_empty(), "{result}");
     let formal = data::read_model_messages(&fixture.runtime.config.data_root, &task.scope.conversation_id).unwrap();
     let old = formal.iter().find(|message| message["Id"] == request_id).unwrap();
     let latest = formal.iter().find(|message| message["Id"] == reply_id).unwrap();
@@ -1191,7 +1201,7 @@ async fn production_resume_reconciles_steering_copies_and_continues_the_same_roo
 }
 
 #[tokio::test]
-async fn user_acknowledged_unknown_effect_resumes_the_same_root_without_replay() {
+async fn resume_continues_original_task_without_unknown_confirmation_or_replaying_effects() {
     use sha2::{Digest, Sha256};
     let fixture = Fixture::new().await;
     let request_id = new_id();
@@ -1214,7 +1224,7 @@ async fn user_acknowledged_unknown_effect_resumes_the_same_root_without_replay()
         "connectionFingerprint":crate::retrieval::gateway_index::hash(&json!(["child-fixture","fixture-model","openai-completions",connection["baseUrl"],connection["apiKey"].as_str().unwrap_or("")]).to_string())});
     let transcript = json!({"version":1,"origin":origin,"rounds":[{"round":1,"text":"Start the service.","calls":[call],"observations":[]}]});
     data::upsert_message(&fixture.runtime.config.data_root, &task.scope.conversation_id,
-        &json!({"Id":request_id,"Role":"assistant","RequestId":request_id,"OriginUserMessageId":user_id,"Provider":"child-fixture","Model":"fixture-model",
+        &json!({"Id":request_id,"Role":"assistant","RequestId":request_id,"ReplyTo":user_id,"OriginUserMessageId":user_id,"Provider":"child-fixture","Model":"fixture-model",
             "Content":"","CreatedAt":"2026-10-20T00:00:01Z","Status":"interrupted","ModelTranscript":transcript,
             "ToolActivities":[{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"round":1,"order":1,"status":"running"}]})).unwrap();
     let intent = crate::storage::task_repository::OperationIntent {
@@ -1225,74 +1235,49 @@ async fn user_acknowledged_unknown_effect_resumes_the_same_root_without_replay()
     };
     journal.record_operation(&intent).unwrap();
     journal.dispatch_operation(&intent.operation_id).unwrap();
+    journal.reserve_model_request("prior-model-request").unwrap();
     journal.finish(TaskState::WaitingVerification, Some("executor-exited")).await.unwrap();
     std::fs::write(fixture.root.join("work/fixture-service-state.json"),
         r#"{"service":"fixture-service","recordedState":"stopped","originalStartOutcome":"unknown"}"#).unwrap();
     fixture.provider.recovery_unknown.store(true, Ordering::Release);
     fixture.provider.recovery_final.store(true, Ordering::Release);
 
-    // Ordinary resume cannot settle the unknown outcome and never calls the model.
-    // 普通继续无法结算未知结果，也不会调用模型。
+    // Ordinary continuation needs no acknowledgement; missing receipts remain facts in the original ledger.
+    // 普通继续不需要额外确认；缺少回执仍按事实保存在原账本。
     let current = journal.load_current().unwrap();
-    let waiting = fixture.runtime.tasks.control(&task.task_id, current.version, TaskControl::Resume).await.unwrap();
-    assert_eq!(waiting["task"]["state"], "waiting-verification", "{waiting}");
-    assert!(waiting["recovery"]["pending"].as_array().unwrap().iter()
-        .any(|item| item["code"] == "TOOL_RECEIPT_EVIDENCE_REQUIRED" && item["operationId"] == intent.operation_id), "{waiting}");
-    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 0);
-
-    let current = journal.load_current().unwrap();
-    let result = fixture.runtime.tasks
-        .acknowledge_unknown(&task.task_id, current.version, vec![intent.operation_id.clone()]).await.unwrap();
+    let result = fixture.runtime.tasks.control(&task.task_id, current.version, TaskControl::Resume).await.unwrap();
     assert_eq!(result["task"]["taskId"], task.task_id, "{result}");
     assert_ne!(result["task"]["state"], "waiting-verification", "{result}");
-    assert_eq!(result["acknowledgedOperationIds"][0], intent.operation_id, "{result}");
-    assert!(result["recovery"]["pending"].as_array().is_none_or(Vec::is_empty), "{result}");
+    assert!(result.get("acknowledgedOperationIds").is_none(), "{result}");
+    assert!(result["recovery"].get("pending").is_none(), "{result}");
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if journal.load_current().unwrap().state.is_terminal() { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("The same root must continue after the user accepts the unknown outcome.");
+    }).await.expect("The same root must continue directly from the saved context.");
     let finished = journal.load_current().unwrap();
     assert_eq!(finished.state, TaskState::Completed, "{finished:?}");
     let operations = journal.repository().operations(&task.task_id).unwrap();
     assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == "terminal.host.run").count(), 1,
         "The original host command must not be replayed.");
     let original = operations.iter().find(|operation| operation.intent.operation_id == intent.operation_id).unwrap();
-    assert_eq!(original.state, OperationState::Unknown, "Confirmation must not mark the command as succeeded.");
-    assert!(original.is_unknown_acknowledged());
+    assert_eq!(original.state, OperationState::Unknown, "Continuation must not mark the command as succeeded.");
+    assert!(original.verification_reference.is_none());
+    let reservations = journal.repository().model_reservations(&task.task_id).unwrap();
+    let prior_request = reservations.iter().find(|reservation| reservation.reservation_id == "prior-model-request").unwrap();
+    assert_eq!(prior_request.state, crate::storage::task_repository::ModelReservationState::Unknown);
+    assert!(prior_request.usage.is_none() && prior_request.dispatched.is_none(),
+        "Unmeasured dispatch and usage must stay unknown, not become known zero.");
     assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == "filesystem.read" && operation.state == OperationState::Succeeded).count(), 1,
         "The resumed model must make a real read-only observation before reporting the recorded current state.");
     let requests = fixture.provider.requests.lock().unwrap().clone();
     assert!(!requests.is_empty());
     let prompt = requests[0]["messages"].to_string();
-    assert!(prompt.contains("unknown outcomes") && prompt.contains("original-host-run")
-        && prompt.contains("observe the current actual state"), "{prompt}");
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn production_resume_keeps_unknown_effects_waiting_and_reports_the_missing_evidence() {
-    let fixture = Fixture::new().await;
-    let journal = TaskJournal::start_existing(&fixture.runtime.config.data_root, &fixture.child, "missing-receipt", 60000).unwrap();
-    let call = json!({"id":"unknown-recovery-write","name":"filesystem.write","arguments":{"path":"created.txt","content":"A","expectedHash":null}});
-    let intent = operation_intent(&call, false, 0);
-    journal.record_operation(&intent).unwrap();
-    journal.dispatch_operation(&intent.operation_id).unwrap();
-    journal.reserve_model_request("unknown-model-request").unwrap();
-    journal.finish(TaskState::WaitingVerification, Some("missing-originals")).await.unwrap();
-    fixture.parent.journal.as_ref().unwrap().release("fixture-old-parent-ended").await.unwrap();
-    std::fs::write(fixture.root.join("work/created.txt"), "Existing file is not an execution receipt").unwrap();
-    let task = journal.load_current().unwrap();
-    let result = fixture.runtime.tasks.control(&task.task_id, task.version, TaskControl::Resume).await.unwrap();
-    assert_eq!(result["task"]["taskId"], task.task_id);
-    assert_eq!(result["task"]["state"], "waiting-verification", "{result}");
-    let pending = result["recovery"]["pending"].as_array().unwrap();
-    assert!(pending.iter().any(|item| item["code"] == "MODEL_DISPATCH_EVIDENCE_REQUIRED"));
-    assert!(pending.iter().any(|item| item["code"] == "TOOL_RECEIPT_EVIDENCE_REQUIRED"));
-    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(journal.repository().operation(&task.task_id, &intent.operation_id).unwrap().unwrap().state, OperationState::Unknown);
-    assert_eq!(std::fs::read_to_string(fixture.root.join("work/created.txt")).unwrap(), "Existing file is not an execution receipt");
+    assert!(prompt.contains("fixture-service --start"), "The original call arguments must remain in context: {prompt}");
+    assert!(crate::models::protocol::complete_pairs(requests[0]["messages"].as_array().unwrap()),
+        "Restored calls need paired observations without certifying success.");
+    assert!(!prompt.contains("user confirmed") && !prompt.contains("user acknowledgement"), "{prompt}");
     fixture.close().await;
 }
 
@@ -1411,7 +1396,7 @@ async fn compaction_preserves_original_context_through_real_hub_readback() {
     let catalog = tools::builtin_catalog()
         .iter()
         .find(|tool| tool["name"] == "task.read")
-        .map(|tool| vec![gateway_loop::descriptor(tool, "task.read")])
+        .map(|tool| vec![gateway_model_request::descriptor(tool, "task.read")])
         .unwrap_or_default();
     compact_child(
         &fixture.runtime,
@@ -1488,6 +1473,7 @@ async fn compaction_preserves_original_context_through_real_hub_readback() {
 async fn incomplete_model_stream_preserves_text_and_retry_cost_until_explicit_pause() {
     let fixture = Fixture::new().await;
     fixture.provider.interrupted.store(true, Ordering::Release);
+    fixture.provider.hold_third_interrupted.store(true, Ordering::Release);
     let runtime = fixture.runtime.clone();
     let child = fixture.child.clone();
     let calls = fixture.provider.calls.clone();
@@ -1500,13 +1486,16 @@ async fn incomplete_model_stream_preserves_text_and_retry_cost_until_explicit_pa
         repository.control(&child.task_id,current.version,TaskControl::Pause).unwrap();
         runtime.cancel_task_worker(&child.task_id).await;
     };
-    let (result,_) = tokio::join!(execute(
-        fixture.runtime.clone(),
-        fixture.parent.clone(),
-        fixture.child.clone(),
-        fixture.context.clone(),
-        fixture.input(),
-    ),pause);
+    let (result,_) = tokio::time::timeout(Duration::from_secs(12), async {
+        tokio::join!(execute(
+            fixture.runtime.clone(),
+            fixture.parent.clone(),
+            fixture.child.clone(),
+            fixture.context.clone(),
+            fixture.input(),
+        ),pause)
+    }).await.expect("Explicit cancellation must settle while the third response is still in flight.");
+    fixture.provider.release_interrupted.notify_one();
     let result = result.unwrap();
     assert!(
         result["summary"]

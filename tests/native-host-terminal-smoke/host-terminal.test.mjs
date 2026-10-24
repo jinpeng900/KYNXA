@@ -200,13 +200,20 @@ test('native timeout stops the owned parent and child while retaining actual out
   for (const pid of [pids.root, pids.child]) assert.throws(() => process.kill(pid, 0));
 });
 
-test('native output cap remains bounded and does not pretend interrupted execution completed', windowsOnly, async t => {
+test('native output cap retains a bounded tail without interrupting successful execution', windowsOnly, async t => {
   const { cwd } = await fixture(t);
-  await writeFile(join(cwd, 'spam.cjs'), "for(let i=0;i<10000;i++)process.stdout.write('x'.repeat(4096));");
+  await writeFile(join(cwd, 'spam.cjs'), "for(let i=0;i<10000;i++)process.stdout.write('x'.repeat(4096));process.stdout.write('OUTPUT_FINISHED');");
   const value = await run({ shell: 'cmd', cwd, script: nodeCommand('spam.cjs'), timeoutMs: 10000 });
-  assert.equal(value.completed, false); assert.equal(value.outcome, 'unknown');
+  assert.equal(value.completed, true); assert.equal(value.outcome, 'completed');
+  assert.equal(value.exitCode, 0); assert.equal(value.timedOut, false); assert.equal(value.cancelled, false);
   assert.equal(value.outputTruncated, true); assert.equal(value.outputLimitExceeded, true);
-  assert.ok(Buffer.byteLength(value.stdout) + Buffer.byteLength(value.stderr) <= value.maxOutputBytes);
+  assert.equal(value.outputOverflowPolicy, 'truncate-keep-tail');
+  assert.ok(value.omittedOutputBytes > 0); assert.ok(value.stdout.endsWith('OUTPUT_FINISHED'));
+  const tailBytes = 64 * 1024;
+  const marker = `\n[... ${value.omittedOutputBytes} bytes omitted ...]\n`;
+  assert.equal(Buffer.byteLength(value.stdout) + Buffer.byteLength(value.stderr),
+    value.capturedOutputBytes + tailBytes + Buffer.byteLength(marker));
+  assert.equal(value.capturedOutputBytes + tailBytes + value.omittedOutputBytes, 10000 * 4096 + 'OUTPUT_FINISHED'.length);
   assert.ok(value.capturedOutputBytes <= value.maxOutputBytes);
 });
 

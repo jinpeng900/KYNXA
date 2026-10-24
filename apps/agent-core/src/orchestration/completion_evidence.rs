@@ -5,9 +5,134 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::task;
+use super::{progress::{RunProgress, ValidationRequirement, ValidationScope, ValidationTarget}, task};
+use sha2::{Digest, Sha256};
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum EvidenceKind {
+    Execution,
+    CommittedOutput,
+    ObservedContent,
+    ObservedState,
+    Visual,
+}
+
+/// Required identity fields are constructed from receipts; dynamic target metadata remains protocol data.
+/// 必需身份字段取自回执，动态目标元信息仍作为协议数据保留。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletionProof {
+    version: u8,
+    id: String,
+    references: Vec<Value>,
+    tool: String,
+    kinds: Vec<EvidenceKind>,
+    targets: Vec<Value>,
+    visual_hashes: Vec<String>,
+    visual_observed: bool,
+}
+
+/// One assessment owns one current projection, never another persistent receipt ledger.
+/// 同次评审复用一份当前投影，不另建持久回执账本。
+pub(super) struct CompletionEvidenceSet {
+    pub verification: Value,
+    pub valid_references: Vec<Value>,
+    pub records: Vec<Value>,
+}
+
+impl CompletionEvidenceSet {
+    pub(super) fn from_records(verification: Value, valid_references: Vec<Value>, mut records: Vec<Value>) -> Self {
+        for proof in &mut records { bind_validation(proof, &verification); }
+        Self { verification, valid_references, records: current(&records) }
+    }
+
+    pub(super) fn from_observations<'a>(observations: impl Iterator<Item = &'a Value>, verification: Value) -> Self {
+        let mut valid_references = Vec::new();
+        let mut records = Vec::new();
+        for observation in observations.filter(|observation| observation["verifiedSuccess"] == true) {
+            if task::is_completion_evidence_tool(observation["name"].as_str().unwrap_or("")) {
+                if let Some(id) = observation["id"].as_str().filter(|id| !id.is_empty()) {
+                    valid_references.push(json!(id));
+                }
+                for reference in observation["completionEvidence"].as_array().into_iter().flatten() {
+                    if reference.as_str().is_some_and(|value| !value.is_empty()) && !valid_references.contains(reference) {
+                        valid_references.push(reference.clone());
+                    }
+                }
+            }
+            let proof = &observation["completionProof"];
+            if proof.is_object() && proof["id"] == observation["id"] { records.push(proof.clone()); }
+        }
+        Self::from_records(verification, valid_references, records)
+    }
+
+    pub(super) fn decision_input(&self, requirements: &[String], mut input: task::TaskDecisionInput) -> task::TaskDecisionInput {
+        input.verification = self.verification.clone();
+        input.expected_requirements = requirements.to_vec();
+        input.valid_evidence = self.valid_references.clone();
+        input.evidence_records = Some(self.records.clone());
+        input.requires_readback = requirements.iter().any(|goal| task::requires_result_readback(goal));
+        input.requires_visual_readback = requirements.iter().any(|goal| task::requires_visual_observation(goal));
+        input.has_readback = has_readback(&self.records, false);
+        input.has_visual_readback = has_readback(&self.records, true);
+        input
+    }
+
+    pub(super) fn validation_scope(&self, requirements: &[String]) -> ValidationScope {
+        validation_scope(requirements, &self.records)
+    }
+
+    pub(super) fn with_current_requirements(mut self, progress: &RunProgress, requirements: &[String]) -> Self {
+        self.verification = progress.verification_for_scope(&self.validation_scope(requirements));
+        for proof in &mut self.records { bind_validation(proof, &self.verification); }
+        self
+    }
+}
+
+/// Associate only explicit targets with native receipt identities; unknown dependencies remain active.
+/// 仅把明确目标关联到原生回执身份，无法确定的依赖继续参与核验。
+pub(super) fn validation_scope(requirements: &[String], records: &[Value]) -> ValidationScope {
+    let records = current(records);
+    let known_targets = records.iter().flat_map(|record| record["targets"].as_array().into_iter().flatten())
+        .filter(|target| target["current"] == true && target["kind"] == "file")
+        .filter_map(|target| Some(ValidationTarget {
+            path_id:target["nativePathId"].as_str().filter(|id| is_digest(id))?.to_owned(),
+            sha256:target["version"].as_str().filter(|hash| is_digest(hash))?.to_ascii_lowercase(),
+            identity:normalized("file", target["identity"].as_str()?),
+        })).take(4096).collect();
+    let requirements = requirements.iter().map(|requirement| {
+        let expected = explicit_targets(requirement, &records);
+        let mut targets = Vec::new();
+        let targets_known = !expected.is_empty() && expected.iter().all(|expected| {
+            let matching = records.iter().flat_map(|record| record["targets"].as_array().into_iter().flatten())
+                .filter(|target| target["current"] == true && target["kind"] == "file" && target_matches(target, expected))
+                .collect::<Vec<_>>();
+            let identities = matching.iter().filter_map(|target| target["identity"].as_str()).collect::<HashSet<_>>();
+            if identities.len() != 1 || matching.is_empty() { return false; }
+            let mut found = false;
+            for target in matching {
+                let Some(path_id) = target["nativePathId"].as_str().filter(|id| is_digest(id)) else { continue; };
+                let Some(version) = target["version"].as_str().filter(|hash| is_digest(hash)) else { continue; };
+                if !targets.iter().any(|target: &ValidationTarget| target.path_id == path_id && target.sha256.eq_ignore_ascii_case(version)) {
+                    targets.push(ValidationTarget { path_id:path_id.to_owned(), sha256:version.to_ascii_lowercase(),
+                        identity:normalized("file", target["identity"].as_str().unwrap_or("")) });
+                }
+                found = true;
+            }
+            found
+        });
+        ValidationRequirement { key:format!("{:x}", Sha256::digest(requirement.as_bytes())), targets_known, targets }
+    }).collect();
+    ValidationScope { requirements, known_targets }
+}
+
+fn is_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 fn normalized(kind: &str, value: &str) -> String {
     let value = value.trim().replace('\\', "/");
@@ -33,6 +158,7 @@ fn actual_targets(body: &Value) -> Vec<Value> {
     for (source, owner) in sources {
         for (field, kind) in [("path", "file"), ("appPath", "file"), ("relativePath", "file"), ("url", "url"), ("sourceId", "source"), ("sourceRef", "source-ref")] {
             let Some(identity) = source[field].as_str().filter(|value| !value.trim().is_empty()) else { continue; };
+            let native_path_id = (kind == "file").then(|| format!("{:x}", Sha256::digest(identity.as_bytes())));
             let identity = normalized(kind, identity);
             if targets.iter().any(|target: &Value| target["kind"] == kind && target["identity"] == identity) { continue; }
             let version = [source, owner].into_iter().flat_map(|value| ["sha256", "contentHash", "sourceVersion", "sourceRevision"]
@@ -48,10 +174,12 @@ fn actual_targets(body: &Value) -> Vec<Value> {
             let complete = if start.is_some() || end.is_some() || total.is_some() {
                 start == Some(0) && end.is_some() && end == total && owner["hasMore"] != true && owner["truncated"] != true
             } else { (owner["documentComplete"] == true || owner["complete"] == true) && owner["hasMore"] != true && owner["truncated"] != true };
-            targets.push(json!({"kind":kind,"identity":identity,"version":version,
+            let mut target = json!({"kind":kind,"identity":identity,"version":version,
                 "range":{"start":start,"end":end,"total":total,"complete":complete,
                     "startLine":owner["lineRange"]["startLine"],"endLine":owner["lineRange"]["endLine"],
-                    "unit":owner["offsetUnit"].as_str().unwrap_or("utf16-code-units")}}));
+                    "unit":owner["offsetUnit"].as_str().unwrap_or("utf16-code-units")}});
+            if let Some(path_id) = native_path_id { target["nativePathId"] = json!(path_id); }
+            targets.push(target);
         }
     }
     targets
@@ -68,26 +196,27 @@ pub(super) fn from_receipt(call: &Value, receipt: &Value) -> Value {
     let canonical = &receipt["content"];
     let decoded = canonical.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
     let body = payload(decoded.as_ref().unwrap_or(canonical));
-    let mut kinds = vec![json!("execution")];
+    let mut kinds = vec![EvidenceKind::Execution];
     let mut references = vec![json!(id)];
-    for path in task::completed_output_paths(name, receipt) {
+    let output_paths = task::completed_output_paths(name, receipt);
+    if !output_paths.is_empty() { kinds.push(EvidenceKind::CommittedOutput); }
+    for path in output_paths {
         if !references.contains(&path) { references.push(path); }
-        if !kinds.contains(&json!("committed-output")) { kinds.push(json!("committed-output")); }
     }
-    if matches!(name, "filesystem.read" | "document.read" | "knowledge.read" | "web.fetch"
+    if matches!(name, "filesystem.read" | "document.read" | "image.read" | "knowledge.read" | "web.fetch"
         | "web.search" | "knowledge.search" | "browser.read" | "browser.snapshot") {
-        kinds.push(json!("observed-content"));
+        kinds.push(EvidenceKind::ObservedContent);
     } else if matches!(name, "filesystem.stat" | "process.list" | "computer.read" | "computer.windows")
         || name.rsplit('.').next().is_some_and(|method| matches!(method,
             "get_scene_info" | "get_object_info" | "list_scene_items" | "get_world_state_snapshot")) {
-        kinds.push(json!("observed-state"));
+        kinds.push(EvidenceKind::ObservedState);
     }
     // A terminal exit code alone is not quality proof; the broker adds version-checked validation.
     // 终端退出码不单独证明质量，由调用端补入已核验版本的检查记录。
     let images = task::receipt_visual_hashes(canonical);
-    if !images.is_empty() { kinds.push(json!("visual")); }
-    json!({"version":1,"id":id,"references":references,"tool":name,"kinds":kinds,
-        "targets":actual_targets(body),"visualHashes":images,"visualObserved":false})
+    if !images.is_empty() { kinds.push(EvidenceKind::Visual); }
+    json!(CompletionProof { version:1, id:id.to_owned(), references, tool:name.to_owned(), kinds,
+        targets:actual_targets(body), visual_hashes:images, visual_observed:false })
 }
 
 fn version_key(value: &Value) -> Option<String> {
@@ -436,6 +565,23 @@ fn matched_commit_target(records: &[Value], claim: &Value, expected: &str, image
             .any(|target| target["current"] == true && target_matches(target, expected)))
 }
 
+pub(super) fn unresolved_check_summary(verification: &Value) -> Value {
+    let unresolved = verification["unresolvedChecks"].as_array();
+    let count = unresolved.map_or(0, Vec::len);
+    json!({"count":count,"checks":unresolved.into_iter().flatten().take(8).map(|check|
+        json!({"toolCallId":check["toolCallId"],"checkId":check["checkId"],
+            "category":check["category"],"resolution":check["resolution"]})).collect::<Vec<_>>(),
+        "remaining":count.saturating_sub(8)})
+}
+
+pub(super) fn directory(records: &[Value]) -> Value {
+    json!(records.iter().filter(|record| record["current"] == true && record["tool"] != "tool.result.read")
+        .map(|record| json!({"id":record["id"],"tool":record["tool"],"kinds":record["kinds"],
+            "targets":record["targets"],"visualObserved":record["visualObserved"],
+            "observationCurrent":record["observationCurrent"],"mutationSequence":record["mutationSequence"]})).collect::<Vec<_>>())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +590,173 @@ mod tests {
         from_receipt(&json!({"name":name,"id":id,"arguments":{}}), &json!({"status":"completed","isError":false,"content":content}))
     }
     fn claim(ids: &[&str]) -> Value { json!({"evidence":ids}) }
+
+    fn code_snapshot(path: &str, hash: &str) -> Value {
+        let files = json!([{"pathId":format!("{:x}", Sha256::digest(path.as_bytes())),"sha256":hash,"state":"present"}]);
+        json!({"signature":format!("{:x}", Sha256::digest(files.to_string().as_bytes())),"complete":true,"files":files})
+    }
+
+    fn scoped_check(progress: &mut RunProgress, id: &str, exit_code: i64, snapshot: &Value, scope: &ValidationScope) {
+        progress.apply("progress.observeOutcome", &json!({
+            "call":{"id":id,"name":"terminal.host.run","arguments":{"script":"cargo test"}},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"exitCode":exit_code,"cwd":"C:/work"},
+            "beforeVersion":snapshot,"afterVersion":snapshot,
+            "validationScope":{"cwd":"C:/work","acceptanceScope":scope.checkpoint()},
+        })).unwrap();
+    }
+
+    #[test]
+    fn withdrawn_target_checks_leave_current_delivery_without_erasing_failed_receipts() {
+        let requirements = vec!["write a.rs".to_owned(), "write b.md".to_owned()];
+        let records = vec![
+            receipt("filesystem.write", "write-a", json!({"path":"C:/work/a.rs","sha256":"a".repeat(64),"bytes":4})),
+            receipt("filesystem.write", "write-b", json!({"path":"C:/work/b.md","sha256":"b".repeat(64),"bytes":4})),
+        ];
+        let mut progress = RunProgress::default();
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"write-a","name":"filesystem.write"},
+            "result":{"status":"completed"},"canonicalResult":{"path":"C:/work/a.rs","sha256":"a".repeat(64),"bytes":4}})).unwrap();
+        scoped_check(&mut progress, "failed-a", 1, &code_snapshot("C:/work/a.rs", &"a".repeat(64)),
+            &validation_scope(&requirements, &records));
+        let original = progress.apply("progress.state", &json!({})).unwrap();
+        assert_eq!(progress.verification()["state"], "checks-failed");
+
+        let active = vec![requirements[1].clone()];
+        let scope = validation_scope(&active, &records);
+        let review = CompletionEvidenceSet::from_records(progress.verification(), vec![json!("write-b")], records.clone())
+            .with_current_requirements(&progress, &active);
+        assert_eq!(review.verification["pendingValidation"], false);
+        assert_eq!(review.verification["requiredChecks"][0]["scopeResolution"], "outside-current-requirements");
+        let reply = json!({"state":"complete","source":"model-task-state","met":[
+            {"requirementId":"requirement-1","item":"b.md","evidence":["write-b"]}]});
+        let decision = task::TaskState::default().decide_typed(&review.decision_input(&active, task::TaskDecisionInput {
+            is_review:true, evidence_required:true, requires_verification:true, reply:reply.clone(), ..Default::default()
+        }));
+        assert_eq!(serde_json::to_value(decision).unwrap()["action"], "final");
+        let completion = progress.complete_for_scope(&json!({"modelTaskState":reply,
+            "requiresVerification":true,"acceptanceReviewed":true,"brokerDecision":"final"}), &scope);
+        assert_eq!(completion["completionState"], "completed");
+        assert_eq!(completion["receipts"][0]["passed"], false);
+        assert_eq!(progress.verification()["state"], "checks-failed");
+        let after = progress.apply("progress.state", &json!({})).unwrap();
+        assert_eq!(after["validationReceipts"], original["validationReceipts"]);
+        assert_eq!(after["requiredChecks"], original["requiredChecks"]);
+        assert!(after["validationReceipts"][0]["acceptanceScope"].is_object());
+        assert!(completion["receipts"][0].get("acceptanceScope").is_none());
+        assert!(completion["requiredChecks"][0].get("acceptanceScope").is_none());
+        let mut restored = RunProgress::default();
+        restored.apply("progress.restoreValidation", &json!({"state":after})).unwrap();
+        assert_eq!(restored.verification_for_scope(&scope)["pendingValidation"], false);
+    }
+
+    #[test]
+    fn shared_dependency_unknown_binding_and_changed_versions_keep_required_checks_active() {
+        let requirements = vec!["write a.rs".to_owned(), "write b.md".to_owned()];
+        let records = vec![
+            receipt("filesystem.write", "write-a", json!({"path":"C:/work/a.rs","sha256":"a".repeat(64),"bytes":4})),
+            receipt("filesystem.write", "write-b", json!({"path":"C:/work/b.md","sha256":"b".repeat(64),"bytes":4})),
+        ];
+        let mut progress = RunProgress::default();
+        scoped_check(&mut progress, "failed-a", 1, &code_snapshot("C:/work/a.rs", &"a".repeat(64)),
+            &validation_scope(&requirements, &records));
+        for active in [vec!["write b.md and verify a.rs".to_owned()], vec!["finish the remaining feature".to_owned()]] {
+            let view = progress.verification_for_scope(&validation_scope(&active, &records));
+            assert_eq!(view["pendingValidation"], true);
+            assert_eq!(view["requiredChecks"][0]["active"], true);
+        }
+        let mut changed = records.clone();
+        changed[0]["targets"][0]["version"] = json!("c".repeat(64));
+        assert_eq!(progress.verification_for_scope(&validation_scope(&["write a.rs".to_owned()], &changed))["pendingValidation"], true);
+
+        let mut legacy = progress.apply("progress.state", &json!({})).unwrap();
+        for field in ["validationReceipts", "requiredChecks"] {
+            for check in legacy[field].as_array_mut().unwrap() { check.as_object_mut().unwrap().remove("acceptanceScope"); }
+        }
+        let mut restored = RunProgress::default();
+        restored.apply("progress.restoreValidation", &json!({"state":legacy})).unwrap();
+        let active = vec![requirements[1].clone()];
+        assert_eq!(restored.verification_for_scope(&validation_scope(&active, &records))["pendingValidation"], true);
+
+        let active = vec![requirements[0].clone()];
+        let scope = validation_scope(&active, &records);
+        let reply = json!({"state":"complete","source":"model-task-state","met":[
+            {"requirementId":"requirement-1","item":"a.rs","evidence":["write-a"]}]});
+        let review = CompletionEvidenceSet::from_records(progress.verification(), vec![json!("write-a")], records.clone())
+            .with_current_requirements(&progress, &active);
+        assert!(matches!(task::TaskState::default().decide_typed(&review.decision_input(&active, task::TaskDecisionInput {
+            is_review:true, evidence_required:true, reply:reply.clone(), ..Default::default()
+        })), task::TaskDecision::Resume { .. }));
+        scoped_check(&mut progress, "passed-current-a", 0, &code_snapshot("C:/work/a.rs", &"a".repeat(64)), &scope);
+        assert_eq!(progress.verification_for_scope(&scope)["pendingValidation"], false);
+        let review = CompletionEvidenceSet::from_records(progress.verification(), vec![json!("write-a")], records.clone())
+            .with_current_requirements(&progress, &active);
+        assert!(matches!(task::TaskState::default().decide_typed(&review.decision_input(&active, task::TaskDecisionInput {
+            is_review:true, evidence_required:true, reply:reply.clone(), ..Default::default()
+        })), task::TaskDecision::Final { .. }));
+        assert_eq!(progress.complete_for_scope(&json!({"modelTaskState":reply,"acceptanceReviewed":true,
+            "requiresVerification":true,"brokerDecision":"final"}), &scope)["completionState"], "completed");
+        assert_eq!(progress.verification()["receipts"][0]["passed"], false);
+    }
+
+    #[test]
+    fn optional_check_failure_does_not_block_real_alternative_readback() {
+        let requirements = vec!["read b.txt".to_owned()];
+        let read = receipt("document.read", "alternative-read", json!({"path":"C:/work/b.txt","sha256":"b".repeat(64),
+            "content":"body","offset":0,"nextOffset":4,"totalCharacters":4}));
+        let mut progress = RunProgress::default();
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"failed-read","name":"filesystem.read"},
+            "result":{"status":"error","isError":true,"content":{"code":"FORMAT_UNSUPPORTED"}}})).unwrap();
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"alternative-read","name":"document.read"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":"C:/work/b.txt","sha256":"b".repeat(64),
+                "content":"body","offset":0,"nextOffset":4,"totalCharacters":4}})).unwrap();
+        let records = vec![receipt("filesystem.read", "unrelated-source", json!({
+            "path":"C:/work/unrelated.rs","sha256":"c".repeat(64),"content":"source"})), read];
+        let scope = validation_scope(&requirements, &records);
+        scoped_check(&mut progress, "optional-unrelated-check", 1, &code_snapshot("C:/work/unrelated.rs", &"c".repeat(64)), &scope);
+        let review = CompletionEvidenceSet::from_records(progress.verification(), vec![json!("alternative-read")], records)
+            .with_current_requirements(&progress, &requirements);
+        let reply = json!({"state":"complete","source":"model-task-state","met":[
+            {"requirementId":"requirement-1","item":"read b.txt","evidence":["alternative-read"]}]});
+        let decision = task::TaskState::default().decide_typed(&review.decision_input(&requirements, task::TaskDecisionInput {
+            is_review:true, evidence_required:true, requires_verification:true, reply:reply.clone(), ..Default::default()
+        }));
+        assert_eq!(serde_json::to_value(decision).unwrap()["action"], "final");
+        assert_eq!(progress.complete_for_scope(&json!({"modelTaskState":reply,"acceptanceReviewed":true,
+            "requiresVerification":true,"brokerDecision":"final"}), &scope)["completionState"], "completed");
+        assert_eq!(progress.verification()["receipts"][0]["passed"], false);
+    }
+
+    #[test]
+    fn windows_target_aliases_preserve_shared_checks_and_missing_native_maps_stay_active() {
+        let requirements = vec!["write a.rs".to_owned(), "write b.md".to_owned()];
+        let records = vec![
+            receipt("filesystem.write", "write-a", json!({"path":"C:/Work/A.rs","sha256":"a".repeat(64),"bytes":4})),
+            receipt("filesystem.write", "write-b", json!({"path":"C:/work/b.md","sha256":"b".repeat(64),"bytes":4})),
+        ];
+        let mut progress = RunProgress::default();
+        scoped_check(&mut progress, "check-original-alias", 1,
+            &code_snapshot("C:/Work/A.rs", &"a".repeat(64)), &validation_scope(&requirements, &records));
+        let aliases = vec![receipt("filesystem.read", "read-a", json!({
+            "path":"c:\\work\\a.rs","sha256":"a".repeat(64),"content":"source"}))];
+        let scope = validation_scope(&["read a.rs".to_owned()], &aliases);
+        assert_ne!(records[0]["targets"][0]["nativePathId"], aliases[0]["targets"][0]["nativePathId"]);
+        assert_eq!(records[0]["targets"][0]["identity"], aliases[0]["targets"][0]["identity"]);
+        assert_eq!(progress.verification_for_scope(&scope)["pendingValidation"], true);
+
+        let mut legacy = progress.apply("progress.state", &json!({})).unwrap();
+        for field in ["validationReceipts", "requiredChecks"] {
+            for check in legacy[field].as_array_mut().unwrap() {
+                check["acceptanceScope"]["scope"].as_object_mut().unwrap().remove("knownTargets");
+                for requirement in check["acceptanceScope"]["scope"]["requirements"].as_array_mut().unwrap() {
+                    for target in requirement["targets"].as_array_mut().unwrap() {
+                        target.as_object_mut().unwrap().remove("identity");
+                    }
+                }
+            }
+        }
+        let mut restored = RunProgress::default();
+        restored.apply("progress.restoreValidation", &json!({"state":legacy})).unwrap();
+        assert_eq!(restored.verification_for_scope(&validation_scope(&[requirements[1].clone()], &records))["pendingValidation"], true);
+    }
 
     #[test]
     fn evidence_targets_cannot_cross_and_labels_cannot_rebind_them() {
@@ -541,6 +854,21 @@ mod tests {
         assert!(!supports_claim(&claim(&["image"]), "render the scene", &[image.clone()]));
         image["visualObserved"] = json!(true);
         assert!(supports_claim(&claim(&["image"]), "render the scene", &[image]));
+    }
+
+    #[test]
+    fn image_read_requires_actual_visual_delivery_and_retention_is_not_observation() {
+        let image = receipt("image.read", "local-image", json!({
+            "structuredContent":{"path":"C:/work/scene.png","sha256":"a".repeat(64)},
+            "content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]}));
+        assert!(has_kind(&image, "observed-content"));
+        assert!(has_kind(&image, "visual"));
+        assert_eq!(image["visualObserved"], false);
+        assert!(!supports_claim(&claim(&["local-image"]), "inspect visual quality", &[image]));
+        let retained = receipt("image.retain", "retain-image", json!({"resultId":"saved","retained":1}));
+        assert!(!has_kind(&retained, "observed-content"));
+        assert!(!has_kind(&retained, "visual"));
+        assert!(!supports_claim(&claim(&["retain-image"]), "inspect visual quality", &[retained]));
     }
 
     #[test]

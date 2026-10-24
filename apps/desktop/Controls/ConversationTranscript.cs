@@ -26,6 +26,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private const string AttachmentHost = "kynxa-attachments.local";
     private const string PageUrl = "https://" + HostName + "/Transcript/index.html";
     private MessageAttachmentsApiClient? _attachmentClient;
+    private WorkspacePreviewApiClient? _markdownImages;
     private readonly CancellationTokenSource _attachmentCancellation = new();
     private readonly WebView2 _browser = new() { DefaultBackgroundColor = AppearanceService.ParseColor(AppearanceService.Current.Main) };
     private readonly TextBlock _notice = new() { Text = UiText.Get("正在加载聊天…"), Margin = new Thickness(12), TextWrapping = TextWrapping.Wrap };
@@ -89,6 +90,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     public event EventHandler<Guid>? RetryRequested;
     public event EventHandler<ToolResultRequest>? ToolResultRequested;
     public event EventHandler<ConversationAttachmentRequest>? AttachmentRequested;
+    public event EventHandler<(Guid ConversationId, string Target)>? LinkRequested;
     public event EventHandler? ConversationChanged;
     public event EventHandler<Guid>? HistoryRequested;
     public event EventHandler<ConversationHistoryRequest>? HistoryNavigationRequested;
@@ -350,7 +352,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 elapsedHoursMinutesSeconds = UiText.Get("用时 {0}小时{1}分钟{2}秒"),
                 toolCompleted = UiText.Get("已完成"), toolError = UiText.Get("工具失败"),
                 toolDenied = UiText.Get("已拒绝"), toolApproval = UiText.Get("等待批准"),
-                toolCancelled = UiText.Get("已取消"), toolUnknown = UiText.Get("结果未知"),
+                toolCancelled = UiText.Get("已取消"), toolUnknown = UiText.Get("未确认"),
                 toolSearchWeb = UiText.Get("搜索网页"), toolReadWeb = UiText.Get("阅读网页"), toolReadFile = UiText.Get("读取文件"),
                 toolInspectFile = UiText.Get("查看文件"), toolListFiles = UiText.Get("查看文件夹"), toolSearchFiles = UiText.Get("查找文件"),
                 toolEditFile = UiText.Get("修改文件"), toolDeleteFile = UiText.Get("删除文件"), toolCreateFolder = UiText.Get("创建文件夹"),
@@ -364,7 +366,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 toolSkillUnavailable = UiText.Get("技能运行环境尚未满足。"), toolApprovalExpired = UiText.Get("批准已过期。"),
                 toolCommandUnavailable = UiText.Get("此命令暂不支持。"), toolConnectionUnavailable = UiText.Get("工具连接不可用。"),
                 toolAuthRequired = UiText.Get("工具需要认证。"),
-                taskPartial = UiText.Get("部分完成"), taskVerificationFailed = UiText.Get("核验失败"), taskExecutionUnknown = UiText.Get("执行结果未知"),
+                taskPartial = UiText.Get("部分完成"), taskVerificationFailed = UiText.Get("核验失败"), taskExecutionUnknown = UiText.Get("执行结果未确认"),
                 toolInspectWindows = UiText.Get("查看窗口"), toolFindApps = UiText.Get("查找软件"), toolScreenshot = UiText.Get("截图"), toolReadWindow = UiText.Get("读取窗口"),
                 toolOpenApp = UiText.Get("打开软件"), toolActivateWindow = UiText.Get("切换窗口"), toolClick = UiText.Get("点击"),
                 toolMovePointer = UiText.Get("移动鼠标"), toolScroll = UiText.Get("滚动"), toolDrag = UiText.Get("拖动"),
@@ -459,7 +461,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
             core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
             core.WebResourceRequested += async (_, e) =>
             {
-                if (Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var resource)
+                if (Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var imageResource)
+                    && TranscriptMarkdown.TryImageSource(imageResource, out var imagePath))
+                {
+                    using var deferral = e.GetDeferral();
+                    await ReadMarkdownImageAsync(environment, e, imagePath);
+                }
+                else if (Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var resource)
                     && resource.Host == AttachmentHost && resource.AbsolutePath.StartsWith("/_attachments/", StringComparison.Ordinal))
                 {
                     using var deferral = e.GetDeferral();
@@ -512,8 +520,12 @@ public sealed class ConversationTranscript : Grid, IDisposable
                         && _messages.Any(row => row.Message.Id == parsed && row.RetryVisibility == Visibility.Visible)) RetryRequested?.Invoke(this, parsed);
                     break;
                 case "link":
-                    if (MatchesConversation(message) && message.TryGetProperty("url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var uri)
-                        && uri.Scheme is "http" or "https" or "mailto") await Launcher.LaunchUriAsync(uri);
+                    if (MatchesConversation(message) && _conversationId is Guid linkConversation
+                        && message.TryGetProperty("url", out var url) && url.GetString() is { } target && TranscriptMarkdown.IsSafeUrl(target))
+                    {
+                        if (Uri.TryCreate(target, UriKind.Absolute, out var uri) && uri.Scheme == "mailto") await Launcher.LaunchUriAsync(uri);
+                        else LinkRequested?.Invoke(this, (linkConversation, target));
+                    }
                     break;
                 case "toolResult":
                     if (MatchesConversation(message) && _conversationId is { } conversation &&
@@ -586,6 +598,25 @@ public sealed class ConversationTranscript : Grid, IDisposable
         // Acknowledge the actual clipboard result for this chat and operation, not the click.
         // 点击只代表请求；回执应绑定聊天与操作，反映剪贴板实际结果。
         Post(new { type = "copyResult", conversationId = _conversationId?.ToString() ?? "", requestId = request.GetString(), success = succeeded });
+    }
+
+    private async Task ReadMarkdownImageAsync(CoreWebView2Environment environment, CoreWebView2WebResourceRequestedEventArgs request, string path)
+    {
+        Guid? conversation = _conversationId;
+        try
+        {
+            if (conversation is null || request.Request.Method != "GET")
+            { request.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", ""); return; }
+            _markdownImages ??= new WorkspacePreviewApiClient();
+            var image = await _markdownImages.ReadImageContentAsync(conversation.Value, path, _attachmentCancellation.Token);
+            if (_disposed) return;
+            if (conversation != _conversationId)
+            { request.Response = environment.CreateWebResourceResponse(null, 409, "Conversation changed", ""); return; }
+            request.Response = environment.CreateWebResourceResponse(new MemoryStream(image.Bytes, writable: false).AsRandomAccessStream(), 200, "OK",
+                $"Content-Type: {image.ContentType}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff");
+        }
+        catch (Exception error) when (error is HttpRequestException or InvalidDataException or OperationCanceledException or System.Runtime.InteropServices.COMException)
+        { if (!_disposed) request.Response = environment.CreateWebResourceResponse(null, 404, "Image unavailable", ""); }
     }
 
     // Only durable attachments belonging to visible messages can cross the local document boundary.
@@ -1025,6 +1056,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _attachmentCancellation.Cancel();
         _attachmentCancellation.Dispose();
         _attachmentClient?.Dispose();
+        _markdownImages?.Dispose();
         _browser.Close();
     }
 }

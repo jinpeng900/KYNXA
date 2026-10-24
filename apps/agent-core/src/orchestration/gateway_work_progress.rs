@@ -234,6 +234,10 @@ pub struct RoundProgress {
     pub discovery_calls: u64,
     pub work_calls: u64,
     pub waiting_only: bool,
+    /// All such actions were refused by the existing same-condition failure guard.
+    /// 这些动作均被已有同条件失败保护拒绝，不把纠偏回执算成新工作。
+    pub suppressed_calls: u64,
+    pub strategy_changed: bool,
     /// An execution turn that only narrates unchanged work is stagnant, unlike an ordinary text answer.
     /// 执行阶段只叙述未变工作的轮次计为停滞；普通文字回答不传入此标记。
     pub execution_without_action: bool,
@@ -249,6 +253,7 @@ pub struct WorkProgress {
     repeated_reads: u64,
     initial_discovery_rounds: u64,
     work_started: bool,
+    correction_pending: bool,
     deterministic_failures: DeterministicFailures,
 }
 
@@ -261,6 +266,8 @@ pub struct WorkProgressPlan {
     pub repeated_reads: u64,
     pub correction_due: bool,
     pub change_strategy: bool,
+    #[serde(default)]
+    pub wait_for_user: bool,
 }
 
 impl WorkProgress {
@@ -278,6 +285,13 @@ impl WorkProgress {
 
     pub fn needs_strategy_change(&self) -> bool {
         self.no_progress_rounds >= STAGNANT_ROUNDS_BEFORE_CORRECTION
+    }
+
+    /// A real new user instruction permits a fresh strategy without deleting accumulated evidence.
+    /// 真实新指令允许重新尝试策略，不删除已累计证据和重复读取诊断。
+    pub fn resume_after_user_instruction(&mut self) {
+        self.no_progress_rounds = 0;
+        self.correction_pending = false;
     }
 
     /// Stalled work can enter synthesis before its tool allowance is nearly spent.
@@ -298,7 +312,9 @@ impl WorkProgress {
             || round.evidence_changed
             || round.artifact_updated
             || round.new_read_range;
-        self.completed_source_count = round.completed_source_count;
+        // Text-only rounds carry no document count; they cannot erase the last witnessed completion watermark.
+        // 纯文字轮次不携带文档计数，不能清掉已有真实完成水位再制造假进展。
+        self.completed_source_count = self.completed_source_count.max(round.completed_source_count);
         self.repeated_reads = self.repeated_reads.saturating_add(round.repeated_reads);
 
         let has_calls = round.work_calls > 0
@@ -306,9 +322,20 @@ impl WorkProgress {
             || round.discovery_calls > 0
             || round.repeated_reads > 0
             || round.execution_without_action;
+        let all_actions_repeated = round.repeated_reads.saturating_add(round.suppressed_calls)
+            >= round.work_calls.max(1)
+            && round.repeated_reads.saturating_add(round.suppressed_calls) > 0;
+        // Pause only a witnessed unchanged route after correction; new methods and active waits remain possible.
+        // 仅纠偏后又回到已证实不变的路径才等待用户；新方法和真实等待仍可继续。
+        let wait_for_user = self.correction_pending && !made_progress && !round.waiting_only && !round.strategy_changed
+            && (round.execution_without_action || all_actions_repeated);
         if made_progress {
             self.work_started = true;
             self.no_progress_rounds = 0;
+            self.correction_pending = false;
+        } else if round.strategy_changed {
+            self.no_progress_rounds = 0;
+            self.correction_pending = false;
         } else if !round.waiting_only && has_calls {
             let initial_discovery = !self.work_started
                 && round.source_reads == 0
@@ -329,7 +356,9 @@ impl WorkProgress {
         let correction_due = change_strategy
             && has_calls
             && !round.waiting_only
+            && !wait_for_user
             && self.no_progress_rounds % STAGNANT_ROUNDS_BEFORE_CORRECTION == 0;
+        self.correction_pending |= correction_due;
         WorkProgressPlan {
             made_progress,
             completed_source_count: self.completed_source_count,
@@ -337,6 +366,7 @@ impl WorkProgress {
             repeated_reads: self.repeated_reads,
             correction_due,
             change_strategy,
+            wait_for_user,
         }
     }
 }
@@ -615,6 +645,41 @@ mod tests {
             assert_eq!(waiting.no_progress_rounds, 1);
         }
         assert_eq!(serde_json::to_value(&progress).unwrap(), before_wait);
+    }
+
+    #[test]
+    fn only_a_repeated_unchanged_route_after_correction_waits_for_user() {
+        let mut work = WorkProgress::default();
+        let repeated = RoundProgress {work_calls:1,source_reads:1,repeated_reads:1,..Default::default()};
+        for _ in 0..3 {assert!(!work.observe_round(&repeated).wait_for_user);}
+        let saved = serde_json::to_value(&work).unwrap();
+        let mut work: WorkProgress = serde_json::from_value(saved).unwrap();
+        let waiting = work.observe_round(&RoundProgress {work_calls:1,waiting_only:true,..Default::default()});
+        assert!(!waiting.wait_for_user);
+        let alternative = work.observe_round(&RoundProgress {work_calls:1,..Default::default()});
+        assert!(!alternative.wait_for_user);
+        assert!(work.observe_round(&repeated).wait_for_user);
+        let new_range = work.observe_round(&RoundProgress {work_calls:1,source_reads:1,new_read_range:true,..Default::default()});
+        assert!(new_range.made_progress);
+        assert!(!new_range.wait_for_user);
+        assert!(!work.observe_round(&repeated).wait_for_user);
+        for _ in 0..3 {work.observe_round(&repeated);}
+        work.resume_after_user_instruction();
+        assert!(!work.observe_round(&repeated).wait_for_user);
+        let legacy: WorkProgress = serde_json::from_value(json!({"workStarted":true,"noProgressRounds":9})).unwrap();
+        assert!(!legacy.correction_pending);
+    }
+
+    #[test]
+    fn text_rounds_do_not_erase_source_completion_and_fake_later_progress() {
+        let mut work = WorkProgress::default();
+        assert!(work.observe_round(&RoundProgress {completed_source_count:2,..Default::default()}).made_progress);
+        let text = work.observe_round(&RoundProgress {execution_without_action:true,..Default::default()});
+        assert_eq!(text.completed_source_count,2);
+        let repeated = work.observe_round(&RoundProgress {completed_source_count:2,source_reads:1,
+            repeated_reads:1,work_calls:1,..Default::default()});
+        assert!(!repeated.made_progress);
+        assert_eq!(repeated.no_progress_rounds,2);
     }
 
     #[test]

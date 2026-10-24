@@ -102,6 +102,7 @@ pub mod browser;
 pub mod configuration;
 pub mod gateway;
 mod gateway_document_read;
+mod gateway_image;
 mod document_packages;
 mod gateway_document_create;
 pub(crate) mod gateway_workspace_preview;

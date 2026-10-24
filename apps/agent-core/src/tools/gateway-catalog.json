@@ -236,14 +236,57 @@
       "source": "builtin"
     },
     {
+      "name": "image.read",
+      "description": "Read actual pixels from an authorized local PNG, JPEG, GIF, WebP, BMP or TIFF for visual analysis; GIF uses its first frame and BMP/TIFF are converted for model input. Use the path directly, without launching a viewer or taking a desktop screenshot. Sources are limited to 32 MiB, 64 million pixels and bounded decoding memory. The default output fits a 2048-pixel longest edge; maxDimension may raise this to 4096. crop selects a rectangle in original image coordinates after orientation, before resizing. Returns source SHA-256/original dimensions and actual sent image SHA-256/dimensions. Original files remain unchanged. expectedSha256 rejects changed sources. Reading does not open or switch the right workspace; artifact.open is for requested display. A text-only model cannot inspect pixels; metadata/OCR is not visual evidence.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mountId": { "type": "string", "description": "Authorized work folder mount ID; omitted uses the task default." },
+          "path": { "type": "string", "minLength": 1, "description": "Existing image path, relative to the selected workspace or an authorized absolute path." },
+          "reason": { "type": "string", "description": "Explanation for access outside the linked work folder; does not itself grant permission." },
+          "expectedSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Expected original file SHA-256 from a prior receipt, if supplied." },
+          "maxDimension": { "type": "integer", "minimum": 1, "maximum": 4096, "default": 2048 },
+          "crop": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "image.retain",
+      "description": "Keep the actual image media from an existing tool receipt in this conversation beyond temporary retention. Use when the user requests preservation or the image supports a key conclusion; state that reason. Supply the original resultId, not a file path or tool call ID. This only marks verified archived media for retention; it neither modifies the source file nor opens the right workspace, and grants no new file access.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resultId": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["resultId", "reason"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "artifact.open",
-      "description": "Open an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. For a URL, opens the interactive sidebar browser and returns its actual sessionId and tabId; retain them for browser.snapshot and later interactions. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. Metadata kind is not the final rendered mode. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching. The current page becomes interactive before remaining content prepares in the background; cached file views retain their state without rereading on tab switches. Only unsupported content or an actual rendering failure uses a cached PDF fallback; legacy DOC/PPT/XLS use conversion. Spreadsheet previews display stored formula caches, not recalculated results. Claim final layout, text fallback or a missing converter only from actual preview observation, never from this registration receipt alone. Does not create files or grant broader file access.",
+      "description": "Present a selected final report, useful result or explicitly requested resource in the user's right workspace. Use exactly one of path, url or resultId and an optional natural title. resultId displays an existing image/screenshot receipt from this conversation without copying the image; choose meaningful conclusions or key results, never routine analysis captures. Background webpage analysis uses browser.open, not this presentation tool. For a URL, returns the actual sidebar browser sessionId and tabId. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching; only unsupported content or an actual rendering failure uses a cached PDF fallback. Spreadsheet previews display stored formula caches, not recalculated results. Claim final appearance only from actual image observation, never from this registration receipt alone. Does not create files, retain temporary images permanently, or grant broader file access.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": { "type": "string", "description": "Existing file path, relative to the current workspace or explicitly authorized absolute path." },
           "url": { "type": "string", "description": "Full HTTP or HTTPS webpage URL, used instead of path." },
+          "resultId": { "type": "string", "minLength": 1, "description": "Original image/screenshot resultRef.id in this conversation, used instead of path/url. Only for selected useful results or explicit user-requested display." },
           "title": { "type": "string", "maxLength": 1024 },
           "reason": { "type": "string" },
           "offset": { "type": "integer", "minimum": 0 },
@@ -1907,10 +1950,13 @@
     {
       "name": "computer.screenshot",
       "source": "builtin",
-      "description": "Capture the identified client area, optionally crop original physical pixels without resizing. PNG is archived locally and can be delivered as actual image content to a vision-capable model. Inspect that delivered image for visual conclusions; a file path, dimensions, hash or text-only receipt alone does not mean the model has seen its pixels. Host desktop; broker permissions and target checks apply.",
+      "description": "Capture the identified client area, optionally crop original physical pixels without resizing. PNG is delivered as actual image content to a vision-capable model; routine screenshots are temporary and do not open the right workspace. Optionally state the concrete visual question. Use permanent retention only for a user request or key evidence, with retentionReason; later preservation uses image.retain. Inspect the delivered image for visual conclusions; metadata alone does not mean the model has seen its pixels. Host desktop; broker permissions and target checks apply.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "retention": { "type": "string", "enum": ["temporary", "permanent"], "default": "temporary" },
+          "retentionReason": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Required for permanent retention: the user requested preservation or this image supports a key conclusion." },
+          "question": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "The concrete visual question this screenshot should answer." },
           "windowId": {
             "type": "string",
             "minLength": 1,
@@ -2053,7 +2099,7 @@
     {
       "name": "computer.launch",
       "source": "builtin",
-      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Websites default to artifact.open/browser.open in the right workspace; use this for browsers only when the user explicitly requests a local/system/external browser application. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
+      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Analyze webpages with browser.open in its default background mode; show a requested webpage with artifact.open(url) or browser.open(presentation=workspace). Use this tool for browsers only when the user explicitly requests a local/system/external browser application. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
       "inputSchema": {
         "type": "object",
         "properties": {

@@ -1,5 +1,8 @@
 pub mod budget;
 mod completion_evidence;
+mod gateway_live_memory;
+mod gateway_model_request;
+mod gateway_tool_execution;
 pub mod context;
 pub mod embedding_policy;
 pub mod gateway_runtime;

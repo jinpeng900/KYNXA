@@ -1,5 +1,17 @@
 # 独立 Rust 网关
 
+## 本地图片与后台视觉分析
+
+`image.read` 在现有文件授权范围内读取 PNG、JPEG、GIF 或 WebP，将真实像素作为模型的多模态输入，`artifact.open` 仍只负责展示。可以指定路径、挂载、版本哈希、原图裁剪区域和输出尺寸；目录查找继续使用原有文件工具，不默认扫描整个文件夹。读取限制为源文件 32 MiB、6400 万像素，输出长边默认 2048、最多 4096；解码并发为 2，资源不足排队且可取消。原文件不修改，回执分别记录来源和实际发送图片的版本。
+
+`browser.open(url)` 默认后台分析：同地址页面可复用，其他地址使用独立页面，不导航或抢占用户正在查看的页面；明确展示时使用 `presentation=workspace` 或 `artifact.open`。DOM 能回答的问题先读 DOM。普通启动软件、保存文件的成功回执足以确认操作，不追加视觉验收。视觉用于当前确有画面问题、用户要求外观质量，或 DOM 无法解释的情况；复用未变化的观察，最新停止与交付指令优先。
+
+截图采集与分析不自动展示、选择或切换右侧栏目。有价值的总结报告、关键结果截图和用户要求展示的内容可通过 `artifact.open(resultId)` 作为交付展示，复用同一原图与标签；保留与展示分别处理，永久保留本身不触发展示。
+
+新产生的模型图片载荷与不可变执行回执分开保存。默认临时保留 24 小时，网关每 10 分钟在后台有界清理；活动读取可使用最长 30 分钟的短租约。截图可指定 `retention=permanent` 和非空 `retentionReason`；`image.retain(resultId,reason)` 也可保留已有结果，适用于用户要求或重要结论的关键依据。清理仅删除本程序保存的图片副本，不删除用户原图、文字结论、任务进度或成功回执。根、子任务检查点保存稳定引用并在验证身份和哈希后恢复图片；已过期的图片改为带原哈希的说明，不能假装仍能看见，也不能因此重做成功操作。旧版内嵌图片归档保持原字节，不进行破坏哈希的原地迁移。
+
+视觉输入沿原模型协议及用量结算派发；能力取决于实际配置的模型。不凭模型名称推定视觉能力，不虚构辅助视觉模型或把图片尺寸统计冒充画面理解。
+
 ## 2026-10-21：模型与检索缓存（本地实现，未发布）
 
 模型请求把固定行为、当前连接身份、有效权限规则与已确认记忆放在系统指令中；时间、目录和 Skill 目录等运行观测使用下述追加快照，不再每轮改写历史之前的动态系统段。记忆撤销仍即时重新投影。工具选择和裁剪保留相关性顺序，发送声明按 wireName 排序；对象字段规范排序，历史角色、工具配对、内容数组和签名字符串不变，不为命中填充上下文。根任务与子任务共用供应商适配，缓存范围键取稳定数据／项目／聊天范围的摘要，不含逐轮预约或请求 ID，不外发磁盘路径。
@@ -108,9 +120,18 @@ EXE 安装器采用自包含、无包身份的 WinUI 载荷，安装时将软件
 |---|---|---|
 | 启动与传输 | `src/bin/kynxa-gateway.rs`、`src/gateway.rs` | 启动配置、HTTP/SSE 和取消；将业务请求交给运行时与所属领域 |
 | 请求生命周期 | `src/orchestration/gateway_runtime.rs` | 请求身份、排队、审批和当前工作快照；持有请求运行状态 |
-| 模型与工具循环 | `src/orchestration/gateway_loop.rs` | 组装当前上下文，调用模型和工具；保存真实回执后推进任务与证据状态 |
-| 任务状态与验证 | `src/orchestration/task.rs`、`progress.rs` | 任务续接、公开正文投影和版本关联的执行核验；不自行发起模型、文件或终端操作 |
+| 根任务状态与协调 | `src/orchestration/gateway_loop.rs` | 组合上下文、工具、验收、交付、视觉、缓存和转录状态；协调阶段，不改变正式检查点结构 |
+| 根准备与恢复 | `src/orchestration/gateway_loop/preparation.rs`、`preparation/inputs.rs`、`context.rs` | 会话与模型准备、正式身份和恢复由准备阶段协调；输入组装独立维护历史、证据与附件配对，守卫覆盖完整执行 |
+| 根验收投影 | `src/orchestration/gateway_loop/acceptance.rs` | 管理评审状态、版本缓存、引导修订和证明恢复；完成规则仍由纯任务与证据模块判定 |
+| 根模型轮 | `src/orchestration/gateway_loop/execution.rs`、`execution/{preparation,streaming,response}.rs` | 准备请求、消费模型流、处理响应与最新引导，继续使用共享模型生命周期 |
+| 根工具轮与交付 | `src/orchestration/gateway_loop/tool_round.rs`、`delivery.rs` | 派发与保存真实回执，按原顺序完成验收、公开输出及最终保存 |
+| 共享模型请求 | `src/orchestration/gateway_model_request.rs` | 分开就绪检查、资源准入、派发和用量结算；`ModelRequestOutcome` 保存结果、真实派发状态及耗时，失败不丢派发事实；根、子摘要共用执行器和真实派发计时 |
+| 共享工具执行 | `src/orchestration/gateway_tool_execution.rs` | 类型化回执与操作状态、只读分类、归档证据恢复和专用工具派发；正式操作仍由原任务日志持有 |
+| 实时记忆投影 | `src/orchestration/gateway_live_memory.rs` | 根、子任务共用记忆刷新与撤销投影，退役失效来源；当前指令、范围和权限优先，不重写持久消息 |
+| 任务状态与验证 | `src/orchestration/task.rs`、`progress.rs`、`completion_evidence.rs` | 类型化任务决定、公开正文投影、版本关联的执行核验及同次评审证据投影；不自行发起模型、文件或终端操作 |
 | 持久任务与子代理 | `src/orchestration/gateway_task_hub.rs`、`gateway_task_worker.rs` → `src/storage/task_repository.rs` | 稳定任务身份、独立上下文、事件与检查点、共享预算和恢复；工具回执仍引用原正式归档 |
+| 子准备、模型与验收 | `src/orchestration/gateway_task_worker/{preparation,model_round,compaction,completion}.rs` | 临时模型会话与持久检查点分开；外层只协调阶段，保留子任务原权限、序列化和交付边界 |
+| 子工具执行与回执 | `src/orchestration/gateway_task_worker/tool_round.rs`、`tool_round/{dispatch,receipts}.rs` | 分开幂等派发、审批及证据投影；工作区保护持有到回执和版本结算，不调用根循环辅助函数 |
 | 模型接入 | `src/models/gateway*.rs` | 配置、供应商协议、流解析、上下文压缩和推理；复用同领域的确定性规则 |
 | 工具发现与策略 | `src/tools/gateway.rs`、`policy.rs`、`system_prompt.rs` | 发现、加载、权限和能力说明；把获准的动作交给对应执行适配器 |
 | 本机工具执行 | `src/tools/gateway_process.rs` → `apps/tool-host/` | Rust 拥有进程与 IPC 生命周期，C# 执行 Windows 操作；回执保留真实输出与身份 |
@@ -121,6 +142,12 @@ EXE 安装器采用自包含、无包身份的 WinUI 载荷，安装时将软件
 | 硬件准入 | `src/resources/gateway.rs` → `apps/resource-service/` | 实际资源观测、租约和准入；工具、模型与后台索引共用资源边界 |
 
 表内 `src/` 相对 `apps/agent-core/`；具体跨域许可与执行模块登记仍以 `docs/team/module-ownership.json` 为准。`src/lib.rs` 提供共享原生操作合同和范围状态会话，HTTP 入口继续复用这些合同，不另建一套业务规则。
+
+上述共享实现已从主循环移出，不保留同名旧实现或转发链。根 `LoopState` 当前由 17 个顶层字段组成，其中 7 个是按职责分组的状态；子 `WorkerContext` 保留原序列化字段。根、子任务继续分别持有身份、权限、委派和交付策略，不通过合并循环抹掉差异。未执行工具意图的纯名称规则由 `task.rs` 共享，根任务仅保留当前目录可识别名称，子任务保留未知精确名称用于后续发现。
+
+`TaskDecisionInput`／`TaskDecision` 负责内部完成决定，`ToolExecutionReceipt`／`ReceiptStatus` 负责真实派发回执，`CompletionProof`／`EvidenceKind` 负责证明身份。动态目标、供应商正文和公开协议仍保留原 JSON。根、子一次评审统一使用 `CompletionEvidenceSet` 绑定版本并筛选当前证据，新操作后重新生成；该投影不持久化为另一份账本。子交付的成功与观察引用使用真实成功合同，错误、未确认和待核实证明不能冒充成功。原始回执、检查点、签名和权限不因内部类型化重写，验收更新与旧断点分类兼容见[持久任务合同](durable-tasks.md#执行控制和恢复)。
+
+第二批的结构拆分与当前目标／执行／验收／恢复闭环分别记录；本轮继续整理超长准备和子循环，并按共享入口补齐行为，具体源码与验证状态见[后续修复与实施状态](../team/pending-fixes.md)。本批不扩大到启动、历史加载或自托管缓存优化，也不预报提速比例。
 
 修改时先定位调用入口和状态所有者，再调整所属模块内部。新增私有辅助函数应表达可复用的实际步骤；原文哈希、JSON 字段顺序、取消后的已执行回执和作用域核验仍需按既有合同处理。注释说明职责、原因和生命周期，保持简明中英两层，不逐行复述代码。
 
@@ -152,6 +179,10 @@ EXE 安装器采用自包含、无包身份的 WinUI 载荷，安装时将软件
 右栏复用 `ConversationWorkTabs`，任务区默认折叠为 28 DIP 标题，用户展开后才轮询进度，整个展开区域仍受可用高度限制；收起不暂停后端任务。下方标签与预览使用剩余空间，标签文件名固定 190 DIP，名称及关闭按钮共用同色背景，高度 26 DIP。截图、真实成功文件回执、任务产物与文件选择器共用标签入口；同一路径更新同一标签，关闭视图不删除文件或取消任务。模型可通过 `artifact.open` 选择展示现有文件或 HTTP(S) 网页，并提供标题；文件生成和命名仍通过正式文件工具完成，不从助手正文猜测产物。
 
 `POST /agent/workspace/preview`（同义 `/api/agent/workspace/preview`）按当前 conversationId 的真实工作范围读取预览；`GET /agent/workspace/content` 返回带版本校验的 DOCX、PPTX、XLSX、PDF、图片或受限 HTML 原始内容并支持 Range。系统文件选择器可为当前聊天授予单文件预览许可，该许可不扩大模型工具权限，也不放开正式 Data。Markdown、公式和 Mermaid 复用离线资源；文本按 UTF-16 分页。普通 DOCX、PPTX 和 XLSX 在有界 ZIP/XML 特征检查后直接展示：DOCX 使用随包固定版本的 docx-preview；PPTX 使用原生 WebView 渲染模块，按原始 EMU 坐标保留页面比例，展示文字、常用形状、图片、表格和基本母版背景，支持翻页、页码、键盘与缩放；XLSX 使用原生表格模块切换工作表、按可见区域展示单元格及已有公式缓存，不执行重算。OOXML 解压复用随包 JSZip，不使用运行时 CDN，也不将这些预览描述为完整 Office 兼容。
+
+聊天和右栏的 Markdown 共用标题锚点、脚注、提示块、表格及代码复制。Mermaid 支持 flowchart/graph、sequenceDiagram、classDiagram、stateDiagram/stateDiagram-v2、erDiagram、gantt、mindmap，以及 timeline、pie、journey、gitGraph、xychart/xychart-beta、quadrantChart、requirement/requirementDiagram；未支持或无效声明保留源码回退，不执行图表内脚本。用户点击网页／文件链接进入右栏，页内锚点留在当前文档，相对文件路径以所属文档目录解析；后台操作不借此切走用户当前标签。Markdown 图片经宿主向原会话授权内容接口请求；公共远程图片使用现有受控下载，页面没有任意磁盘或网关访问权。
+
+CSV/TSV 按完整记录分页为只读表格，正确保留引号内分隔符和换行，正文与表格可切换；超长记录明确回退原文，不静默丢弃。Office 后缀别名复用统一格式识别及原转换路径，不执行宏。TIFF 原件保留，预览按有界解码转换 PNG；BMP/TIFF 送模型分析时也转换为供应商支持的像素格式。文本支持 UTF-8、带 BOM 的 UTF-16LE/BE 和可解码 GBK，不改写源文件；二进制内容不冒充文本。
 
 只有实际不支持的内容（如嵌入对象、复杂图表、SmartArt 或透视表）和真实渲染失败才切换为同一原件版本的缓存 PDF；前端通过 `representation=pdf` 请求，沿用私有 LibreOffice 转换缓存。旧 DOC/PPT/XLS 等格式继续使用既有转换路径；PDF、图片、SVG、HTML 和文本不为此增加转换。完整资源构建准备 `runtime/office/`；旧离线资源缺少转换器或转换失败时显示提取正文与具体原因，不阻断对话。登记回执中的 `previewStatus=registered` 或 `rendered=false` 仅说明标签已登记、尚未确认显示，不能据此判定失败、声称文本回退或要求用户安装外部 Office。
 

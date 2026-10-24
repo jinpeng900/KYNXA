@@ -400,76 +400,8 @@ public partial class App
         }
     }
 
-    [DllImport("user32.dll", EntryPoint = "IsWindowVisible")] private static extern bool IsShortcutWindowVisible(nint window);
-    [DllImport("user32.dll", EntryPoint = "IsIconic")] private static extern bool IsShortcutWindowIconic(nint window);
-
-    private async Task ActivateOwnedShortcutWindowAsync()
-    {
-        nint owned = WinRT.Interop.WindowNative.GetWindowHandle(Window);
-        if (GetForegroundWindow() == owned) return;
-        // A restored window may extend beyond the monitor before the hover checks resize it.
-        // 悬停检查调整尺寸之前，恢复后的窗口可能超出屏幕；激活坐标必须先落在可达区域。
-        var workArea = DisplayArea.GetFromWindowId(Window.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-        var currentSize = Window.AppWindow.Size;
-        var currentPosition = Window.AppWindow.Position;
-        int reachableWidth = Math.Min(currentSize.Width, workArea.Width - 32);
-        int reachableHeight = Math.Min(currentSize.Height, workArea.Height - 32);
-        if (currentPosition.X < workArea.X || currentPosition.Y < workArea.Y ||
-            currentPosition.X + currentSize.Width > workArea.X + workArea.Width ||
-            currentPosition.Y + currentSize.Height > workArea.Y + workArea.Height)
-        {
-            Window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(workArea.X + 16, workArea.Y + 16,
-                reachableWidth, reachableHeight));
-        }
-        Window.AppWindow.Show(activateWindow: true);
-        Window.Activate();
-        SetForegroundWindow(owned);
-        Window.AppWindow.MoveInZOrderAtTop();
-        await SettleAsync();
-        if (GetForegroundWindow() == owned) return;
-        // Windows can reject background activation. Click only the verified blank title bar of this visible fixture.
-        // Windows 可能拒绝后台激活；仅点击已核验可见、属于本夹具的标题栏空白位置。
-        if (!IsShortcutWindowVisible(owned) || IsShortcutWindowIconic(owned) || !GetCursorPos(out var originalPointer))
-            throw new InvalidOperationException("The owned shortcut fixture is not available for native activation.");
-        foreach (int key in new[] { 0x01, 0x02, 0x04, 0x10, 0x11, 0x12, 0x5B, 0x5C })
-            if ((GetAsyncKeyState(key) & 0x8000) != 0)
-                throw new InvalidOperationException("Fixture activation stopped because a mouse button or modifier is held.");
-        var presenter = Window.AppWindow.Presenter as OverlappedPresenter
-            ?? throw new InvalidOperationException("The shortcut fixture has no overlapped presenter.");
-        bool wasAlwaysOnTop = presenter.IsAlwaysOnTop;
-        try
-        {
-            // Temporarily raise only this fixture to avoid unrelated topmost windows.
-            // 仅临时提升本夹具以避开其他置顶窗口，finally 中恢复设置。
-            presenter.IsAlwaysOnTop = true;
-            Window.AppWindow.MoveInZOrderAtTop();
-            await SettleAsync();
-            double scale = _shell.XamlRoot.RasterizationScale;
-            var point = new NativePoint { X = (int)Math.Round(((FrameworkElement)Window.Content).ActualWidth * 0.6 * scale), Y = (int)Math.Round(24 * scale) };
-            if (!ClientToScreen(owned, ref point) || GetAncestor(WindowFromPoint(point), 2) != owned)
-                throw new InvalidOperationException("The fixture's blank title bar is covered or outside the reachable screen.");
-            int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);
-            if (width <= 1 || height <= 1 || point.X < left || point.Y < top || point.X >= left + width || point.Y >= top + height)
-                throw new InvalidOperationException("The fixture activation target is outside the virtual screen.");
-            SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput
-            {
-                X = (int)Math.Round((point.X - left) * 65535d / (width - 1)),
-                Y = (int)Math.Round((point.Y - top) * 65535d / (height - 1)), Flags = 0x8000 | 0x4000 | 0x0001
-            } } }]);
-            await Task.Delay(40);
-            if (!GetCursorPos(out var actual) || Math.Abs(actual.X - point.X) > 1 || Math.Abs(actual.Y - point.Y) > 1 ||
-                GetAncestor(WindowFromPoint(actual), 2) != owned)
-                throw new InvalidOperationException("The owned fixture activation point changed before clicking.");
-            SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0002 } } },
-                new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0004 } } }]);
-            await WaitAsync(() => GetForegroundWindow() == owned, "clicking the owned blank title bar activates only this fixture");
-        }
-        finally
-        {
-            presenter.IsAlwaysOnTop = wasAlwaysOnTop;
-            if (GetForegroundWindow() == owned) SetCursorPos(originalPointer.X, originalPointer.Y);
-        }
-    }
+    private Task ActivateOwnedShortcutWindowAsync() =>
+        OwnedWinUiWindowActivation.EnsureAsync(Window, Path.Combine(_directory, "shell-native-activation.jsonl"));
 
     private sealed record ShortcutScrollObservation(double Top, double Height, double Viewport, bool HasFixture);
 

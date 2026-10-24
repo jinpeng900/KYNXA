@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using KYNXA.Contracts;
 
 namespace KYNXA_Desktop
 {
@@ -85,6 +86,32 @@ namespace KYNXA_Desktop.Views
     // 直接链接生产关闭处理器，仅替换无关界面与持久化依赖。
     public sealed partial class ShellPage : Page
     {
+        // No live replies exist in this fixture; unexpected gateway pause calls fail without network I/O.
+        // 此夹具没有运行中的回复；意外暂停调用直接失败，不访问真实网关。
+        private sealed class PendingChatReply
+        {
+            public Guid ConversationId { get; init; }
+            public Guid? TaskId { get; init; }
+            public bool StopRequested { get; set; }
+            public bool StopControlPending { get; set; }
+            public bool PauseConfirmed { get; set; }
+            public TaskCompletionSource<Guid?> TaskRegistered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        private sealed record FixtureProject(Guid Id);
+        private sealed class UnexpectedTaskApi
+        {
+            public Task<TaskDetailResponse> GetAsync(Guid conversationId, Guid taskId, Guid? projectId, CancellationToken token) =>
+                Task.FromException<TaskDetailResponse>(new InvalidOperationException("Unexpected live task lookup in window-close fixture."));
+            public Task<TaskControlResponse> ControlAsync(Guid conversationId, Guid taskId, ulong version, string action,
+                Guid? projectId, CancellationToken token) =>
+                Task.FromException<TaskControlResponse>(new InvalidOperationException("Unexpected live task control in window-close fixture."));
+        }
+
+        private readonly Dictionary<Guid, PendingChatReply> _pendingReplies = [];
+        private readonly UnexpectedTaskApi _tasksApiClient = new();
+        private static (object? Chat, FixtureProject? Project) FindChat(Guid conversationId) => (null, null);
         private readonly Services.FakeProjectStore _projectStore;
         private readonly List<string> _projects = ["synthetic-project"];
         private readonly List<string> _standaloneChats = ["synthetic-chat"];

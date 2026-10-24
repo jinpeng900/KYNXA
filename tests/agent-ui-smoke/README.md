@@ -1,5 +1,9 @@
 # Agent native UI smoke
 
+Use `pwsh -NoProfile -File tests/agent-ui-smoke/run.ps1 -Scenario dialog-polish` for only the approval/result layout and real clipboard checks. Before copying, the shared owned-window helper verifies the fixture's actual foreground HWND, using a verified click only on that fixture when Windows rejects programmatic activation. Diagnostics record only window/process identities and native errors, never the previous clipboard content. Exact Unicode, TeX, indentation and original line endings are read back from the real system clipboard. This preserves the [WinRT foreground requirement](https://learn.microsoft.com/en-us/uwp/api/windows.applicationmodel.datatransfer.clipboard.setcontent).
+
+仅验证审批／结果布局和真实复制可运行 `-Scenario dialog-polish`。复制前用共用自有窗口助手核对实际前台 HWND；Windows 拒绝程序激活时，仅点击经过归属校验的测试窗口。诊断只记窗口、进程身份和原生错误，不读取原有剪贴板内容，成功后从系统剪贴板回读并严格比较 Unicode、TeX、缩进和原始换行。
+
 For the focused search, draft retention and responsive layout check, build the same project, then start `AgentUiSmoke.exe --management-layout-only`. Results use the same temporary-directory pointer. The fixture waits for the target Pivot item and a completed render frame before taking narrow-window screenshots; grid coordinates alone do not prove the selected page is visible. Native fixtures must run sequentially.
 
 The management checks also exercise real filter-reset buttons without losing dirty drafts, a delayed configuration read with live busy status, saved-form save availability, 480 × 540 DIP short windows, scroll access to server actions, directory selection and full-path tooltips. Narrow windows move connection controls and the directory expander into their existing form scroll areas; widening restores the original owners and state. `management-short-mcp-en.png` and `management-short-skills-en.png` capture the isolated English short-window states.

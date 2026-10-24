@@ -6,6 +6,10 @@ The fixture uses the production screenshot panel, image decoder, source projecti
 
 Checks cover receipt identity and size limits; lazy loading; synchronous sidebar opening without duplicate reads; conversation changes; cancelled and late responses; archive-only retry; bounded thumbnail caching; manual navigation; hot language changes; narrow layout; and subscription disposal. Shared decoding checks also cover JPEG/GIF compatibility and image bounds. The existing `agent-ui-smoke --computer-tools-only` verifies the full screenshot viewer and computer approvals.
 
+Native `IsLoaded` does not imply that queued source discovery has finished. Catalog checks wait for actual readiness and source identities, retain the zero-background-read assertion, and verify that an unchanged empty catalog also publishes its ready transition.
+
+原生 `IsLoaded` 不代表排队的来源扫描已完成。目录检查等待真实就绪状态及来源身份，保留零后台读取断言，并验证未变化的空目录也会通知就绪。
+
 `App.MountedWorkspaceChecks.cs` also hosts the production mounted-folder header. It verifies the folder icon and basename, full-path tooltip, hidden state without a folder, actual native open/change/unlink events, live localization, narrow layout, unchanged metadata refreshes, invalidated menus after project/path changes, and disposal. These callbacks are observed by the fixture; it does not open Explorer, invoke the folder picker, or change the formal catalog.
 
 The combined check uses the same 32-pixel header row and margins as `ShellPage.xaml`. It displays an archived PNG under the mounted folder, verifies the visible geometry and uncropped width, and writes `mounted-screenshot-combined.png`.

@@ -29,6 +29,9 @@ struct LayoutSnapshot {
 }
 static CATALOG_SNAPSHOTS: Mutex<Vec<CatalogSnapshot>> = Mutex::new(Vec::new());
 static LAYOUT_SNAPSHOTS: Mutex<Vec<LayoutSnapshot>> = Mutex::new(Vec::new());
+static IMAGE_CLEANUP_CONVERSATIONS: Mutex<Vec<(PathBuf, usize)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static MODEL_READ_OBSERVERS: Mutex<Vec<(PathBuf, Arc<dyn Fn(&str) + Send + Sync>)>> = Mutex::new(Vec::new());
 
 pub fn now() -> String {
     crate::gateway_contract::now_iso8601()
@@ -1304,7 +1307,21 @@ pub fn ensure_conversation(root: &Path, id: &str, title: &str) -> ContractResult
     })
 }
 pub fn read_model_messages(root: &Path, id: &str) -> Result<Vec<Value>, ContractError> {
-    read_messages(root, id, false)
+    // Share the formal writer owner while projecting history; external file checks still apply.
+    // 历史投影与正式写入共用所有者锁；外部文件身份与版本核验仍然生效。
+    with_conversation_catalog(root, id, |catalog, _| {
+        #[cfg(test)]
+        let observer = MODEL_READ_OBSERVERS.lock().unwrap().iter()
+            .find(|(path, _)| path == root).map(|(_, observer)| observer.clone());
+        #[cfg(test)]
+        if let Some(observer) = observer.as_ref() { observer("before"); }
+        let messages = read_messages_at(root, &locate(catalog, id)?)?;
+        #[cfg(test)]
+        if let Some(observer) = observer.as_ref() { observer("after"); }
+        let (current, _) = prepared_conversation_catalog(root, id)?;
+        verify_catalog_sources(catalog, &current, &[id.to_string()])?;
+        Ok(messages)
+    })
 }
 pub fn read_conversation(root: &Path, id: &str) -> ContractResult {
     let document = load_catalog(root)?;
@@ -1537,26 +1554,38 @@ pub fn save_tool_result(
     canonical: &Value,
     environment: Option<&Value>,
 ) -> ContractResult {
+    if call["arguments"]["retention"] == "permanent" && call["arguments"]["retentionReason"].as_str()
+        .is_none_or(|reason| reason.trim().is_empty() || reason.chars().count() > 2000) {
+        return Err(error("Permanent image retention requires a reason of 1–2000 characters. / 永久保留图像须提供1–2000字符的原因。",
+            "INVALID_IMAGE_RETENTION", 400));
+    }
     let request_id = super::identity(&json!(request_id))?;
-    let canonical_raw = serde_json::to_string(canonical)
-        .map_err(|_| error("工具结果无法编码。", "INVALID_TOOL_RESULT", 400))?;
-    super::tool_results::apply(
-        "storage.toolResults.prepare",
-        &json!({"identity":call,"canonical":canonical,"bytes":canonical_raw.len()}),
-    )?;
+    super::tool_results::validate_result_shape(call, canonical)?;
     let environment = normalize_environment(environment)?;
     let version = if environment.is_null() { 1 } else { 2 };
-    let integrity = if version == 2 {
-        serde_json::to_string(&json!({"canonical":canonical,"executionEnvironment":environment}))
-            .unwrap()
-    } else {
-        canonical_raw.clone()
-    };
     let id = new_id();
-    let digest = archive_hash(integrity.as_bytes());
     with_conversation_catalog(root, conversation_id, |document, _| {
         let (relationship, directory) =
             scoped_result_directory(root, document, conversation_id, true)?;
+        // Externalize before assigning the immutable archive reference; existing hashes never change.
+        // 先外置临时图像再生成不可变归档引用，不改写旧引用的受保护字节。
+        let media_directory = directory.parent().unwrap().join("model-images");
+        let canonical = super::model_images::externalize(root, &media_directory, conversation_id,
+            request_id.as_str().unwrap(), canonical, chrono::Utc::now().timestamp_millis())?;
+        if call["arguments"]["retention"] == "permanent" {
+            if let Some(reason) = call["arguments"]["retentionReason"].as_str().filter(|reason|
+                !reason.trim().is_empty() && reason.chars().count() <= 2000) {
+                super::model_images::retain(root, &media_directory, conversation_id, &canonical,
+                    Some(reason), 0, chrono::Utc::now().timestamp_millis())?;
+            }
+        }
+        let canonical_raw = serde_json::to_string(&canonical).map_err(|_| error("工具结果无法编码。", "INVALID_TOOL_RESULT", 400))?;
+        super::tool_results::apply("storage.toolResults.prepare",
+            &json!({"identity":call,"canonical":canonical,"bytes":canonical_raw.len()}))?;
+        let integrity = if version == 2 {
+            serde_json::to_string(&json!({"canonical":canonical,"executionEnvironment":environment})).unwrap()
+        } else { canonical_raw.clone() };
+        let digest = archive_hash(integrity.as_bytes());
         let mut archived = json!({"version":version,"id":id,"conversationId":relationship["conversationId"],"requestId":request_id,
             "toolCallId":call["id"],"toolName":call["name"],"originalProjectId":relationship["projectId"],"savedProjectId":relationship["projectId"],
             "createdAt":now(),"bytes":canonical_raw.len(),"sha256":digest,"canonical":canonical});
@@ -1620,7 +1649,7 @@ fn load_result_at(
     )?;
     Ok(document)
 }
-fn public_archive(document: &Value) -> Result<(), ContractError> {
+pub(crate) fn public_archive(document: &Value) -> Result<(), ContractError> {
     let name = document["toolName"].as_str().unwrap_or("");
     if name.starts_with("model.") || name.starts_with("context.private") {
         return Err(error(
@@ -1710,13 +1739,10 @@ pub fn public_tool_result(
     }
     for item in plan["media"].as_array().unwrap() {
         let path = item["path"].as_array().unwrap();
-        let mut original = canonical.clone();
-        let bytes = object_at_mut(&mut original, path)
-            .and_then(|value| value.get(item["key"].as_str().unwrap()))
-            .and_then(Value::as_str)
-            .and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
-            .map(|bytes| bytes.len())
-            .unwrap_or(0);
+        let payload = canonical.pointer(item["pointer"].as_str().unwrap());
+        let bytes = payload.and_then(|value| value["kynxaImageRef"]["imageBytes"].as_u64()).unwrap_or_else(||
+            payload.and_then(Value::as_str).and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
+                .map_or(0, |bytes| bytes.len() as u64));
         let mut media =
             json!({"encoding":"base64","bytes":bytes,"availableInLocalView":reference.is_some()});
         if let Some(reference) = reference {
@@ -1793,12 +1819,106 @@ pub fn model_media(
         "storage.toolResults.reference",
         &json!({"document":document,"reference":reference,"owner":owner}),
     )?;
-    public_tool_result(
-        &document["canonical"],
+    let hydrated = hydrate_model_images(root, conversation_id, &document["canonical"])?;
+    let mut result = public_tool_result(
+        &hydrated["value"],
         Some(reference),
         document.get("executionEnvironment"),
         true,
-    )
+    )?;
+    if hydrated["expiredMedia"].as_array().is_some_and(|media| !media.is_empty()) {
+        result["mediaRetention"] = json!({"expiredMedia":hydrated["expiredMedia"],"availableMedia":hydrated["availableMedia"]});
+    }
+    Ok(result)
+}
+
+/// Only trusted stored context uses image sidecars; original user files are never managed here.
+/// 图像旁车仅用于可信已保存上下文，不接管或清理用户原文件。
+pub fn externalize_model_images(root: &Path, conversation_id: &str, request_id: &str, value: &Value) -> ContractResult {
+    if !super::model_images::has_image_payload(value) { return Ok(value.clone()); }
+    super::identity(&json!(request_id))?;
+    super::tool_results::apply("storage.toolResults.depth", &json!({"value":value}))?;
+    with_conversation_catalog(root, conversation_id, |catalog, _| {
+        let (_, directory) = scoped_result_directory(root, catalog, conversation_id, true)?;
+        super::model_images::externalize(root, &directory.parent().unwrap().join("model-images"),
+            conversation_id, request_id, value, chrono::Utc::now().timestamp_millis())
+    })
+}
+
+pub fn hydrate_model_images(root: &Path, conversation_id: &str, value: &Value) -> ContractResult {
+    if !super::model_images::has_references(value) {
+        return Ok(json!({"value":value,"expiredMedia":[],"availableMedia":0}));
+    }
+    super::tool_results::apply("storage.toolResults.depth", &json!({"value":value}))?;
+    with_conversation_catalog(root, conversation_id, |catalog, _| {
+        let (_, directory) = scoped_result_directory(root, catalog, conversation_id, true)?;
+        super::model_images::hydrate(root, &directory.parent().unwrap().join("model-images"),
+            conversation_id, value, chrono::Utc::now().timestamp_millis())
+    })
+}
+
+pub fn pin_model_images(root: &Path, conversation_id: &str, value: &Value, reason: &str) -> ContractResult {
+    if reason.trim().is_empty() || reason.chars().count() > 2000 {
+        return Err(error("Permanent image retention requires a reason of 1–2000 characters. / 永久保留图像须提供1–2000字符的原因。",
+            "INVALID_IMAGE_RETENTION", 400));
+    }
+    if !super::model_images::has_references(value) { return Ok(json!({"retained":0,"expired":0})); }
+    with_conversation_catalog(root, conversation_id, |catalog, _| {
+        let (_, directory) = scoped_result_directory(root, catalog, conversation_id, true)?;
+        super::model_images::retain(root, &directory.parent().unwrap().join("model-images"),
+            conversation_id, value, Some(reason), 0, chrono::Utc::now().timestamp_millis())
+    })
+}
+
+pub fn protect_model_images(root: &Path, conversation_id: &str, value: &Value, lease_ms: u64) -> ContractResult {
+    if !super::model_images::has_references(value) { return Ok(json!({"retained":0,"expired":0})); }
+    with_conversation_catalog(root, conversation_id, |catalog, _| {
+        let (_, directory) = scoped_result_directory(root, catalog, conversation_id, true)?;
+        super::model_images::retain(root, &directory.parent().unwrap().join("model-images"),
+            conversation_id, value, None, lease_ms.min(30 * 60 * 1000) as i64, chrono::Utc::now().timestamp_millis())
+    })
+}
+
+/// Inspect bounded batches per session; expiry removes payloads, never receipts or hash metadata.
+/// 每个会话分批检查；过期只删除载荷，不删回执或哈希元数据。
+pub fn cleanup_expired_model_images(root: &Path, now_ms: i64, limit: usize) -> ContractResult {
+    let empty = || json!({"scanned":0,"removed":0,"removedBytes":0});
+    if limit == 0 { return Ok(empty()); }
+    let owner = catalog_owner(root)?;
+    let _guard = owner.lock().map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
+    if managed_files::inspect(root, &root.join(".catalog-transaction.json"), false, true, 64 * 1024 * 1024)? {
+        return Ok(empty());
+    }
+    let Some(catalog) = read_catalog_snapshot(root)?.0 else { return Ok(empty()); };
+        let chats = catalog["Chats"].as_array().into_iter().flatten().chain(
+            catalog["Projects"].as_array().into_iter().flatten().flat_map(|project|
+                project["Chats"].as_array().into_iter().flatten())).collect::<Vec<_>>();
+        if chats.is_empty() { return Ok(empty()); }
+        let mut cursor = IMAGE_CLEANUP_CONVERSATIONS.lock().map_err(|_| error("图像清理游标不可用。", "STORAGE_IO_FAILED", 500))?;
+        let start = cursor.iter().find(|(path, _)| path == root).map_or(0, |(_, index)| *index) % chats.len();
+        let mut next = start;
+        let mut remaining = limit.min(4096);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let (mut scanned, mut removed, mut bytes) = (0_u64, 0_u64, 0_u64);
+        for offset in 0..chats.len() {
+            let index = (start + offset) % chats.len();
+            next = (index + 1) % chats.len();
+            let chat = chats[index];
+            let Some(id) = chat["Id"].as_str() else { continue; };
+            let directory = conversation_logs::directory(root, &locate(&catalog, id)?)?.join("model-images");
+            let result = super::model_images::cleanup(root, &directory, id, now_ms, remaining)?;
+            remaining = remaining.saturating_sub(result["visited"].as_u64().unwrap_or(0) as usize);
+            scanned = scanned.saturating_add(result["scanned"].as_u64().unwrap_or(0));
+            removed = removed.saturating_add(result["removed"].as_u64().unwrap_or(0));
+            bytes = bytes.saturating_add(result["removedBytes"].as_u64().unwrap_or(0));
+            if remaining == 0 || std::time::Instant::now() >= deadline { break; }
+        }
+        if let Some((_, index)) = cursor.iter_mut().find(|(path, _)| path == root) { *index = next; }
+        else {
+            if cursor.len() >= 128 { cursor.remove(0); }
+            cursor.push((root.to_path_buf(), next));
+        }
+        Ok(json!({"scanned":scanned,"removed":removed,"removedBytes":bytes}))
 }
 
 /// Commit semantic checkpoints only when formal turn and receipt versions match.
@@ -2051,6 +2171,62 @@ mod gateway_tests {
             super::super::gateway_memory::stop_candidates(&self.0);
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn model_history_projection_serializes_with_formal_steering_without_losing_messages() {
+        let workspace = Workspace::new();
+        let root = workspace.0.clone();
+        let chat = new_id();
+        ensure_conversation(&root, &chat, "Owned model projection").unwrap();
+        upsert_message(&root, &chat, &json!({"Id":new_id(),"Role":"user","Content":"original"})).unwrap();
+        let (start, started) = std::sync::mpsc::sync_channel(1);
+        let (ready, waiting) = std::sync::mpsc::sync_channel(1);
+        let waiting = Mutex::new(waiting);
+        let writer_root = root.clone();
+        let writer_chat = chat.clone();
+        let owner = catalog_owner(&root).unwrap();
+        let writer = std::thread::spawn(move || {
+            started.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            ready.send(matches!(owner.try_lock(), Err(std::sync::TryLockError::WouldBlock))).unwrap();
+            upsert_message(&writer_root, &writer_chat,
+                &json!({"Id":new_id(),"Role":"user","Content":"new steering"})).unwrap();
+        });
+        MODEL_READ_OBSERVERS.lock().unwrap().push((root.clone(), Arc::new(move |phase| {
+            if phase != "before" { return; }
+            start.send(()).unwrap();
+            assert!(waiting.lock().unwrap().recv_timeout(std::time::Duration::from_secs(3)).unwrap(),
+                "The formal writer must observe the model projection holding its existing owner.");
+        })));
+        let projected = read_model_messages(&root, &chat);
+        MODEL_READ_OBSERVERS.lock().unwrap().retain(|(path, _)| path != &root);
+        writer.join().unwrap();
+        let projected = projected.unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0]["Content"], "original");
+        let latest = read_model_messages(&root, &chat).unwrap();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[0]["Content"], "original");
+        assert_eq!(latest[1]["Content"], "new steering");
+    }
+    #[test]
+    fn model_history_projection_rechecks_external_catalog_archival_before_returning() {
+        let workspace = Workspace::new();
+        let root = workspace.0.clone();
+        let chat = new_id();
+        ensure_conversation(&root, &chat, "External scope change").unwrap();
+        upsert_message(&root, &chat, &json!({"Id":new_id(),"Role":"user","Content":"saved"})).unwrap();
+        let changed_root = root.clone();
+        MODEL_READ_OBSERVERS.lock().unwrap().push((root.clone(), Arc::new(move |phase| {
+            if phase != "after" { return; }
+            let path = changed_root.join("catalog.json");
+            let mut catalog: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            catalog["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
+            catalog["Chats"][0]["IsArchived"] = json!(true);
+            std::fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        })));
+        let projected = read_model_messages(&root, &chat);
+        MODEL_READ_OBSERVERS.lock().unwrap().retain(|(path, _)| path != &root);
+        assert_eq!(projected.unwrap_err().code(), "WORKSPACE_CHANGED");
     }
     #[test]
     fn public_numbers_preserve_integer_compatibility_without_changing_raw_logs() {
@@ -2740,8 +2916,13 @@ pub fn handle(
             return Some(with_catalog(root, |document, _| {
                 let archive = load_result_at(root, document, id, parts[4], true)?;
                 public_archive(&archive)?;
+                let canonical = if super::model_images::has_references(&archive["canonical"]) {
+                    let (_, directory) = scoped_result_directory(root, document, id, true)?;
+                    super::model_images::hydrate(root, &directory.parent().unwrap().join("model-images"), id,
+                        &archive["canonical"], chrono::Utc::now().timestamp_millis())?["value"].take()
+                } else { archive["canonical"].clone() };
                 public_tool_result(
-                    &archive["canonical"],
+                    &canonical,
                     None,
                     archive.get("executionEnvironment"),
                     true,

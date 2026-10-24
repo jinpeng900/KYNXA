@@ -5,12 +5,116 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 /// Bound reference metadata without dropping evidence needed for a composite requirement.
 /// 引用元数据保持有界，不裁掉复合要求所需的真实证据。
 pub(super) const MAX_COMPLETION_REFERENCES_PER_ITEM: usize = 64;
+
+/// Explicit turn boundaries constrain execution; an eventual deliverable remains background.
+/// 明确的当前阶段约束执行，最终想要的产物仍保留为背景目标。
+pub(crate) fn resolve_work_scope(message: &str, previous: &Value) -> Value {
+    static PLAN: OnceLock<Regex> = OnceLock::new();
+    static EXPLAIN: OnceLock<Regex> = OnceLock::new();
+    static READ_ONLY: OnceLock<Regex> = OnceLock::new();
+    static EXECUTE: OnceLock<Regex> = OnceLock::new();
+    static SAME_TURN_EXECUTION: OnceLock<Regex> = OnceLock::new();
+    static PLAN_FILE: OnceLock<Regex> = OnceLock::new();
+    static FILE_PATH: OnceLock<Regex> = OnceLock::new();
+    let text = instruction_text(message);
+    let positive = positive_request_text(&text);
+    let execute = EXECUTE.get_or_init(|| Regex::new(concat!(
+        r"(?ix)(?:开始|直接|继续|接着|现在|立即|马上|就按.{0,24})(?:动手|执行|实施|修改|修复|制作|建模|生成|做)",
+        r"|^\s*(?:那就|好|好的|请)?(?:开始|执行|动手|继续做|开始做)(?:吧|了)?[。！!\s]*$",
+        r"|(?:^|[。！？!?\n])\s*(?:请|帮我)?(?:(?:修复|修改)(?:这个|这些|该)(?:bug|错误|问题|代码|功能)|把(?:这个|这些|上面|刚才)(?:问题|错误|代码)?(?:给)?(?:改掉|修复|修改))(?:[，,。；;！!\s]|$)",
+        r"|\b(?:start|begin|proceed|continue)\s+(?:the\s+)?(?:implementation|executing|execution|building|coding|work)\b"
+    )).expect("static execution scope expression")).is_match(&positive);
+    let same_turn_execution = SAME_TURN_EXECUTION.get_or_init(|| Regex::new(concat!(
+        r"(?ix)(?:然后|再|并且?|随后|之后|接着)\s*(?:请|直接|马上|立即|帮我|就)?(?:开始|继续|动手|执行|实施|实现|修改|修复|制作|生成|保存|写入|导出|做起来)",
+        r"|\b(?:then|and)\s+(?:immediately\s+)?(?:execute|implement|build|start|proceed)\b"
+    )).expect("static same turn execution expression")).is_match(&positive);
+    let plan = PLAN.get_or_init(|| Regex::new(concat!(
+        r"(?ix)(?:先|只|仅)(?:要|需要|给我|给|出|提供|制定|整理|设计|讨论|说说|说|讲讲|讲|说明|介绍|总结|一个|一份|一下|具体|详细|\s){0,18}",
+        r"(?:方案|计划|思路|设计要求|怎么做|如何做|要做什么|会做什么)",
+        r"|先(?:说说|讲讲|说明).{0,16}(?:要做什么|会做什么|怎么做|如何做|方案|计划)",
+        r"|\b(?:plan\s+first|first\s+(?:explain|describe|outline)\s+(?:what|the\s+plan)|(?:only|just)\s+(?:give|provide|discuss|outline)\s+(?:a\s+|the\s+)?plan)\b"
+    )).expect("static planning scope expression")).is_match(&text);
+    let explanation = EXPLAIN.get_or_init(|| Regex::new(concat!(
+        r"(?ix)(?:只|仅|先)(?:要|需要|请|给我|根据.{0,32})?(?:解释|说明|分析|总结|回答|复述|说说)",
+        r"|\b(?:only|just)\s+(?:explain|describe|summarize|answer|analyse|analyze)\b"
+    )).expect("static explanation scope expression")).is_match(&text);
+    let read_only = READ_ONLY.get_or_init(|| Regex::new(concat!(
+        r"(?ix)只读|仅(?:查看|检查|审查|调查)|(?:先|暂时|这次|本轮)?(?:不要|不准|别|禁止|不)(?:再|实际|动手|进行)?(?:修改|改动|改|写入|执行|操作)(?:代码|文件|任何内容)?(?:[，,；;。！？!?]|$)",
+        r"|\b(?:read[ -]only|no\s+(?:edits|changes))\b|\bdo\s+not\s+(?:modify|edit|write|execute)\s*(?:[.;,!]|$)"
+    )).expect("static readonly scope expression")).is_match(&text);
+    let requested_plan_file = PLAN_FILE.get_or_init(|| Regex::new(
+        r"(?ix)(?:创建|生成|写入|保存|导出|给|提供|制作|create\b|save\b|write\b)"
+    ).expect("static requested plan artifact expression")).is_match(&positive)
+        && FILE_PATH.get_or_init(|| Regex::new(r"(?i)\.(?:md|txt|docx|pdf|pptx)\b")
+            .expect("static requested artifact path expression")).is_match(message)
+        && !text.contains("先说") && !text.contains("先讲") && !text.contains("先解释");
+    let stage = if plan && !same_turn_execution && !requested_plan_file { "plan" }
+        else if explanation && !same_turn_execution { "explain" }
+        else if read_only { "read-only" }
+        else if execute || same_turn_execution || requested_plan_file { "execute" }
+        else { previous["stage"].as_str().unwrap_or("execute") };
+    let mut scope = previous.as_object().cloned().map(Value::Object).unwrap_or_else(|| json!({}));
+    scope["stage"] = json!(stage);
+    scope["request"] = json!(message);
+    scope
+}
+
+fn instruction_text(message: &str) -> String {
+    let mut fenced = false;
+    let mut quote = None;
+    let mut text = String::new();
+    for line in message.lines() {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || line.trim_start().starts_with('>') { continue; }
+        for character in line.chars() {
+            if let Some(end) = quote {
+                if character == end { quote = None; }
+            } else {
+                match character {
+                    '“' => quote = Some('”'), '‘' => quote = Some('’'), '"' => quote = Some('"'),
+                    _ => text.push(character),
+                }
+            }
+        }
+        text.push('\n');
+    }
+    text
+}
+
+pub(crate) fn response_only_scope(scope: &Value) -> bool {
+    matches!(scope["stage"].as_str(), Some("plan" | "explain" | "read-only"))
+}
+
+pub(crate) fn scope_allows_mutation(scope: &Value) -> bool {
+    !matches!(scope["stage"].as_str(), Some("plan" | "explain" | "read-only"))
+}
+
+pub(crate) fn work_scope_instruction(scope: &Value) -> String {
+    let boundary = match scope["stage"].as_str() {
+        Some("plan") => "The current turn asks for a plan, not its implementation. Deliver that plan and stop this response. The eventual artifact or project is background, not a missing execution receipt. Read only what is genuinely necessary to explain the plan; do not create files, delegate implementation or begin execution until the user asks.",
+        Some("explain") => "The current turn asks for an explanation or assessment. Answer it without implementing the discussed changes. Read relevant sources only if needed. Earlier successful operations and future recommendations do not authorize further execution or require another verification cycle.",
+        Some("read-only") => "The current turn permits investigation and reading only. Gather the necessary evidence and report the answer; do not modify files, launch programs or delegate mutation. Earlier failed implementation checks remain historical facts, not requests to repair them. A discussed future fix is not an active acceptance requirement.",
+        _ => "Complete the current authorized task accurately. Choose ordinary implementation and presentation details yourself; ask only when a necessary missing fact or material ambiguity prevents a correct or authorized result. Do not add optional work or checks after the requested result is established.",
+    };
+    format!("Current work stage: {}. {boundary} Choose reasonable ordinary defaults yourself; ask only for a necessary missing fact, permission or material ambiguity, never routine stylistic preferences.", scope["stage"].as_str().unwrap_or("execute"))
+}
+
+/// Bookkeeping does not grant permission to mutate the work product.
+/// 内部任务登记不授予修改工作产物的权限。
+pub(crate) fn scope_allows_call(scope: &Value, name: &str, read_only: bool) -> bool {
+    scope_allows_mutation(scope) || read_only || matches!(name,
+        "tool.load" | "context.compact" | "task.describe" | "task.document" | "task.wait" | "task.result" | "task.delegate")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SteeringRevision {
@@ -42,8 +146,13 @@ pub(super) fn steering_revision(
     let disposition = user_work_disposition(value).map_err(|_| invalid())?;
     let deliver_existing = disposition == Some("deliver-existing");
     let stop = matches!(disposition, Some("stop" | "deliver-existing"));
+    // Stopping suspends the whole old scope; unused edits or duration cannot veto bound user control.
+    // 停止挂起全部旧要求；未使用的范围编辑或时长字段不能否决已绑定的用户控制。
+    if stop {
+        return Ok(SteeringRevision { requirements: Vec::new(), minimum_active_ms: 0, stop, deliver_existing });
+    }
     let minimum_active_ms = super::budget::revised_minimum_active(minimum_active_ms,
-        value.get("minimumActiveMs"), stop)?;
+        value.get("minimumActiveMs"))?;
     let array = |name: &str| -> Result<&[Value], String> {
         value.get(name).map(|value| value.as_array().filter(|items| items.len() <= 128)
             .map(Vec::as_slice).ok_or_else(invalid)).unwrap_or(Ok(&[]))
@@ -71,13 +180,10 @@ pub(super) fn steering_revision(
         }
     }
     let additions = array("addRequirements")?.iter().map(text).collect::<Result<Vec<_>, _>>()?;
-    if stop && (!changes.is_empty() || !additions.is_empty()) { return Err(invalid()); }
-    let mut requirements = if stop { Vec::new() } else {
-        current.iter().enumerate().filter_map(|(index, original)| match changes.get(&index) {
-            Some(replacement) => replacement.clone(),
-            None => Some(original.clone()),
-        }).collect::<Vec<_>>()
-    };
+    let mut requirements = current.iter().enumerate().filter_map(|(index, original)| match changes.get(&index) {
+        Some(replacement) => replacement.clone(),
+        None => Some(original.clone()),
+    }).collect::<Vec<_>>();
     for addition in additions {
         if !requirements.contains(&addition) { requirements.push(addition); }
     }
@@ -165,35 +271,14 @@ pub(crate) fn native_task_control_receipt(call: &Value, requirements: &[String])
 
 /// Root and child reviews share the same scope and evidence rules.
 /// 根任务和子任务共用验收范围与证据规则。
-pub(crate) const COMPLETION_REVIEW_CONTRACT: &str = "Assess only the user's current explicit requirements against saved results and real receipts. Return a standalone <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[],\"met\":[{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"exact successful call ID\"]}]}</kynxa_task>; kynxa_task is not a native tool. Cover each listed requirement with evidence matching its action, target and current version. A write proves existence; use existing readback or visual evidence only when the requirement calls for that quality. Optional improvements and extra audits are not completion gates. If a required fact is missing, name that specific target or failed check and choose continue with a concrete next step; available native tools remain usable. Repair reference formatting from saved receipts without repeating successful work or searching for internal control names. Use blocked only for a real user-input, authorization, external or resource blocker. Do not repeat the public delivery, pad time or add verification just because this is a review.";
+pub(crate) const COMPLETION_REVIEW_CONTRACT: &str = "Assess only the user's current explicit requirements against saved results and real receipts. Return a standalone <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[],\"met\":[{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"exact successful call ID\"]}]}</kynxa_task>; kynxa_task is not a native tool. Cover each listed requirement with evidence matching its action, target and current version. A write proves existence; use existing readback or visual evidence only when the requirement calls for that quality. Optional improvements and extra audits are not completion gates. If a required fact is missing, name that specific target or failed check and choose continue with a concrete next step; available native tools remain usable. Repair reference formatting from saved receipts without repeating successful work or searching for internal control names. Use blocked for a real user-input, authorization, external or resource blocker. If requirements are logically impossible or a necessary capability is confirmed unavailable, use blocker impossible or unsupported with feasibility {basis: specific facts or reasoning, alternatives: reasonable alternatives and their limits}. Ordinary difficulty or a first failed method does not establish impossibility. Complete feasible current requirements without optional work. Do not repeat the public delivery, pad time or add verification just because this is a review.";
 
 /// Explicit external actions and current-source questions require actual execution evidence; prose does not.
 /// 明确外部动作与当下来源问题须有真实执行证据；问候、文案、解释和纯运算不额外触发工具验收。
 pub(crate) fn requires_execution_verification(goal: &str) -> bool {
-    static EXPLANATION: OnceLock<Regex> = OnceLock::new();
-    static ACTION: OnceLock<Regex> = OnceLock::new();
-    static NEGATED_ACTION: OnceLock<Regex> = OnceLock::new();
-    static CLAUSES: OnceLock<Regex> = OnceLock::new();
-    static EXPLANATORY_ACTION: OnceLock<Regex> = OnceLock::new();
     if super::budget::is_finite_response_request(goal) { return false; }
     if plain_application_launch(goal) { return true; }
-    let explanation=EXPLANATION.get_or_init(|| Regex::new(concat!(
-        r"(?ix)^\s*(?:请|能否|可以|please\s+)?(?:解释|说明|教我|告诉我(?:如何|怎么)|介绍|explain\b|describe\b|teach\s+me\b|how\s+(?:do|can|to)\b)"
-    )).expect("static explanatory task expression"));
-    let additional_action=EXPLANATORY_ACTION.get_or_init(||Regex::new(concat!(
-        r"(?ix)(?:并且?|同时|然后|and\s+(?:then\s+|also\s+)?)(?:请|帮我|为我|please\s+)?",
-        r"(?:打开|启动|运行|执行|安装|下载|上传|搜索|抓取|读取|保存|导出|提交|修改|修复|创建|生成|制作|测试|删除|open\b|launch\b|run\b|execute\b|install\b|download\b|upload\b|search\b|read\b|save\b|export\b|modify\b|fix\b|create\b|build\b|test\b|delete\b)"
-    )).expect("static explanatory additional action expression"));
-    let negative=NEGATED_ACTION.get_or_init(||Regex::new(concat!(
-        r"(?ix)^\s*(?:(?:请|先|这次|这轮|本轮|当前|please)\s*)*(?:(?:不要|不再|无需|不用|不需要|不准|不允许|不必|禁止|别)",
-        r"(?:再|继续|去|额外|实际|自动|重新|主动|帮我|任何|进行)*\s*",
-        r"(?:打开|启动|运行|执行|安装|卸载|下载|上传|抓取|爬取|搜索|检索|浏览|访问|回读|读取|读写|读|扫描|渲染|建模|写入|写|保存|导出|提交|推送|修改|修复|重构|编译|测试|检查|验证|调用|删除|删|创建|生成|制作|更新)",
-        r"|(?:don't|do\s+not|never|without|no\s+need\s+to)\s+(?:actually\s+|continue\s+|further\s+|automatically\s+)*",
-        r"(?:open|launch|run|execute|install|uninstall|download|upload|fetch|scrape|browse|render|inspect|compile|deploy|commit|push|read|write|save|export|edit|modify|delete|create|build|verify|test|search|call|use)\b)"
-    )).expect("static negated execution task expression"));
-    let clauses=CLAUSES.get_or_init(||Regex::new(r"(?i)[，,；;。！？!?\n\r]+|(?:但是|但请|而是|\bbut\b|\binstead\b)").expect("static request clause expression"));
-    let positive=clauses.split(goal).filter(|clause|!negative.is_match(clause)
-        && (!explanation.is_match(clause) || additional_action.is_match(clause))).collect::<Vec<_>>().join("\n");
+    static ACTION: OnceLock<Regex> = OnceLock::new();
     ACTION.get_or_init(|| Regex::new(concat!(
         r"(?ix)(?:打开|启动|运行|执行|安装|卸载|下载|上传|抓取|爬取|搜索网页|网页搜索|检索网页|浏览网页|访问网站|回读|读取|扫描|渲染|建模|写入|保存|导出|提交|推送|合并分支|修改代码|修复代码|重构代码|编译|运行测试|测试代码)",
         r"|(?:创建|生成|新建|编辑|修改|删除|更新|制作|检查|验证|核对).{0,40}(?:文件|文档|目录|文件夹|代码|工程|项目|场景|模型|数据库|网页|网站|图像|图片|图表|演示|表格|幻灯片|进程|应用|软件)",
@@ -202,7 +287,31 @@ pub(crate) fn requires_execution_verification(goal: &str) -> bool {
         r"|\b(?:open|launch|execute|install|uninstall|download|upload|fetch|scrape|browse|render|inspect|compile|deploy|commit|push)\b",
         r"|\b(?:run|read|scan|save|export|edit|modify|fix|delete|create|build|verify|test|search)\b.{0,60}\b(?:file|folder|directory|code|project|scene|application|app|software|web|website|browser|terminal|command|test|tests|blender|document|spreadsheet|presentation)\b",
         r"|\b(?:latest|current|today|live)\b.{0,40}\b(?:news|version|price|weather|score|rate|release|information)\b"
-    )).expect("static external execution task expression")).is_match(&positive)
+    )).expect("static external execution task expression")).is_match(&positive_request_text(goal))
+}
+
+fn positive_request_text(goal: &str) -> String {
+    static EXPLANATION: OnceLock<Regex> = OnceLock::new();
+    static NEGATED_ACTION: OnceLock<Regex> = OnceLock::new();
+    static CLAUSES: OnceLock<Regex> = OnceLock::new();
+    static EXPLANATORY_ACTION: OnceLock<Regex> = OnceLock::new();
+    let explanation=EXPLANATION.get_or_init(|| Regex::new(concat!(
+        r"(?ix)^\s*(?:请|能否|可以|please\s+)?(?:解释|说明|教我|告诉我(?:如何|怎么)|介绍|explain\b|describe\b|teach\s+me\b|how\s+(?:do|can|to)\b)"
+    )).expect("static explanatory task expression"));
+    let additional_action=EXPLANATORY_ACTION.get_or_init(||Regex::new(concat!(
+        r"(?ix)(?:并且?|同时|然后|and\s+(?:then\s+|also\s+)?)(?:请|帮我|为我|please\s+)?",
+        r"(?:打开|启动|运行|执行|安装|下载|上传|搜索|抓取|读取|保存|导出|提交|修改|修复|创建|生成|制作|测试|删除|open\b|launch\b|run\b|execute\b|install\b|download\b|upload\b|search\b|read\b|save\b|export\b|modify\b|fix\b|create\b|build\b|test\b|delete\b)"
+    )).expect("static explanatory additional action expression"));
+    let negative=NEGATED_ACTION.get_or_init(||Regex::new(concat!(
+        r"(?ix)^\s*(?:(?:请|先|也|并且|并|同时|而且|这次|这轮|本轮|当前|please|and|also)\s*)*(?:(?:不要|不再|无需|不用|不需要|不准|不允许|不必|禁止|别)",
+        r"(?:再|继续|去|额外|实际|自动|重新|主动|帮我|任何|进行)*\s*",
+        r"(?:打开|启动|运行|执行|安装|卸载|下载|上传|抓取|爬取|搜索|检索|浏览|访问|回读|读取|读写|读|扫描|渲染|建模|截图|截屏|预览|写入|写|保存|导出|提交|推送|修改|修复|重构|编译|测试|检查|验证|调用|删除|删|创建|生成|制作|更新)",
+        r"|(?:don't|do\s+not|never|without|no\s+need\s+to)\s+(?:actually\s+|continue\s+|further\s+|automatically\s+)*",
+        r"(?:open|launch|run|execute|install|uninstall|download|upload|fetch|scrape|browse|render|inspect|compile|deploy|commit|push|read|write|save|export|edit|modify|delete|create|build|verify|test|search|call|use|take|capture|preview)\b)"
+    )).expect("static negated execution task expression"));
+    let clauses=CLAUSES.get_or_init(||Regex::new(r"(?i)[，,；;。！？!?\n\r]+|(?:但是|但请|而是|\bbut\b|\binstead\b)").expect("static request clause expression"));
+    clauses.split(goal).filter(|clause|!negative.is_match(clause)
+        && (!explanation.is_match(clause) || additional_action.is_match(clause))).collect::<Vec<_>>().join("\n")
 }
 
 /// Launching an application needs a successful receipt; its name is not a visual-quality request.
@@ -233,7 +342,7 @@ pub(crate) fn requires_result_readback(goal: &str) -> bool {
     !plain_application_launch(goal) && requires_execution_verification(goal) && QUALITY.get_or_init(|| Regex::new(concat!(
         r"(?ix)回读|检查|验证|核对|渲染|预览|画面|视觉|精致|细节|美观|质量|金碧|排版|测试|截图|查看.{0,12}(?:界面|窗口)|确认.{0,12}外观",
         r"|\b(?:read\s+back|readback|inspect|verify|validate|render|preview|visual|beautiful|detailed|quality|test|tests|screenshot)\b|\b(?:view|look\s+at)\b.{0,30}\b(?:interface|window|appearance)\b"
-    )).expect("static observed quality task expression")).is_match(goal)
+    )).expect("static observed quality task expression")).is_match(&positive_request_text(goal))
 }
 
 /// Visual acceptance requires image input to the evaluating model, not a text description of a render.
@@ -244,11 +353,11 @@ pub(crate) fn requires_visual_observation(goal: &str) -> bool {
         r"(?ix)渲染|建模|画面|视觉|精致|美观|金碧|配色|排版|幻灯片|演示文稿|截图|查看.{0,12}(?:界面|窗口)|确认.{0,12}外观",
         r"|\b(?:render|rendering|visual|beautiful|aesthetic|layout|slide|slides|presentation|screenshot)\b|\b(?:view|look\s+at)\b.{0,30}\b(?:interface|window|appearance)\b",
         r"|\b(?:create|build|model|sculpt)\b.{0,100}\bblender\b|\bblender\b.{0,100}\b(?:model|scene|sculpt)\b"
-    )).expect("static visual observation task expression")).is_match(goal)
+    )).expect("static visual observation task expression")).is_match(&positive_request_text(goal))
 }
 
-/// Only actual embedded image bytes can be visual input; paths, media placeholders and prose do not qualify.
-/// 只有真实嵌入图像字节才可能成为视觉输入；路径、媒体占位和描述文字不算。
+/// Bytes or typed archive references identify image evidence; actual model delivery is checked separately.
+/// 图像字节或规范归档引用标识图像证据；是否真正送入模型另行核对。
 pub(crate) fn receipt_has_visual_observation(canonical: &Value) -> bool {
     !receipt_visual_hashes(canonical).is_empty()
 }
@@ -262,9 +371,23 @@ fn encoded_visual_hash(encoded: &str) -> Option<String> {
 /// Compare decoded media bytes, not a call ID appearing alongside an unrelated older image.
 /// 比较实际解码的媒体字节；不能因当前调用 ID 与旧图同时出现就认定新图已经投递。
 pub(crate) fn receipt_visual_hashes(canonical:&Value)->Vec<String> {
-    let mut hashes:Vec<String>=canonical["content"].as_array().into_iter().flatten().filter(|block|
+    // Browser receipts wrap the media once; unrelated nested JSON is never visual evidence.
+    // 浏览器回执只多包装一层；无关嵌套 JSON 不能冒充图像证据。
+    let content = if canonical["sessionId"].is_string() && canonical["tabId"].is_string() {
+        canonical["value"]["content"].as_array().or_else(|| canonical["content"].as_array())
+    } else { canonical["content"].as_array() };
+    let mut hashes:Vec<String>=content.into_iter().flatten().filter(|block|
         block["type"]=="image" && matches!(block["mimeType"].as_str(),Some("image/png"|"image/jpeg"|"image/webp"|"image/gif")))
-        .filter_map(|block|block["data"].as_str().and_then(encoded_visual_hash)).collect();
+        .filter_map(|block| {
+            if let Some(encoded) = block["data"].as_str() { return encoded_visual_hash(encoded); }
+            let reference = &block["data"]["kynxaImageRef"];
+            if reference["version"] != 1 || reference["imageBytes"].as_u64().is_none_or(|bytes| bytes == 0)
+                || !["id", "sha256", "imageSha256"].iter().all(|key| reference[key].as_str()
+                    .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))) {
+                return None;
+            }
+            reference["imageSha256"].as_str().map(str::to_ascii_lowercase)
+        }).collect();
     hashes.sort();hashes.dedup();hashes
 }
 
@@ -304,7 +427,7 @@ pub(crate) fn receipt_is_readback(tool: &str, canonical: &Value) -> bool {
     if tool.starts_with("terminal.") && (canonical["exitCode"].is_i64() || canonical["command"]["exitCode"].is_i64()) {
         return true;
     }
-    matches!(tool, "filesystem.read" | "document.read" | "web.fetch" | "web.search" | "browser.read"
+    matches!(tool, "filesystem.read" | "document.read" | "image.read" | "web.fetch" | "web.search" | "browser.read"
         | "browser.snapshot" | "browser.screenshot" | "knowledge.read" | "knowledge.search"
         | "tool.result.read" | "terminal.session.read" | "terminal.host.read" | "process.list")
         || tool.rsplit('.').next().is_some_and(|name| matches!(name,
@@ -459,6 +582,137 @@ impl TaskTextProjection {
     }
 }
 
+/// Typed broker facts keep absent legacy defaults explicit; provider proof payloads remain intact.
+/// 程序事实使用明确类型及旧版默认值，供应商证明载荷保持原样。
+#[derive(Debug, Clone)]
+pub struct TaskDecisionInput {
+    pub reply: Value,
+    pub verification: Value,
+    pub expected_requirements: Vec<String>,
+    pub valid_evidence: Vec<Value>,
+    pub evidence_records: Option<Vec<Value>>,
+    pub is_review: bool,
+    pub has_calls: bool,
+    pub output_truncated: bool,
+    pub remaining_rounds: Option<u64>,
+    pub review_attempts: u64,
+    pub minimum_active_ms: u64,
+    pub active_elapsed_ms: u64,
+    pub evidence_required: bool,
+    pub requires_verification: bool,
+    pub requires_readback: bool,
+    pub has_readback: bool,
+    pub requires_visual_readback: bool,
+    pub has_visual_readback: bool,
+    pub summarize_only: bool,
+    pub recovery_final: bool,
+    pub supports_task_markers: bool,
+    pub execution_intent: bool,
+    pub response_only: bool,
+    pub output_continuations: u64,
+    pub steered_task: bool,
+    pub steered_tool_task: bool,
+    pub effectful_work: bool,
+}
+
+impl Default for TaskDecisionInput {
+    fn default() -> Self {
+        Self {
+            reply: Value::Null, verification: Value::Null, expected_requirements: Vec::new(),
+            valid_evidence: Vec::new(), evidence_records: None, is_review: false, has_calls: false,
+            output_truncated: false, remaining_rounds: None, review_attempts: 0,
+            minimum_active_ms: 0, active_elapsed_ms: u64::MAX, evidence_required: false,
+            requires_verification: false, requires_readback: false, has_readback: false,
+            requires_visual_readback: false, has_visual_readback: false, summarize_only: false,
+            recovery_final: false, supports_task_markers: true, execution_intent: true, response_only: false,
+            output_continuations: 0, steered_task: false, steered_tool_task: false, effectful_work: false,
+        }
+    }
+}
+
+impl TaskDecisionInput {
+    /// Only the compatibility boundary decodes loose JSON; decisions use typed fields thereafter.
+    /// 仅兼容入口解析宽松 JSON，后续判定直接使用类型字段。
+    pub fn from_value(value: &Value) -> Self {
+        Self {
+            reply: value.get("reply").cloned().unwrap_or(Value::Null),
+            verification: value["verification"].clone(),
+            expected_requirements: value["expectedRequirements"].as_array().into_iter().flatten()
+                .filter_map(Value::as_str).map(str::to_owned).collect(),
+            valid_evidence: value["validEvidence"].as_array().cloned().unwrap_or_default(),
+            evidence_records: value.get("evidenceRecords").map(|records| records.as_array().cloned().unwrap_or_default()),
+            is_review: boolean_field(value, "isReview"),
+            has_calls: boolean_field(value, "hasCalls"),
+            output_truncated: boolean_field(value, "outputTruncated"),
+            remaining_rounds: value["remainingRounds"].as_u64(),
+            review_attempts: value["reviewAttempts"].as_u64().unwrap_or(0),
+            minimum_active_ms: value["minimumActiveMs"].as_u64().unwrap_or(0),
+            active_elapsed_ms: value["activeElapsedMs"].as_u64().unwrap_or(u64::MAX),
+            evidence_required: boolean_field(value, "evidenceRequired"),
+            requires_verification: boolean_field(value, "requiresVerification"),
+            requires_readback: boolean_field(value, "requiresReadback"),
+            has_readback: boolean_field(value, "hasReadback"),
+            requires_visual_readback: boolean_field(value, "requiresVisualReadback"),
+            has_visual_readback: boolean_field(value, "hasVisualReadback"),
+            summarize_only: boolean_field(value, "summarizeOnly"),
+            recovery_final: boolean_field(value, "recoveryFinal"),
+            supports_task_markers: value["supportsTaskMarkers"] != false,
+            execution_intent: value["executionIntent"] != false,
+            response_only: boolean_field(value, "responseOnly"),
+            output_continuations: value["outputContinuations"].as_u64().unwrap_or(0),
+            steered_task: boolean_field(value, "steeredTask"),
+            steered_tool_task: boolean_field(value, "steeredToolTask"),
+            effectful_work: boolean_field(value, "effectfulWork"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskReviewRepairMode {
+    RepairFooter,
+    RebuildFromCheckpoint,
+}
+
+/// Execution remains the caller's responsibility; typed variants preserve the existing wire contract.
+/// 执行仍由调用端负责；类型分支保留既有公开返回字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum TaskDecision {
+    Review { exhausted_budget: bool },
+    RetryReview { code: &'static str, exhausted_budget: bool, repair_mode: TaskReviewRepairMode },
+    Resume {
+        #[serde(skip_serializing_if = "is_false")]
+        reviewed: bool,
+        exhausted_budget: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remaining: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "is_false")]
+        minimum_active: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_continuation: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replan: Option<bool>,
+    },
+    Interrupt {
+        code: &'static str,
+        #[serde(skip_serializing_if = "is_false")]
+        reviewed: bool,
+    },
+    Final {
+        #[serde(skip_serializing_if = "is_false")]
+        reviewed: bool,
+    },
+}
+
+impl TaskDecision {
+    pub fn into_value(self) -> Value {
+        serde_json::to_value(self).expect("task decisions contain only serializable fields")
+    }
+}
+
+fn is_false(value: &bool) -> bool { !*value }
+
 /// Semantic state is a model assessment, never an authorization or correctness certificate.
 /// 语义状态来自模型判断，不能增加授权，也不能证明任务或事实正确。
 #[derive(Default)]
@@ -551,17 +805,6 @@ impl TaskState {
             serde_json::from_str::<Value>(&captures[1]).ok()
         });
         let unexecuted = unexecuted_tool_names(content);
-        if !unexecuted.is_empty() {
-            let mut status = json!({"content":projected,"state":"continue",
-                "next":"Return to execution and emit the intended tool through the current native tool protocol; literal DSML was not dispatched.",
-                "reason":"Tool-call markup in ordinary text is an unexecuted intent, not a successful operation or completion evidence.",
-                "source":"unexecuted-tool-intent","unexecutedToolNames":unexecuted});
-            if let Some(value) = &parsed_footer { retain_user_control(&mut status, value); }
-            let mut metadata = status.clone();
-            metadata.as_object_mut().expect("task status object").remove("content");
-            self.last_state = Some(metadata);
-            return status;
-        }
         if let Some(value) = &parsed_footer {
             if valid_footer(value) {
                 let public_content = projected.trim_end_matches(javascript_whitespace);
@@ -577,6 +820,9 @@ impl TaskState {
                 if let Some(unmet) = value.get("unmet") {
                     status["unmet"] = unmet.clone();
                 }
+                if let Some(feasibility) = value.get("feasibility") {
+                    status["feasibility"] = feasibility.clone();
+                }
                 if let Some(blocker) = value.get("blocker") {
                     status["blocker"] = blocker.clone();
                 }
@@ -586,10 +832,10 @@ impl TaskState {
                 if let Some(action) = value.get("action") {
                     status["action"] = action.clone();
                 }
+                if !unexecuted.is_empty() { status["unexecutedToolNames"] = json!(unexecuted); }
                 retain_user_control(&mut status, value);
                 if status["state"] == "complete" && handoff(public_content) {
-                    status["state"] = json!("review");
-                    status["source"] = json!("conflicting-completion-cue");
+                    status["continuationCue"] = json!(true);
                 }
                 // Snapshots are control metadata; the response body is returned only by inspect.
                 // 快照只保留控制元数据；正文仅由 inspect 返回，避免每次 IPC 重传长回复。
@@ -598,6 +844,17 @@ impl TaskState {
                 self.last_state = Some(metadata);
                 return status;
             }
+        }
+        if !unexecuted.is_empty() {
+            let mut status = json!({"content":projected,"state":"continue",
+                "next":"Use the native tool protocol only for an unmet current requirement; literal tool markup was not dispatched.",
+                "reason":"Tool-call markup in ordinary text is an unexecuted proposal, not a successful operation or an additional requirement.",
+                "source":"unexecuted-tool-intent","unexecutedToolNames":unexecuted});
+            if let Some(value) = &parsed_footer { retain_user_control(&mut status, value); }
+            let mut metadata = status.clone();
+            metadata.as_object_mut().expect("task status object").remove("content");
+            self.last_state = Some(metadata);
+            return status;
         }
         let needs_review = handoff(content);
         let mut status = json!({
@@ -641,28 +898,39 @@ impl TaskState {
     }
 
     fn decide(&self, args: &Value) -> Value {
-        // Return a decision only; the caller owns archiving, resource admission, and the next model request.
-        // 这里只返回决策；归档、资源准入和下一次模型请求由调用端执行。
-        let reply = args.get("reply").unwrap_or(&Value::Null);
-        let state = string_field(reply, "state");
-        let has_calls = boolean_field(args, "hasCalls")
-            || reply
-                .get("calls")
-                .and_then(Value::as_array)
-                .is_some_and(|calls| !calls.is_empty());
-        let truncated = boolean_field(args, "outputTruncated");
-        let exhausted = args.get("remainingRounds").and_then(Value::as_u64) == Some(0);
+        self.decide_typed(&TaskDecisionInput::from_value(args)).into_value()
+    }
 
-        let mut remaining = remaining_work(reply);
-        if boolean_field(args, "isReview") {
-            if state == "continue" && string_field(reply, "source") == "unexecuted-tool-intent" {
-                return json!({"action":"resume","reviewed":true,"exhaustedBudget":exhausted,
-                    "remaining":[string_field(reply, "next")]});
+    /// Decide from typed facts; archiving, admission and further requests remain outside this rule.
+    /// 直接依据类型事实判定；归档、准入和后续请求仍由外层负责。
+    pub fn decide_typed(&self, input: &TaskDecisionInput) -> TaskDecision {
+        let reply = &input.reply;
+        let state = string_field(reply, "state");
+        let has_calls = input.has_calls || reply.get("calls").and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+        let exhausted = input.remaining_rounds == Some(0);
+        let mut remaining = explicit_unmet_work(reply);
+        // Future steps in a plan are not authorization to execute them; truncation still continues text.
+        // 方案中的后续步骤不代表获准执行；正文被截断时仍正常续写。
+        if input.response_only && !has_calls && !input.output_truncated {
+            if !remaining.is_empty() {
+                return TaskDecision::Resume { reviewed: input.is_review, exhausted_budget: exhausted,
+                    remaining: Some(remaining), minimum_active: false,
+                    task_continuation: Some(true), replan: None };
             }
-            // Broker-owned failed or pending checks cannot be overruled by a successful unrelated receipt.
-            // 程序记录的失败或待核验不能被无关成功回执覆盖；先核验原结果，再接受模型完成声明。
-            if state == "complete" && args["verification"]["pendingValidation"] == true {
-                let next = match args["verification"]["state"].as_str() {
+            return TaskDecision::Final { reviewed: false };
+        }
+        if input.is_review {
+            if state == "continue" && string_field(reply, "source") == "unexecuted-tool-intent" {
+                return TaskDecision::Resume { reviewed: true, exhausted_budget: exhausted,
+                    remaining: Some(vec![string_field(reply, "next").to_owned()]), minimum_active: false,
+                    task_continuation: None, replan: None };
+            }
+            // Required failed or pending checks survive an unrelated successful receipt.
+            // 必要检查的失败或待核验状态不能被无关成功回执覆盖。
+            let assessing_result = matches!(state, "complete" | "continue");
+            if assessing_result && input.verification["pendingValidation"] == true {
+                let next = match input.verification["state"].as_str() {
                     Some("checks-failed") => "Inspect the failed validation, repair its cause and run the relevant check again; keep successful operations and outputs.",
                     Some("execution-unconfirmed") => "Verify the original operation outcome before any retry; an unknown outcome does not authorize replay.",
                     Some("checks-version-unverified") => "Validate the current output version; an earlier check does not cover changed files.",
@@ -670,103 +938,181 @@ impl TaskState {
                 };
                 remaining.push(next.into());
             }
-            // With real effects, a completion is accepted only when every claimed item cites real evidence.
-            // 有真实操作时，只有每项已满足的要求都引用了真实证据，完成才被接受。
-            if (boolean_field(args, "evidenceRequired") || boolean_field(args, "requiresVerification"))
-                && state == "complete" && remaining.is_empty() {
-                let valid = args.get("validEvidence").and_then(Value::as_array).cloned().unwrap_or_default();
-                let expected = args.get("expectedRequirements").and_then(Value::as_array).cloned().unwrap_or_default();
-                let records = args.get("evidenceRecords").map(|records| records.as_array().map(Vec::as_slice).unwrap_or(&[]));
-                remaining = unproven_requirements(reply, &valid, &expected, records);
-                if boolean_field(args, "requiresReadback") && !boolean_field(args, "hasReadback") {
+            let requires_evidence = input.evidence_required || input.requires_verification;
+            if requires_evidence && assessing_result {
+                remaining.extend(unproven_requirements(reply, &input.valid_evidence,
+                    &input.expected_requirements, input.evidence_records.as_deref()));
+                if input.requires_readback && !input.has_readback {
                     remaining.push("Observe and read back the actual result before certifying its requested quality; a saved path or mutation receipt is not sufficient.".into());
                 }
-                if boolean_field(args, "requiresVisualReadback") && !boolean_field(args, "hasVisualReadback") {
+                if input.requires_visual_readback && !input.has_visual_readback {
                     remaining.push("Render or capture the actual output and deliver its image to the evaluating model before visual acceptance; text or an image filename is not visual evidence.".into());
                 }
             }
-            let valid = !has_calls
-                && !truncated
+            let valid = !has_calls && !input.output_truncated
                 && string_field(reply, "source") == "model-task-state"
                 && matches!(state, "complete" | "continue" | "blocked");
             if !valid {
-                // A malformed assessment is repairable control metadata, never a reason to end useful work.
-                // 非法验收结构属于可修正控制元数据，不能据固定两次次数结束仍可推进的工作。
-                return json!({"action":"retry-review","code":"TASK_COMPLETION_REVIEW_REPAIR",
-                    "exhaustedBudget":exhausted,"repairMode":if args["reviewAttempts"].as_u64().unwrap_or(0) >= 2 {
-                        "rebuild-from-checkpoint" } else { "repair-footer" }});
+                // Invalid control metadata can be repaired; it does not end useful work.
+                // 非法控制元数据可继续修正，不据此终止仍可推进的工作。
+                return TaskDecision::RetryReview { code: "TASK_COMPLETION_REVIEW_REPAIR",
+                    exhausted_budget: exhausted, repair_mode: if input.review_attempts >= 2 {
+                        TaskReviewRepairMode::RebuildFromCheckpoint
+                    } else { TaskReviewRepairMode::RepairFooter } };
             }
-            // A self-reported completion that still lists unmet requirements or a next step is not complete.
-            // 自报完成但仍列出未达要求或下一步，不能当作完成；difficulty 也不是外部受阻。
-            let reviewed_continue = state == "continue"
+            // A model-proposed next step cannot expand already proven current acceptance.
+            // 模型提出的下一步，不能扩大已被真实证据满足的当前验收范围。
+            let current_requirements_proven = assessing_result && requires_evidence
+                && !input.expected_requirements.is_empty() && remaining.is_empty();
+            let reviewed_continue = state == "continue" && !current_requirements_proven
                 || state == "complete" && !remaining.is_empty()
                 || state == "blocked" && !genuine_blocker(reply);
             if state == "blocked" && !reviewed_continue {
-                return json!({ "action": "interrupt", "code": "TASK_BLOCKED", "reviewed": true });
+                return TaskDecision::Interrupt { code: blocker_code(reply), reviewed: true };
             }
             if reviewed_continue {
                 if remaining.is_empty() && state == "blocked" {
                     remaining.push("Change the implementation strategy and choose a concrete authorized next step using the saved evidence.".into());
                 }
-                return json!({ "action": "resume", "reviewed": true, "exhaustedBudget": exhausted,
-                    "remaining": remaining,"replan":self.no_progress_rounds >= 2 });
+                return TaskDecision::Resume { reviewed: true, exhausted_budget: exhausted,
+                    remaining: Some(remaining), minimum_active: false, task_continuation: None,
+                    replan: Some(self.no_progress_rounds >= 2) };
             }
-            if below_minimum_active(args) {
-                return json!({ "action": "resume", "reviewed": true, "exhaustedBudget": exhausted,
-                    "minimumActive": true });
+            // Segment exhaustion never erases the user's effective-work minimum.
+            // 执行段用尽不清除用户要求的有效工作时长。
+            if input.minimum_active_ms > 0 && input.active_elapsed_ms < input.minimum_active_ms {
+                return TaskDecision::Resume { reviewed: true, exhausted_budget: exhausted,
+                    remaining: None, minimum_active: true, task_continuation: None, replan: None };
             }
-            return json!({ "action": "final", "reviewed": true });
+            return TaskDecision::Final { reviewed: true };
         }
 
-        let can_continue = !boolean_field(args, "summarizeOnly")
-            && !boolean_field(args, "recoveryFinal")
-            && !boolean_field(args, "hasUnknownEffects");
-        // Difficulty with an executable next step stays inside the authorized task.
-        // 有可执行下一步的困难仍属于原授权任务，不能当作外部受阻收尾。
+        let can_continue = !input.summarize_only && !input.recovery_final;
+        if !has_calls && !input.output_truncated && can_continue && input.execution_intent
+            && state == "continue" && remaining.is_empty()
+            && (input.effectful_work || input.evidence_records.as_ref().is_some_and(|records| !records.is_empty())) {
+            return TaskDecision::Review { exhausted_budget: exhausted };
+        }
         let difficulty = state == "blocked" && !genuine_blocker(reply);
-        let continue_task = !has_calls
-            && can_continue
+        let continue_task = !has_calls && can_continue && input.execution_intent
             && (matches!(state, "continue" | "review") || difficulty || state == "complete" && !remaining.is_empty());
         if state == "blocked" && !has_calls && !continue_task {
-            return decision("interrupt", Some("TASK_BLOCKED"));
+            return TaskDecision::Interrupt { code: blocker_code(reply), reviewed: false };
         }
-        if truncated || continue_task {
+        if input.output_truncated || continue_task {
             if has_calls {
-                return decision("interrupt", Some("OUTPUT_CONTINUATION_INVALID"));
+                return TaskDecision::Interrupt { code: "OUTPUT_CONTINUATION_INVALID", reviewed: false };
             }
-            // Archive the current output before enforcing the last-round boundary.
-            // 当前正文必须先归档；不能因最后一轮预算耗尽而丢掉已经生成的内容。
-            return json!({
-                "action": "resume",
-                "taskContinuation": continue_task,
-                "exhaustedBudget": exhausted,
-                "replan":self.no_progress_rounds >= 2
-            });
+            return TaskDecision::Resume { reviewed: false, exhausted_budget: exhausted,
+                remaining: None, minimum_active: false, task_continuation: Some(continue_task),
+                replan: Some(self.no_progress_rounds >= 2) };
         }
-        if !has_calls
-            && can_continue
-            && (args["supportsTaskMarkers"] != false || boolean_field(args, "requiresVerification"))
-            // Current intent is explicit at the production boundary; legacy callers retain their contract.
-            // 生产调用明确传入本轮真实执行意图；旧调用未传入时保持原合同兼容。
-            && args["executionIntent"] != false
-            // A reply to live guidance can acknowledge work without completing the existing task.
-            // 实时插话后的正文可能只是确认调整；原任务需沿用完成核对，不能仅因没有工具调用就结束。
-            // Real external effects also need a review: unknown or self-reported completion is not proof.
-            // 已执行真实外部操作的任务同样需要核对：unknown 或自报完成都不能证明原任务已完成。
-            && (args
-                .get("outputContinuations")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                > 0
-                || boolean_field(args, "steeredTask")
-                || boolean_field(args, "steeredToolTask")
-                || boolean_field(args, "effectfulWork")
-                || boolean_field(args, "requiresVerification"))
+        if !has_calls && can_continue
+            && (input.supports_task_markers || input.requires_verification)
+            && input.execution_intent
+            && (input.output_continuations > 0 || input.steered_task || input.steered_tool_task
+                || input.effectful_work || input.requires_verification)
             && matches!(state, "unknown" | "complete")
         {
-            return json!({ "action": "review", "exhaustedBudget": exhausted });
+            return TaskDecision::Review { exhausted_budget: exhausted };
         }
-        decision("final", None)
+        TaskDecision::Final { reviewed: false }
+    }
+}
+#[cfg(test)]
+mod decision_contract_tests {
+    use super::*;
+
+    #[test]
+    fn typed_decision_preserves_legacy_defaults_and_explicit_evidence_strictness() {
+        let state = TaskState::default();
+        assert_eq!(state.decide_typed(&TaskDecisionInput::default()).into_value(), json!({"action":"final"}));
+        let mut args = json!({"reply":{"source":"model-task-state","state":"complete",
+            "met":[{"requirementId":"requirement-1","item":"save a.txt","evidence":["write-a"]}]},
+            "isReview":true,"requiresVerification":true,"expectedRequirements":["save a.txt"],
+            "validEvidence":["write-a"],"minimumActiveMs":60000});
+        let input = TaskDecisionInput::from_value(&args);
+        assert!(input.supports_task_markers && input.execution_intent);
+        assert_eq!(input.active_elapsed_ms, u64::MAX);
+        assert!(input.evidence_records.is_none());
+        assert_eq!(state.decide(&args), json!({"action":"final","reviewed":true}));
+        // An explicitly supplied empty/invalid proof directory must not fall back to legacy ID-only proof.
+        // 显式提供的空或无效证明目录不能退回旧版仅凭 ID 的证明规则。
+        for records in [Value::Null, json!([]), json!({"invalid":"proof directory"})] {
+            args["evidenceRecords"] = records;
+            let input = TaskDecisionInput::from_value(&args);
+            assert_eq!(input.evidence_records, Some(Vec::new()));
+            assert!(matches!(state.decide_typed(&input), TaskDecision::Resume { reviewed:true, remaining:Some(ref gaps), .. } if !gaps.is_empty()));
+        }
+    }
+
+    #[test]
+    fn typed_review_preserves_minimum_time_and_repair_decisions_across_segment_exhaustion() {
+        let state = TaskState::default();
+        let mut input = TaskDecisionInput { reply:json!({"source":"model-task-state","state":"complete"}),
+            is_review:true, minimum_active_ms:60_000, active_elapsed_ms:1000, remaining_rounds:Some(0),
+            ..Default::default() };
+        assert_eq!(state.decide_typed(&input).into_value(), json!({"action":"resume","reviewed":true,
+            "exhaustedBudget":true,"minimumActive":true}));
+        input.active_elapsed_ms = 60_000;
+        assert_eq!(state.decide_typed(&input), TaskDecision::Final { reviewed:true });
+        input.output_truncated = true;
+        input.review_attempts = 2;
+        assert_eq!(state.decide_typed(&input).into_value(), json!({"action":"retry-review",
+            "code":"TASK_COMPLETION_REVIEW_REPAIR","exhaustedBudget":true,"repairMode":"rebuild-from-checkpoint"}));
+        assert_eq!(state.decide(&json!({"reply":{"state":"unknown"},"outputContinuations":1,
+            "supportsTaskMarkers":false})), json!({"action":"final"}));
+    }
+
+    #[test]
+    fn proven_current_requirements_finish_despite_next_while_real_gaps_continue() {
+        let mut task = TaskState::default();
+        let call = json!({"id":"saved-result","name":"filesystem.write"});
+        let receipt = json!({"status":"completed","isError":false,"content":{
+            "path":"result.md","sha256":"a".repeat(64),"bytes":12}});
+        let proof = super::super::completion_evidence::from_receipt(&call, &receipt);
+        let mut input = TaskDecisionInput { is_review:true, evidence_required:true, requires_verification:true,
+            expected_requirements:vec!["保存 result.md".into()], valid_evidence:vec![json!("saved-result")],
+            evidence_records:Some(vec![proof]), verification:json!({"state":"checks-passed","pendingValidation":false}),
+            minimum_active_ms:1000, active_elapsed_ms:1000, ..Default::default() };
+        for state in ["complete", "continue"] {
+            let footer = json!({"state":state,"next":"Try an extra optional rendering","unmet":[],
+                "met":[{"requirementId":"requirement-1","item":"保存 result.md","evidence":["saved-result"]}]});
+            for body in ["已保存要求的结果。", "已保存要求的结果。\n\n下一步我将继续优化。"] {
+                input.reply = task.inspect(&format!("{body}\n<kynxa_task>{footer}</kynxa_task>"));
+                assert_eq!(input.reply["source"], "model-task-state");
+                assert_eq!(task.decide_typed(&input), TaskDecision::Final { reviewed:true });
+            }
+        }
+        let satisfied = input.clone();
+        for gap in ["failed-check", "missing-proof", "required-readback", "explicit-unmet", "minimum-time"] {
+            input = satisfied.clone();
+            match gap {
+                "failed-check" => input.verification = json!({"state":"checks-failed","pendingValidation":true}),
+                "missing-proof" => input.evidence_records = Some(Vec::new()),
+                "required-readback" => input.requires_readback = true,
+                "explicit-unmet" => input.reply["unmet"] = json!(["A required quality remains unmet"]),
+                _ => input.active_elapsed_ms = 999,
+            }
+            assert!(matches!(task.decide_typed(&input), TaskDecision::Resume { .. }), "{gap}");
+        }
+        input = satisfied;
+        input.output_truncated = true;
+        assert!(matches!(task.decide_typed(&input), TaskDecision::RetryReview { .. }));
+    }
+
+    #[test]
+    fn a_next_step_after_existing_work_requests_assessment_instead_of_more_execution() {
+        let task = TaskState::default();
+        let mut input = TaskDecisionInput { effectful_work:true, execution_intent:true,
+            reply:json!({"state":"continue","source":"model-task-state","next":"Add an optional appendix"}),
+            ..Default::default() };
+        assert!(matches!(task.decide_typed(&input), TaskDecision::Review { .. }));
+        input.reply["unmet"] = json!(["The requested appendix is missing"]);
+        assert!(matches!(task.decide_typed(&input), TaskDecision::Resume { .. }));
+        input.reply["unmet"] = json!([]);
+        input.output_truncated = true;
+        assert!(matches!(task.decide_typed(&input), TaskDecision::Resume { .. }));
     }
 }
 
@@ -821,11 +1167,33 @@ mod steering_revision_tests {
         assert_eq!(unchanged.requirements[1], current[1]);
         for change in [json!({"removeRequirementIds":["requirement-99"]}),
             json!({"removeRequirementIds":["requirement-2"],"replaceRequirements":[{"requirementId":"requirement-2","text":"Different"}]}),
-            json!({"minimumActiveMs":-1}),json!({"minimumActiveMs":u64::MAX}),
-            json!({"stop":true,"minimumActiveMs":3_600_000})] {
+            json!({"minimumActiveMs":-1}),json!({"minimumActiveMs":u64::MAX})] {
             let mut invalid = json!({"userMessageId":"latest-user","quote":user});
             invalid.as_object_mut().unwrap().extend(change.as_object().unwrap().clone());
             assert!(steering_revision(&invalid, "latest-user", user, &current, 3_600_000).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn bound_stop_ignores_unused_scope_edits_and_duration_without_mutating_saved_requirements() {
+        let current = vec!["Copy seed.txt once".into(), "Write report.md".into()];
+        let user = "Keep the saved checkpoint; stop writing the report and checking it.";
+        for disposition in ["stop", "deliver-existing"] {
+            for edits in [json!({"removeRequirementIds":["requirement-2"],"minimumActiveMs":0}),
+                json!({"removeRequirementIds":["requirement-99"],"minimumActiveMs":3_600_000}),
+                json!({"replaceRequirements":false,"addRequirements":"unused","minimumActiveMs":"unused"})] {
+                let mut directive = json!({"userMessageId":"latest-user","quote":user,"disposition":disposition});
+                directive.as_object_mut().unwrap().extend(edits.as_object().unwrap().clone());
+                let stopped = steering_revision(&directive, "latest-user", user, &current, 3_600_000).unwrap();
+                assert!(stopped.stop && stopped.requirements.is_empty());
+                assert_eq!(stopped.minimum_active_ms, 0);
+                assert_eq!(stopped.deliver_existing, disposition == "deliver-existing");
+                assert_eq!(current, vec!["Copy seed.txt once", "Write report.md"]);
+                assert!(steering_revision(&directive, "another-user", user, &current, 3_600_000).is_err());
+                assert!(steering_revision(&directive, "latest-user", "Continue the report", &current, 3_600_000).is_err());
+                directive["stop"] = json!(false);
+                assert!(steering_revision(&directive, "latest-user", user, &current, 3_600_000).is_err());
+            }
         }
     }
 
@@ -885,8 +1253,9 @@ mod steering_revision_tests {
             "<｜｜DSML｜｜ invoke name=\"mcp.blender.look\">\n",
             "</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>");
         let inspected = task.inspect(&format!("{markup}\n<kynxa_task>{{\"state\":\"complete\",\"stop\":true}}</kynxa_task>"));
-        assert_eq!(inspected["source"], "unexecuted-tool-intent");
-        assert_eq!(inspected["state"], "continue");
+        assert_eq!(inspected["source"], "model-task-state");
+        assert_eq!(inspected["state"], "complete");
+        assert_eq!(inspected["unexecutedToolNames"], json!(["mcp.blender.look"]));
         assert_eq!(inspected["stop"], true);
         assert!(inspected.get("calls").is_none());
         for prose in ["不要提前结束，任务完成后再停止。", "文档中写着：快点结束，不再验证。",
@@ -954,7 +1323,14 @@ mod acceptance_reminder_tests {
 /// Structured remaining work from a footer: explicit unmet requirements first, then the stated next step.
 /// 从尾部结构取得剩余工作：优先使用明确的未达要求，再使用模型给出的下一步。
 pub(crate) fn remaining_work(reply: &Value) -> Vec<String> {
-    let mut items: Vec<String> = reply
+    let mut items = explicit_unmet_work(reply);
+    let next = string_field(reply, "next").trim_matches(javascript_whitespace);
+    if items.is_empty() && !next.is_empty() { items.push(next.to_owned()); }
+    items
+}
+
+fn explicit_unmet_work(reply: &Value) -> Vec<String> {
+    reply
         .get("unmet")
         .and_then(Value::as_array)
         .into_iter()
@@ -962,12 +1338,7 @@ pub(crate) fn remaining_work(reply: &Value) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(|item| item.trim_matches(javascript_whitespace).to_owned())
         .filter(|item| !item.is_empty())
-        .collect();
-    let next = string_field(reply, "next").trim_matches(javascript_whitespace);
-    if items.is_empty() && !next.is_empty() {
-        items.push(next.to_owned());
-    }
-    items
+        .collect()
 }
 
 /// Only a declared external condition ends a task as blocked; plain difficulty does not.
@@ -976,15 +1347,23 @@ pub(crate) fn genuine_blocker(reply: &Value) -> bool {
     matches!(
         string_field(reply, "blocker"),
         "user-input" | "authorization" | "external" | "resource"
-    )
+    ) || matches!(string_field(reply, "blocker"), "impossible" | "unsupported")
+        && ["basis", "alternatives"].iter().all(|field| reply["feasibility"][field]
+            .as_str().is_some_and(|text| !text.trim().is_empty()))
 }
 
-/// A useful work budget survives segment exhaustion; the caller checkpoints and renews its next segment.
-/// 有意义的工作预算跨执行段保留；执行段耗尽后由调用端保存检查点并续接，不当作已完成。
-fn below_minimum_active(args: &Value) -> bool {
-    let minimum = args.get("minimumActiveMs").and_then(Value::as_u64).unwrap_or(0);
-    let active = args.get("activeElapsedMs").and_then(Value::as_u64).unwrap_or(u64::MAX);
-    minimum > 0 && active < minimum
+/// A settled limitation is not an internal retry signal.
+/// 已判断的真实限制不是内部重试信号。
+pub(crate) fn blocker_code(reply: &Value) -> &'static str {
+    match string_field(reply, "blocker") {
+        "user-input" => "TASK_INPUT_REQUIRED",
+        "authorization" => "TASK_AUTHORIZATION_REQUIRED",
+        "external" => "TASK_EXTERNAL_WAIT",
+        "resource" => "RESOURCE_ADMISSION_REQUIRED",
+        "impossible" if genuine_blocker(reply) => "TASK_INFEASIBLE",
+        "unsupported" if genuine_blocker(reply) => "TASK_CAPABILITY_UNAVAILABLE",
+        _ => "TASK_BLOCKED",
+    }
 }
 
 /// Preserve explicit request clauses as acceptance; stable requirement IDs avoid copying long prose in a footer.
@@ -1019,13 +1398,6 @@ pub(crate) fn is_explicit_continuation(message: &str) -> bool {
         r"(?:(?:继续|接着|接下来|续上)(?:\s*[吧啊呀，,。.!！]?\s*$|\s*(?:刚才|上次|之前|原来|当前|这个|上述|剩余|未完成|精修|完善|推进|执行|做|工作|优化|修改|建模|修复|测试|验证|完成))",
         r"|(?:continue|resume|carry\s+on)(?:\s*[.!]?\s*$|\s+(?:the\s+)?(?:previous|unfinished|remaining|same|current|work|task|refin|build|implement|test|fix)))"
     )).expect("static explicit continuation expression")).is_match(message)
-}
-
-pub(crate) fn has_continuation_details(message: &str) -> bool {
-    static BARE: OnceLock<Regex> = OnceLock::new();
-    !BARE.get_or_init(|| Regex::new(
-        r"(?ix)^\s*(?:请|麻烦|帮我|那就|好|好的|ok|please|okay)?\s*(?:继续|接着|续上|continue|resume|carry\s+on)\s*(?:吧|啊|呀|please)?\s*[，,。.!！]?\s*$"
-    ).expect("static bare continuation expression")).is_match(message)
 }
 
 /// Detect an echoed internal history record; it is never an answer or proof of a current action.
@@ -1065,6 +1437,50 @@ pub(super) fn unexecuted_tool_names(text: &str) -> Vec<String> {
         }
     }
     names
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToolIntentPolicy {
+    /// Root navigation changes only after a current catalog match.
+    /// 根任务只有匹配当前目录后才更新导航。
+    CatalogOnly,
+    /// Children retain unresolved exact names and existing pending work for later discovery.
+    /// 子任务保留未解析的精确名称和已有待执行项，供后续发现能力。
+    PreserveUnknown,
+}
+
+/// Merge identities only; neither textual parameters nor model claims can dispatch an action.
+/// 仅合并工具身份；文本参数和模型自述都不能派发操作。
+pub(super) fn retain_unexecuted_tool_intent(
+    checkpoint: &mut Value, requested: &[String], catalog: &[Value], round: u64, policy: ToolIntentPolicy,
+) -> bool {
+    let names = requested.iter().filter(|name| name.as_str() != "kynxa_task").filter_map(|requested|
+        catalog.iter().find(|tool| tool["name"].as_str().is_some_and(|name|
+            name == requested || crate::models::protocol::wire_name(name) == *requested))
+            .and_then(|tool| tool["name"].as_str())
+            .or_else(|| (policy == ToolIntentPolicy::PreserveUnknown).then_some(requested.as_str()))
+            .filter(|name| *name != "kynxa_task").map(str::to_owned)).collect::<Vec<_>>();
+    if names.is_empty() && policy == ToolIntentPolicy::CatalogOnly { return false; }
+    let mut pending = checkpoint["unexecutedToolIntent"]["names"].as_array().cloned().unwrap_or_default();
+    pending.retain(|name| name != "kynxa_task");
+    for name in names { if !pending.contains(&json!(name)) { pending.push(json!(name)); } }
+    if pending.is_empty() { return false; }
+    if !checkpoint.is_object() { *checkpoint = json!({}); }
+    checkpoint["unexecutedToolIntent"] = json!({"names":pending,"round":round});
+    true
+}
+
+pub(super) fn has_unexecuted_tool_intent(checkpoint: &Value) -> bool {
+    checkpoint["unexecutedToolIntent"]["names"].as_array()
+        .is_some_and(|names| names.iter().any(|name| name.as_str().is_some_and(|name| name != "kynxa_task")))
+}
+
+pub(super) fn settle_unexecuted_tool_intent(checkpoint: &mut Value, name: &str, receipt: &Value) {
+    if !has_unexecuted_tool_intent(checkpoint) || receipt["executed"] == false
+        || !successful_completion_receipt(receipt) { return; }
+    if let Some(names) = checkpoint["unexecutedToolIntent"]["names"].as_array_mut() {
+        names.retain(|pending| pending.as_str() != Some(name));
+    }
 }
 
 /// Remove echoed history-record JSON objects from public text, keeping surrounding prose.
@@ -1149,13 +1565,6 @@ impl HistoryEchoFilter {
     }
 }
 
-fn decision(action: &str, code: Option<&str>) -> Value {
-    match code {
-        Some(code) => json!({ "action": action, "code": code }),
-        None => json!({ "action": action }),
-    }
-}
-
 fn string_field<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -1193,9 +1602,12 @@ fn valid_footer(value: &Value) -> bool {
         && object.get("blocker").is_none_or(|blocker| {
             matches!(
                 blocker.as_str(),
-                Some("user-input" | "authorization" | "external" | "resource" | "difficulty")
+                Some("user-input" | "authorization" | "external" | "resource" | "difficulty" | "impossible" | "unsupported")
             )
         })
+        && object.get("feasibility").is_none_or(|assessment| assessment.is_object()
+            && ["basis", "alternatives"].iter().all(|field| assessment[*field].as_str()
+                .is_some_and(|text| !text.trim().is_empty() && text.encode_utf16().count() <= 2048)))
         && ["next", "reason"].iter().all(|key| {
             object.get(*key).is_none_or(|item| {
                 item.as_str()
@@ -1262,7 +1674,7 @@ fn known_completion_evidence(entry: &str, valid_evidence: &[Value]) -> bool {
         }).count() == 1
 }
 
-fn unproven_requirements(reply: &Value, valid_evidence: &[Value], expected: &[Value], records: Option<&[Value]>) -> Vec<String> {
+fn unproven_requirements(reply: &Value, valid_evidence: &[Value], expected: &[String], records: Option<&[Value]>) -> Vec<String> {
     let normalize = normalized_evidence_text;
     let known = |entry: &str| known_completion_evidence(entry, valid_evidence);
     let Some(items) = reply.get("met").and_then(Value::as_array).filter(|items| !items.is_empty()) else {
@@ -1279,7 +1691,7 @@ fn unproven_requirements(reply: &Value, valid_evidence: &[Value], expected: &[Va
         })
         .map(|item| format!("Provide real evidence for: {}", item["item"].as_str().unwrap_or("")))
         .collect();
-    for (index, requirement) in expected.iter().filter_map(Value::as_str).enumerate() {
+    for (index, requirement) in expected.iter().enumerate() {
         let id = format!("requirement-{}", index + 1);
         let covered = items.iter().any(|item| {
             (item["requirementId"].as_str() == Some(id.as_str())
@@ -1306,6 +1718,113 @@ fn in_fence(content: &str) -> bool {
         .count()
         % 2
         != 0
+}
+
+#[cfg(test)]
+mod work_scope_contract_tests {
+    use super::*;
+
+    #[test]
+    fn a_requested_plan_stops_before_its_future_document_without_blocking_plan_files() {
+        let scope = resolve_work_scope("看一下今年诺贝尔物理学奖，用一篇md文档详细解读，先说说你要做什么", &Value::Null);
+        assert_eq!(scope["stage"], "plan");
+        assert!(!scope_allows_call(&scope, "filesystem.write", false));
+        assert!(scope_allows_call(&scope, "filesystem.read", true));
+        let decision = TaskState::default().decide_typed(&TaskDecisionInput {
+            response_only: true, execution_intent: false, effectful_work: true,
+            reply: json!({"state":"continue","source":"model-task-state","next":"Write the future document"}),
+            ..Default::default()
+        });
+        assert_eq!(decision.into_value()["action"], "final");
+        for request in ["创建计划.md，内容是实施方案", "先读取A，再修代码", "先给我方案.md", "先给计划，然后直接实现",
+            "先分析原因，然后保存报告.md", "先给方案，保存到“方案.md”"] {
+            let executing = resolve_work_scope(request, &Value::Null);
+            assert!(scope_allows_mutation(&executing), "{request}: {executing}");
+        }
+        assert!(scope_allows_mutation(&resolve_work_scope("开始", &scope)));
+        for request in ["修复这个bug", "把这个改掉"] {
+            assert!(scope_allows_mutation(&resolve_work_scope(request, &json!({"stage":"read-only"}))), "{request}");
+        }
+        assert!(!scope_allows_mutation(&resolve_work_scope("修复这个bug的建议是什么", &scope)));
+        assert!(scope_allows_mutation(&resolve_work_scope("把方案保存到x.md", &json!({"stage":"read-only"}))));
+    }
+
+    #[test]
+    fn explicit_explanation_keeps_reads_and_history_but_does_not_authorize_more_edits() {
+        let scope = resolve_work_scope("只分析，不改代码", &json!({"stage":"execute"}));
+        assert!(response_only_scope(&scope));
+        assert!(scope_allows_call(&scope, "filesystem.read", true));
+        assert!(!scope_allows_call(&scope, "filesystem.edit", false));
+        assert!(!scope_allows_call(&scope, "computer.launch", false));
+        assert!(scope_allows_mutation(&resolve_work_scope("修复后先不提交", &Value::Null)));
+        assert!(scope_allows_mutation(&resolve_work_scope("解释文本里的“先说说你要做什么”是什么意思", &Value::Null)));
+    }
+
+    #[test]
+    fn readonly_scope_delivers_current_facts_without_repairing_or_erasing_old_failed_checks() {
+        let scope = resolve_work_scope("只读检查现状，不改代码", &json!({"stage":"execute"}));
+        let history = json!({"pendingValidation":true,"state":"checks-failed",
+            "receipts":[{"id":"old-test","status":"failed"}],"mutationRevision":3});
+        let input = TaskDecisionInput {response_only:response_only_scope(&scope),
+            execution_intent:true,effectful_work:true,is_review:true,requires_verification:true,
+            verification:history.clone(),reply:json!({"state":"complete","source":"model-task-state"}),
+            ..Default::default()};
+        assert_eq!(TaskState::default().decide_typed(&input).into_value()["action"], "final");
+        assert_eq!(input.verification, history, "Current delivery must not rewrite the saved failed checks");
+        assert!(scope_allows_call(&scope,"filesystem.read",true));
+        assert!(!scope_allows_call(&scope,"filesystem.edit",false));
+    }
+
+    #[test]
+    fn negated_capture_does_not_turn_a_normal_launch_or_save_into_visual_acceptance() {
+        for request in ["打开QQ并确认进程，不要截图", "保存 result.md，不用预览，也不要验证画面", "Open the app, do not take a screenshot"] {
+            assert!(requires_execution_verification(request), "{request}");
+            assert!(!requires_visual_observation(request), "{request}");
+        }
+        assert!(requires_visual_observation("建模一个金色穹顶并检查渲染画面"));
+    }
+
+    #[test]
+    fn unsupported_or_impossible_needs_a_specific_basis_while_ordinary_difficulty_continues() {
+        let mut task = TaskState::default();
+        for (kind, expected) in [("impossible", "TASK_INFEASIBLE"), ("unsupported", "TASK_CAPABILITY_UNAVAILABLE")] {
+            let reply = task.inspect(&format!("无法满足这项要求，现有成果保留。\n<kynxa_task>{}</kynxa_task>",json!({
+                "state":"blocked","reason":"A necessary condition cannot be met.","blocker":kind,
+                "feasibility":{"basis":"The required conditions contradict each other or the verified necessary capability is absent.",
+                    "alternatives":"The current permitted alternatives do not satisfy that necessary condition; the feasible part is preserved."}
+            })));
+            assert!(genuine_blocker(&reply), "{reply}");
+            let decision = task.decide_typed(&TaskDecisionInput {reply,is_review:true,..Default::default()}).into_value();
+            assert_eq!(decision["action"], "interrupt");
+            assert_eq!(decision["code"], expected);
+        }
+        for reply in [json!({"state":"blocked","source":"model-task-state","blocker":"difficulty"}),
+            json!({"state":"blocked","source":"model-task-state","blocker":"unsupported","reason":"The first method failed"})] {
+            assert!(!genuine_blocker(&reply));
+            assert_eq!(task.decide_typed(&TaskDecisionInput {reply,is_review:true,..Default::default()}).into_value()["action"], "resume");
+        }
+    }
+
+    #[test]
+    fn a_future_next_step_cannot_extend_a_finite_answer_but_real_text_truncation_can() {
+        let mut input = TaskDecisionInput {execution_intent:false,
+            reply:json!({"state":"continue","next":"Optional implementation later"}),..Default::default()};
+        assert_eq!(TaskState::default().decide_typed(&input).into_value()["action"], "final");
+        input.output_truncated = true;
+        assert_eq!(TaskState::default().decide_typed(&input).into_value()["action"], "resume");
+        input.output_truncated = false;
+        input.verification = json!({"state":"checks-failed","pendingValidation":true});
+        input.minimum_active_ms = 3_600_000;
+        input.active_elapsed_ms = 1;
+        input.reply["unmet"] = json!(["Read the requested source and finish the missing current section"]);
+        for stage in ["plan", "read-only"] {
+            input.response_only = response_only_scope(&json!({"stage":stage}));
+            let decision = TaskState::default().decide_typed(&input).into_value();
+            assert_eq!(decision["action"], "resume");
+            assert_ne!(decision["minimumActive"], true);
+            assert_eq!(decision["remaining"], input.reply["unmet"]);
+        }
+    }
 }
 
 fn handoff(content: &str) -> bool {
@@ -1378,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn literal_dsml_invocations_are_unexecuted_even_with_a_complete_footer() {
+    fn literal_tool_proposals_preserve_the_footer_without_becoming_receipts() {
         let raw = concat!(
             "继续做实际工作，保留此前成功结果。\n\n",
             "<｜｜DSML｜｜ calls>\n",
@@ -1389,18 +1908,45 @@ mod tests {
         );
         let mut task = TaskState::default();
         let status = task.inspect(raw);
-        assert_eq!(status["state"], "continue");
-        assert_eq!(status["source"], "unexecuted-tool-intent");
+        assert_eq!(status["state"], "complete");
+        assert_eq!(status["source"], "model-task-state");
         assert_eq!(status["unexecutedToolNames"], json!(["k_mcp_blender_execute_blender_code_392ef9df"]));
-        assert!(status["next"].as_str().unwrap().contains("native tool protocol"));
-        assert!(status.get("action").is_none() && status.get("met").is_none());
-        let decision = task.decide(&json!({"reply":status,"isReview":true,"reviewAttempts":9,"hasCalls":false}));
-        assert_eq!(decision["action"], "resume", "a delegated review must return to execution instead of repairing another footer");
+        assert!(status.get("action").is_none() && status["met"].is_array());
+        let decision = task.decide(&json!({"reply":status,"isReview":true,"reviewAttempts":9,"hasCalls":false,
+            "requiresVerification":true,"expectedRequirements":["Build the requested new scene"],"evidenceRecords":[]}));
+        assert_eq!(decision["action"], "resume", "a proposal is not real evidence for the requested operation");
         assert_eq!(decision["reviewed"], true);
-        assert_eq!(decision["remaining"], json!([status["next"]]));
+        assert!(decision["remaining"].as_array().unwrap().iter().any(|gap| gap.as_str().unwrap().contains("requirement-1")));
         assert!(decision.get("calls").is_none(), "the control decision cannot execute literal DSML");
         let snapshot = task.apply("task.state", &json!({})).unwrap();
         assert!(!snapshot.to_string().contains("planned only"), "Private task metadata must not copy planned code.");
+    }
+
+    #[test]
+    fn pending_tool_intent_policies_preserve_catalog_and_child_discovery_behavior() {
+        let catalog = [json!({"name":"filesystem.list"})];
+        let original = json!({"pending":true,"cachedReview":{"keep":true},
+            "unexecutedToolIntent":{"names":["mcp.existing.run","kynxa_task"],"round":8}});
+        let unknown = vec!["mcp.undiscovered.inspect".to_owned(), "kynxa_task".to_owned()];
+        let mut root = original.clone();
+        assert!(!retain_unexecuted_tool_intent(&mut root, &unknown, &catalog, 9, ToolIntentPolicy::CatalogOnly));
+        assert_eq!(root, original, "Unknown root names must not rewrite the checkpoint or prior review.");
+        let known = vec![crate::models::protocol::wire_name("filesystem.list"), "filesystem.list".to_owned(), "kynxa_task".to_owned()];
+        assert!(retain_unexecuted_tool_intent(&mut root, &known, &catalog, 9, ToolIntentPolicy::CatalogOnly));
+        assert_eq!(root["unexecutedToolIntent"], json!({"names":["mcp.existing.run","filesystem.list"],"round":9}));
+        assert_eq!(root["cachedReview"], original["cachedReview"]);
+        assert_eq!(root["pending"], true, "Loop-specific state changes stay with the caller.");
+        let mut child = original;
+        assert!(retain_unexecuted_tool_intent(&mut child, &unknown, &catalog, 9, ToolIntentPolicy::PreserveUnknown));
+        assert_eq!(child["unexecutedToolIntent"]["names"], json!(["mcp.existing.run","mcp.undiscovered.inspect"]));
+        assert!(retain_unexecuted_tool_intent(&mut child, &[], &catalog, 10, ToolIntentPolicy::PreserveUnknown));
+        assert_eq!(child["unexecutedToolIntent"]["round"], 10);
+        assert!(!retain_unexecuted_tool_intent(&mut root, &[], &catalog, 10, ToolIntentPolicy::CatalogOnly));
+        assert_eq!(root["unexecutedToolIntent"]["round"], 9);
+        assert!(!has_unexecuted_tool_intent(&json!({"unexecutedToolIntent":{"names":["kynxa_task"]}})));
+        let mut empty = Value::Null;
+        assert!(!retain_unexecuted_tool_intent(&mut empty, &["kynxa_task".to_owned()], &catalog, 0, ToolIntentPolicy::PreserveUnknown));
+        assert!(empty.is_null());
     }
 
     #[test]
@@ -1545,8 +2091,12 @@ mod tests {
         let result = state.inspect(
             "正文\n\n下一章将继续从原位置写起。\n<kynxa_task>{\"state\":\"complete\"}</kynxa_task>",
         );
-        assert_eq!(result["state"], "review");
-        assert_eq!(result["source"], "conflicting-completion-cue");
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["source"], "model-task-state");
+        assert_eq!(result["continuationCue"], true);
+        assert_eq!(state.decide(&json!({"reply":result,"isReview":true,"requiresVerification":true,
+            "expectedRequirements":["Finish the requested document"],"evidenceRecords":[]}))["action"], "resume");
+        assert_eq!(state.inspect("正文\n\n下一章将继续从原位置写起。")["source"], "unresolved-handoff-cue");
     }
 
     #[test]
@@ -1700,6 +2250,23 @@ mod tests {
     }
 
     #[test]
+    fn archived_image_identity_does_not_prove_model_delivery() {
+        let hash = encoded_visual_hash("bmV3LWltYWdl").unwrap();
+        let mut archived = json!({"content":[{"type":"image","mimeType":"image/png","data":{"kynxaImageRef":{
+            "version":1,"id":"a".repeat(64),"sha256":"b".repeat(64),"imageSha256":hash,"imageBytes":9}}}]});
+        assert_eq!(receipt_visual_hashes(&archived), vec![hash.clone()]);
+        let browser = json!({"sessionId":"browser-session","tabId":"browser-tab","value":archived});
+        assert_eq!(receipt_visual_hashes(&browser), vec![hash.clone()]);
+        assert!(receipt_visual_hashes(&json!({"value":archived})).is_empty());
+        assert!(model_visual_hashes(&browser).is_empty());
+        assert!(model_visual_hashes(&archived).is_empty());
+        assert!(receipt_is_readback("image.read", &archived));
+        assert!(!receipt_is_readback("image.retain", &json!({"resultId":"saved","retained":1})));
+        archived["content"][0]["data"]["kynxaImageRef"]["imageSha256"] = json!("not-a-hash");
+        assert!(receipt_visual_hashes(&archived).is_empty());
+    }
+
+    #[test]
     fn review_completion_with_unmet_requirements_or_difficulty_keeps_working() {
         let mut state = TaskState::default();
         let unmet = state.inspect("已渲染。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\",\"unmet\":[\"彩窗\",\"金箔穹顶\"]}</kynxa_task>");
@@ -1711,8 +2278,8 @@ mod tests {
         assert_eq!(state.decide(&json!({"reply":difficulty,"isReview":true}))["action"], "resume");
         assert_eq!(state.decide(&json!({"reply":difficulty}))["action"], "resume");
         let external = state.inspect("需要账号。\n<kynxa_task>{\"state\":\"blocked\",\"next\":\"用户登录后继续\",\"reason\":\"需要登录\",\"blocker\":\"user-input\"}</kynxa_task>");
-        assert_eq!(state.decide(&json!({"reply":external,"isReview":true}))["code"], "TASK_BLOCKED");
-        assert_eq!(state.decide(&json!({"reply":external}))["code"], "TASK_BLOCKED");
+        assert_eq!(state.decide(&json!({"reply":external,"isReview":true}))["code"], "TASK_INPUT_REQUIRED");
+        assert_eq!(state.decide(&json!({"reply":external}))["code"], "TASK_INPUT_REQUIRED");
         let invalid = state.inspect("x\n<kynxa_task>{\"state\":\"blocked\",\"reason\":\"r\",\"blocker\":\"tired\"}</kynxa_task>");
         assert_eq!(invalid["source"], "legacy-response");
     }
@@ -1858,8 +2425,6 @@ mod tests {
         for message in ["你好", "北京天气怎么样", "另一个问题，解释 BCNF", "请创建新项目"] {
             assert!(!is_explicit_continuation(message), "{message}");
         }
-        assert!(!has_continuation_details("继续吧"));
-        assert!(has_continuation_details("继续精修，把穹顶改金色"));
     }
 
     #[test]
@@ -1939,7 +2504,12 @@ mod tests {
         assert_eq!(state.decide(&legacy)["action"], "review");
         args["reply"] = json!({"state":"complete","source":"model-task-state"});
         assert_eq!(state.decide(&args)["action"], "review");
-        for boundary in ["hasCalls", "hasUnknownEffects", "summarizeOnly", "recoveryFinal"] {
+        let mut unconfirmed = args.clone();
+        unconfirmed["hasUnknownEffects"] = json!(true);
+        assert_eq!(state.decide(&unconfirmed)["action"], "review");
+        unconfirmed["reply"]["state"] = json!("continue");
+        assert_eq!(state.decide(&unconfirmed)["action"], "resume");
+        for boundary in ["hasCalls", "summarizeOnly", "recoveryFinal"] {
             let mut guarded = args.clone();
             guarded[boundary] = json!(true);
             assert_eq!(state.decide(&guarded)["action"], "final", "{boundary}");
@@ -1947,6 +2517,6 @@ mod tests {
         args["reply"] = json!({"state":"blocked","source":"model-task-state"});
         assert_eq!(state.decide(&args)["action"], "resume");
         args["reply"]["blocker"] = json!("external");
-        assert_eq!(state.decide(&args)["code"], "TASK_BLOCKED");
+        assert_eq!(state.decide(&args)["code"], "TASK_EXTERNAL_WAIT");
     }
 }

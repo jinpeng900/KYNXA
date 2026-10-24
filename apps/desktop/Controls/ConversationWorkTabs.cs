@@ -91,12 +91,12 @@ public sealed class ConversationWorkTabs : Grid, IDisposable
         RefreshLanguage(); Render();
     }
 
-    public bool ShowConversation(Guid? conversationId, IReadOnlyList<ConversationWorkTab> items, bool autoOpenNew = true)
+    public bool ShowConversation(Guid? conversationId, IReadOnlyList<ConversationWorkTab> items, bool autoOpenNew = true, bool catalogComplete = true)
     {
         if (_disposed) return false;
         var before = SelectedTab;
         Guid? beforeConversation = _state.ConversationId;
-        bool added = _state.ShowConversation(conversationId, items, autoOpenNew);
+        bool added = _state.ShowConversation(conversationId, items, autoOpenNew, catalogComplete);
         bool changed = Render();
         Notify(before, beforeConversation, changed);
         return added;

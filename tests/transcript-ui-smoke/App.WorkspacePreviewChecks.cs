@@ -59,6 +59,13 @@ namespace TranscriptUiSmoke
             try
             {
                 Guid conversation = Guid.NewGuid();
+                if (Environment.GetCommandLineArgs().Contains("--workspace-format-only", StringComparer.Ordinal))
+                {
+                    await CheckWorkspaceFormatsAsync(panel, fixture, conversation);
+                    SaveWorkspaceMetrics(cold, "workspace-format-only");
+                    File.WriteAllText(_result, $"PASS: {_checks} focused workspace format checks; CSV/TSV pagination, Markdown anchors and scoped images, clicked file/website navigation and cached reading position. No Office matrix or model requests.");
+                    return;
+                }
                 if (Environment.GetEnvironmentVariable("KYNXA_WORKSPACE_DOCX_ONLY") == "1")
                 {
                     await CheckDocxDocumentAsync(panel, fixture, conversation);
@@ -942,6 +949,9 @@ namespace TranscriptUiSmoke
         public bool LastUserSelected { get; private set; }
         public int PdfRequests { get; private set; }
         public int PreviewRequests { get; private set; }
+        public System.Collections.Concurrent.ConcurrentQueue<(string Path, bool UserSelected, Guid? MountId)> FormatPreviewRequests { get; } = new();
+        public int RemoteImageRequests { get; private set; }
+        public int DeniedImageRequests { get; private set; }
         public int SlowRequests { get; private set; }
         public int DocxRequests { get; private set; }
         public int BrokenDocxRequests { get; private set; }
@@ -1065,6 +1075,8 @@ namespace TranscriptUiSmoke
                     }
                     string target = request.Length > 1 ? request[1] : "/";
                     string contentType = "application/json";
+                    bool deniedImage = false;
+                    if (target.StartsWith("/agent/workspace/content?", StringComparison.Ordinal) && target.Contains("imageUrl=", StringComparison.Ordinal)) RemoteImageRequests++;
                     byte[] bytes;
                     string attachmentEndpoint = $"/api/conversations/{AttachmentConversationId:D}/attachments/{AttachmentId:D}";
                     string pptxAttachmentEndpoint = $"/api/conversations/{AttachmentConversationId:D}/attachments/{PptxAttachmentId:D}";
@@ -1103,7 +1115,10 @@ namespace TranscriptUiSmoke
                     {
                         PreviewRequests++;
                         using var json = JsonDocument.Parse(requestBody);
-                        string path = json.RootElement.GetProperty("path").GetString()!;
+                        string path = json.RootElement.GetProperty("path").GetString()!.Replace('\\', '/');
+                        FormatPreviewRequests.Enqueue((path, json.RootElement.GetProperty("userSelected").GetBoolean(),
+                            json.RootElement.TryGetProperty("mountId", out var mount) && mount.ValueKind == JsonValueKind.String ? mount.GetGuid() : null));
+                        if (path.EndsWith("unauthorized.png", StringComparison.Ordinal)) { deniedImage = true; DeniedImageRequests++; }
                         if (path == "user-sample.pptx") UserPptxPreviewRequests++;
                         if (path == "slow.md")
                         {
@@ -1124,9 +1139,23 @@ namespace TranscriptUiSmoke
                         string text = kind == "markdown" ? "# REPORT_FIXTURE\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n$E=mc^2$\n\n```mermaid\nflowchart LR\n A-->B\n```\n\n" + string.Join("\n\n", Enumerable.Range(0, 300).Select(index => $"段落 {index}：用于核对实际文件切换后的阅读位置。"))
                             : kind == "mermaid" ? "flowchart LR\n A[FILE_DIAGRAM]-->B[完成]" : path == "sample.cs" ? "public class Sample { public string Name = \"syntax\"; }" : path == "sample.rs" ? "// 中文说明\npub fn greet() -> String { String::from(\"Hello\") }" : "PLAIN_FILE_FIXTURE\n第二行";
                         if (path == "slow.md") text = "# BACKGROUND_DOCUMENT\n\n```mermaid\nflowchart LR\n A[后台加载]-->B[完成并缓存]\n```";
-                        bytes = JsonSerializer.SerializeToUtf8Bytes(new { kind, title = path, path, version = "fixture-v1", text,
+                        if (path == "reports/formats.md") text = "# Format report\n\n[Jump](#target-anchor) [Next](next.md#next-section) [Website](" + new Uri(Address, "/site") + ")\n\n![Allowed](images/picture.png) ![Denied](../unauthorized.png) ![Remote](https://public.example/picture.png)\n\n> [!NOTE]\n> FORMAT_ALERT\n\nFact[^source].\n\n[^source]: FORMAT_FOOTNOTE\n\n```javascript\nconsole.log('CODE_COPY_FIXTURE');\n```\n\n" + string.Join("\n\n", Enumerable.Range(0, 40).Select(index => $"段落 {index} FORMAT_BODY")) + "\n\n## Target anchor\n\n" + string.Join("\n\n", Enumerable.Range(0, 20).Select(index => $"目标后段落 {index}"));
+                        if (path == "reports/next.md") text = "# NEXT_FILE_FIXTURE\n\n## Next section\n\nThe relative file is open.";
+                        string? delimiter = path is "data.csv" ? "," : path is "data.tsv" ? "\t" : null;
+                        bool firstPage = !json.RootElement.TryGetProperty("offset", out var pageOffset) || pageOffset.GetInt32() == 0;
+                        string[][]? rows = null;
+                        int? nextOffset = null;
+                        if (delimiter is not null)
+                        {
+                            kind = "delimited";
+                            string firstText = "Name" + delimiter + "Detail\nOne" + delimiter + "\"first\nsecond\"\n";
+                            text = firstPage ? firstText : "Two" + delimiter + "\"a" + delimiter + "b\"\n";
+                            rows = firstPage ? [["Name", "Detail"], ["One", "first\nsecond"]] : [["Two", "a" + delimiter + "b"]];
+                            if (firstPage) nextOffset = firstText.Length;
+                        }
+                        bytes = JsonSerializer.SerializeToUtf8Bytes(new { kind, title = path, path, version = "fixture-v1", text, rows, delimiter, nextOffset,
                             mimeType = kind switch { "pdf" => "application/pdf", "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation", "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", _ => "text/plain" }, hasMore = false,
+                                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation", "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", _ => "text/plain" }, hasMore = nextOffset is not null,
                             contentUrl = kind is "pdf" or "image" or "html" or "docx" or "pptx" or "xlsx" ? "/agent/workspace/content?file=" + (kind == "pdf" ? "sample.pdf" : path) : null as string });
                     }
                     else if (target == "/api/agent/workspace/chrome")
@@ -1218,7 +1247,7 @@ namespace TranscriptUiSmoke
                             + "</h1><input id=\"native-input\" aria-label=\"Native input\"><button id=\"native-button\" onclick=\"this.dataset.count='1';this.textContent='CLICKED'\">交互图表 Interactive</button><div style=\"height:2400px\">可滚动页面 Scroll fixture</div><script>addEventListener('mousedown',e=>window.lastPointer={x:e.clientX,y:e.clientY,target:e.target.id||e.target.tagName},true)</script></body></html>");
                     }
                     if (hasOrigin) { bytes = "Origin forbidden"u8.ToArray(); contentType = "text/plain"; }
-                    string status = hasOrigin ? "403 Forbidden" : "200 OK";
+                    string status = hasOrigin || deniedImage ? "403 Forbidden" : "200 OK";
                     string policy = target.Contains("page.html", StringComparison.Ordinal)
                         ? "Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'\r\n" : "";
                     byte[] headers = Encoding.ASCII.GetBytes($"HTTP/1.1 {status}\r\nContent-Type: {contentType}\r\nContent-Length: {bytes.Length}\r\n{policy}Connection: close\r\n\r\n");

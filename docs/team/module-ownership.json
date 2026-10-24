@@ -278,6 +278,7 @@
         "url",
         "ignore",
         "base64",
+        "image",
         "tokio",
         "axum",
         "reqwest",
@@ -335,6 +336,9 @@
         "models/gateway_inference.rs",
         "models/gateway_protocol.rs",
         "orchestration/gateway_loop.rs",
+        "orchestration/gateway_model_request.rs",
+        "orchestration/gateway_live_memory.rs",
+        "orchestration/gateway_tool_execution.rs",
         "orchestration/gateway_runtime.rs",
         "orchestration/gateway_attachments.rs",
         "orchestration/gateway_tool_batch.rs",
@@ -361,6 +365,7 @@
         "storage/extensions.rs",
         "storage/gateway.rs",
         "storage/message_attachments.rs",
+        "storage/model_images.rs",
         "storage/gateway_memory.rs",
         "storage/layout.rs",
         "storage/library.rs",
@@ -380,6 +385,7 @@
         "storage/tool_memory.rs",
         "tools/gateway.rs",
         "tools/gateway_document_read.rs",
+        "tools/gateway_image.rs",
         "tools/gateway_document_create.rs",
         "tools/gateway_workspace_preview.rs",
         "tools/gateway_attachment_read.rs",
@@ -433,7 +439,24 @@
         "orchestration/gateway_task_worker_tests.rs",
         "orchestration/gateway_document_progress.rs",
         "storage/task_repository_cleanup.rs",
-        "gateway_storage.rs"
+        "gateway_storage.rs",
+        "orchestration/gateway_loop/context.rs",
+        "orchestration/gateway_loop/preparation.rs",
+        "orchestration/gateway_loop/tool_round.rs",
+        "orchestration/gateway_loop/delivery.rs",
+        "orchestration/gateway_task_worker/tool_round.rs",
+        "orchestration/gateway_task_worker/compaction.rs",
+        "orchestration/gateway_task_worker/completion.rs",
+        "orchestration/gateway_loop/execution.rs",
+        "orchestration/gateway_loop/execution/preparation.rs",
+        "orchestration/gateway_loop/execution/streaming.rs",
+        "orchestration/gateway_loop/execution/response.rs",
+        "orchestration/gateway_loop/acceptance.rs",
+        "orchestration/gateway_loop/preparation/inputs.rs",
+        "orchestration/gateway_task_worker/preparation.rs",
+        "orchestration/gateway_task_worker/model_round.rs",
+        "orchestration/gateway_task_worker/tool_round/dispatch.rs",
+        "orchestration/gateway_task_worker/tool_round/receipts.rs"
       ],
       "dependencyVersions": {
         "serde": "=1.0.228",
@@ -446,6 +469,7 @@
         "url": "=2.5.8",
         "ignore": "=0.4.24",
         "base64": "=0.22.1",
+        "image": "=0.25.10",
         "tokio": "=1.48.0",
         "axum": "=0.8.6",
         "reqwest": "=0.12.24",
@@ -484,32 +508,50 @@
       "integrationModules": [
         {
           "path": "storage/message_attachments.rs",
-          "allowedDomains": ["retrieval"],
+          "allowedDomains": [
+            "retrieval"
+          ],
           "purpose": "Conversation-owned attachment snapshots and extraction cache / 会话所有的附件快照与解析缓存"
         },
         {
           "path": "orchestration/gateway_attachments.rs",
-          "allowedDomains": ["storage", "retrieval", "tools"],
+          "allowedDomains": [
+            "storage",
+            "retrieval",
+            "tools"
+          ],
           "purpose": "Message-scoped attachment import and model context / 消息范围附件导入与模型上下文"
         },
         {
           "path": "orchestration/gateway_tool_batch.rs",
-          "allowedDomains": ["storage", "tools", "resources", "retrieval"],
+          "allowedDomains": [
+            "storage",
+            "tools",
+            "resources",
+            "retrieval"
+          ],
           "purpose": "Bounded same-step read scheduling with ordered receipts / 同轮只读调用的有界调度与有序回执"
         },
         {
           "path": "retrieval/gateway_message_attachments.rs",
-          "allowedDomains": ["storage"],
+          "allowedDomains": [
+            "storage"
+          ],
           "purpose": "Document parsing with conversation-owned cache / 文档解析及会话自有缓存"
         },
         {
           "path": "tools/gateway_attachment_read.rs",
-          "allowedDomains": ["retrieval", "storage"],
+          "allowedDomains": [
+            "retrieval",
+            "storage"
+          ],
           "purpose": "Authorized original attachment readback / 已授权原始附件回读"
         },
         {
           "path": "tools/gateway_workspace_terminal.rs",
-          "allowedDomains": ["storage"],
+          "allowedDomains": [
+            "storage"
+          ],
           "purpose": "Conversation-owned interactive ConPTY lifecycle / 聊天自有交互终端生命周期"
         },
         {
@@ -544,7 +586,9 @@
         },
         {
           "path": "bin/kynxa-cache-replay.rs",
-          "allowedDomains": ["models"],
+          "allowedDomains": [
+            "models"
+          ],
           "purpose": "Development-only offline copied-request analysis; no API or tool dispatch / 仅开发用离线请求副本分析，不连接API或派发工具"
         },
         {
@@ -568,6 +612,35 @@
             "resources"
           ],
           "purpose": "Actual model/tool loop composing existing native policies / 真实模型工具循环组合现有原生策略"
+        },
+        {
+          "path": "orchestration/gateway_model_request.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "resources",
+            "retrieval"
+          ],
+          "purpose": "Shared model admission, dispatch and durable usage settlement / 根子任务共用模型准入、派发与正式用量结算"
+        },
+        {
+          "path": "orchestration/gateway_live_memory.rs",
+          "allowedDomains": [
+            "models",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Shared scoped memory projection and withdrawal refresh / 共用范围记忆投影与撤回刷新"
+        },
+        {
+          "path": "orchestration/gateway_tool_execution.rs",
+          "allowedDomains": [
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Shared scoped tool execution context and receipt semantics / 共用工具执行上下文、范围与回执语义"
         },
         {
           "path": "models/gateway.rs",
@@ -653,6 +726,11 @@
           "purpose": "Authorized direct file-document extraction without an index / 已授权文件的直接文档解析，不依赖索引"
         },
         {
+          "path": "tools/gateway_image.rs",
+          "allowedDomains": [],
+          "purpose": "Authorized bounded image decoding without workspace presentation / 已授权图片的有界解码，不触发展示"
+        },
+        {
           "path": "tools/gateway_document_create.rs",
           "allowedDomains": [],
           "purpose": "Authorized document generation, validation and atomic binary publication / 授权文档生成、校验与二进制原子发布"
@@ -680,12 +758,18 @@
         },
         {
           "path": "tools/gateway_semantic.rs",
-          "allowedDomains": ["models", "retrieval", "resources"],
+          "allowedDomains": [
+            "models",
+            "retrieval",
+            "resources"
+          ],
           "purpose": "Optional E5 capability ranking with shared inference and background admission / 可选E5能力排序复用推理和后台资源准入"
         },
         {
           "path": "tools/gateway_experience.rs",
-          "allowedDomains": ["storage"],
+          "allowedDomains": [
+            "storage"
+          ],
           "purpose": "Scope-checked receipt-backed procedure navigation without execution / 范围核验的回执支持步骤导航，不执行历史操作"
         },
         {
@@ -696,7 +780,8 @@
         {
           "path": "tools/gateway_mcp.rs",
           "allowedDomains": [
-            "resources", "storage"
+            "resources",
+            "storage"
           ],
           "purpose": "Actual MCP transports, callback lifetime and owned recovery receipts / 真实 MCP 传输、回调生命周期及所属恢复回执"
         },
@@ -707,12 +792,16 @@
         },
         {
           "path": "tools/gateway_skill_authoring.rs",
-          "allowedDomains": ["storage"],
+          "allowedDomains": [
+            "storage"
+          ],
           "purpose": "Versioned application Skill authoring with formal validation evidence / 基于正式验证证据的应用Skill版本化编写"
         },
         {
           "path": "tools/gateway_extension_install.rs",
-          "allowedDomains": ["storage"],
+          "allowedDomains": [
+            "storage"
+          ],
           "purpose": "Explicit extension installation and verified configuration handoff / 显式扩展安装及核验后的配置接线"
         },
         {
@@ -732,7 +821,9 @@
         },
         {
           "path": "tools/gateway_deepseek_search.rs",
-          "allowedDomains": ["models"],
+          "allowedDomains": [
+            "models"
+          ],
           "purpose": "Built-in last-resort DeepSeek search reusing a configured official connection key / 复用已配置官方连接密钥的内置 DeepSeek 最后备用搜索"
         },
         {
@@ -753,6 +844,11 @@
             "orchestration"
           ],
           "purpose": "Formal HTTP-facing storage, paired transcript/segment contract validation and verified summary publication / HTTP 正式存储、配对续传与分段合同校验及核验摘要提交"
+        },
+        {
+          "path": "storage/model_images.rs",
+          "allowedDomains": [],
+          "purpose": "Scoped expiring model image sidecars and immutable receipt references / 范围隔离的临时模型图片旁车与不可变回执引用"
         },
         {
           "path": "storage/gateway_memory.rs",
@@ -797,7 +893,10 @@
         },
         {
           "path": "retrieval/gateway_cache.rs",
-          "allowedDomains": ["storage", "resources"],
+          "allowedDomains": [
+            "storage",
+            "resources"
+          ],
           "purpose": "Optional process cache memory admission and owned shared computation / 可选进程缓存内存准入与有生命周期的共享计算"
         },
         {
@@ -857,7 +956,8 @@
         {
           "path": "orchestration/gateway_task_journal.rs",
           "allowedDomains": [
-            "storage", "tools"
+            "storage",
+            "tools"
           ],
           "purpose": "Attempt-scoped event and checkpoint I/O / 尝试范围事件及检查点 I/O"
         },
@@ -992,6 +1092,166 @@
             "resources"
           ],
           "purpose": "Storage admission, drain and immutable runtime replacement / 存储准入、结算与不可变运行时替换"
+        },
+        {
+          "path": "orchestration/gateway_loop/context.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Verified root checkpoint and source restoration / 根检查点与来源恢复"
+        },
+        {
+          "path": "orchestration/gateway_loop/preparation.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Root request identity, capabilities and context preparation / 根请求身份、能力与上下文准备"
+        },
+        {
+          "path": "orchestration/gateway_loop/tool_round.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Root tool dispatch and durable receipt settlement / 根工具派发与正式回执结算"
+        },
+        {
+          "path": "orchestration/gateway_loop/delivery.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Root final reply and task settlement / 根答复交付与任务结算"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/tool_round.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Delegated tool dispatch under parent scope / 父范围内的子工具派发"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/compaction.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage"
+          ],
+          "purpose": "Delegated context compaction and checkpoints / 子任务上下文压缩与检查点"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/completion.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Delegated completion and evidence adaptation / 子任务完成判定与证据适配"
+        },
+        {
+          "path": "orchestration/gateway_loop/execution.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Root round coordination with owned guards / 持有执行守卫的根轮次协调"
+        },
+        {
+          "path": "orchestration/gateway_loop/execution/preparation.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Scoped request budgeting and compaction / 范围内请求预算与压缩"
+        },
+        {
+          "path": "orchestration/gateway_loop/execution/streaming.rs",
+          "allowedDomains": [
+            "models",
+            "retrieval"
+          ],
+          "purpose": "Streaming model round and prefix observation / 流式模型轮与前缀观测"
+        },
+        {
+          "path": "orchestration/gateway_loop/execution/response.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "retrieval"
+          ],
+          "purpose": "Model response, steering and completion advancement / 模型响应、引导与完成推进"
+        },
+        {
+          "path": "orchestration/gateway_loop/acceptance.rs",
+          "allowedDomains": [
+            "models",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Root acceptance projections, revisions and proof restoration / 根验收投影、版本与证明恢复"
+        },
+        {
+          "path": "orchestration/gateway_loop/preparation/inputs.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Verified initial history, evidence and attachment inputs / 已核验的初始历史、证据及附件输入"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/preparation.rs",
+          "allowedDomains": [
+            "models",
+            "storage",
+            "tools"
+          ],
+          "purpose": "Delegated context and current-scope preparation / 子任务上下文与当前范围准备"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/model_round.rs",
+          "allowedDomains": [
+            "models",
+            "tools"
+          ],
+          "purpose": "Delegated model session, request preparation and response recovery / 子模型会话、请求准备与响应恢复"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/tool_round/dispatch.rs",
+          "allowedDomains": [
+            "storage",
+            "tools"
+          ],
+          "purpose": "Delegated idempotent dispatch and approvals / 子任务幂等派发与审批"
+        },
+        {
+          "path": "orchestration/gateway_task_worker/tool_round/receipts.rs",
+          "allowedDomains": [
+            "storage",
+            "models",
+            "tools",
+            "retrieval"
+          ],
+          "purpose": "Delegated durable receipt and evidence projection / 子任务正式回执及证据投影"
         }
       ]
     }

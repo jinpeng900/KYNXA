@@ -33,6 +33,8 @@
     officeView?.dispose?.(); officeView = null;
     releaseDocx(docxView); docxView = null;
     content.replaceChildren();
+    window.kynxaContentBlocks?.disposeDetached();
+    window.kynxaTables?.disposeDetached();
     document.body.dataset.previewKind = message.kind || '';
     window.kynxaDiagrams?.disposeDetached();
     if (message.kind === 'markdown' || message.kind === 'mermaid' || message.kind === 'code') {
@@ -45,6 +47,17 @@
           { displayMode: formula.dataset.display === 'true', throwOnError: false, trust: false, strict: 'ignore' }); } catch { }
       }
       window.kynxaDiagrams?.hydrate(content);
+      window.kynxaContentBlocks?.hydrate(content);
+      window.kynxaTables?.hydrate(content);
+    } else if (message.kind === 'delimited' && Array.isArray(message.rows)) {
+      const table = document.createElement('table'), body = document.createElement('tbody');
+      for (const values of message.rows) {
+        if (!Array.isArray(values)) continue;
+        const row = document.createElement('tr');
+        for (const value of values) { const cell = document.createElement('td'); cell.textContent = String(value ?? ''); row.append(cell); }
+        body.append(row);
+      }
+      table.append(body); content.append(table); window.kynxaTables?.hydrate(content);
     } else if (['docx', 'pptx', 'xlsx'].includes(message.kind)) {
       try {
         if (!await renderOffice(message, current)) return;
@@ -66,7 +79,7 @@
     requestAnimationFrame(() => { if (revision === current) restoreState(states.get(key) || readState(message.state)); });
     // Office modules report their usable first view independently from background resource completion.
     // Office 模块将可操作首屏与后台资源完成分开回报，不让字体、图片及后续页阻塞 shown。
-    if (!['docx', 'pptx', 'xlsx'].includes(message.kind)) await contentSettled();
+    if (!['docx', 'pptx', 'xlsx'].includes(message.kind)) await contentSettled(content, { visibleOnly: true });
     if (revision === current) post({ type: 'shown', key, renderId: message.renderId });
   }
 
@@ -115,7 +128,7 @@
         if (name.startsWith('on') || name === 'srcdoc') node.removeAttributeNode(attribute);
         else if (name === 'src' || name === 'href' || name === 'poster') {
           const isLink = node.localName === 'a' && name === 'href';
-          const allowed = isLink ? /^(#|https?:\/\/)/i.test(value) : /^(blob:|data:image\/)/i.test(value);
+          const allowed = isLink ? window.kynxaMarkdownLinks?.isSafe(value) === true : /^(blob:|data:image\/)/i.test(value);
           if (!allowed) node.removeAttributeNode(attribute);
           else if (value.startsWith('blob:')) urls.add(value);
         }
@@ -263,7 +276,7 @@
         const link = event.target.closest('a[href]');
         if (!link || link.getAttribute('href')?.startsWith('#')) return;
         event.preventDefault();
-        if (isCurrent() && /^https?:\/\//i.test(link.href)) post({ type: 'link', key, url: link.href });
+        if (isCurrent()) window.kynxaMarkdownLinks?.follow(link, documentBody, url => post({ type: 'link', key, url }));
       });
       const saved = options.state?.docx || options.state;
       if (Number.isFinite(saved?.x) && Number.isFinite(saved?.y)) frame.contentWindow.scrollTo(saved.x, saved.y);
@@ -305,20 +318,39 @@
     }
   }
 
-  window.kynxaDiagrams?.configure({ requestCopy: (text, block, requestId) => {
-    post({ type: 'copy', key, text }); window.kynxaDiagrams.acknowledgeCopy({ requestId, ok: true });
+  const requestCopy = (text, block, requestId) => {
+    if (!key || !block.isConnected || !content.contains(block)) return false;
+    post({ type: 'copy', key, text, requestId }); return true;
+  };
+  window.kynxaContentBlocks?.configure({ requestCopy });
+  window.kynxaTables?.configure({ requestCopy });
+  window.kynxaDiagrams?.configure({ requestCopy, requestExport(format, content, block, requestId) {
+    if (!key || !block.isConnected) return false;
+    post({ type: 'exportDiagram', key, format, content, requestId }); return true;
   } });
   window.chrome?.webview?.addEventListener('message', event => {
     const message = event.data;
     if (message?.type === 'show') show(message);
     else if (message?.type === 'saveState') saveState();
-    else if (message?.type === 'appearance') appearance(message.palette);
+    else if (message?.type === 'appearance') {
+      appearance(message.palette);
+      window.kynxaContentBlocks?.setLanguage(message.strings);
+      window.kynxaTables?.setLanguage(message.strings);
+      window.kynxaDiagrams?.setLanguage(message.strings);
+    }
+    else if (message?.type === 'copyResult' && message.key === key) {
+      window.kynxaContentBlocks?.acknowledgeCopy(message);
+      window.kynxaTables?.acknowledgeCopy(message);
+      window.kynxaDiagrams?.acknowledgeCopy(message);
+    }
+    else if (message?.type === 'anchor' && message.key === key) window.kynxaMarkdownLinks?.anchor(content, message.fragment || '');
+    else if (message?.type === 'diagramExportResult' && message.key === key) window.kynxaDiagrams?.acknowledgeExport(message);
   });
   document.addEventListener('click', event => {
     const link = event.target.closest('a[href]');
     if (!link) return;
     event.preventDefault();
-    try { const url = new URL(link.getAttribute('href')); if (/^https?:$/.test(url.protocol)) post({ type: 'link', key, url: url.href }); } catch { }
+    window.kynxaMarkdownLinks?.follow(link, content, url => post({ type: 'link', key, url }));
   });
   window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(saveState, 120); }, { passive: true });
   post({ type: 'ready' });

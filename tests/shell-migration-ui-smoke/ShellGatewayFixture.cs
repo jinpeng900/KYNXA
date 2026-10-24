@@ -62,7 +62,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public TaskCompletionSource? PromptReplyGate { get; set; }
     public TaskDetailResponse? SteeringDetail { get; set; }
     public TaskCompletionSource? NextSteeringDetailGate { get; set; }
-    public TaskRecord? UnknownOutcomeTask { get; set; }
     public TaskSteeringRequest? LastSteeringReplay { get; private set; }
     public List<TaskSteeringRequest> SteeringAttempts { get; } = [];
     public int SteeringDetailReads { get; private set; }
@@ -370,8 +369,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             {
                 if (path == "/api/tasks/recoverable")
                     lock (_sync) _recoverableReads[taskConversationId] = _recoverableReads.GetValueOrDefault(taskConversationId) + 1;
-                result = new TaskListResponse(path == "/api/tasks/recoverable" && UnknownOutcomeTask is { } unknown
-                    && unknown.Scope.ConversationId == taskConversationId ? [unknown] : [], false, null);
+                result = new TaskListResponse([], false, null);
             }
             else if (path == "/api/tasks/paused" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
             {

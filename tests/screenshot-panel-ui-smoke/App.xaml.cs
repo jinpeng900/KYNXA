@@ -98,11 +98,27 @@ public partial class App : Application
             await CheckScreenshotViewerAsync();
             await CheckScreenshotRetryAsync();
             await CheckBrowserScreenshotsAsync();
+            var ordinary = Message(_chatA, Screenshot("ordinary-read") with { Name = "filesystem.read" });
+            _panel.ShowConversation(_chatA, [ordinary]);
+            await WaitAsync(() => _panel.IsSourceCatalogReady, "an empty screenshot catalog completes its first discovery");
+            int readinessEvents = 0;
+            EventHandler catalogReady = (_, _) => { if (_panel.IsSourceCatalogReady) readinessEvents++; };
+            _panel.ScreenshotsChanged += catalogReady;
+            ordinary.Message.ToolActivities.Add(Screenshot("ordinary-stat") with { Name = "filesystem.stat" });
+            ordinary.Refresh();
+            Check(!_panel.IsSourceCatalogReady, "new activity discovery exposes its pending catalog state");
+            await WaitAsync(() => _panel.IsSourceCatalogReady && readinessEvents == 1,
+                "unchanged empty screenshot discovery notifies its actual ready transition");
+            _panel.ScreenshotsChanged -= catalogReady;
+            Check(!_panel.HasScreenshots && _api.Reads.Count == 0,
+                "an empty catalog reaches ready without fetching any archive");
             var first = Screenshot("shot-a-1"); var second = Screenshot("shot-a-2");
             var row = Message(_chatA, first, second);
             int changes = 0; _panel.ScreenshotsChanged += (_, _) => changes++;
             _panel.ShowConversation(_chatA, [row]);
             await WaitAsync(() => _panel.IsLoaded, "visible screenshot module completes native loading");
+            await WaitAsync(() => _panel.Items.Count == 2 && _panel.HasScreenshots,
+                "queued screenshot source discovery completes for the current conversation");
             Check(_panel.HasScreenshots && _api.Reads.Count == 0 && _panel.Visibility == Visibility.Visible, "collapsed preview discovers receipts without downloading images");
             EventHandler openSidebar = (_, _) => _panel.SetPreviewEnabled(_panel.HasScreenshots);
             _panel.ScreenshotsChanged += openSidebar;

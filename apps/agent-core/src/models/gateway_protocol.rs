@@ -597,7 +597,13 @@ pub fn append_results(
             && pair["result"]["isError"] != true
             && canonical["isError"] != true
         {
-            for block in canonical["content"]
+            // Native browser receipts wrap their image blocks in value; keep the pixels out of tool text.
+            // 原生浏览器回执用 value 包装图块；像素走多模态输入，不塞进工具文字。
+            let image_content = canonical.get("content").or_else(|| {
+                (canonical["sessionId"].is_string() && canonical["tabId"].is_string())
+                    .then(|| canonical["value"].get("content")).flatten()
+            });
+            for block in image_content.unwrap_or(&Value::Null)
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -1984,18 +1990,18 @@ mod tests {
         ];
         for (name, raw) in fixtures {
             let turn = decode_response(name, raw, &catalog(), Value::Null).unwrap();
-            let continued=append_results(name,&[],&turn,&[json!({"call":turn.calls[0],"result":{"status":"completed","content":{"content":[{"type":"text","text":"temporary image"},{"type":"image","mimeType":"image/png","data":"aGVsbG8="}],"_meta":{"private":"secret"}}}})]).unwrap();
-            assert!(protocol::complete_pairs(&continued));
-            assert_eq!(
-                &continued[..turn.continuation.len()],
-                turn.continuation.as_slice()
-            );
-            let image = &continued.last().unwrap()["content"][1]["image_url"]["url"];
-            assert_eq!(image, "data:image/png;base64,aGVsbG8=");
-            let tool_text =
-                json!(&continued[turn.continuation.len()..continued.len() - 1]).to_string();
-            assert!(!tool_text.contains("aGVsbG8="));
-            assert!(!tool_text.contains("secret"));
+            let image = json!({"content":[{"type":"text","text":"temporary image"},{"type":"image","mimeType":"image/png","data":"aGVsbG8="}],"_meta":{"private":"secret"}});
+            for canonical in [image.clone(), json!({"sessionId":"browser-session","tabId":"page","value":image})] {
+                let continued = append_results(name, &[], &turn,
+                    &[json!({"call":turn.calls[0],"result":{"status":"completed","content":canonical}})]).unwrap();
+                assert!(protocol::complete_pairs(&continued));
+                assert_eq!(&continued[..turn.continuation.len()], turn.continuation.as_slice());
+                let image = &continued.last().unwrap()["content"][1]["image_url"]["url"];
+                assert_eq!(image, "data:image/png;base64,aGVsbG8=");
+                let tool_text = json!(&continued[turn.continuation.len()..continued.len() - 1]).to_string();
+                assert!(!tool_text.contains("aGVsbG8="));
+                assert!(!tool_text.contains("secret"));
+            }
         }
     }
 

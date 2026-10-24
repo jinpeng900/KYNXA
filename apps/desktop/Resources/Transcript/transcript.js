@@ -17,7 +17,7 @@
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
-    toolDenied: '已拒绝', toolApproval: '等待批准', toolCancelled: '已取消', toolUnknown: '结果未知',
+    toolDenied: '已拒绝', toolApproval: '等待批准', toolCancelled: '已取消', toolUnknown: '未确认',
     toolSearchWeb: '搜索网页', toolReadWeb: '阅读网页', toolReadFile: '读取文件', toolInspectFile: '查看文件',
     toolListFiles: '查看文件夹', toolSearchFiles: '查找文件', toolEditFile: '修改文件', toolDeleteFile: '删除文件',
     toolCreateFolder: '创建文件夹', toolRunCommand: '运行命令', toolUseSkill: '使用技能', toolReadSkill: '读取技能',
@@ -28,7 +28,7 @@
     toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
     toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',
     toolMoreWebLinks: '另{0}个链接',
-    taskPartial: '部分完成', taskVerificationFailed: '核验失败', taskExecutionUnknown: '执行结果未知',
+    taskPartial: '部分完成', taskVerificationFailed: '核验失败', taskExecutionUnknown: '执行结果未确认',
     toolInspectWindows: '查看窗口', toolFindApps: '查找软件', toolScreenshot: '截图', toolReadWindow: '读取窗口', toolOpenApp: '打开软件',
     toolActivateWindow: '切换窗口', toolClick: '点击', toolMovePointer: '移动鼠标', toolScroll: '滚动', toolDrag: '拖动',
     toolTypeText: '输入文字', toolPressKey: '按下按键', toolCharacterCount: '{0}字符', toolScrollDelta: '滚动量 {0}',
@@ -236,7 +236,8 @@
       const dot = document.createElement('span'); dot.className = 'streaming-dot';
       dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot);
     } else if (!generating) existingDot?.remove();
-    entry.retry.hidden = !message.canRetry;
+    const retryHidden = !message.canRetry;
+    if (entry.retry.hidden !== retryHidden) entry.retry.hidden = retryHidden;
   }
   function applyMessageState(command) {
     if (command.conversationId !== conversationId || !command.message) return;
@@ -1319,7 +1320,9 @@
     const link = event.target.closest('a[href]');
     if (!link) return;
     event.preventDefault();
-    try { const url = new URL(link.getAttribute('href')); if (['http:', 'https:', 'mailto:'].includes(url.protocol)) send({ type: 'link', conversationId, url: url.href }); } catch { }
+    if (link.getAttribute('href')?.startsWith('#')) { stopFollowing(); cancelAnimationFrame(scrollFrame); }
+    const scope = link.closest('.message-body') || link.closest('article') || messages;
+    window.kynxaMarkdownLinks?.follow(link, scope, url => send({ type: 'link', conversationId, url }));
   });
   new ResizeObserver(() => { updateJumpButton(); scheduleViewport(); followBottom(); }).observe(messages);
   window.addEventListener('resize', () => { updateJumpButton(); scheduleViewport(); followBottom(); });

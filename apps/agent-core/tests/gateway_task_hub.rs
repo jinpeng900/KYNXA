@@ -268,7 +268,7 @@ async fn root_pagination_does_not_let_children_shadow_roots_or_replay_controls()
 }
 
 #[tokio::test]
-async fn a_follow_up_inherits_the_unmet_minimum_duration_of_the_previous_task() {
+async fn a_new_request_does_not_silently_select_or_inherit_an_unfinished_task() {
     use kynxa_agent_core_native::orchestration::gateway_task_input;
     let fixture = Fixture::new();
     let message = |text: &str| json!({"conversationId":fixture.scope.conversation_id,"requestId":uuid::Uuid::new_v4().to_string(),
@@ -282,11 +282,12 @@ async fn a_follow_up_inherits_the_unmet_minimum_duration_of_the_previous_task() 
     assert_eq!(persisted(&first)["minActiveMs"], 3_600_000);
     let follow_up = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
     let limits = persisted(&follow_up);
-    assert_eq!(limits["minActiveMs"], 3_600_000);
-    assert_eq!(limits["minimumInheritedFrom"], first.task_id);
-    assert_eq!(follow_up.goal, first.goal);
-    assert_eq!(follow_up.acceptance, first.acceptance);
-    assert!(limits["maxDurationMs"].as_u64().unwrap() >= 3_600_000);
+    assert!(limits.get("minActiveMs").is_none());
+    assert!(limits.get("minimumInheritedFrom").is_none());
+    assert!(limits.get("continuedFromTaskId").is_none());
+    assert_eq!(follow_up.goal, "继续");
+    assert_eq!(follow_up.acceptance, vec!["继续"]);
+    assert_eq!(persisted(&first)["minActiveMs"], 3_600_000);
     // A cancelled task does not carry its minimum forward.
     // 已取消任务不继承最低时长。
     let repository = TaskRepository::open(&fixture.root).unwrap();
@@ -321,7 +322,7 @@ async fn a_follow_up_keeps_committed_requirement_revocations_and_never_revives_t
         journal.finish(TaskState::Paused, Some("fixture-stopped")).await.unwrap();
         let continued = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
         let saved = read_input(&continued);
-        assert_eq!(saved["acceptanceRequirements"], json!(suspended.as_ref().unwrap_or(&requirements)));
+        assert_eq!(saved["acceptanceRequirements"], json!(["继续"]));
         assert_eq!(saved["resolvedRunLimits"]["minActiveMs"].as_u64().unwrap_or(0), 0);
         assert!(saved["resolvedRunLimits"].get("minimumInheritedFrom").is_none());
         assert!(!continued.goal.contains("一小时"));
@@ -371,7 +372,8 @@ async fn long_acceptance_keeps_original_requirements_outside_the_small_task_row(
     assert_eq!(saved["input"]["message"], goal);
     assert_eq!(saved["acceptanceRequirements"][0], goal.split('；').next().unwrap());
     let continued = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
-    assert_eq!(read_input(&continued)["acceptanceRequirements"], saved["acceptanceRequirements"]);
+    assert_eq!(read_input(&continued)["acceptanceRequirements"], json!(["继续"]));
+    assert_eq!(read_input(&first)["acceptanceRequirements"], saved["acceptanceRequirements"]);
     assert!(serde_json::to_vec(&continued.acceptance).unwrap().len() <= 8 * 1024);
 }
 
@@ -691,131 +693,88 @@ async fn burst_controls_utf16_readback_and_elapsed_budget_keep_their_contracts()
 }
 
 #[tokio::test]
-async fn replayed_unknown_acknowledgements_do_not_resume_a_paused_task() {
+async fn unknown_facts_remain_visible_without_resuming_a_user_paused_task() {
     let fixture = Fixture::new();
-    let journal = TaskJournal::begin(&fixture.root, &fixture.input("paused-unknown-ack", None), "fixture", 60_000).unwrap();
+    let journal = TaskJournal::begin(&fixture.root, &fixture.input("paused-unknown-facts", None), "fixture", 60_000).unwrap();
     journal.reserve_model_request("unknown-cost").unwrap();
-    journal.record_operation(&OperationIntent { operation_id:"unknown-write".into(),tool_call_id:"unknown-call".into(),
-        tool_name:"file.write".into(),input_sha256:"a".repeat(64),input_reference:None,effect:OperationEffect::FileMutation }).unwrap();
+    journal.record_operation(&OperationIntent { operation_id:"unknown-write".into(), tool_call_id:"unknown-call".into(),
+        tool_name:"file.write".into(), input_sha256:"a".repeat(64), input_reference:None, effect:OperationEffect::FileMutation }).unwrap();
     journal.dispatch_operation("unknown-write").unwrap();
     journal.release("fixture-process-exit").await.unwrap();
     let repository = journal.repository();
     let task = journal.load_current().unwrap();
-    let attempt = repository.start_attempt(&task.task_id, task.version, "fixture-reconcile", 60_000).unwrap();
-    repository.mark_verification_quiescent(&attempt.token, "fixture-known-quiescence").unwrap();
-    let costs = vec![ModelReservationIdentity { task_id:task.task_id.clone(),reservation_id:"unknown-cost".into() }];
-    let operations = vec![TaskOperationIdentity { task_id:task.task_id.clone(),operation_id:"unknown-write".into() }];
-    repository.acknowledge_unknown_model_reservations(&task.task_id, repository.load(&task.task_id).unwrap().version, &costs).unwrap();
-    repository.acknowledge_unknown_task_operations(&task.task_id, repository.load(&task.task_id).unwrap().version, &operations).unwrap();
-    repository.release_attempt(&attempt.token, "fixture-acknowledged-unknown").unwrap();
-    let paused = fixture.runtime.tasks.control(&task.task_id, repository.load(&task.task_id).unwrap().version, TaskControl::Pause).await.unwrap();
-    let version = paused["task"]["version"].as_u64().unwrap();
-    // A replay confirms the same uncertainty; it cannot override a later user pause.
-    // 重放只确认相同未知结果，不能覆盖用户随后作出的暂停。
-    let repeated_cost = fixture.runtime.tasks.acknowledge_unknown_costs(&task.task_id, task.version, costs).await.unwrap();
-    assert_eq!(repeated_cost["task"]["state"], "paused");
-    assert_eq!(repeated_cost["task"]["version"], version);
-    assert_eq!(repeated_cost["costUnknown"], true);
-    let repeated_operation = fixture.runtime.tasks.acknowledge_unknown_operations_scoped(&task.task_id, task.version, operations).await.unwrap();
-    assert_eq!(repeated_operation["task"]["state"], "paused");
-    assert_eq!(repeated_operation["task"]["version"], version);
-    assert_eq!(repository.current_attempt(&task.task_id).unwrap().unwrap().token, attempt.token);
+    let paused = fixture.runtime.tasks.control(&task.task_id, task.version, TaskControl::Pause).await.unwrap();
+    let report = fixture.runtime.tasks.recover().await.unwrap();
+    assert_eq!(report["scheduled"], 0);
+    let detail = fixture.runtime.tasks.detail(&task.task_id).await.unwrap();
+    assert_eq!(detail["task"]["state"], "paused");
+    assert_eq!(detail["task"]["version"], paused["task"]["version"]);
+    assert_eq!(detail["recoveryOperations"][0]["state"], "unknown");
+    assert_eq!(detail["recoveryModelReservations"][0]["state"], "unknown");
+    assert!(detail["recoveryModelReservations"][0]["dispatched"].is_null());
+    assert!(detail["recoveryModelReservations"][0]["usage"].is_null());
     assert_eq!(repository.load(&task.task_id).unwrap().usage.model_requests, 0);
-    let reservation = &repository.model_reservations(&task.task_id).unwrap()[0];
-    assert_eq!(reservation.state, ModelReservationState::Unknown);
-    assert!(reservation.is_unknown_acknowledged());
-    assert_eq!(repository.operations(&task.task_id).unwrap()[0].state, OperationState::Unknown);
+    assert!(repository.current_attempt(&task.task_id).unwrap().unwrap().ended_at_ms.is_some());
+    fixture.runtime.tasks.shutdown().await;
 }
 
 #[tokio::test]
-async fn restart_blocks_unknown_effects_without_replaying_or_consuming_model_budget() {
+async fn restart_preserves_unknown_effects_without_a_manual_confirmation_gate_or_replay() {
     let fixture = Fixture::new();
-    let journal = TaskJournal::begin(
-        &fixture.root,
-        &fixture.input("unknown", None),
-        "fixture",
-        60_000,
-    )
-    .unwrap();
-    journal
-        .record_operation(&OperationIntent {
-            operation_id: "sideeffect".into(),
-            tool_call_id: "call-1".into(),
-            tool_name: "file.write".into(),
-            input_sha256: "a".repeat(64),
-            input_reference: None,
-            effect: OperationEffect::FileMutation,
-        })
-        .unwrap();
+    let journal = TaskJournal::begin(&fixture.root, &fixture.input("unknown", None), "fixture", 60_000).unwrap();
+    journal.record_operation(&OperationIntent {
+        operation_id:"sideeffect".into(), tool_call_id:"call-1".into(), tool_name:"file.write".into(),
+        input_sha256:"a".repeat(64), input_reference:None, effect:OperationEffect::FileMutation,
+    }).unwrap();
     journal.dispatch_operation("sideeffect").unwrap();
     journal.release("fixture-process-exit").await.unwrap();
     fixture.runtime.tasks.recover().await.unwrap();
+    // Non-network interrupted work keeps its facts and waits for an explicit continuation.
+    // 非网络中断工作保留原事实并等待明确续作，不启动模型或未知结果人工确认流程。
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let task = journal.load_current().unwrap();
-            if task.state == TaskState::WaitingVerification {
-                break;
-            }
+            assert_ne!(task.state, TaskState::WaitingVerification);
+            if task.state == TaskState::WaitingConfig { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    })
-    .await
-    .unwrap();
+    }).await.unwrap();
     assert_eq!(journal.load_current().unwrap().usage.model_requests, 0);
-    assert_eq!(
-        journal.repository().operations(journal.task_id()).unwrap()[0].state,
-        OperationState::Unknown
-    );
+    let operations = journal.repository().operations(journal.task_id()).unwrap();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].state, OperationState::Unknown);
+    assert!(operations[0].result_reference.is_none());
     fixture.runtime.tasks.shutdown().await;
     assert_ne!(journal.load_current().unwrap().state, TaskState::Cancelled);
 }
 
 #[tokio::test]
-async fn unknown_child_effect_blocks_parent_and_sibling_writes_but_allows_verification_reads() {
+async fn unknown_child_effect_does_not_block_parent_or_sibling_work_and_cannot_be_replayed() {
     let fixture = Fixture::new();
-    let parent = TaskJournal::begin(
-        &fixture.root,
-        &fixture.input("tree", None),
-        "parent",
-        60_000,
-    )
-    .unwrap();
-    let child = parent
-        .repository()
-        .accept_task(&fixture.input("child", Some(parent.task_id())))
-        .unwrap();
+    let parent = TaskJournal::begin(&fixture.root, &fixture.input("tree", None), "parent", 60_000).unwrap();
+    let child = parent.repository().accept_task(&fixture.input("child", Some(parent.task_id()))).unwrap();
     let child = TaskJournal::start_existing(&fixture.root, &child, "child", 60_000).unwrap();
-    let intent = OperationIntent {
-        operation_id: "write-1".into(),
-        tool_call_id: "call-1".into(),
-        tool_name: "filesystem.write".into(),
-        input_sha256: "a".repeat(64),
-        input_reference: None,
-        effect: OperationEffect::FileMutation,
-    };
+    let intent = OperationIntent { operation_id:"write-1".into(), tool_call_id:"call-1".into(),
+        tool_name:"filesystem.write".into(), input_sha256:"a".repeat(64), input_reference:None, effect:OperationEffect::FileMutation };
     child.record_operation(&intent).unwrap();
     child.dispatch_operation("write-1").unwrap();
     child.release("interrupted-write").await.unwrap();
     let mut next = intent.clone();
     next.operation_id = "parent-next".into();
-    assert_eq!(
-        parent.record_operation(&next).unwrap_err().code,
-        "TASK_BLOCKED"
-    );
-    let sibling = parent
-        .repository()
-        .accept_task(&fixture.input("sibling", Some(parent.task_id())))
-        .unwrap();
+    parent.record_operation(&next).unwrap();
+    parent.dispatch_operation("parent-next").unwrap();
+    let sibling = parent.repository().accept_task(&fixture.input("sibling", Some(parent.task_id()))).unwrap();
     let sibling = TaskJournal::start_existing(&fixture.root, &sibling, "sibling", 60_000).unwrap();
     next.operation_id = "sibling-next".into();
-    assert_eq!(
-        sibling.record_operation(&next).unwrap_err().code,
-        "TASK_BLOCKED"
-    );
-    next.effect = OperationEffect::Observation;
-    next.tool_name = "filesystem.read".into();
-    parent.record_operation(&next).unwrap();
-    parent.dispatch_operation("sibling-next").unwrap();
+    sibling.record_operation(&next).unwrap();
+    sibling.dispatch_operation("sibling-next").unwrap();
+    let child_task = child.load_current().unwrap();
+    let recovered = TaskJournal::start_existing(&fixture.root, &child_task, "child-recovered", 60_000).unwrap();
+    assert_eq!(recovered.record_operation(&intent).unwrap().state, OperationState::Unknown);
+    assert_eq!(recovered.dispatch_operation("write-1").unwrap_err().code, "TASK_BLOCKED");
+    recovered.release("fixture-done").await.unwrap();
+    sibling.release("fixture-done").await.unwrap();
+    parent.release("fixture-done").await.unwrap();
 }
 
 #[tokio::test]

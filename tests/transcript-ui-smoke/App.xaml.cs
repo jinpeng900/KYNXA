@@ -31,7 +31,7 @@ public partial class App : Application
             LaunchWorkTabsChecks(cold);
             return;
         }
-        if (Environment.GetCommandLineArgs().Any(argument => argument is "--workspace-preview-only" or "--workspace-chrome-only"))
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--workspace-preview-only" or "--workspace-chrome-only" or "--workspace-format-only"))
         {
             LaunchWorkspacePreviewChecks(cold);
             return;
@@ -39,11 +39,6 @@ public partial class App : Application
         if (Environment.GetCommandLineArgs().Contains("--prompt-queue-only", StringComparer.Ordinal))
         {
             LaunchPromptQueueChecks(cold);
-            return;
-        }
-        if (Environment.GetCommandLineArgs().Contains("--unknown-outcome-only", StringComparer.Ordinal))
-        {
-            LaunchUnknownOutcomeChecks(cold);
             return;
         }
         _transcript = new ConversationTranscript();
@@ -74,6 +69,11 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--conversation-switching-only", StringComparer.Ordinal))
+            {
+                await CheckConversationSwitchingOnlyAsync();
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--message-attachments-only", StringComparer.Ordinal))
             {
                 await CheckMessageAttachmentsAsync();
@@ -182,6 +182,14 @@ public partial class App : Application
                 _metrics["checks"] = _checks;
                 File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
                 File.WriteAllText(_result, $"PASS: {_checks} native Mermaid diagram checks; bundled SVG types, streaming fences, safe source fallback, native acknowledged copy, palettes, resize, zoom/pan, fullscreen Escape and conversation isolation.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--diagram-interaction-only", StringComparer.Ordinal))
+            {
+                await CheckDiagramInteractionsAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} focused Mermaid interaction checks; real clipboard acknowledgement, selection, resize and zoom.");
                 return;
             }
             if (Environment.GetCommandLineArgs().Contains("--message-time-cache-only", StringComparer.Ordinal))

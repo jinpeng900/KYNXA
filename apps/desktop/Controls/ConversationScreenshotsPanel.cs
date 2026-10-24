@@ -61,6 +61,7 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
     }
 
     public bool HasScreenshots => _screenshotSources.Length > 0;
+    public bool IsSourceCatalogReady => !_sourcesRefreshQueued;
     public IReadOnlyList<ConversationScreenshotSource> Items => _screenshotSources;
     public ConversationScreenshotSource? SelectedSource => _screenshotSources.Length > 0 ? _screenshotSources[_selectedSourceIndex] : null;
     public event EventHandler? ScreenshotsChanged;
@@ -214,11 +215,18 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         var selected = SelectedSource;
         var next = ConversationScreenshotSources.Collect(_conversationId,
             _messages.Select(message => new ScreenshotMessage(message.ConversationId, message.Message.Id, message.Message.Role, message.ToolActivities)));
-        bool changed = force || !_screenshotSources.Select(source => source.Identity).SequenceEqual(next.Select(source => source.Identity));
+        bool changed = force || !_screenshotSources.Select(source => (source.Identity, source.PresentationPriority, source.Title))
+            .SequenceEqual(next.Select(source => (source.Identity, source.PresentationPriority, source.Title)));
         _screenshotSources = next;
-        if (!changed) return;
+        if (!changed)
+        {
+            // Queued discovery also completes an unchanged/empty catalog; waiting tab selection must settle.
+            // 队列扫描也会完成未变化或空的目录，等待恢复的标签选择需要据此结算。
+            ScreenshotsChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
         int previousIndex = _tabbedMode && !force && selected is not null
-            ? Array.FindIndex(next, source => source.MessageId == selected.MessageId && source.Tool.ToolCallId == selected.Tool.ToolCallId) : -1;
+            ? Array.FindIndex(next, source => source.Identity == selected.Identity) : -1;
         _selectedSourceIndex = previousIndex >= 0 ? previousIndex : next.Length == 0 ? 0 : next.Length - 1;
         Visibility = HasScreenshots && (!_tabbedMode || _previewEnabled) ? Visibility.Visible : Visibility.Collapsed;
         ScreenshotsChanged?.Invoke(this, EventArgs.Empty);

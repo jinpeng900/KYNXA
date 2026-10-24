@@ -31,6 +31,13 @@ const STREAM_BATCH_DELAY: Duration = Duration::from_millis(32);
 const STREAM_BATCH_BYTES: usize = 32 * 1024;
 const STREAM_BATCH_EVENTS: usize = 128;
 
+/// Only transport failures authorize unattended execution recovery; invalid inputs need a user retry.
+/// 仅网络传输故障允许无人值守恢复；参数及其他执行失败等待用户继续。
+pub(crate) fn automatic_network_recovery(code: &str) -> bool {
+    matches!(code, "MODEL_NETWORK_FAILED" | "MODEL_RESPONSE_READ_FAILED"
+        | "MODEL_RESPONSE_TIMEOUT" | "MODEL_IDLE_TIMEOUT" | "MODEL_STREAM_INCOMPLETE")
+}
+
 #[derive(Default)]
 struct StreamEmission {
     pending: VecDeque<Value>,
@@ -131,9 +138,6 @@ pub struct RequestRun {
     /// Restored background work yields new model admission to current user interaction.
     /// 后台恢复任务在新增模型准入时让出当前用户交互的优先位置。
     pub is_background_recovery: AtomicBool,
-    /// Set when repeated recovery made no new model request; the next execute settles instead of retrying.
-    /// 连续恢复没有产生新的模型请求时置位；下一次执行如实收尾，不再重试。
-    pub recovery_stalled: std::sync::atomic::AtomicBool,
 }
 impl RequestRun {
     /// Reuse the current replay projection across reattachment; offline time is never added.
@@ -664,7 +668,6 @@ impl RequestRun {
             resource_wait_ms: AtomicU64::new(0),
             active_duration_base_ms: 0,
             is_background_recovery: AtomicBool::new(false),
-            recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -743,7 +746,7 @@ impl GatewayRuntime {
         Ok(result)
     }
     pub fn new(config: GatewayConfig) -> Arc<Self> {
-        Arc::new_cyclic(|weak| Self {
+        let runtime = Arc::new_cyclic(|weak| Self {
             models: ModelConfigStore::new(&config.data_home),
             model_preparation: PreparationService::new(config.clone()),
             tasks: Arc::new(super::gateway_task_hub::TaskHub::new(
@@ -762,7 +765,33 @@ impl GatewayRuntime {
             execution_tasks: AtomicUsize::new(0),
             extension_prewarm_scheduled: AtomicBool::new(false),
             background_cancellation: watch::channel(false).0,
-        })
+        });
+        runtime.schedule_image_cleanup();
+        runtime
+    }
+
+    /// Cleanup owns only expiring model copies; it neither retains the runtime nor delays startup.
+    /// 清理仅接管可过期的模型图像副本，不延长网关生命周期，也不阻塞启动。
+    fn schedule_image_cleanup(self: &Arc<Self>) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return; };
+        let runtime = Arc::downgrade(self);
+        let mut cancellation = self.background_cancellation.subscribe();
+        handle.spawn(async move {
+            let delay = Duration::from_secs(10 * 60);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {},
+                    _ = cancellation.changed() => break,
+                }
+                if *cancellation.borrow() { break; }
+                let Some(runtime) = runtime.upgrade() else { break; };
+                let root = runtime.config.data_root.clone();
+                drop(runtime);
+                let _ = tokio::task::spawn_blocking(move || {
+                    data::cleanup_expired_model_images(&root, chrono::Utc::now().timestamp_millis(), 256)
+                }).await;
+            }
+        });
     }
     pub async fn conversation_gate(&self, id: &str) -> Arc<Mutex<()>> {
         let mut gates = self.conversations.lock().await;
@@ -1064,7 +1093,6 @@ impl GatewayRuntime {
             resource_wait_ms: AtomicU64::new(0),
             active_duration_base_ms: task.usage.active_duration_ms.unwrap_or(0),
             is_background_recovery: AtomicBool::new(background),
-            recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         });
         let _ = run.stream_owner.set(Arc::downgrade(&run));
         self.task_runs
@@ -1268,7 +1296,6 @@ impl GatewayRuntime {
             resource_wait_ms: AtomicU64::new(0),
             active_duration_base_ms: task.usage.active_duration_ms.unwrap_or(0),
             is_background_recovery: AtomicBool::new(background),
-            recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         });
         let _ = run.stream_owner.set(Arc::downgrade(&run));
         let mut runs = self.task_runs.lock().map_err(|_| {
@@ -1629,9 +1656,23 @@ impl GatewayRuntime {
 
     pub async fn shutdown(&self) {
         self.background_cancellation.send_replace(true);
-        for run in self.runs.lock().await.values() {
+        let runs: Vec<_> = self.runs.lock().await.values().cloned().collect();
+        for run in runs {
             if !run.finished.load(Ordering::Acquire) {
                 run.suspending.store(true, Ordering::Release);
+                // Pause the owned tree together so explicit resume can restore its paused descendants.
+                // 同时暂停所属任务树，明确恢复时才能接回这些暂停的子任务。
+                if let Some(journal) = &run.journal {
+                    for attempt in 0..2 {
+                        let Ok(task) = journal.load_current() else { break; };
+                        if task.state.is_terminal() || task.state == TaskState::Paused { break; }
+                        match journal.repository().control(journal.task_id(), task.version,
+                            crate::storage::task_repository::TaskControl::Pause) {
+                            Err(error) if attempt == 0 && matches!(error.code(), "TASK_CONFLICT" | "TASK_VERSION_CONFLICT") => {},
+                            _ => break,
+                        }
+                    }
+                }
                 run.cancel();
             }
         }

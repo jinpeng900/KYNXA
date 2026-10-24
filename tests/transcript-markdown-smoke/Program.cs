@@ -138,12 +138,24 @@ string unsafeHtml = TranscriptMarkdown.Render("""
 
 [![badge](https://example.com/badge.png)](https://example.com/outer)
 """);
-Check(!Regex.IsMatch(unsafeHtml, "<(script|img|iframe|object|style)\\b", RegexOptions.IgnoreCase), "Raw HTML and images cannot create executable elements or fetch images.");
-Check(!Regex.IsMatch(unsafeHtml, "href=\"(?:javascript|data|file|/)"), "Unsupported destinations are not links.");
+Check(!Regex.IsMatch(unsafeHtml, "<(script|iframe|object|style)\\b", RegexOptions.IgnoreCase), "Raw HTML cannot create executable elements.");
+Check(!Regex.IsMatch(unsafeHtml, "href=\"(?:javascript|data|file):"), "Executable and direct filesystem destinations are not links.");
 Check(unsafeHtml.Contains("href=\"https://example.com/?a=1&amp;b=2\"") && unsafeHtml.Contains("mailto:hello@example.com"), "Safe web and email links remain available.");
-Check(unsafeHtml.Contains("class=\"image-link\"") && unsafeHtml.Contains(">picture</a>"), "Image Markdown becomes a text link.");
+Check(unsafeHtml.Contains("class=\"markdown-image\"") && unsafeHtml.Contains("src=\"https://kynxa-markdown-images.local/image?source=https%3A%2F%2Fexample.com%2Fimage.png")
+    && !unsafeHtml.Contains("src=\"https://example.com"), "Markdown pixels use only the authorized local image proxy.");
 Check(!Regex.IsMatch(unsafeHtml, "<a[^>]*>\\s*<a"), "Linked images do not create nested anchors.");
 Check(Text(unsafeHtml).Contains("bad image") && Text(unsafeHtml).Contains("<script>alert('x')</script>"), "Unsafe content remains readable text.");
+string documentLinks = TranscriptMarkdown.Render("# Summary title\n\n[Here](#summary-title) [Next](../next.md#details) [Local](C:/Work/report.pdf)\n\nFact[^source].\n\n[^source]: Primary source.\n\n> [!NOTE]\n> Keep the result.");
+Check(documentLinks.Contains("id=\"summary-title\"") && documentLinks.Contains("href=\"#summary-title\"")
+    && documentLinks.Contains("href=\"../next.md#details\""), "Headings and relative links retain usable local navigation.");
+Check(documentLinks.Contains("footnotes") && documentLinks.Contains("Primary source.") && documentLinks.Contains("markdown-alert"),
+    "Footnotes and typed alerts use semantic Markdown renderers.");
+Check(TranscriptMarkdown.ResolveFileLink("../images/chart.png", "reports/summary.md") == Path.Combine("reports", "../images/chart.png")
+    && TranscriptMarkdown.ResolveFileLink("https://example.com/image.png", "reports/summary.md") == "https://example.com/image.png",
+    "Relative image and file paths use the source document directory without changing remote URLs.");
+Check(TranscriptMarkdown.TryImageSource(new Uri("https://kynxa-markdown-images.local/image?source=images%2Fchart.png"), out var imageSource)
+    && imageSource == "images/chart.png" && !TranscriptMarkdown.TryImageSource(new Uri("https://other.invalid/image?source=images%2Fchart.png"), out _),
+    "Image resolution accepts only the dedicated proxy host and preserved path.");
 
 var longText = string.Join("\n\n", Enumerable.Range(0, 300).Select(index => $"段落{index} **完整语义** $x_{index}$。"));
 var firstStream = TranscriptMarkdown.RenderStreaming(longText + "\n\n活动尾部", null);

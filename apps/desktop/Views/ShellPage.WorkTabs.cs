@@ -20,7 +20,7 @@ public sealed partial class ShellPage
     private long _workspaceSequence;
 
     private static string ScreenshotTabKey(ConversationScreenshotSource source) =>
-        $"screenshot/{source.ConversationId:D}/{source.MessageId:D}/{source.Tool.ToolCallId}";
+        source.TabKey;
 
     private void InitializeWorkTabs()
     {
@@ -72,7 +72,22 @@ public sealed partial class ShellPage
             foreach (var request in requests) AcceptTaskArtifact(request, select: false);
         };
         DocumentPanel.WebsiteRequested += (_, url) => AddWebsiteTab(url);
+        ConversationMessages.LinkRequested += (_, request) => OpenMarkdownLink(request.ConversationId, request.Target);
+        DocumentPanel.FileRequested += (_, request) => OpenMarkdownLink(request.ConversationId, request.Path, request.MountId);
         Unloaded += (_, _) => { DocumentPanel.SetPreviewEnabled(false); CancelWorkspaceFileRead(forgetScope: true); };
+    }
+
+    private void OpenMarkdownLink(Guid conversation, string target, Guid? mountId = null)
+    {
+        if (_chatClosing || ActiveChatId != conversation || !TranscriptMarkdown.IsSafeUrl(target)) return;
+        if (Uri.TryCreate(target, UriKind.Absolute, out var address) && address.Scheme is "http" or "https")
+        { AddWebsiteTab(address.AbsoluteUri); return; }
+        int marker = target.IndexOf('#');
+        string path = Uri.UnescapeDataString(marker < 0 ? target : target[..marker]);
+        if (string.IsNullOrWhiteSpace(path)) return;
+        AddWorkspaceTab(conversation, ConversationWorkspaceSources.File(path, userSelected: true) with
+            { MountId = mountId ?? CurrentWorkspaceMount()?.Id }, select: true);
+        if (marker >= 0) DocumentPanel.NavigateToAnchor(target[(marker + 1)..]);
     }
 
     private WorkspaceResources ResourcesFor(Guid conversation)
@@ -86,19 +101,19 @@ public sealed partial class ShellPage
 
     private void SynchronizeWorkTabs()
     {
-        var screenshots = new Dictionary<(Guid MessageId, string ToolCallId), ConversationWorkTab>();
+        var screenshots = new Dictionary<Guid, ConversationWorkTab>();
         int imageNumber = 0;
         foreach (var source in ScreenshotPanel.Items)
             if (source.ConversationId == ActiveChatId)
-                screenshots[(source.MessageId, source.Tool.ToolCallId)] =
-                    new(ScreenshotTabKey(source), "screenshot", $"{UiText.Get("截图")} {++imageNumber}",
-                        PresentationPriority: WorkspacePresentationPriority.CatalogOnly);
+                screenshots[source.Tool.ResultRef!.Id] =
+                    new(ScreenshotTabKey(source), "screenshot", string.IsNullOrWhiteSpace(source.Title) ? $"{UiText.Get("截图")} {++imageNumber}" : source.Title,
+                        PresentationPriority: source.PresentationPriority);
         var items = new List<ConversationWorkTab>();
         WorkspaceResources? resources = ActiveChatId is Guid conversation ? ResourcesFor(conversation) : null;
         foreach (var message in ActiveMessages)
             foreach (var tool in message.ToolActivities)
             {
-                if (screenshots.Remove((message.Message.Id, tool.ToolCallId), out var tab)) items.Add(tab);
+                if (tool.ResultRef is { } screenshotRef && screenshots.Remove(screenshotRef.Id, out var tab)) items.Add(tab);
                 if (resources is not null)
                     QueueWorkspaceResourceDiscovery(message.ConversationId, message.Message.Id, tool,
                         _pendingReplies.TryGetValue(message.ConversationId, out var pending) && pending.Message.Id == message.Message.Id);
@@ -109,7 +124,8 @@ public sealed partial class ShellPage
         if (resources is not null) items.AddRange(resources.Items.Values.OrderBy(item => item.Order).Select(item => item.Tab));
         string? finalAnswer = ActiveMessages.LastOrDefault(message => message.Message.Role == "assistant" &&
             message.Message.Status == "completed")?.Message.Content;
-        WorkTabs.ShowConversation(ActiveChatId, ConversationWorkspaceSources.PrioritizeDeliveredOutputs(items, finalAnswer));
+        WorkTabs.ShowConversation(ActiveChatId, ConversationWorkspaceSources.PrioritizeDeliveredOutputs(items, finalAnswer),
+            catalogComplete: ScreenshotPanel.IsSourceCatalogReady);
     }
 
     private void QueueWorkspaceResourceDiscovery(Guid conversation, Guid messageId, ToolActivity tool, bool liveReply)

@@ -547,8 +547,8 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","document.create","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
-        || name == "artifact.open" && !arguments["url"].is_string()
+    name.starts_with("filesystem.") || ["document.read","document.create","image.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+        || name == "artifact.open" && !arguments["url"].is_string() && !arguments["resultId"].is_string()
 }
 
 pub(crate) fn operation_mount_binding(ctx: &GatewayToolContext, arguments: &Value) -> Result<Value, GatewayError> {
@@ -751,9 +751,12 @@ pub(super) async fn filesystem(
         return Ok(approval(name, &args, ctx));
     }
     let binding = json!({"requestedPath":super::local_files::path_text(&requested),"path":super::local_files::path_text(&path),
-        "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "artifact.open"});
+        "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "image.read" || name == "artifact.open"});
     if name == "artifact.open" {
         return super::gateway_workspace_preview::open(args, path, binding, ctx).await;
+    }
+    if name == "image.read" {
+        return super::gateway_image::read(args, path, binding, ctx).await;
     }
     if name == "document.read" {
         let result = super::gateway_document_read::read(args, path, binding.clone(), ctx).await?;
@@ -1020,11 +1023,20 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "document.create", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
         return Ok(approval(tool_name, &args, ctx));
+    }
+    if tool_name == "artifact.open" {
+        if ["path", "url", "resultId"].iter().filter(|key| args[*key].as_str().is_some_and(|value| !value.trim().is_empty())).count() != 1 {
+            return Err(failure("INVALID_TOOL_ARGUMENTS", "请仅指定文件路径、网页地址或已有图片回执之一。", 400));
+        }
+        if args["resultId"].is_string() {
+            let execute = ctx.external_execute.as_ref().ok_or_else(|| failure("TOOL_NOT_IMPLEMENTED", "图片归档展示服务未接线。", 503))?;
+            return execute(tool_name.to_owned(), args).await;
+        }
     }
     if tool_name == "artifact.open" && args["url"].is_string() {
         let target = super::gateway_workspace_preview::web_target(&args)?;
@@ -1052,7 +1064,7 @@ async fn execute_inner(
     if tool_name == "knowledge.experience" {
         return super::gateway_experience::query(args,ctx).await;
     }
-    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "artifact.open"].contains(&tool_name) {
+    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.workspace.") {
@@ -2964,6 +2976,30 @@ mod tests {
             .code,
             "PROTECTED_APP_DATA"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn archived_image_display_uses_scoped_executor_without_file_or_browser_dispatch() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let displayed = Arc::new(Mutex::new(Vec::new()));
+        let captured = displayed.clone();
+        ctx.external_execute = Some(Arc::new(move |name, args| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                captured.lock().unwrap().push((name, args.clone()));
+                Ok(json!({"kind":"screenshot","presentation":"workspace","sourceResultRef":{"id":args["resultId"]}}))
+            })
+        }));
+        let input = json!({"resultId":uuid::Uuid::new_v4().to_string(),"title":"Final result"});
+        assert!(!workspace_path_tool("artifact.open", &input));
+        assert_eq!(execute("artifact.open", input.clone(), &ctx).await.unwrap()["kind"], "screenshot");
+        assert_eq!(displayed.lock().unwrap().as_slice(), &[("artifact.open".to_owned(), input)]);
+        for invalid in [json!({}), json!({"path":"report.png","resultId":"saved"}),
+            json!({"url":"https://example.org","resultId":"saved"}), json!({"path":"report.png","url":"https://example.org"})] {
+            assert_eq!(execute("artifact.open", invalid, &ctx).await.unwrap_err().code, "INVALID_TOOL_ARGUMENTS");
+        }
+        assert_eq!(displayed.lock().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

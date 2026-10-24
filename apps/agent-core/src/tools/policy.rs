@@ -68,6 +68,8 @@ mod recovery_tests {
             "computer.apps",
             "computer.windows",
             "computer.screenshot",
+            "image.read",
+            "image.retain",
             "web.fetch",
             "knowledge.assess",
             "memory.read",
@@ -244,6 +246,7 @@ const BROWSER_OBSERVATIONS: &[&str] = &[
     "browser.wait",
 ];
 const PARALLEL_READS: &[&str] = &[
+    "image.read",
     "skill.validate",
     "mcp.task.status",
     "mcp.task.result",
@@ -266,6 +269,8 @@ const PARALLEL_READS: &[&str] = &[
 ];
 
 const READ_TOOLS: &[&str] = &[
+    "image.read",
+    "image.retain",
     "attachment.read",
     "artifact.open",
     // Current-task metadata changes no external state and needs no additional approval.

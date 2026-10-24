@@ -74,7 +74,7 @@ public partial class App : Application
         _ = RunAsync();
     }
 
-    private static string ShotKey(ConversationScreenshotSource source) => $"screenshot/{source.MessageId:D}/{source.Tool.ToolCallId}";
+    private static string ShotKey(ConversationScreenshotSource source) => source.TabKey;
     private static string RunKey(TerminalOutputState.TerminalRun run) => $"terminal/{run.Identity.RequestId:D}/{run.Identity.ToolCallId}";
     private void Show(Guid chat, params ConversationMessageViewModel[] rows)
     {
@@ -85,9 +85,10 @@ public partial class App : Application
     }
     private void SyncTabs()
     {
-        var items = _screens.Items.Select((source, index) => new ConversationWorkTab(ShotKey(source), "screenshot", UiText.Get("截图") + " " + (index + 1)))
+        var items = _screens.Items.Select((source, index) => new ConversationWorkTab(ShotKey(source), "screenshot", UiText.Get("截图") + " " + (index + 1),
+                PresentationPriority: source.PresentationPriority))
             .Concat(_terminal.Items.Select(run => new ConversationWorkTab(RunKey(run), "terminal", run.Shell + " · " + run.Identity.ToolCallId))).ToArray();
-        _tabs.ShowConversation(_chat, items); ApplyPane();
+        _tabs.ShowConversation(_chat, items, catalogComplete: _screens.IsSourceCatalogReady); ApplyPane();
     }
     private void ApplyPane()
     {
@@ -142,7 +143,12 @@ public partial class App : Application
         {
             await WaitAsync(() => _work.XamlRoot is not null, "native work pane loaded"); _png = await EncodeAsync();
             var shotTool = Screenshot("shot-first"); var shotRow = Row(_chatA, "completed", shotTool);
-            Show(_chatA, shotRow); await WaitAsync(() => _api.Reads.Count == 1, "first screenshot archive read");
+            Show(_chatA, shotRow);
+            await WaitAsync(() => _screens.IsSourceCatalogReady && _screens.Items.Count == 1 && _tabs.Items.Count == 1, "first screenshot catalog ready");
+            Check(_api.Reads.Count == 0 && !_tabs.HasOpenTabs && NativeUi.Descendants<Image>(_screens).All(image => image.Source is null),
+                "ordinary screenshot discovery stays catalog-only until the user chooses it");
+            Check(_tabs.Reopen(ShotKey(_screens.Items[0])), "user explicitly opens the first catalogued screenshot");
+            await WaitAsync(() => _api.Reads.Count == 1, "first screenshot archive read");
             string shotKey = _tabs.SelectedTab!.Key;
             Check(_api.Reads[0].Chat == _chatA && _api.Reads[0].Reference == shotTool.ResultRef, "initial screenshot preserves exact chat and result identity");
             CompleteImage(0);
@@ -157,7 +163,7 @@ public partial class App : Application
                 "new live command opens in the background without replacing the screenshot");
             shotRow.Message.ToolActivities.Add(Screenshot("shot-second")); shotRow.Refresh(); await SettleAsync();
             string secondKey = ShotKey(_screens.Items.Single(item => item.Tool.ToolCallId == "shot-second"));
-            Check(_tabs.OpenItems.Count == 3 && _tabs.SelectedTab?.Key == shotKey && _api.Reads.Count == 1,
+            Check(_tabs.Items.Count == 3 && _tabs.OpenItems.Count == 2 && _tabs.SelectedTab?.Key == shotKey && _api.Reads.Count == 1,
                 "new background screenshot is catalogued without downloading or taking focus");
             NativeUi.Invoke(TabButton(terminalKey)); await WaitAsync(() => Output.Text.Contains("LIVE OUTPUT") && NativeUi.IsVisible(_terminal), "native terminal tab selection");
             Check(!NativeUi.IsVisible(_screens) && NativeUi.IsVisible(_terminal) && _terminal.SelectedRun?.Identity.RequestId == runningRow.Message.Id,
@@ -177,7 +183,8 @@ public partial class App : Application
                 "language changes preserve selection and cannot resurface both content panes");
             Check(AutomationProperties.GetName(Element<Button>(_tabs, "WorkTabsReopen")) == "Open tab", "tab reopen control updates its accessible language");
             UiText.Initialize("zh-CN");
-            NativeUi.Invoke(TabButton(secondKey)); await WaitAsync(() => _api.Reads.Count == 2, "user selects new screenshot");
+            Check(_tabs.Reopen(secondKey), "user explicitly opens the second catalogued screenshot");
+            await WaitAsync(() => _api.Reads.Count == 2, "user selects new screenshot");
             Check(_api.Reads[1].Reference == shotRow.Message.ToolActivities[1].ResultRef, "selected screenshot uses its own immutable receipt reference");
             _sidebarOpen = false; ApplyPane(); CompleteImage(1); await SettleAsync();
             Check(_api.Reads[1].Token.IsCancellationRequested && Image.Source is null && !NativeUi.IsVisible(_screens) && !NativeUi.IsVisible(_terminal),
@@ -207,6 +214,8 @@ public partial class App : Application
             Check(_api.Reads.Count == 4 && !archive.Token.IsCancellationRequested,
                 "unchanged selected command and repeated layout refresh keep one archive request alive");
             Show(_chatA, shotRow, runningRow); _api.Complete(3, new { structuredContent = new { boundary = "host-terminal", stdout = "WRONG CHAT", stderr = "", exitCode = 0 } });
+            Check(Image.Source is null && _tabs.SelectedTab is null,
+                "returning conversation hides old images while its deferred screenshot catalog is incomplete");
             await WaitAsync(() => _api.Reads.Count == 5, "returning chat reloads its selected screenshot archive");
             CompleteImage(4); await WaitAsync(() => Image.Source is not null, "returned chat selected image decoded");
             await SettleAsync();
@@ -215,6 +224,10 @@ public partial class App : Application
             for (int i = 0; i < 15; i++) shotRow.Message.ToolActivities.Add(Screenshot("background-wide-" + i));
             shotRow.Refresh(); await SettleAsync();
             int reads = _api.Reads.Count;
+            _sidebarOpen = false; ApplyPane();
+            foreach (var source in _screens.Items.Where(source => source.Tool.ToolCallId.StartsWith("background-wide-", StringComparison.Ordinal)))
+                Check(_tabs.Reopen(ShotKey(source)), "user opens a retained image tab while preview is hidden");
+            _tabs.Select(secondKey); _sidebarOpen = true; ApplyPane();
             _layout.ColumnDefinitions[1].Width = new GridLength(230); _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(740, 500)); await SettleAsync();
             var scroll = Element<ScrollViewer>(_tabs, "WorkTabsScroll");
             Check(scroll.ScrollableWidth > 0 && scroll.ActualWidth <= _tabs.ActualWidth && _tabs.ActualWidth <= _work.ActualWidth,
@@ -228,8 +241,10 @@ public partial class App : Application
                 "closing every tab keeps resources reopenable and leaves mounted-folder header intact");
             shotRow.Message.ToolActivities[0] = shotTool with { ResultRef = new(Guid.NewGuid(), 14000, new string('c', 64)) };
             shotRow.Refresh(); await SettleAsync();
-            Check(_tabs.Items.Any(item => item.Key == shotKey) && !_tabs.HasOpenTabs && _api.Reads.Count == reads,
-                "a closed screenshot's new archive reference cannot reopen the logical tab or trigger a hidden download");
+            Check(_tabs.Items.All(item => item.Key != shotKey) &&
+                _tabs.Items.Any(item => item.Key == ShotKey(_screens.Items.Single(source => source.Tool.ToolCallId == shotTool.ToolCallId))) &&
+                !_tabs.HasOpenTabs && _api.Reads.Count == reads,
+                "a replacement archive has its own formal resource identity and stays catalog-only without reopening closed previews");
             Check(_tabs.Reopen(secondKey), "closed screenshot can be explicitly reopened from resource catalog");
             await WaitAsync(() => Image.Source is not null, "reopened screenshot retained cache");
             Check(_tabs.SelectedTab?.Key == secondKey && _api.Reads.Count == reads, "reopen selects the requested history image without taking another snapshot");

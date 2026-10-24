@@ -18,6 +18,8 @@ internal static class ModelStreamRecoveryChecks
         await CheckRecoveryAsync("restarted-completed");
         await CheckRecoveryAsync("restarted-steered-completed");
         await CheckRecoveryAsync("restarted-running");
+        await CheckRecoveryAsync("restarted-paused");
+        await CheckRecoveryAsync("restarted-waiting-config");
         await CheckExplicitFailuresAsync();
         await CheckPersistentProjectionAsync();
         Console.WriteLine("PASS: stream recovery preserves request identity, reattaches without resubmitting, restores durable replies and receipts, and preserves cancellation/authentication failures.");
@@ -32,7 +34,8 @@ internal static class ModelStreamRecoveryChecks
         var events = new List<ChatStreamEvent>();
         await foreach (var item in client.StreamReplyAsync(handler.Request, deadline.Token)) events.Add(item);
         Check(handler.Submissions == 1, scenario + ": the user prompt was submitted more than once.");
-        Check(events.Count(item => item.Type == "started") == 1 && events[^1].Type == "completed"
+        bool waitingForUser = scenario is "restarted-paused" or "restarted-waiting-config";
+        Check(events.Count(item => item.Type == "started") == 1 && events[^1].Type == (waitingForUser ? "interrupted" : "completed")
             && events[^1].Content == "部分完成", scenario + ": canonical completion was not restored.");
         Check(events.All(item => item.ConversationId == handler.ConversationId && item.RequestId == handler.RequestId),
             scenario + ": recovery changed the accepted identity.");
@@ -152,7 +155,9 @@ internal static class ModelStreamRecoveryChecks
             {
                 TaskReads++;
                 return Json(new { task = new { taskId = TaskId, requestId = RequestId.ToString("D"), parentTaskId = (string?)null,
-                    scope = new { conversationId = ConversationId }, state = scenario == "restarted-running" ? "running" : "completed" },
+                    scope = new { conversationId = ConversationId }, state = scenario switch {
+                        "restarted-running" => "running", "restarted-paused" => "paused",
+                        "restarted-waiting-config" => "waiting-config", _ => "completed" } },
                     checkpoint = scenario == "restarted-steered-completed"
                         ? new { contextReference = new { assistantMessageId = SteeredReplyId } } : null });
             }
@@ -166,7 +171,8 @@ internal static class ModelStreamRecoveryChecks
                 var reply = new Dictionary<string, object?>
                 {
                     ["Id"] = scenario == "restarted-steered-completed" ? SteeredReplyId : RequestId,
-                    ["Role"] = "assistant", ["Content"] = "部分完成", ["Reasoning"] = "", ["Status"] = "completed",
+                    ["Role"] = "assistant", ["Content"] = "部分完成", ["Reasoning"] = "",
+                    ["Status"] = scenario is "restarted-paused" or "restarted-waiting-config" ? "streaming" : "completed",
                     ["Error"] = "", ["CreatedAt"] = CreatedAt, ["DurationMs"] = 10, ["ToolActivities"] = new[] { tool },
                     ["ReplyTo"] = scenario == "restarted-steered-completed" ? SteeringUserMessageId : UserMessageId,
                     ["OriginUserMessageId"] = UserMessageId

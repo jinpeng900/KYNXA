@@ -1,0 +1,10 @@
+/* Shared semantic Markdown decoration; source remains escaped and native HTML stays disabled.
+ * 共用 Markdown 语义样式；原文仍转义，保持禁用任意 HTML。 */
+.markdown-alert { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--appearance-border); border-left: 3px solid var(--appearance-accent); border-radius: 9px; background: var(--appearance-soft); }
+.markdown-alert > :first-child { margin-top: 0; }
+.markdown-alert > :last-child { margin-bottom: 0; }
+.markdown-alert-title { font-weight: 600; color: var(--appearance-text); }
+.footnotes { margin-top: 20px; color: var(--appearance-secondary); font-size: .9em; }
+.footnote-ref, .footnote-back-ref { text-decoration: none; }
+.markdown-image { display: block; max-width: 100%; height: auto; margin: 10px 0; border-radius: 8px; }
+:is(h1,h2,h3,h4,h5,h6)[id], .footnotes [id] { scroll-margin-top: 16px; }

@@ -268,7 +268,9 @@ try {
     $startParameters = @{
         FilePath = $targetPath
         WorkingDirectory = [IO.Path]::GetDirectoryName($targetPath)
-        WindowStyle = 'Hidden'
+        # Foreground keyboard/pointer checks require a visible, normally shown owned window.
+        # 前台键盘与指针检查需要正常显示的自有窗口，不能以 Hidden 启动。
+        WindowStyle = 'Normal'
         PassThru = $true
         RedirectStandardOutput = (Join-Path $runRoot 'runner.stdout.log')
         RedirectStandardError = (Join-Path $runRoot 'runner.stderr.log')

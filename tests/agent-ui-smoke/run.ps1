@@ -1,9 +1,12 @@
+param([ValidateSet('all', 'dialog-polish')][string]$Scenario = 'all')
 $ErrorActionPreference = 'Stop'
 $fixtureProject = Join-Path $PSScriptRoot 'AgentUiSmoke.csproj'
 dotnet build $fixtureProject
 if ($LASTEXITCODE -ne 0) { throw 'Agent native UI fixture build failed.' }
 $fixtureExecutable = Join-Path $PSScriptRoot 'bin/Debug/net10.0-windows10.0.26100.0/win-x64/AgentUiSmoke.exe'
-$fixtureProcess = Start-Process -FilePath $fixtureExecutable -WindowStyle Hidden -PassThru
+$launch = @{ FilePath = $fixtureExecutable; WindowStyle = 'Hidden'; PassThru = $true }
+if ($Scenario -eq 'dialog-polish') { $launch.ArgumentList = @('--dialog-polish-only') }
+$fixtureProcess = Start-Process @launch
 if (-not $fixtureProcess.WaitForExit(45000)) {
     $fixtureProcess.Kill()
     throw "Agent UI fixture timed out (owned process $($fixtureProcess.Id))."

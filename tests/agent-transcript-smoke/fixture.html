@@ -1,78 +1,84 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Isolated compact progress checks</title><link rel="stylesheet" href="__TRANSCRIPT_STYLE__"></head><body>
-<div id="messages"></div><pre id="result">RUNNING</pre>
+<div id="messages"></div><button id="jump-to-latest" hidden>↓</button><pre id="result">RUNNING</pre>
 <script>
 window.chrome=window.chrome||{}; window.sentMessages=[];
 window.chrome.webview={postMessage(value){window.sentMessages.push(value);},addEventListener(type,callback){window.hostMessage=callback;}};
 </script>
 <script src="__WEB_LINKS_SCRIPT__"></script>
+<script src="__MARKDOWN_LINKS_SCRIPT__"></script>
 <script src="__TOOL_PRESENTATION_SCRIPT__"></script>
 <script src="__MESSAGE_PRESENTATION_SCRIPT__"></script>
 <script src="__TRANSCRIPT_SCRIPT__"></script>
 <script>
+(async () => {
+ const render = async value => {
+  applyTranscript(value);
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+ };
 try {
  let checks=0; const assert=(condition,text)=>{if(!condition)throw Error(text);checks++;};
  const select=KynxaMessagePresentation.selectMessagePresentation;
  const snapshot=message=>({conversationId:'fixture-chat',messages:[message]});
  const tool={toolCallId:'call-fixture',name:'filesystem.read',arguments:{path:'fixture.txt'},status:'running',summary:'Real fixture read'};
  const message={id:'fixture-message',role:'assistant',content:'Assistant original',html:'<p id="stable">Assistant original</p>',status:'streaming',streaming:true,toolActivities:[tool]};
- applyTranscript(snapshot(message));
+ await render(snapshot(message));
  const article=document.querySelector('article'),paragraph=document.getElementById('stable'),row=document.querySelector('.tool-activity');
  assert(row?.tagName==='DIV'&&!document.querySelector('.tool-activities summary,.tool-details,.tool-arguments,.tool-result,.tool-metadata,.tool-view-result'),'active tools are direct compact actions without cards or JSON');
  assert(row.querySelector('.tool-title').textContent==='读取文件'&&row.querySelector('.tool-command').textContent==='fixture.txt','friendly read label retains exact real action');
  const completed={...tool,status:'completed',result:'literal <script>window.fixtureExecuted=true<\/script>'};
- applyTranscript(snapshot({...message,toolActivities:[completed]}));
+ await render(snapshot({...message,toolActivities:[completed]}));
  assert(document.getElementById('stable')===paragraph&&document.querySelector('.tool-activity')===row,'real tool outcome preserves stable prose and action row');
  assert(!row.textContent.includes(completed.result)&&!window.fixtureExecuted,'completed raw result is neither displayed nor executed');
  const selection=getSelection(),range=document.createRange();range.setStart(paragraph.firstChild,10);range.setEnd(paragraph.firstChild,18);selection.removeAllRanges();selection.addRange(range);
  const anchor=selection.anchorNode;
- applyTranscript(snapshot({...message,content:'Assistant changed',html:'<p id="stable">Assistant changed</p>'}));
+ await render(snapshot({...message,content:'Assistant changed',html:'<p id="stable">Assistant changed</p>'}));
  assert(transcriptState().pending&&selection.toString()==='original'&&document.getElementById('stable')===paragraph,'selected text freezes replacement snapshots');
  hostMessage({data:{type:'initializeUi',language:'en',strings:{toolReadFile:'Read file',toolCompleted:'Completed'}}});
  assert(row.querySelector('.tool-title').textContent==='Read file'&&selection.anchorNode===anchor&&selection.toString()==='original','hot localization preserves compact action selection and prose');
- hostMessage({data:{type:'clearSelection'}});applyTranscript(snapshot({...message,content:'Assistant changed',html:'<p id="stable">Assistant changed</p>'}));
+ hostMessage({data:{type:'clearSelection'}});await render(snapshot({...message,content:'Assistant changed',html:'<p id="stable">Assistant changed</p>'}));
  assert(document.getElementById('stable').textContent==='Assistant changed'&&document.querySelector('article')===article,'clearing selection applies newest snapshot without replacing article');
- applyTranscript({conversationId:'other-chat',messages:[]});applyTranscript(snapshot(message));
+ await render({conversationId:'other-chat',messages:[]});await render(snapshot(message));
  assert(document.querySelector('article')===article&&document.querySelector('.tool-activity')===row,'cached navigation reuses compact action identity');
  assert(KynxaToolPresentation.describe({name:'mcp.fixture.custom',arguments:{id:'opaque'},status:'running'}).action==='','opaque IDs are not business commands');
  assert(KynxaToolPresentation.describe({name:'mcp.fixture.custom',status:'error',result:JSON.stringify({_meta:{message:'private'},debug:{message:'internal'}})}).errorText==='','unknown result JSON and metadata do not become public failure text');
  assert(KynxaToolPresentation.describe({name:'filesystem.read',status:'error',result:JSON.stringify({message:'File unavailable.'})}).errorText==='File unavailable.','public real error remains readable');
  const failure={...tool,status:'error',result:'literal <script>window.fixtureExecuted=true<\/script>'};
- applyTranscript(snapshot({...message,toolActivities:[failure]}));
+ await render(snapshot({...message,toolActivities:[failure]}));
  assert(document.querySelector('.tool-error').textContent===failure.result&&!document.querySelector('.tool-error script')&&!window.fixtureExecuted,'readable failure is literal text, never executable HTML');
  const many=Array.from({length:204},(_,index)=>({toolCallId:'batch-'+index,name:'filesystem.read',arguments:{path:'sample-'+index+'.txt'},status:index===203?'running':'completed',uiRevision:index+100}));
  const approval={toolCallId:'approval-old',name:'filesystem.write',arguments:{path:'pending.txt'},status:'approval-required'};
  const formal=[approval,...many],source=JSON.stringify(formal);
- applyTranscript(snapshot({...message,toolActivities:formal}));
+ await render(snapshot({...message,toolActivities:formal}));
  assert(document.querySelectorAll('.tool-activity').length<=9&&document.querySelector('[data-tool-call-id=approval-old]')&& !document.querySelector('[data-tool-call-id=batch-0]'),'old approval remains visible while 204 ordinary events project a bounded window');
  assert(formal.length===205&&JSON.stringify(formal)===source,'bounded display does not discard source events');
  assert([...document.querySelectorAll('.tool-command')].some(node=>node.textContent.includes('sample-203.txt')),'latest command survives bounded merging');
  const pending=document.querySelector('[data-tool-call-id=approval-old]');
- const observer=new MutationObserver(()=>{});observer.observe(pending,{attributes:true,childList:true,characterData:true,subtree:true});
- applyTranscript(snapshot({...message,toolActivities:[approval,...many.map((item,index)=>index===203?{...item,status:'completed',uiRevision:900}:item)]}));
- assert(observer.takeRecords().length===0&&document.querySelector('[data-tool-call-id=approval-old]')===pending,'merged recent update does not mutate an unrelated pending approval');observer.disconnect();
+ let pendingMutations=0;const observer=new MutationObserver(records=>pendingMutations+=records.length);observer.observe(pending,{attributes:true,childList:true,characterData:true,subtree:true});
+ await render(snapshot({...message,toolActivities:[approval,...many.map((item,index)=>index===203?{...item,status:'completed',uiRevision:900}:item)]}));
+ assert(pendingMutations+observer.takeRecords().length===0&&document.querySelector('[data-tool-call-id=approval-old]')===pending,'merged recent update does not mutate an unrelated pending approval');observer.disconnect();
  const segments=Array.from({length:6},(_,index)=>({id:'round-'+(index+1),round:index+1,order:index*2,phase:'commentary',status:index===5?'streaming':'completed',content:'STAGE_'+(index+1),html:'<p id="stage-'+(index+1)+'">STAGE_'+(index+1)+'</p>',reasoningHtml:'<p>PUBLIC_PROVIDER_SUMMARY</p>'}));
  const stages={id:'stage-message',role:'assistant',content:'legacy aggregate',status:'streaming',streaming:true,assistantSegments:segments,toolActivities:[]};
  const stageSnapshot=value=>({conversationId:'stages-chat',messages:[{id:'stage-user',role:'user',content:'inspect'},value]});
- applyTranscript(stageSnapshot(stages));
+ await render(stageSnapshot(stages));
  assert([...document.querySelectorAll('.assistant-segment')].map(node=>node.dataset.round).join(',')==='1,2,3,4,5,6','active chronology retains every received prose stage in order');
  assert(!document.querySelector('.assistant-segment .reasoning')&&!document.getElementById('messages').textContent.includes('PUBLIC_PROVIDER_SUMMARY'),'prose stages do not accumulate repeated thinking cards');
  const activeStyle=getComputedStyle(document.getElementById('stage-1')),activeProseStyle={fontSize:activeStyle.fontSize,color:activeStyle.color};
- assert(activeProseStyle.fontSize==='15px'&&activeProseStyle.color==='rgb(35, 35, 35)','intermediate prose keeps ordinary final-answer type size and dark color');
+ assert(activeProseStyle.fontSize==='15px'&&activeProseStyle.color==='rgb(36, 39, 45)','intermediate prose keeps ordinary final-answer type size and dark color');
  document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text===segments.map(segment=>segment.content).join('\n\n'),'active copy retains all displayed prose rather than a recent window');
  const oldApproval={...approval,round:1,order:1};
- applyTranscript(stageSnapshot({...stages,toolActivities:[oldApproval]}));
+ await render(stageSnapshot({...stages,toolActivities:[oldApproval]}));
  assert([...document.querySelectorAll('.assistant-segment')].map(node=>node.dataset.round).join(',')==='1,2,3,4,5,6'&&document.querySelector('[data-tool-call-id=approval-old]')&&getComputedStyle(document.querySelector('.tool-title')).fontSize==='12px','all prose and older approval remain visible while tool text stays small');
  const finalSegments=segments.map((segment,index)=>index===5?{...segment,phase:'final_answer',status:'completed',content:'FINAL **verified**',html:'<p id="final-body">FINAL <strong>verified</strong></p>'}:segment);
  const awaiting={...stages,assistantSegments:finalSegments.map((segment,index)=>index===5?{...segment,html:'<p id="awaiting-final">FINAL <strong>verified</strong></p>'}:segment)};
- applyTranscript(stageSnapshot(awaiting));
+ await render(stageSnapshot(awaiting));
  assert(document.querySelectorAll('.assistant-segment').length===6&&document.getElementById('stage-1')&&document.getElementById('awaiting-final')&&!document.querySelector('.final-answer')&&document.querySelector('.assistant .message-elapsed').hidden,'a completed final phase retains earlier prose until the enclosing request actually completes');
  document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text===awaiting.assistantSegments.map(segment=>segment.content).join('\n\n'),'active copy includes all prose even after the final phase is decoded');
  const body=document.getElementById('stage-4'),stageRange=document.createRange();stageRange.selectNodeContents(body);selection.removeAllRanges();selection.addRange(stageRange);
  const final={...stages,status:'completed',streaming:false,content:'FINAL **verified**',durationMs:17000,assistantSegments:finalSegments,toolActivities:[]};
- applyTranscript(stageSnapshot(final));
+ await render(stageSnapshot(final));
  assert(transcriptState().pending&&selection.toString()==='STAGE_4'&&document.getElementById('stage-4')===body,'successful convergence waits while progress text is selected');
- hostMessage({data:{type:'clearSelection'}});applyTranscript(stageSnapshot(final));
+ hostMessage({data:{type:'clearSelection'}});await render(stageSnapshot(final));
  assert(document.querySelectorAll('.assistant-segment').length===1&&document.querySelector('.final-answer')&&document.getElementById('final-body'),'completed typed reply converges to one final section');
  assert(!document.querySelector('.tool-activity,.tool-activities,.reasoning')&&!document.getElementById('messages').textContent.includes('STAGE_'),'final DOM contains no discarded process');
  assert(document.querySelector('.assistant .message-elapsed').textContent.includes('17')&&getComputedStyle(document.querySelector('.assistant .message-elapsed')).fontSize==='12px','final duration uses actual milliseconds and small gray display');
@@ -83,17 +89,17 @@ try {
  const finalNode=document.getElementById('final-body');
  hostMessage({data:{type:'initializeUi',language:'en',strings:{elapsedSeconds:'Elapsed {0} s'}}});
  assert(document.querySelector('.assistant .message-elapsed').textContent==='Elapsed 17 s'&&document.getElementById('final-body')===finalNode,'duration hot localization preserves final body DOM');
- applyTranscript({conversationId:'another-stage-chat',messages:[]});applyTranscript(stageSnapshot(final));
+ await render({conversationId:'another-stage-chat',messages:[]});await render(stageSnapshot(final));
  assert(document.getElementById('final-body')===finalNode&&!document.querySelector('.tool-activity'),'reopening final history does not resurrect process');
  for(const status of ['interrupted','error']){
   const partial={...final,status,error:'Actual fixture interruption',assistantSegments:segments.map((segment,index)=>index===5?{...segment,status:'interrupted',content:'PARTIAL_VISIBLE',html:'<p>PARTIAL_VISIBLE</p>'}:segment)};
-  applyTranscript(stageSnapshot(partial));
+  await render(stageSnapshot(partial));
   assert(document.querySelectorAll('.assistant-segment').length===6&&document.getElementById('messages').textContent.includes('STAGE_1')&&document.getElementById('messages').textContent.includes('PARTIAL_VISIBLE')&&!document.querySelector('.final-answer'),'failed terminal retains earlier prose and latest partial without false completed final');
   assert(document.querySelector('.assistant .message-status').textContent.includes('Actual fixture interruption'),'failed terminal has concise actual reason');
   document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text===partial.assistantSegments.map(segment=>segment.content).join('\n\n'),'partial copy equals all displayed prose');
  }
  const incomplete={...stages,status:'completed',streaming:false,durationMs:17000};
- applyTranscript(stageSnapshot(incomplete));
+ await render(stageSnapshot(incomplete));
  assert(!document.querySelector('.final-answer')&&document.querySelector('.assistant .message-status').textContent.trim(),'completed status without valid final stays incomplete with reason');
  assert(document.querySelectorAll('.assistant-segment').length===6&&select(incomplete).content===segments.map(segment=>segment.content).join('\n\n'),'missing final phase preserves every received prose stage');
  assert(select({role:'assistant',status:'completed',content:'   '}).mode==='incomplete','empty legacy completed text is not a successful final');
@@ -109,7 +115,7 @@ try {
   {toolCallId:'file-with-url',name:'filesystem.read',arguments:{path:'source.txt'},result:'URL: https://file-content.invalid/source',status:'completed'}
  ];
  const webMessage={id:'web-message',role:'assistant',content:'Streaming verified fixture.',status:'streaming',streaming:true,toolActivities:websites};
- applyTranscript({conversationId:'web-chat',messages:[webMessage]});
+ await render({conversationId:'web-chat',messages:[webMessage]});
  const links=()=>[...document.querySelectorAll('.tool-web-link')].map(link=>link.href);
  assert(links().join('\n')===['https://fetch.invalid/article','https://first.invalid/source','https://second.invalid/source','https://final.invalid/page','https://selected.invalid/page'].join('\n'),'website actions retain distinct actual current URLs and explicit sources');
  assert([...document.querySelectorAll('.tool-web-activity')].every(node=>node.tagName==='DIV'&&!node.querySelector('details,summary,.tool-details,button')),'website links need no extra disclosure or JSON');
@@ -119,7 +125,7 @@ try {
  assert(sourceLink.textContent===sourceLink.href&&getComputedStyle(sourceLink).fontSize==='12px','source text remains full and small');
  sourceLink.click();assert(sentMessages.at(-1).type==='link'&&sentMessages.at(-1).url==='https://first.invalid/source'&&sentMessages.at(-1).conversationId==='web-chat','source opens through existing host mechanism without network in fixture');
  const sourceRange=document.createRange();sourceRange.selectNodeContents(sourceLink);selection.removeAllRanges();selection.addRange(sourceRange);assert(transcriptSelectionText()==='https://first.invalid/source','complete source URL copies verbatim');hostMessage({data:{type:'clearSelection'}});
- const webRow=sourceLink.closest('.tool-activity');applyTranscript({conversationId:'web-chat',messages:[{...webMessage,toolActivities:websites.map(item=>item.toolCallId==='web-search'?{...item,status:'running'}:item)}]});
+ const webRow=sourceLink.closest('.tool-activity');await render({conversationId:'web-chat',messages:[{...webMessage,toolActivities:websites.map(item=>item.toolCallId==='web-search'?{...item,status:'running'}:item)}]});
  assert(webRow===document.querySelector('[data-tool-call-id=web-search]')&&webRow.querySelector('.tool-web-link')===sourceLink,'status changes preserve source link and action identity');
  const structured={name:'mcp.brave-search.brave_web_search',arguments:args({query:'Fact'}),result:JSON.stringify({structuredContent:{web:{results:[{url:'https://structured.invalid/source'}]}},_meta:{url:'https://secret.invalid/key'}})};
  assert(KynxaToolWebLinks.extract(structured).join()==='https://structured.invalid/source','structured sources remain supported without private metadata');
@@ -128,7 +134,7 @@ try {
  assert(KynxaToolWebLinks.extract({name:'mcp.chrome-devtools.list_pages',result:'1: Fixture (https://selected.invalid/page(1)) [selected]'}).join()==='https://selected.invalid/page(1)','embedded URL parentheses survive parsing');
  const sourceUrls=Array.from({length:32},(_,index)=>'https://source-'+index+'.invalid/report');
  const largeWeb={...websites[1],result:result(sourceUrls.map(url=>'URL: '+url).join('\n'))};
- applyTranscript({conversationId:'web-limit-chat',messages:[{...webMessage,toolActivities:[largeWeb]}]});
+ await render({conversationId:'web-limit-chat',messages:[{...webMessage,toolActivities:[largeWeb]}]});
  assert(document.querySelectorAll('.tool-web-link').length===4&&document.querySelector('.tool-web-more').textContent.includes('28')&&!document.querySelector('.tool-web-more button'),'large source lists show four links and a truthful static remainder count');
  assert(sourceUrls.length===32&&largeWeb.result.includes(sourceUrls.at(-1)),'source display cap leaves all original URLs intact');
  assert(document.documentElement.scrollWidth<=innerWidth,'compact actions and links respect transcript width');
@@ -144,15 +150,15 @@ try {
   {toolCallId:'desktop-shot-b',name:'computer.screenshot',arguments:{...target,reason:'Capture latest target'},status:'completed',resultRef:{id:'result-b'}}
  ];
  const desktopReply={id:'desktop-message',role:'assistant',content:'Desktop progress.',html:'<p>Desktop progress.</p>',status:'streaming',streaming:true,toolActivities:desktopTools};
- applyTranscript({conversationId:'desktop-chat',messages:[desktopReply]});
- assert(document.querySelectorAll('.tool-activity').length===4&&document.querySelector('[data-tool-call-id=desktop-shot-a]').dataset.toolCount==='2'&&!document.querySelector('.tool-preview,.screenshot-result,.message-attachments'),'consecutive completed screenshot events merge into compact process without chat preview buttons');
+ await render({conversationId:'desktop-chat',messages:[desktopReply]});
+ assert(document.querySelectorAll('.tool-activity').length===4&&document.querySelector('[data-tool-call-id=desktop-shot-a]').dataset.toolCount==='2'&&!document.querySelector('.tool-preview,.screenshot-result,.message-attachments:not([hidden])'),'consecutive completed screenshot events merge into compact process without chat preview buttons');
  assert(!Object.hasOwn(KynxaToolPresentation.describe(desktopTools[3]),'preview')&&desktopTools[3].resultRef.id==='result-a'&&desktopTools[4].resultRef.id==='result-b','obsolete preview display state is removed while independent formal screenshot references remain unchanged');
  const separatedScreenshots=[{...desktopTools[3],status:'approval-required',toolCallId:'shot-approval-a'},{...desktopTools[4],status:'approval-required',toolCallId:'shot-approval-b'},
   {...desktopTools[3],status:'unknown',toolCallId:'shot-unknown-a'},{...desktopTools[4],status:'unknown',toolCallId:'shot-unknown-b'},
   {...desktopTools[3],status:'error',toolCallId:'shot-error-a'},{...desktopTools[4],status:'error',toolCallId:'shot-error-b'}];
- applyTranscript({conversationId:'desktop-chat',messages:[{...desktopReply,toolActivities:separatedScreenshots}]});
+ await render({conversationId:'desktop-chat',messages:[{...desktopReply,toolActivities:separatedScreenshots}]});
  assert(document.querySelectorAll('.tool-activity').length===6&&[...document.querySelectorAll('.tool-activity')].every(node=>node.dataset.toolCount==='1'),'approval, unknown and failed screenshots retain separate real states');
- applyTranscript({conversationId:'desktop-chat',messages:[desktopReply]});
+ await render({conversationId:'desktop-chat',messages:[desktopReply]});
  assert(!document.getElementById('messages').textContent.includes(privateInput)&&![...document.querySelectorAll('[title]')].some(node=>node.title.includes(privateInput)),'private desktop input never appears in commands, summaries or tooltips');
  assert(document.querySelector('[data-tool-call-id=desktop-type] .tool-command').textContent==='HWND 123456 · PID 789 · '+privateInput.length+'字符','desktop type shows target and true character count only');
  assert(document.querySelector('[data-tool-call-id=desktop-launch] .tool-command').textContent.includes('"a file.txt"')&&document.querySelector('[data-tool-call-id=desktop-launch] .tool-command').textContent.includes('--literal=<fixture>')&&!document.querySelector('fixture'),'launch arguments are literal text, not markup');
@@ -162,19 +168,20 @@ try {
  assert(document.querySelector('[data-tool-call-id=desktop-type] .tool-command').textContent.endsWith(privateInput.length+' characters')&&document.querySelector('[data-tool-call-id=desktop-scroll] .tool-command').textContent.endsWith('Scroll delta -120')&&!document.getElementById('messages').textContent.includes('View screenshot'),'desktop labels hot-switch without exposing input or adding screenshot controls');
  const finalDesktop={...desktopReply,status:'completed',streaming:false,durationMs:37000,content:'Final desktop answer.',html:'<p><strong>Final desktop answer.</strong></p>'};
  const beforeFinalMessages=sentMessages.length;
- applyTranscript({conversationId:'desktop-chat',messages:[finalDesktop]});
- assert(document.querySelector('.message-body strong')&&!document.querySelector('.tool-activity,.tool-preview,.screenshot-result,.message-attachments')&&desktopReply.toolActivities.length===5,'successful final removes desktop process and screenshot controls while preserving formal source receipts');
+ await render({conversationId:'desktop-chat',messages:[finalDesktop]});
+ assert(document.querySelector('.message-body strong')&&!document.querySelector('.tool-activity,.tool-preview,.screenshot-result,.message-attachments:not([hidden])')&&desktopReply.toolActivities.length===5,'successful final removes desktop process and screenshot controls while preserving formal source receipts');
  assert(sentMessages.length===beforeFinalMessages&&!document.querySelector('#messages img:not(.message-avatar),#messages canvas'),'final chat never loads base64 or requests image data automatically');
  document.querySelector('.copy-message').click();assert(sentMessages.at(-1).text===finalDesktop.content,'whole message copy contains only final prose');
  const finalDesktopBody=document.querySelector('.message-body strong');
  hostMessage({data:{type:'initializeUi',language:'zh-CN',strings:{toolViewScreenshot:'查看截图'}}});
  assert(!document.querySelector('.tool-preview,.screenshot-result')&&document.querySelector('.message-body strong')===finalDesktopBody,'language switching never adds chat screenshot buttons or re-renders the answer');
- applyTranscript({conversationId:'other-desktop-chat',messages:[]});applyTranscript({conversationId:'desktop-chat',messages:[finalDesktop]});
+ await render({conversationId:'other-desktop-chat',messages:[]});await render({conversationId:'desktop-chat',messages:[finalDesktop]});
  assert(document.querySelector('.message-body strong')===finalDesktopBody&&!document.querySelector('.tool-activity,.tool-preview,.screenshot-result'),'cached final history preserves final-only chat without screenshot controls');
- applyTranscript({conversationId:'fresh-desktop-chat',messages:[{...finalDesktop,id:'fresh-desktop-message'}]});
+ await render({conversationId:'fresh-desktop-chat',messages:[{...finalDesktop,id:'fresh-desktop-message'}]});
  assert(!document.querySelector('.tool-activity,.tool-preview,.screenshot-result')&&document.querySelector('.message-body strong'),'freshly reloaded final history has no chat screenshot controls');
- applyTranscript({conversationId:'fresh-desktop-chat',messages:[{...finalDesktop,id:'fresh-desktop-message',status:'interrupted'}]});
+ await render({conversationId:'fresh-desktop-chat',messages:[{...finalDesktop,id:'fresh-desktop-message',status:'interrupted'}]});
  assert(!document.querySelector('.tool-preview,.screenshot-result')&&document.querySelector('.tool-activity'),'interrupted requests retain actual process without chat screenshot controls');
  document.getElementById('result').textContent='PASS: '+checks+' compact progress DOM checks';
 }catch(error){document.getElementById('result').textContent='FAIL: '+error.stack;}
+})();
 </script></body></html>

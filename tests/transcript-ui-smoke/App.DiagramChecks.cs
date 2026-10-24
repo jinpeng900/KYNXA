@@ -54,14 +54,23 @@ public partial class App
             ("classDiagram", "classDiagram\n  class Gateway {\n    +String status\n    +sendMessage()\n  }\n  class ModelClient {\n    <<interface>>\n    +generate()\n  }\n  Gateway --> ModelClient : 调用 Call", "Gateway"),
             ("erDiagram", "erDiagram\n  USER ||--o{ MESSAGE : 发送\n  USER {\n    int id PK\n    string name\n  }\n  MESSAGE {\n    int id PK\n    int userId FK\n    string content\n  }", "USER"),
             ("gantt", "gantt\n  title 课设进度 Project schedule\n  dateFormat YYYY-MM-DD\n  section 界面 UI\n  设计 Design :done, design, 2026-10-01, 2d\n  实现 Implement :active, impl, after design, 3d\n  验证 Verify :after impl, 1d", "课设"),
-            ("mindmap", "mindmap\n  root((任务拆解 Task))\n    界面 UI\n      配色 Theme\n      流程图 Diagram\n    验证 Tests\n      中文 Chinese\n      English", "任务拆解")
+            ("mindmap", "mindmap\n  root((任务拆解 Task))\n    界面 UI\n      配色 Theme\n      流程图 Diagram\n    验证 Tests\n      中文 Chinese\n      English", "任务拆解"),
+            ("timeline", "timeline\n title 发展 Timeline\n 2025 : 启动 Start\n 2026 : 交付 Deliver", "启动"),
+            ("pie", "pie title 资源 Allocation\n \"开发 Development\" : 60\n \"验证 Tests\" : 40", "开发"),
+            ("journey", "journey\n title 用户 Journey\n section 准备 Plan\n  阅读 Read: 5: User\n  执行 Work: 3: User", "阅读"),
+            ("gitGraph", "gitGraph\n commit id: \"初始 Start\"\n branch feature\n checkout feature\n commit id: \"功能 Feature\"", "初始"),
+            ("xychart", "xychart-beta\n title \"结果 Results\"\n x-axis [A, B, C]\n y-axis \"数量 Count\" 0 --> 10\n bar [2, 5, 8]", "数量"),
+            ("quadrantChart", "quadrantChart\n title 优先级 Priority\n x-axis Low --> High\n y-axis Low --> High\n 项目: [0.2, 0.8]", "项目"),
+            ("requirementDiagram", "requirementDiagram\n requirement spec {\n id: 1\n text: Required\n risk: low\n verifymethod: test\n }", "Required")
         };
         var chat = Guid.NewGuid();
         var rows = fixtures.Select(fixture => Message(chat, "assistant", fixture.Type + "\n\n" + MermaidFence(fixture.Source))).ToArray();
-        _transcript.ShowConversation(chat, rows);
-        await WaitAsync(string.Join(" && ", rows.Select(row => DiagramBlockExpression(row) + "?.dataset.diagramState === 'ready'")), "all seven requested Mermaid types and graph alias render using the bundled runtime");
         for (int index = 0; index < fixtures.Length; index++)
         {
+            // Inspect one real mounted message; long conversations deliberately virtualize distant rows.
+            // 逐条核对真实挂载消息；长会话会主动卸载远处消息，不能等待全部节点同时存在。
+            _transcript.ShowConversation(chat, [rows[index]]);
+            await WaitAsync(DiagramBlockExpression(rows[index]) + "?.dataset.diagramState === 'ready'", fixtures[index].Type + " renders using the bundled runtime");
             string messageId = JsonSerializer.Serialize(rows[index].Message.Id.ToString());
             string source = JsonSerializer.Serialize(fixtures[index].Source);
             string label = JsonSerializer.Serialize(fixtures[index].Label);
@@ -77,6 +86,8 @@ public partial class App
                 })()
                 """), fixtures[index].Type + " has real SVG text, a valid viewBox, Chinese/English labels and its original source");
         }
+        _transcript.ShowConversation(chat, [rows[0]]);
+        await WaitAsync(DiagramBlockExpression(rows[0]) + "?.dataset.diagramState === 'ready'", "the first flowchart is mounted for label and safety checks");
         Check(await EvalAsync<bool>($$"""
             (() => {
               const svg = {{DiagramBlockExpression(rows[0])}}.querySelector('.mermaid-viewport svg');
@@ -302,6 +313,13 @@ public partial class App
     private async Task CheckDiagramCopyAsync(string expectedSource)
     {
         {
+            var copyRequests = new List<string>();
+            void ObserveCopy(Microsoft.Web.WebView2.Core.CoreWebView2 sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs args)
+            { if (args.WebMessageAsJson.Contains("\"copy\"", StringComparison.Ordinal)) copyRequests.Add(args.WebMessageAsJson); }
+            _transcript.Browser.CoreWebView2.WebMessageReceived += ObserveCopy;
+            await EvalAsync<bool>("(() => { window.__diagramCopyReplies=[]; window.chrome.webview.addEventListener('message',e=>{ if(e.data?.type==='copyResult')__diagramCopyReplies.push(e.data); }); return true; })()");
+            try
+            {
             Check(await EvalAsync<bool>("(() => { const button=__diagramBlock.querySelector('.mermaid-copy-source'); window.__diagramCopy=button; button.click(); return button.dataset.copyState !== 'success'; })()"),
                 "diagram copy does not announce success before the native clipboard acknowledgement");
             await WaitAsync("__diagramCopy.dataset.copyState === 'success' && !!__diagramCopy.querySelector('svg path')", "native copy acknowledgement changes the diagram copy icon to a checkmark");
@@ -309,6 +327,13 @@ public partial class App
                 "diagram copy displays its result beside the button without a floating title");
             Check(await Clipboard.GetContent().GetTextAsync() == expectedSource, "diagram source copy preserves exact Unicode, line breaks, indentation and HTML label syntax");
             await WaitAsync("!__diagramCopy.dataset.copyState && !!__diagramCopy.querySelector('svg rect')", "diagram copy feedback restores its normal icon");
+            }
+            finally
+            {
+                _transcript.Browser.CoreWebView2.WebMessageReceived -= ObserveCopy;
+                _metrics["diagramCopyRequests"] = copyRequests;
+                _metrics["diagramCopyReplies"] = await EvalAsync<JsonElement>("__diagramCopyReplies");
+            }
         }
     }
 

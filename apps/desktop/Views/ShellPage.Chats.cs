@@ -232,6 +232,7 @@ public sealed partial class ShellPage
     {
         if (TryQueuePrompt()) return;
         if (_sendingPrompt || _savingOnClose || _chatClosing || IsReplyInProgress(ActiveChatId)) return;
+        if (await TryContinueSavedTaskAsync(PromptTextBox.Text.Trim())) return;
         string originalDraft = PromptTextBox.Text;
         string text = originalDraft.Trim();
         string attachmentDraftKey = AttachmentDraftKey;

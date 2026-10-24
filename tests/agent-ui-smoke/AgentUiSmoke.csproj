@@ -31,6 +31,7 @@
     <Compile Include="../../apps/desktop/Services/Presentation/ComputerToolPresentation.cs" Link="ComputerToolPresentation.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationWorkTabState.cs" Link="ConversationWorkTabState.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
     <Compile Include="../../apps/desktop/Controls/StorageLocationRow.cs" Link="StorageLocationRow.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
@@ -45,6 +46,8 @@
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
     <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
+    <Compile Include="../memory-ui-smoke/OwnedWindowActivation.cs" Link="OwnedWindowActivation.cs" />
+    <Compile Include="../memory-ui-smoke/OwnedWinUiWindowActivation.cs" Link="OwnedWinUiWindowActivation.cs" />
     <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
     <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

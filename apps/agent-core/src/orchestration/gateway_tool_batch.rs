@@ -6,7 +6,7 @@
 //! 只有相邻的独立只读调用组成批次；其他调用都是有序屏障，写操作、浏览器／终端会话、未知 MCP
 //! 以及同一 MCP 连接上的调用仍保持原有串行顺序。
 
-use super::{gateway_runtime::RequestRun, gateway_task_journal::TaskJournal};
+use super::{gateway_runtime::RequestRun, gateway_task_journal::TaskJournal, gateway_tool_execution};
 use crate::{
     gateway_contract::GatewayError,
     resources::gateway::ResourceLease,
@@ -374,15 +374,8 @@ pub(crate) fn finish_dispatch(
     name: &str,
     tool_execution_ms: u64,
 ) -> Result<(), GatewayError> {
-    use crate::storage::task_repository::{OperationState, TaskUsage};
-    let status = if receipt["status"] == "unknown" {
-        OperationState::Unknown
-    } else if receipt["isError"] == true {
-        OperationState::Failed
-    } else {
-        OperationState::Succeeded
-    };
-    journal.finish_operation(operation_id, status, Some(reference.clone()), None)?;
+    use crate::storage::task_repository::TaskUsage;
+    journal.finish_operation(operation_id, gateway_tool_execution::operation_outcome(receipt), Some(reference.clone()), None)?;
     journal.repository().record_usage(
         journal.token(),
         &format!("tool-duration:{operation_id}"),
@@ -440,7 +433,7 @@ pub(crate) async fn execute(
                 prefetched.outcome = PrefetchOutcome::AwaitingApproval(result);
                 return (index, prefetched);
             }
-            let mut receipt = super::gateway_loop::tool_execution_receipt(result);
+            let mut receipt = gateway_tool_execution::tool_execution_receipt(result);
             let settled = async {
                 let canonical = receipt["content"].clone();
                 let (root, conversation, request) = (data_root.to_path_buf(), run.conversation_id.clone(), run.request_id.clone());

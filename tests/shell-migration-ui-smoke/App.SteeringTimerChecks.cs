@@ -54,7 +54,6 @@ public partial class App
         }
         finally { Prompt.Text = priorDraft; type.GetProperty("TaskId")!.SetValue(pending, taskId); }
         await CheckNewChatDuringReplyAsync(chat, pending, waitingMessages);
-        await CheckUnknownOutcomeRefreshAsync(chat);
         await CheckBackgroundReplyObservationAsync(chat, pending);
         await CheckHistoryLifecycleAsync(chat, pending);
         var initial = (ChatMessageState)type.GetProperty("Message")!.GetValue(pending)!;
@@ -262,20 +261,17 @@ public partial class App
         var expectedMessages = chat.Messages.ToArray();
         var recent = _shell.ViewModel.RecentConversations.Single(item => item.Id == chat.Id);
         Call("RefreshPromptQueue");
-        Check(ShellField<bool>("_unknownOutcomeReplyActive"),
+        Check((bool)Call("HasQueuedTaskActivity", chat.Id)!,
             "the old conversation has a running reply before new-chat navigation");
         try
         {
-            // New chats finish the unknown-outcome read synchronously, including its queue refresh.
-            // 新聊天的未知结果读取及其队列刷新会同步结束，必须覆盖真实切换入口。
+            // Navigation refreshes only the selected chat's queue, without an extra recovery/confirmation lookup.
+            // 导航只刷新当前聊天的队列，不额外查询恢复或确认流程。
             Call("NewStandaloneChat_Click", _shell, new RoutedEventArgs());
             var fresh = ShellField<ProjectChatState>("_activeStandaloneChat");
             Call("RefreshPromptQueue");
-            var read = (Task)Call("RefreshUnknownOutcomeAsync", fresh.Id)!;
             Check(fresh.Id != chat.Id && !fresh.IsPersisted && ActiveId == fresh.Id
-                && read.IsCompletedSuccessfully
-                && ShellField<Guid?>("_unknownOutcomeCheckedChat") == fresh.Id
-                && !ShellField<bool>("_unknownOutcomeReplyActive"),
+                && !(bool)Call("HasQueuedTaskActivity", fresh.Id)!,
                 "switching a running reply to an unsaved new chat returns synchronously without recursive queue refresh");
             await SettleAsync();
             Check(ReferenceEquals(queues[chat.Id], queue) && queue.SequenceEqual(expectedQueue)
@@ -290,86 +286,6 @@ public partial class App
         {
             queue.Remove(queued);
             Call("SelectStandaloneChat", recent);
-        }
-    }
-
-    private async Task CheckUnknownOutcomeRefreshAsync(ProjectChatState chat)
-    {
-        var reads = ShellField<Dictionary<Guid, Task>>("_unknownOutcomeReads");
-        if (reads.TryGetValue(chat.Id, out var initialRead)) await initialRead;
-        var states = ShellField<IDictionary>("_unknownOutcomes");
-        var controls = ShellField<HashSet<Guid>>("_unknownOutcomeControls");
-        var card = Element<ConversationUnknownOutcomeCard>("UnknownOutcomeCard");
-        bool Busy() => !((Button)typeof(ConversationUnknownOutcomeCard)
-            .GetField("_confirm", PrivateInstance)!.GetValue(card)!).IsEnabled;
-        var task = new TaskRecord(Guid.NewGuid(), Guid.NewGuid().ToString("D"), "Unknown result fixture", [], new(chat.Id, null),
-            null, [], new(256, null), new(0, 0, 0, 0, 0, 0, 0), "waiting-verification", 1, 1, null, 0, null, 0, 0);
-        var operation = new TaskOperation(task.TaskId, Guid.Parse(task.RequestId),
-            new("unknown-call", "unknown-call", "terminal.host.run", "irreversible"), "unknown", null, null, 300);
-        object State(TaskRecord owner) => Activator.CreateInstance(
-            typeof(ShellPage).GetNestedType("UnknownOutcomeState", BindingFlags.NonPublic)!,
-            [owner, new[] { operation }, Array.Empty<TaskModelReservation>()])!;
-        var recent = _shell.ViewModel.RecentConversations.Single(item => item.Id == chat.Id);
-        Guid? freshId = null;
-        try
-        {
-            states[chat.Id] = State(task);
-            controls.Add(chat.Id);
-            Call("RefreshPromptQueue");
-            Check(card.TaskId == task.TaskId && Busy(), "an active unknown-result control disables its own conversation card");
-            Call("NewStandaloneChat_Click", _shell, new RoutedEventArgs());
-            freshId = ActiveId!.Value;
-            var other = task with { TaskId = Guid.NewGuid(), Scope = new(freshId.Value, null) };
-            states[freshId.Value] = State(other);
-            // A cached target card replaces the previous busy card without an intermediate Hide.
-            // 目标聊天已有缓存卡片时，会直接替换仍忙碌的旧卡片，不先经过 Hide。
-            card.Show(task, [operation]);
-            card.SetBusy(true);
-            Call("RefreshPromptQueue");
-            Check(card.TaskId == other.TaskId && !Busy(), "switching cards does not inherit another conversation's busy state");
-            controls.Add(freshId.Value);
-            Call("RefreshPromptQueue");
-            controls.Remove(chat.Id);
-            Call("OnUnknownOutcomeControlled", chat.Id, task with { State = "running", Version = 2 });
-            Check(card.TaskId == other.TaskId && Busy(), "a background control receipt cannot unlock the current conversation's busy card");
-        }
-        finally
-        {
-            controls.Remove(chat.Id);
-            states.Remove(chat.Id);
-            if (freshId is Guid otherId) { controls.Remove(otherId); states.Remove(otherId); }
-            Call("SelectStandaloneChat", recent);
-        }
-        if (reads.TryGetValue(chat.Id, out var priorRead)) await priorRead;
-        var detailGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _gateway.UnknownOutcomeTask = task;
-        _gateway.SteeringDetail = new(task, [], [operation], null, []);
-        _gateway.NextSteeringDetailGate = detailGate;
-        states[chat.Id] = State(task);
-        int detailReads = _gateway.SteeringDetailReads;
-        var staleRead = (Task)Call("RefreshUnknownOutcomeAsync", chat.Id)!;
-        try
-        {
-            await WaitAsync(() => _gateway.SteeringDetailReads > detailReads, "the old unknown-result detail is held before its response");
-            Call("OnUnknownOutcomeControlled", chat.Id, task with { State = "running", Version = 2 });
-            _gateway.UnknownOutcomeTask = null;
-            var freshRead = (Task)Call("RefreshUnknownOutcomeAsync", chat.Id)!;
-            Check(!ReferenceEquals(freshRead, staleRead), "a confirmed control starts a fresh lookup instead of joining its obsolete read");
-            await freshRead;
-            detailGate.TrySetResult();
-            await staleRead;
-            Check(!states.Contains(chat.Id) && !card.IsShown && !reads.ContainsKey(chat.Id),
-                "a late waiting-verification response cannot resurrect a resolved card or retain its read slot");
-        }
-        finally
-        {
-            detailGate.TrySetResult();
-            await staleRead;
-            _gateway.UnknownOutcomeTask = null;
-            _gateway.NextSteeringDetailGate = null;
-            _gateway.SteeringDetail = null;
-            states.Remove(chat.Id);
-            Call("RefreshPromptQueue");
         }
     }
 

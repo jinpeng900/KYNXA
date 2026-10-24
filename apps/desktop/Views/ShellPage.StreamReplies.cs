@@ -228,7 +228,6 @@ public sealed partial class ShellPage
                                     pending.Message.ExecutionPhase = update.Phase ?? string.Empty;
                                     pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
                                 }
-                                if (update.Phase == "waiting-verification") _ = RefreshUnknownOutcomeAsync(pending.ConversationId);
                                 TaskPanel.NotifyChanged(pending.ConversationId);
                                 continue;
                             case "task_tool_call":
@@ -505,40 +504,38 @@ public sealed partial class ShellPage
     private async void Transcript_RetryRequested(object? sender, Guid messageId)
     {
         var failed = ActiveMessages.FirstOrDefault(row => row.Message.Id == messageId);
-        if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || failed is null ||
-            failed.ToolActivities.Count > 0 || IsReplyInProgress(failed.ConversationId)) return;
-        var (chat, _) = FindChat(failed.ConversationId);
-        if (chat is null || chat.Messages.LastOrDefault() != failed.Message) return;
-        string? question = chat.Messages.Take(chat.Messages.Count - 1).LastOrDefault(message => message.Role == "user")?.Content;
-        if (question is null || !_retryingReplies.Add(chat.Id)) return;
-        PendingChatReply pending;
+        if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || failed is null || IsReplyInProgress(failed.ConversationId)) return;
+        var (chat, project) = FindChat(failed.ConversationId);
+        if (chat is null || chat.Messages.LastOrDefault() != failed.Message || !_retryingReplies.Add(chat.Id)) return;
         try
         {
-            // Reserve this retry across cache I/O, then recheck ownership before replacing its source row.
-            // 缓存读写期间保留重试占位，替换原消息前再次核对会话和请求归属。
-            if (!await MessageTimePresentation.ForgetAsync(chat.Id, failed.Message))
-                ShowActionFeedback(UiText.Get("回复时间未能保存到本机缓存，聊天内容不受影响。"));
-            if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || IsReplyInProgress(chat.Id) ||
-                FindChat(chat.Id).Chat != chat || chat.Messages.LastOrDefault() != failed.Message) return;
-            chat.Messages.Remove(failed.Message);
-            pending = BeginPendingReply(chat.Id, question,
-                string.IsNullOrEmpty(failed.Message.Provider) ? _selectedModel?.ProviderId : failed.Message.Provider,
-                string.IsNullOrEmpty(failed.Message.Model) ? _selectedModel?.ModelId : failed.Message.Model, requestId: failed.Message.Id);
-            if (ActiveChatId == chat.Id)
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var detail = await FindReplyTaskAsync(chat, project?.Id, failed.Message, deadline.Token);
+            if (_chatClosing || IsReplyInProgress(chat.Id) || FindChat(chat.Id).Chat != chat) return;
+            if (detail is not null)
             {
-                int index = ActiveMessages.IndexOf(failed);
-                if (index >= 0)
-                {
-                    ActiveMessages[index] = pending.Presentation;
-                    ConversationMessages.ShowConversation(chat.Id, ActiveMessages.ToArray(), openAtBottom: false);
-                    ScreenshotPanel.ShowConversation(chat.Id, ActiveMessages.ToArray());
-                }
-                else UpdateConversationPresentation();
+                // Retry continues the original task and receipts; its old reply remains visible.
+                // 重试续接原任务和回执，已有回复保留，不重发原问题或删除正文。
+                var receipt = await _tasksApiClient.ControlAsync(chat.Id, detail.Task.TaskId, detail.Task.Version,
+                    "resume", project?.Id, deadline.Token);
+                await ObserveResumedTaskAsync(receipt.Task, detail.Checkpoint, expectedReplyId: failed.Message.Id);
+                return;
             }
-            UpdateSendButtonState();
+            if (failed.ToolActivities.Count > 0) return;
+            var user = chat.Messages.Take(chat.Messages.IndexOf(failed.Message)).LastOrDefault(message => message.Role == "user");
+            if (user is null) return;
+            var pending = new PendingChatReply(chat.Id, user.Id, user.Content,
+                failed.Message.Provider, failed.Message.Model, _layout.PermissionMode, failed.Message)
+                { StreamRequestId = failed.Message.Id, Presentation = failed };
+            pending.Content.Append(failed.Message.Content); pending.Reasoning.Append(failed.Message.Reasoning);
+            failed.Message.Status = "streaming"; failed.Message.Error = string.Empty;
+            _pendingReplies.Add(chat.Id, pending); StartReplyRefreshTimer(); UpdateSendButtonState(); failed.Refresh();
+            await ReceiveReplyAsync(pending);
         }
+        catch (Exception error) when (error is HttpRequestException or OperationCanceledException or InvalidOperationException
+            or InvalidDataException or System.Text.Json.JsonException)
+        { if (!_chatClosing) ShowActionFeedback(UiText.Get("消息已保留，请重试。")); }
         finally { _retryingReplies.Remove(chat.Id); }
-        await ReceiveReplyAsync(pending);
     }
 
     private void CancelPendingReply(Guid chatId)

@@ -60,6 +60,8 @@ struct Provider {
     native_completion_control: Arc<std::sync::atomic::AtomicBool>,
     dsml_review_emissions: Arc<AtomicUsize>,
     memory_approval_target: Arc<Mutex<Option<String>>>,
+    work_scope_cycle: Arc<std::sync::atomic::AtomicBool>,
+    optional_followup_cycle: Arc<std::sync::atomic::AtomicBool>,
 }
 fn system_text(request: &Value) -> String {
     request["messages"]
@@ -182,6 +184,43 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
     if state.hold_next_provider.swap(false, Ordering::AcqRel) {
         state.resume_generation_gate.notified().await;
     }
+    if body["messages"].as_array().into_iter().flatten().any(|message|
+        message["role"] == "user" && message["content"].as_str().is_some_and(|text|text.contains("UNCHANGED_READ_FIXTURE"))) {
+        let attempt = state.calls.load(Ordering::SeqCst);
+        let message = json!({"role":"assistant","content":"读取当前文件。","tool_calls":[{
+            "id":format!("unchanged-read-{attempt}"),"type":"function","function":{
+                "name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.read"),
+                "arguments":json!({"path":"progress-loop.txt"}).to_string()
+            }}]});
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":"tool_calls"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+    }
+    if state.work_scope_cycle.load(Ordering::Acquire) {
+        let messages = body["messages"].as_array().unwrap();
+        let denied = messages.iter().filter(|message| message["role"] == "tool")
+            .any(|message| {
+                let content = message["content"].to_string();
+                content.contains("TASK_SCOPE_NOT_AUTHORIZED")
+                    || content.contains("Not dispatched: this turn permits only")
+            });
+        let wrote = messages.iter().any(|message| message["role"] == "tool" && message["tool_call_id"] == "scope-write");
+        let message = if denied {
+            json!({"role":"assistant","content":"方案：先整理要求，再准备文档；当前只说明方案，不实施。\n<kynxa_task>{\"state\":\"continue\",\"next\":\"之后生成文档\"}</kynxa_task>"})
+        } else if is_completion_review_request(&body) {
+            completion_review_reply(&body, "Only the explicitly requested plan file was saved")
+        } else if wrote {
+            json!({"role":"assistant","content":"方案已保存到 scope-plan.md。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[]}</kynxa_task>"})
+        } else {
+            json!({"role":"assistant","content":"准备保存方案。","tool_calls":[{
+                "id":"scope-write","type":"function","function":{
+                    "name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.write"),
+                    "arguments":json!({"path":"scope-plan.md","content":"# 方案\n先整理要求，再准备文档。","expectedHash":null}).to_string()
+                }}]})
+        };
+        let has_calls = message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"} else {"stop"}}],
+            "usage":{"prompt_tokens":100,"completion_tokens":30,"total_tokens":130}})).into_response();
+    }
     if state.native_stop_cycle.load(Ordering::Acquire) {
         let current_guidance = body["messages"].as_array().into_iter().flatten()
             .filter_map(|message| message["content"].as_str())
@@ -265,7 +304,12 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
                     "id":"native-completion-control","type":"function","function":{
                         "name":"kynxa_task","arguments":assessment.to_string()}}]})
             } else {
-                reply["content"] = json!(format!("<kynxa_task>{assessment}</kynxa_task>"));
+                if state.optional_followup_cycle.load(Ordering::Acquire) {
+                    assessment["state"] = json!("continue");
+                    assessment["next"] = json!("Optionally inspect one more file property");
+                    let name = kynxa_agent_core_native::models::protocol::wire_name("filesystem.stat");
+                    reply["content"] = json!(format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"{name}\">\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n<kynxa_task>{assessment}</kynxa_task>"));
+                } else { reply["content"] = json!(format!("<kynxa_task>{assessment}</kynxa_task>")); }
                 reply
             }
         } else if resume_generation > 0 && !has_receipt(&resumed_call_id) {
@@ -278,7 +322,10 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
             && state.dsml_review_emissions.load(Ordering::Acquire) > 0 {
             call("dsml-native-stat", "filesystem.stat", json!({"path":"annotated-result.txt"}))
         } else {
-            json!({"role":"assistant","content":"文件已写入并回读，内容为 ANNOTATED_RECEIPT_BODY。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"原写入和回读均完成\"}</kynxa_task>"})
+            let assessment = if state.optional_followup_cycle.load(Ordering::Acquire) {
+                json!({"state":"continue","next":"Consider an optional appendix","unmet":[]})
+            } else { json!({"state":"complete","next":"","reason":"原写入和回读均完成"}) };
+            json!({"role":"assistant","content":format!("文件已写入并回读，内容为 ANNOTATED_RECEIPT_BODY。\n<kynxa_task>{assessment}</kynxa_task>")})
         };
         let has_calls = message["tool_calls"].is_array();
         return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"} else {"stop"}}],
@@ -774,6 +821,8 @@ impl Fixture {
             native_completion_control: Default::default(),
             dsml_review_emissions: Default::default(),
             memory_approval_target: Default::default(),
+            work_scope_cycle: Default::default(),
+            optional_followup_cycle: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let provider_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1118,17 +1167,17 @@ async fn automatic_continuation_and_review_notes_do_not_change_compaction_user_g
     assert!(
         main_requests[1]
             .to_string()
-            .contains("Continue the original authorized task")
+            .contains("Continue only the current authorized request from saved progress")
     );
     assert!(
         main_requests[3]
             .to_string()
-            .contains("Broker: compare the original requested work")
+            .contains("Expected acceptance requirements:")
     );
     assert!(
         main_requests[4]
             .to_string()
-            .contains("Broker: verified remaining work")
+            .contains("Broker: remaining current requirements:")
     );
     let summaries: Vec<Value> = requests
         .iter()
@@ -1184,10 +1233,11 @@ async fn tool_result_http_wraps_media_and_paginates_the_public_utf16_view() {
     let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJesAAAAASUVORK5CYII=";
     let canonical = json!({"content":[{"type":"image","mimeType":"image/png","data":png}],
         "structuredContent":{"notice":"前😀后"},"isError":false});
+    let request_id = new_id();
     let reference = data::save_tool_result(
         &fixture.root.join("Data"),
         &fixture.conversation,
-        &new_id(),
+        &request_id,
         &json!({"id":"image-fixture","name":"computer.screenshot","arguments":{}}),
         &canonical,
         None,
@@ -1205,7 +1255,12 @@ async fn tool_result_http_wraps_media_and_paginates_the_public_utf16_view() {
     assert!(complete["result"].is_object(), "{complete}");
     assert_eq!(complete["result"]["content"][0]["data"], png);
     assert_eq!(complete["result"]["structuredContent"]["notice"], "前😀后");
-    let projected = data::public_tool_result(&canonical, Some(&reference), None, false)
+    let archived = data::load_private_tool_result(&fixture.root.join("Data"), &fixture.conversation,
+        reference["id"].as_str().unwrap()).unwrap();
+    assert!(archived["canonical"]["content"][0]["data"]["kynxaImageRef"].is_object());
+    assert_eq!(data::model_media(&fixture.root.join("Data"), &fixture.conversation, &reference,
+        &json!({"requestId":request_id,"toolCallId":"image-fixture","toolName":"computer.screenshot"})).unwrap(), canonical);
+    let projected = data::public_tool_result(&archived["canonical"], Some(&reference), None, false)
         .unwrap()
         .to_string();
     let total = projected.encode_utf16().count();
@@ -1265,7 +1320,7 @@ async fn tool_result_http_wraps_media_and_paginates_the_public_utf16_view() {
             reference["id"].as_str().unwrap()
         )
         .unwrap()["canonical"],
-        canonical
+        archived["canonical"]
     );
     assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 0);
     fixture.close().await;
@@ -2125,7 +2180,7 @@ async fn runtime_model_identity_tracks_switches_without_rewriting_history_or_con
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_calls_keep_the_request_live_until_a_valid_reply_without_dispatch() {
     let fixture = Fixture::new(false, false).await;
-    fixture.provider.malformed_calls.store(3, Ordering::SeqCst);
+    fixture.provider.malformed_calls.store(2, Ordering::SeqCst);
     let response = fixture
         .client
         .post(format!("{}/api/chat/stream", fixture.url))
@@ -2154,35 +2209,87 @@ async fn malformed_calls_keep_the_request_live_until_a_valid_reply_without_dispa
     assert!(!finished["content"].as_str().unwrap().is_empty());
     assert_eq!(finished["content"], "你好！");
     assert_ne!(finished["taskCompletion"]["completionState"], "partial");
-    assert!(events.iter().any(|event| event["type"] == "task_progress" && event["phase"] == "recovering"));
-    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(events.iter().filter(|event| event["type"] == "assistant_segment"
+        && event["segment"]["status"] == "interrupted").count(), 2);
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 3);
     assert!(!events.iter().any(|event| event["type"] == "tool_call"));
     let requests = fixture.provider.requests.lock().await.clone();
-    assert_eq!(requests[3]["messages"].as_array().unwrap().iter().filter(|message|
+    assert_eq!(requests[2]["messages"].as_array().unwrap().iter().filter(|message|
         message["role"] == "user" && message["content"] == "你好").count(), 1);
     let messages = fixture.messages().await;
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["Status"], "completed");
     assert!(messages[1]["Error"].as_str().is_none_or(str::is_empty));
-    assert_eq!(messages[1]["ToolRun"]["diagnostics"]["modelCalls"], 4);
+    assert_eq!(messages[1]["ToolRun"]["diagnostics"]["modelCalls"], 3);
     fixture.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn temporary_provider_server_failure_keeps_the_original_request_live() {
+async fn temporary_provider_error_waits_for_explicit_same_task_resume() {
     let fixture = Fixture::new(false, false).await;
     fixture.provider.transient_http_failures.store(1, Ordering::SeqCst);
+    let input = fixture.request("你好");
     let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
-        .json(&fixture.request("你好")).send().await.unwrap();
+        .json(&input).send().await.unwrap();
     let text = tokio::time::timeout(Duration::from_secs(30), response.text())
-        .await.expect("A transient provider failure must not terminate the request").unwrap();
+        .await.expect("A provider HTTP failure must save progress and finish delivery").unwrap();
     let events = event_values(&mut text.as_bytes().to_vec());
-    assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))));
-    assert!(events.iter().any(|event| event["type"] == "task_progress" && event["phase"] == "recovering"));
-    let completed = events.iter().find(|event| event["type"] == "completed").unwrap();
-    assert_eq!(completed["content"], "你好！");
+    let interrupted = events.iter().find(|event| event["type"] == "interrupted").expect("HTTP 500 is not a network-disconnection retry");
+    assert_eq!(interrupted["code"], "MODEL_HTTP_ERROR");
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 1);
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(
+        &fixture.runtime.config.data_root).unwrap();
+    let original = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(original.state, kynxa_agent_core_native::storage::task_repository::TaskState::Partial);
+    assert!(repository.latest_checkpoint(&original.task_id).unwrap().is_some());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 1, "Non-network failure must wait for explicit user continuation.");
+    let resumed = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, original.task_id))
+        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":original.version,"action":"resume"}))
+        .send().await.unwrap();
+    assert!(resumed.status().is_success());
+    let completed = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(status) = fixture.runtime.run_status(&fixture.conversation, &original.request_id).await {
+                if status["status"] == "completed" && status["result"]["type"] == "completed" { break status["result"].clone(); }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("Explicit resume must complete the original request.");
+    let preserved = interrupted["content"].as_str().unwrap();
+    assert!(completed["content"].as_str().is_some_and(|text| text.starts_with(preserved) && text.ends_with("你好！")));
+    let settled = repository.load(&original.task_id).unwrap();
+    assert_eq!(settled.request_id, original.request_id);
+    assert_eq!(settled.state, kynxa_agent_core_native::storage::task_repository::TaskState::Completed);
+    assert!(settled.usage.model_requests > original.usage.model_requests);
     assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(fixture.messages().await.len(), 2);
+    let messages = fixture.messages().await;
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["Status"], "completed");
+    assert!(messages[1]["Error"].as_str().is_none_or(str::is_empty));
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_malformed_calls_save_progress_without_dispatch_or_background_retry() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.malformed_calls.store(10, Ordering::SeqCst);
+    let input = fixture.request("你好");
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url)).json(&input).send().await.unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(15), response.text()).await.unwrap().unwrap();
+    let events = event_values(&mut text.as_bytes().to_vec());
+    let interrupted = events.iter().find(|event| event["type"] == "interrupted").unwrap();
+    assert_eq!(interrupted["code"], "MODEL_TOOL_CALL_INVALID");
+    assert!(!events.iter().any(|event| event["type"] == "tool_call"));
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 3);
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(task.state, kynxa_agent_core_native::storage::task_repository::TaskState::Partial);
+    assert_eq!(task.usage.model_requests, 3);
+    assert!(repository.latest_checkpoint(&task.task_id).unwrap().is_some());
+    assert!(repository.operations(&task.task_id).unwrap().is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 3);
     fixture.close().await;
 }
 
@@ -2491,6 +2598,103 @@ async fn acceptance_readback_gap_plain_generation_does_not_force_output_readback
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_plan_scope_blocks_real_writes_but_an_explicit_plan_file_is_saved_once() {
+    for (request, should_write) in [
+        ("先说说你要做什么，暂不实施，不要生成文件。", false),
+        ("把方案保存到 scope-plan.md。", true),
+    ] {
+        let fixture = Fixture::new(false, false).await;
+        fixture.provider.work_scope_cycle.store(true, Ordering::Release);
+        let mut input = fixture.request(request);
+        input["userMessageId"] = json!(new_id());
+        let response: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(response["type"], "completed", "{response}");
+        let output = fixture.root.join("work/scope-plan.md");
+        assert_eq!(output.exists(), should_write, "The scope must govern actual filesystem dispatch: {response}");
+        let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+        let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+        let writes = repository.operations(&task.task_id).unwrap().into_iter().filter(|operation|
+            operation.intent.tool_name == "filesystem.write"
+                && operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded).count();
+        assert_eq!(writes, usize::from(should_write), "Only the explicitly authorized file may be written");
+        let requests = fixture.provider.requests.lock().await.clone();
+        assert!(requests.len() <= 5, "A scope decision must not trigger repeated recovery or verification: {}", requests.len());
+        if should_write {
+            assert_eq!(std::fs::read_to_string(output).unwrap(), "# 方案\n先整理要求，再准备文档。");
+            assert_eq!(response["taskCompletion"]["completionState"], "completed", "{response}");
+        } else {
+            assert_eq!(response["taskCompletion"]["workStage"], "plan");
+            assert_eq!(response["taskCompletion"]["backgroundGoalCertified"], false);
+            assert!(response["content"].as_str().is_some_and(|text| text.contains("当前只说明方案")), "{response}");
+            assert!(!requests.iter().any(is_completion_review_request), "A future writing step must not become a completion gate");
+        }
+        fixture.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proven_current_work_finishes_without_executing_optional_next_or_text_tools() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.annotated_evidence_cycle.store(true, Ordering::Release);
+    fixture.provider.optional_followup_cycle.store(true, Ordering::Release);
+    let mut input = fixture.request("生成 annotated-result.txt 文件并回读当前内容，然后简短回复。");
+    input["userMessageId"] = json!(new_id());
+    let response: Value = tokio::time::timeout(Duration::from_secs(15), async {
+        fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+            .send().await.unwrap().json().await.unwrap()
+    }).await.expect("Proven current work must deliver without following an optional next step.");
+    assert_eq!(response["type"], "completed", "{response}");
+    assert_eq!(response["taskCompletion"]["completionState"], "completed", "{response}");
+    assert_eq!(response["taskCompletion"]["brokerDecision"], "final");
+    assert_eq!(response["taskCompletion"]["modelTaskState"]["state"], "continue");
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    let operations = repository.operations(&task.task_id).unwrap();
+    assert_eq!(operations.len(), 2, "Only the requested write and read may dispatch: {operations:?}");
+    for name in ["filesystem.write", "filesystem.read"] {
+        assert_eq!(operations.iter().filter(|operation| operation.intent.tool_name == name
+            && operation.state == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded).count(), 1);
+    }
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/annotated-result.txt")).unwrap(), "ANNOTATED_RECEIPT_BODY");
+    let requests = fixture.provider.requests.lock().await.clone();
+    assert_eq!(requests.iter().filter(|request| is_completion_review_request(request)).count(), 1);
+    assert!(requests.len() <= 5, "Optional next steps must not cause repeated model work: {}", requests.len());
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_unchanged_reads_save_the_original_task_without_auto_restarting() {
+    use kynxa_agent_core_native::storage::task_repository::{TaskRepository, TaskState};
+    let fixture = Fixture::new(false, false).await;
+    std::fs::write(fixture.root.join("work/progress-loop.txt"), "Original useful evidence").unwrap();
+    let mut input = fixture.request("读取 progress-loop.txt 并整理结论。UNCHANGED_READ_FIXTURE");
+    input["userMessageId"] = json!(new_id());
+    let response: Value = tokio::time::timeout(Duration::from_secs(30), async {
+        fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+            .send().await.unwrap().json().await.unwrap()
+    }).await.expect("An unchanged read loop must save progress rather than consume the task allowance.");
+    assert_eq!(response["type"], "interrupted", "{response}");
+    assert_eq!(response["code"], "TASK_CONTINUATION_NO_PROGRESS", "{response}");
+    assert_ne!(response["taskCompletion"]["completionState"], "completed");
+    let repository = TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(task.state, TaskState::Partial);
+    assert!(repository.latest_checkpoint(&task.task_id).unwrap().is_some());
+    let requests = fixture.provider.requests.lock().await.clone();
+    assert!(requests.iter().any(|request| request["messages"].to_string().contains("Work stalled:")),
+        "The saved pause must follow actual correction guidance, not a global round limit.");
+    assert!(requests.len() < 16, "The mock deliberately repeats unchanged content: {}", requests.len());
+    let saved = fixture.messages().await;
+    let reply = saved.iter().find(|message|message["RequestId"] == input["requestId"] && message["Role"] == "assistant").unwrap();
+    assert!(reply["ToolActivities"].as_array().unwrap().iter().any(|activity|
+        activity["name"] == "filesystem.read" && activity["status"] == "completed" && activity["resultRef"].is_object()));
+    assert_eq!(task.execution_version, 1, "No automatic attempt restart may erase the repeated-route history.");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/progress-loop.txt")).unwrap(), "Original useful evidence");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn annotated_successful_evidence_finishes_without_archive_scans_or_repeating_writes() {
     let fixture = Fixture::new(false, false).await;
     fixture.provider.annotated_evidence_cycle.store(true, Ordering::Release);
@@ -2759,11 +2963,7 @@ async fn partial_http_resume_reopens_the_same_task_twice_and_steers_without_repl
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Explicitly authorized live API validation; requires KYNXA_REAL_MODEL_HOME, KYNXA_REAL_PROVIDER and KYNXA_REAL_MODEL."]
 async fn authorized_live_model_preserves_paused_work_and_obeys_latest_user_stop() {
-    use kynxa_agent_core_native::{models::gateway_config::ModelConfigStore,
-        storage::task_repository::{OperationState, TaskRepository, TaskState}};
-    let source_home = PathBuf::from(std::env::var_os("KYNXA_REAL_MODEL_HOME").expect("Explicit model settings home is required."));
-    let provider = std::env::var("KYNXA_REAL_PROVIDER").expect("Explicit provider is required.");
-    let model = std::env::var("KYNXA_REAL_MODEL").expect("Explicit model is required.");
+    use kynxa_agent_core_native::storage::task_repository::{OperationState, TaskRepository, TaskState};
     let stop_only = std::env::var_os("KYNXA_REAL_STOP_ONLY").is_some();
     let mut fixture = Fixture::new(false, false).await;
     let reuse_task = std::env::var("KYNXA_REAL_REUSE_TASK").ok();
@@ -2788,15 +2988,7 @@ async fn authorized_live_model_preserves_paused_work_and_obeys_latest_user_stop(
         let service = gateway::router(fixture.runtime.clone());
         fixture.servers.push(tokio::spawn(async move { axum::serve(listener, service).await.unwrap(); }));
     }
-    assert!(!fixture.root.starts_with(std::env::current_dir().unwrap()), "Live credentials must stay outside the repository.");
-    let mut connection = ModelConfigStore::new(&source_home).connection_for(&provider).await
-        .expect("Read-only selected connection lookup failed.").expect("Selected connection is unavailable.");
-    assert!(connection["apiKey"].as_str().is_some_and(|key| !key.is_empty()), "The authorized connection requires its saved credential.");
-    // Copy only the selected connection into isolated temporary settings; never log credentials or edit their source.
-    // 仅把所选连接写入隔离临时配置；不打印凭据，也不修改用户的原配置。
-    connection["maxOutputTokens"] = json!(8192);
-    ModelConfigStore::new(&fixture.runtime.config.data_home).save(connection).await.expect("Isolated model setup failed.");
-    fixture.client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(180)).build().unwrap();
+    let (provider, model) = configure_live_provider(&mut fixture, 8192).await;
     std::fs::write(fixture.root.join("work/second.txt"), "SECOND_LIVE_SOURCE").unwrap();
     let mut input = fixture.request("请至少持续工作1小时完善一份技术研究报告，最终报告覆盖恢复、回执、缓存三部分。第一步读取 fixture.txt，把全文原样写到 progress.txt（只写一次），再读回 progress.txt。先完成这一步，随后按我追加的指导展开，不为凑时间重复读写文件。");
     input["userMessageId"] = json!(new_id());
@@ -2892,27 +3084,11 @@ async fn authorized_live_model_preserves_paused_work_and_obeys_latest_user_stop(
             "userMessageId":stop_id,"replyMessageId":stop_reply,"action":"update",
             "message":"现在停止这个任务，取消原先至少一小时以及后续研究报告的所有未完成要求，不再继续执行工具；保留已成功的文件、上下文、进度和回执，只简短确认已停止。"})).await;
     println!("{}", json!({"phase":"live-stop-accepted","elapsedMs":started_at.elapsed().as_millis()}));
-    let mut acknowledged_unknown_cost = false;
     let settled = tokio::time::timeout(Duration::from_secs(75), async {
         loop {
             let task = repository.load(&original.task_id).unwrap();
             if task.state == TaskState::Paused && repository.current_attempt(&task.task_id).unwrap()
                 .is_some_and(|attempt| attempt.ended_at_ms.is_some()) { break task; }
-            if task.state == TaskState::WaitingVerification && !acknowledged_unknown_cost {
-                let identities = repository.model_reservations(&task.task_id).unwrap().into_iter()
-                    .filter(|reservation| reservation.blocks_recovery())
-                    .map(|reservation| json!({"taskId":task.task_id,"reservationId":reservation.reservation_id})).collect::<Vec<_>>();
-                if !identities.is_empty() {
-                    let acknowledgement = fixture.client.post(format!("{}/api/tasks/{}/control", fixture.url, task.task_id))
-                        .json(&json!({"conversationId":fixture.conversation,"expectedVersion":task.version,
-                            "action":"acknowledge-unknown-costs","modelReservationIds":identities})).send().await.unwrap();
-                    assert!(acknowledgement.status().is_success(), "Authorized isolated validation must acknowledge real unknown costs without inventing usage.");
-                    let acknowledged: Value = acknowledgement.json().await.unwrap();
-                    assert_eq!(acknowledged["costUnknown"], true);
-                    acknowledged_unknown_cost = true;
-                    println!("{}", json!({"phase":"live-unknown-cost-acknowledged","costUnknown":true}));
-                }
-            }
             let stop_is_settling = repository.latest_event(&task.task_id, "task.user-directive").unwrap()
                 .is_some_and(|event| event.payload["userMessageId"] == stop_id && event.payload["stop"] == true);
             if task.usage.model_requests.saturating_sub(stop_model_baseline) >= 3 && task.state != TaskState::Paused && !stop_is_settling {
@@ -2974,6 +3150,51 @@ async fn authorized_live_model_preserves_paused_work_and_obeys_latest_user_stop(
         "newStopModelRequests":settled.usage.model_requests.saturating_sub(stop_model_baseline),"unknownTokenRequests":settled.usage.unknown_token_requests}));
     drop(response);
     fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Explicitly authorized live API validation; requires KYNXA_REAL_MODEL_HOME, KYNXA_REAL_PROVIDER and KYNXA_REAL_MODEL."]
+async fn authorized_live_simple_answer_finishes_once_without_tool_dispatch() {
+    let mut fixture = Fixture::new(false, false).await;
+    let (provider, model) = configure_live_provider(&mut fixture, 1024).await;
+    let mut input = fixture.request("只回复“你好”，不要调用任何工具。");
+    input["userMessageId"] = json!(new_id());
+    input["provider"] = json!(provider);
+    input["model"] = json!(model);
+    let started = std::time::Instant::now();
+    let response: Value = tokio::time::timeout(Duration::from_secs(60), async {
+        fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input)
+            .send().await.unwrap().json().await.unwrap()
+    }).await.expect("A finite live greeting must finish promptly without review or tools.");
+    assert_eq!(response["type"], "completed", "Live greeting did not complete: code={}", response["code"]);
+    assert!(response["content"].as_str().is_some_and(|text| text.contains("你好")));
+    assert_ne!(response["taskCompletion"]["completionState"], "partial");
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
+    let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(task.state, kynxa_agent_core_native::storage::task_repository::TaskState::Completed);
+    assert_eq!(task.usage.model_requests, 1, "A successful finite answer needs no extra review round.");
+    assert!(repository.operations(&task.task_id).unwrap().is_empty());
+    println!("{}", json!({"phase":"live-simple-answer","liveProvider":provider,"model":model,
+        "modelRequests":task.usage.model_requests,"inputTokens":task.usage.input_tokens,
+        "outputTokens":task.usage.output_tokens,"elapsedMs":started.elapsed().as_millis(),"toolOperations":0}));
+    fixture.close().await;
+}
+
+async fn configure_live_provider(fixture: &mut Fixture, output_tokens: u64) -> (String, String) {
+    use kynxa_agent_core_native::models::gateway_config::ModelConfigStore;
+    let source_home = PathBuf::from(std::env::var_os("KYNXA_REAL_MODEL_HOME").expect("Explicit model settings home is required."));
+    let provider = std::env::var("KYNXA_REAL_PROVIDER").expect("Explicit provider is required.");
+    let model = std::env::var("KYNXA_REAL_MODEL").expect("Explicit model is required.");
+    assert!(!fixture.root.starts_with(std::env::current_dir().unwrap()), "Live credentials must stay outside the repository.");
+    let mut connection = ModelConfigStore::new(&source_home).connection_for(&provider).await
+        .expect("Read-only selected connection lookup failed.").expect("Selected connection is unavailable.");
+    assert!(connection["apiKey"].as_str().is_some_and(|key| !key.is_empty()), "The authorized connection requires its saved credential.");
+    // Copy only the selected connection into isolated settings; never log credentials or edit their source.
+    // 仅把所选连接写入隔离临时配置；不打印凭据，也不修改用户的原配置。
+    connection["maxOutputTokens"] = json!(output_tokens);
+    ModelConfigStore::new(&fixture.runtime.config.data_home).save(connection).await.expect("Isolated model setup failed.");
+    fixture.client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(180)).build().unwrap();
+    (provider, model)
 }
 
 async fn submit_live_steering(fixture: &Fixture,

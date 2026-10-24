@@ -63,7 +63,7 @@
     if (interaction || unsafeHtml.test(inspected)
       || /%%\s*\{|^\s*---(?:\s|$)|(?:javascript|vbscript)\s*:|data\s*:[^\s]*[;,]|@import|url\s*\(|@\{[^}]*\b(?:img|icon)\s*:/im.test(inspected)) return 'diagramUnsafe';
     const declaration = source.replace(/^\s*%%[^\r\n]*(?:\r?\n|$)/gm, '').trimStart();
-    if (!/^(?:flowchart\b|graph\b|sequenceDiagram\b|stateDiagram-v2\b|classDiagram\b|erDiagram\b|gantt\b|mindmap\b)/.test(declaration)) return 'diagramUnsupported';
+    if (!/^(?:flowchart\b|graph\b|sequenceDiagram\b|stateDiagram-v2\b|classDiagram\b|erDiagram\b|gantt\b|mindmap\b|timeline\b|pie\b|journey\b|gitGraph\b|xychart(?:-beta)?\b|quadrantChart\b|requirement(?:Diagram)?\b)/.test(declaration)) return 'diagramUnsupported';
     return null;
   }
   function diagramType(source) {

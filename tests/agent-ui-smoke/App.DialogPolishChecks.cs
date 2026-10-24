@@ -16,6 +16,27 @@ namespace AgentUiSmoke;
 
 public partial class App
 {
+    private object ClipboardWindowState()
+    {
+        nint foreground = GetClipboardForegroundWindow(), open = GetOpenClipboardWindow();
+        GetClipboardWindowProcessId(foreground, out uint foregroundProcessId);
+        GetClipboardWindowProcessId(open, out uint openProcessId);
+        return new
+        {
+            OwnedWindow = WinRT.Interop.WindowNative.GetWindowHandle(_window!).ToInt64(),
+            OwnedProcessId = Environment.ProcessId, ForegroundWindow = foreground.ToInt64(), ForegroundProcessId = foregroundProcessId,
+            OpenClipboardWindow = open.ToInt64(), OpenClipboardProcessId = openProcessId,
+            HasUiThreadAccess = _root.DispatcherQueue.HasThreadAccess
+        };
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]
+    private static extern nint GetClipboardForegroundWindow();
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern nint GetOpenClipboardWindow();
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")]
+    private static extern uint GetClipboardWindowProcessId(nint window, out uint processId);
+
     // Normalize only the TextBox display contract; clipboard assertions still compare the original text exactly.
     // 仅归一化 TextBox 的显示换行；剪贴板断言仍与原文严格比较。
     private static string NormalizeDialogDisplayText(string text) => text.Replace("\r\n", "\n").Replace('\r', '\n');
@@ -39,6 +60,14 @@ public partial class App
         var originalDelayed = _api.DelayedResult;
         string? originalImagePath = _api.ScreenshotImagePath;
         ContentDialog? openDialog = null;
+        var clipboardErrors = new List<object>();
+        void RecordClipboardError(object? sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs args)
+        {
+            if (args.Exception is not System.Runtime.InteropServices.COMException ||
+                !Environment.StackTrace.Contains("ToolResultDialog.CopyLoadedContent", StringComparison.Ordinal)) return;
+            clipboardErrors.Add(new { args.Exception.Message, HResult = $"0x{args.Exception.HResult:X8}", WindowState = ClipboardWindowState() });
+        }
+        AppDomain.CurrentDomain.FirstChanceException += RecordClipboardError;
         int saves = _api.Saves, connections = _api.Connections;
         try
         {
@@ -96,7 +125,14 @@ public partial class App
                     actions.Orientation == Orientation.Vertical && actions.Children.OfType<Button>().All(button => DialogControlFitsWidth(button, scroll)),
                     "English result actions stack within a narrow dialog and the complete tool name remains readable");
                 copy.StartBringIntoView();
+                // WinRT needs the actual foreground owner, even when the click came from UI Automation.
+                // 即便点击由 UI 自动化触发，WinRT 剪贴板仍要求应用实际位于前台。
+                await OwnedWinUiWindowActivation.EnsureAsync(_window, Path.Combine(_directory, "native-activation.jsonl"));
+                Check(GetClipboardForegroundWindow() == WinRT.Interop.WindowNative.GetWindowHandle(_window),
+                    "the fixture owns foreground before writing its synthetic clipboard content");
                 await SettleAsync();
+                File.WriteAllText(Path.Combine(_directory, "native-clipboard-before-copy.json"),
+                    System.Text.Json.JsonSerializer.Serialize(ClipboardWindowState()));
                 NativeUi.Invoke(copy);
                 await WaitAsync(() => NativeUi.ByName<TextBlock>(viewer.Dialog, "ToolResultCopyStatus").Text == UiText.Get("已复制"),
                     "copy feedback acknowledges the actual native clipboard operation");
@@ -166,6 +202,9 @@ public partial class App
         }
         finally
         {
+            AppDomain.CurrentDomain.FirstChanceException -= RecordClipboardError;
+            File.WriteAllText(Path.Combine(_directory, "native-clipboard-errors.json"), System.Text.Json.JsonSerializer.Serialize(clipboardErrors));
+            File.WriteAllText(Path.Combine(_directory, "native-clipboard-final-window-state.json"), System.Text.Json.JsonSerializer.Serialize(ClipboardWindowState()));
             openDialog?.Hide();
             _api.DelayedResult = originalDelayed;
             _api.ScreenshotImagePath = originalImagePath;

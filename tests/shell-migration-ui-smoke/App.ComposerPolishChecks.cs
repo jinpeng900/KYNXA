@@ -13,8 +13,8 @@ namespace KYNXA_Desktop;
 
 public partial class App
 {
-    private static SolidColorBrush? PresentedBackground(Button button) => NativeUi.Descendants<ContentPresenter>(button)
-        .FirstOrDefault(presenter => presenter.Name == "ContentPresenter")?.Background as SolidColorBrush;
+    private static SolidColorBrush? PresentedBackground(Button button) => NativeUi.Descendants<Microsoft.UI.Xaml.Shapes.Ellipse>(button)
+        .FirstOrDefault(ellipse => ellipse.Name == "SendBackground")?.Fill as SolidColorBrush;
 
     private bool SendArrowUsesBrush(string key) => Element<PathShape>("SendArrow").Stroke is SolidColorBrush stroke &&
         ReferenceEquals(stroke, AppearanceService.GetBrush(key));

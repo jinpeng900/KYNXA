@@ -1,5 +1,9 @@
 # Transcript UI smoke
 
+Run only cache and conversation navigation checks with `pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario conversation-switching`. This reuses the strict no-mutation assertion, cached DOM identity, stale-parse cancellation and cache bounds without clipboard or native keyboard input.
+
+仅验证缓存与会话导航可用 `-Scenario conversation-switching`：复用严格零 DOM 变更、缓存节点身份、过期解析取消和缓存容量断言，不依赖剪贴板或原生按键输入。
+
 ## Current conversation body search
 
 ```powershell
@@ -176,7 +180,9 @@ Run the focused production-renderer checks:
 pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario diagrams
 ```
 
-`App.DiagramChecks.cs` renders `flowchart`, its `graph` alias, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, `erDiagram`, `gantt` and `mindmap` using the bundled runtime inside the actual native WebView2. It checks real SVG text and view boxes, Chinese/English and multiline labels, original source retention, closed-fence streaming, interrupted open fences, syntax errors and source-only size limits. The safety fixtures attempt configuration/frontmatter overrides, executable/external links, arbitrary HTML/SVG and external images; rejected diagrams retain readable source instead of creating active content.
+`App.DiagramChecks.cs` renders `flowchart`, its `graph` alias, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, `erDiagram`, `gantt`, `mindmap`, `timeline`, `pie`, `journey`, `gitGraph`, `xychart-beta`, `quadrantChart` and `requirementDiagram` using the bundled runtime inside the actual native WebView2. Each fixture is mounted independently so conversation virtualization remains enabled. It checks real SVG text and view boxes, Chinese/English and multiline labels, original source retention, closed-fence streaming, interrupted open fences, syntax errors and source-only size limits. The safety fixtures attempt configuration/frontmatter overrides, executable/external links, arbitrary HTML/SVG and external images; rejected diagrams retain readable source instead of creating active content.
+
+For a narrow rerun, `-Scenario diagram-interaction` exercises real clipboard acknowledgement, selection, window resizing and zoom without repeating all diagram types. `-Scenario workspace-format` covers CSV/TSV record pagination and source switching, Markdown footnotes/alerts/anchors, scoped image requests and a denied image, relative file links, one clicked embedded website and retained file reading position. It uses the existing isolated HTTP/Chromium fixture, skips the Office matrix and makes no model requests.
 
 Interaction checks use the native clipboard acknowledgement before asserting the copy checkmark, compare source exactly, resize the native window to 480/980, exercise fit/zoom and trusted WebView-local pointer panning, and close the modal viewer with an actual Escape key event. Palette and live language changes preserve message nodes, source, selection and scroll; cached and rapid conversation changes isolate asynchronous results. These are synthetic presentation inputs, not real model or HTTP streaming, and the tests do not execute diagram scripts or tools.
 

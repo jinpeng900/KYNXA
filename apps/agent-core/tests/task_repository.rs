@@ -335,106 +335,163 @@ fn explicit_revision_keeps_the_settled_root_and_receipts_without_reviving_cancel
 }
 
 #[test]
-fn unknown_model_cost_acknowledgement_preserves_uncertainty_and_allows_later_real_settlement() {
-    let fixture=Fixture::new();
-    let task=fixture.task("unknown-model-cost",None);
-    let old=fixture.attempt(&task);
-    fixture.repository.reserve_model_request(&old.token,"unknown-http").unwrap();
+fn unknown_model_cost_keeps_its_budget_reservation_without_blocking_other_work() {
+    let fixture = Fixture::new();
+    let task = fixture.task("unknown-model-cost", None);
+    let old = fixture.attempt(&task);
+    fixture.repository.reserve_model_request(&old.token, "unknown-http").unwrap();
     fixture.expire(&old);
-    let current=fixture.repository.load(&task.task_id).unwrap();
-    let recovery=fixture.repository.start_attempt(&task.task_id,current.version,"recovery",60_000).unwrap();
-    fixture.repository.release_attempt(&recovery.token,"verify-cost").unwrap();
-    let waiting=fixture.repository.load(&task.task_id).unwrap();
-    let identities=vec![ModelReservationIdentity{task_id:task.task_id.clone(),reservation_id:"unknown-http".into()}];
-    assert!(fixture.repository.acknowledge_unknown_model_reservations(&task.task_id,waiting.version+1,&identities).is_err());
-    let acknowledged=fixture.repository.acknowledge_unknown_model_reservations(&task.task_id,waiting.version,&identities).unwrap();
-    assert_eq!(fixture.repository.acknowledge_unknown_model_reservations(&task.task_id,waiting.version,&identities).unwrap().version,acknowledged.version);
-    let unknown=fixture.repository.model_reservations(&task.task_id).unwrap().pop().unwrap();
-    assert_eq!(unknown.state,ModelReservationState::Unknown);
-    assert!(unknown.is_unknown_acknowledged() && !unknown.blocks_recovery());
-    assert!(unknown.dispatched.is_none() && unknown.usage.is_none());
-    assert_eq!(acknowledged.usage.model_requests,0);
-    let resumed=fixture.repository.control(&task.task_id,acknowledged.version,TaskControl::Resume).unwrap();
-    let next=fixture.repository.start_attempt(&task.task_id,resumed.version,"resumed",60_000).unwrap();
-    assert_eq!(fixture.repository.load(&task.task_id).unwrap().state,TaskState::Running);
-    let current=fixture.repository.load(&task.task_id).unwrap();
-    fixture.repository.transition(&next.token,current.version,TaskState::Completed,Some("work-verified-cost-remains-unknown")).unwrap();
-    assert_eq!(fixture.repository.model_reservations(&task.task_id).unwrap()[0].state,ModelReservationState::Unknown);
-    let settled=fixture.repository.reconcile_model_request(&next.token,"unknown-http",true,&TaskUsage{input_tokens:7,output_tokens:3,..Default::default()},json!({"kind":"provider-original-receipt","requestId":"actual-original"})).unwrap();
-    assert_eq!(settled.state,ModelReservationState::Settled);
-    assert_eq!(fixture.repository.load(&task.task_id).unwrap().usage.model_requests,1);
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    let recovery = fixture.repository.start_attempt(&task.task_id, current.version, "recovery", 60_000).unwrap();
+    assert_eq!(fixture.repository.load(&task.task_id).unwrap().state, TaskState::Running);
+    let unknown = fixture.repository.model_reservations(&task.task_id).unwrap().pop().unwrap();
+    assert_eq!(unknown.state, ModelReservationState::Unknown);
+    assert!(unknown.dispatched.is_none() && unknown.usage.is_none() && unknown.verification_reference.is_none());
+    fixture.repository.reserve_model_request(&recovery.token, "next-http").unwrap();
+    fixture.repository.settle_model_request(&recovery.token, "next-http", false, &TaskUsage::default()).unwrap();
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    fixture.repository.transition(&recovery.token, current.version, TaskState::Completed, Some("work-finished-cost-remains-unknown")).unwrap();
+    assert_eq!(fixture.repository.load(&task.task_id).unwrap().usage.model_requests, 0);
+    assert_eq!(fixture.repository.model_reservations(&task.task_id).unwrap().iter().find(|item| item.reservation_id == "unknown-http").unwrap().state, ModelReservationState::Unknown);
+    for _ in 0..2 {
+        let settled = fixture.repository.reconcile_model_request(&recovery.token, "unknown-http", true,
+            &TaskUsage { input_tokens:7, output_tokens:3, ..Default::default() },
+            json!({"kind":"provider-original-receipt","requestId":"actual-original"})).unwrap();
+        assert_eq!(settled.state, ModelReservationState::Settled);
+    }
+    assert_eq!(fixture.repository.load(&task.task_id).unwrap().usage.model_requests, 1);
 }
 
 #[test]
-fn quiescent_live_verification_acknowledges_unknowns_and_resumes_the_original_attempt() {
-    let fixture=Fixture::new();
-    let task=fixture.task("live-verification",None);
-    let old=fixture.attempt(&task);
-    fixture.repository.record_operation(&old.token,&operation("old-unknown-write")).unwrap();
-    fixture.repository.dispatch_operation(&old.token,"old-unknown-write").unwrap();
-    fixture.repository.reserve_model_request(&old.token,"old-unknown-cost").unwrap();
+fn unknown_effects_allow_unrelated_work_but_cannot_be_replayed_or_called_successful() {
+    let fixture = Fixture::new();
+    let task = fixture.task("unknown-unrelated-work", None);
+    let old = fixture.attempt(&task);
+    fixture.repository.record_operation(&old.token, &operation("old-unknown-write")).unwrap();
+    fixture.repository.dispatch_operation(&old.token, "old-unknown-write").unwrap();
+    fixture.repository.reserve_model_request(&old.token, "old-unknown-cost").unwrap();
     fixture.expire(&old);
-    let current=fixture.repository.load(&task.task_id).unwrap();
-    let live=fixture.repository.start_attempt(&task.task_id,current.version,"live-recovery",60_000).unwrap();
-    let waiting=fixture.repository.load(&task.task_id).unwrap();
-    let operation_ids=vec!["old-unknown-write".into()];
-    let costs=vec![ModelReservationIdentity{task_id:task.task_id.clone(),reservation_id:"old-unknown-cost".into()}];
-    assert!(fixture.repository.acknowledge_unknown_operations(&task.task_id,waiting.version,&operation_ids).is_err());
-    assert!(fixture.repository.acknowledge_unknown_model_reservations(&task.task_id,waiting.version,&costs).is_err());
-    assert!(fixture.repository.record_operation(&live.token,&operation("must-not-dispatch")).is_err());
-    assert!(fixture.repository.reserve_model_request(&live.token,"must-not-request").is_err());
-    assert!(fixture.repository.transition(&live.token,waiting.version,TaskState::Running,None).is_err());
-    let quiet=fixture.repository.mark_verification_quiescent(&live.token,"await-original-verification").unwrap();
-    assert_eq!(quiet.current_attempt_id.as_deref(),Some(live.token.attempt_id.as_str()));
-    assert_eq!(fixture.repository.mark_verification_quiescent(&live.token,"repeated-poll").unwrap().version,quiet.version);
-    let acknowledged=fixture.repository.acknowledge_unknown_operations(&task.task_id,quiet.version,&operation_ids).unwrap();
-    let acknowledged=fixture.repository.acknowledge_unknown_model_reservations(&task.task_id,acknowledged.version,&costs).unwrap();
-    assert_eq!(fixture.repository.operation(&task.task_id,"old-unknown-write").unwrap().unwrap().state,OperationState::Unknown);
-    assert_eq!(fixture.repository.model_reservations(&task.task_id).unwrap()[0].state,ModelReservationState::Unknown);
-    let running=fixture.repository.transition(&live.token,acknowledged.version,TaskState::Running,Some("user-acknowledged")).unwrap();
-    assert_eq!(running.current_attempt_id,quiet.current_attempt_id);
-    fixture.repository.reserve_model_request(&live.token,"next-request").unwrap();
-    fixture.repository.settle_model_request(&live.token,"next-request",false,&TaskUsage::default()).unwrap();
-    // The old marker cannot authorize a later waiting state after fresh execution.
-    // 新执行后的再次等待不能复用旧静止标记。
-    fixture.repository.record_operation(&live.token,&operation("next-unknown-write")).unwrap();
-    fixture.repository.dispatch_operation(&live.token,"next-unknown-write").unwrap();
-    assert!(fixture.repository.mark_verification_quiescent(&live.token,"still-in-flight").is_err());
-    fixture.repository.finish_operation(&live.token,"next-unknown-write",OperationState::Unknown,None,None).unwrap();
-    let current=fixture.repository.load(&task.task_id).unwrap();
-    let waiting=fixture.repository.transition(&live.token,current.version,TaskState::WaitingVerification,None).unwrap();
-    assert!(fixture.repository.acknowledge_unknown_operations(&task.task_id,waiting.version,&["next-unknown-write".into()]).is_err());
-    let quiet=fixture.repository.mark_verification_quiescent(&live.token,"second-verification").unwrap();
-    fixture.repository.acknowledge_unknown_operations(&task.task_id,quiet.version,&["next-unknown-write".into()]).unwrap();
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    let live = fixture.repository.start_attempt(&task.task_id, current.version, "live-recovery", 60_000).unwrap();
+    assert_eq!(fixture.repository.record_operation(&live.token, &operation("old-unknown-write")).unwrap().state, OperationState::Unknown);
+    assert_eq!(fixture.repository.dispatch_operation(&live.token, "old-unknown-write").unwrap_err().code(), "TASK_BLOCKED");
+    assert_eq!(fixture.repository.finish_operation(&live.token, "old-unknown-write", OperationState::Succeeded,
+        Some(json!({"id":"unverified"})), None).unwrap_err().code(), "TASK_BLOCKED");
+    fixture.repository.record_operation(&live.token, &operation("new-write")).unwrap();
+    fixture.repository.dispatch_operation(&live.token, "new-write").unwrap();
+    fixture.repository.finish_operation(&live.token, "new-write", OperationState::Succeeded, Some(json!({"id":"actual-new-result"})), None).unwrap();
+    fixture.repository.reserve_model_request(&live.token, "new-model-request").unwrap();
+    assert_eq!(fixture.repository.operation(&task.task_id, "old-unknown-write").unwrap().unwrap().state, OperationState::Unknown);
+    assert_eq!(fixture.repository.finish_operation(&live.token, "old-unknown-write", OperationState::Failed,
+        Some(json!({"id":"late-original-result"})), Some(json!({"kind":"verified-original"}))).unwrap().state, OperationState::Failed);
 }
 
 #[test]
-fn quiescence_rejects_inflight_reservations_and_keeps_descendant_receipts_writable() {
-    let fixture=Fixture::new();
-    let task=fixture.task("quiescence-parent",None);
-    let parent=fixture.attempt(&task);
-    let child=fixture.task("quiescence-child",Some(&task));
-    let delegated=fixture.attempt(&child);
-    fixture.repository.record_operation(&delegated.token,&operation("delegated-write")).unwrap();
-    fixture.repository.dispatch_operation(&delegated.token,"delegated-write").unwrap();
-    fixture.repository.finish_operation(&delegated.token,"delegated-write",OperationState::Unknown,None,None).unwrap();
-    fixture.repository.reserve_model_request(&parent.token,"inflight-model").unwrap();
-    assert!(fixture.repository.mark_verification_quiescent(&parent.token,"model-not-settled").is_err());
-    let unknown=fixture.repository.mark_model_request_unknown(&parent.token,"inflight-model","io-ended-receipt-unavailable").unwrap();
-    assert_eq!(unknown.state,ModelReservationState::Unknown);
+fn actual_inflight_io_still_blocks_completion_while_unknown_facts_do_not_block_descendants() {
+    let fixture = Fixture::new();
+    let task = fixture.task("inflight-parent", None);
+    let parent = fixture.attempt(&task);
+    fixture.repository.reserve_model_request(&parent.token, "inflight-model").unwrap();
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    assert_eq!(fixture.repository.transition(&parent.token, current.version, TaskState::Completed, None).unwrap_err().code(), "TASK_BLOCKED");
+    let unknown = fixture.repository.mark_model_request_unknown(&parent.token, "inflight-model", "io-ended-receipt-unavailable").unwrap();
+    assert_eq!(unknown.state, ModelReservationState::Unknown);
     assert!(unknown.dispatched.is_none() && unknown.usage.is_none());
-    assert_eq!(fixture.repository.mark_model_request_unknown(&parent.token,"inflight-model","repeat").unwrap().state,ModelReservationState::Unknown);
-    let quiet=fixture.repository.mark_verification_quiescent(&parent.token,"parent-idle").unwrap();
-    let ids=vec![TaskOperationIdentity{task_id:child.task_id.clone(),operation_id:"delegated-write".into()}];
-    assert!(fixture.repository.acknowledge_unknown_task_operations(&task.task_id,quiet.version,&ids).is_err());
-    assert!(fixture.repository.record_operation(&delegated.token,&operation("blocked-by-parent")).is_err());
-    fixture.repository.mark_verification_quiescent(&delegated.token,"child-idle").unwrap();
-    fixture.repository.acknowledge_unknown_task_operations(&task.task_id,quiet.version,&ids).unwrap();
-    let settled=fixture.repository.finish_operation(&delegated.token,"delegated-write",OperationState::Succeeded,Some(json!({"id":"late-original-receipt"})),Some(json!({"kind":"verified-original"}))).unwrap();
-    assert_eq!(settled.state,OperationState::Succeeded);
-    fixture.repository.renew_attempt(&delegated.token,60_000).unwrap();
-    fixture.repository.reconcile_model_request(&parent.token,"inflight-model",false,&TaskUsage::default(),json!({"kind":"verified-no-dispatch"})).unwrap();
-    assert!(fixture.repository.mark_model_request_unknown(&parent.token,"inflight-model","cannot-reopen-settled").is_err());
+    let child = fixture.task("inflight-child", Some(&task));
+    let delegated = fixture.attempt(&child);
+    fixture.repository.record_operation(&delegated.token, &operation("delegated-write")).unwrap();
+    fixture.repository.dispatch_operation(&delegated.token, "delegated-write").unwrap();
+    let current = fixture.repository.load(&child.task_id).unwrap();
+    assert_eq!(fixture.repository.transition(&delegated.token, current.version, TaskState::Completed, None).unwrap_err().code(), "TASK_BLOCKED");
+    fixture.repository.finish_operation(&delegated.token, "delegated-write", OperationState::Unknown, None, None).unwrap();
+    fixture.repository.record_operation(&parent.token, &operation("unrelated-parent-write")).unwrap();
+    let current = fixture.repository.load(&child.task_id).unwrap();
+    fixture.repository.transition(&delegated.token, current.version, TaskState::Completed, None).unwrap();
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    fixture.repository.transition(&parent.token, current.version, TaskState::Completed, None).unwrap();
+    let settled = fixture.repository.finish_operation(&delegated.token, "delegated-write", OperationState::Succeeded,
+        Some(json!({"id":"late-original-receipt"})), Some(json!({"kind":"verified-original"}))).unwrap();
+    assert_eq!(settled.state, OperationState::Succeeded);
+    fixture.repository.reconcile_model_request(&parent.token, "inflight-model", false, &TaskUsage::default(), json!({"kind":"verified-no-dispatch"})).unwrap();
+    assert!(fixture.repository.mark_model_request_unknown(&parent.token, "inflight-model", "cannot-reopen-settled").is_err());
+}
+
+#[test]
+fn takeover_extends_only_operational_floors_and_keeps_usage_and_successful_receipts() {
+    let fixture = Fixture::new();
+    let mut input = new_task("cold-budget-resume");
+    input.budget = TaskBudget { max_model_requests:2, max_known_tokens:Some(10_000), max_execution_ms:Some(1_000) };
+    let task = fixture.repository.accept_task(&input).unwrap();
+    let old = fixture.attempt(&task);
+    let receipt = json!({"kind":"tool-result","id":"saved-original-success"});
+    let intent = operation("saved-effect");
+    fixture.repository.record_operation(&old.token, &intent).unwrap();
+    fixture.repository.dispatch_operation(&old.token, &intent.operation_id).unwrap();
+    fixture.repository.finish_operation(&old.token, &intent.operation_id, OperationState::Succeeded,
+        Some(receipt.clone()), None).unwrap();
+    fixture.repository.record_usage(&old.token, "saved-provider-cost", &TaskUsage {
+        model_requests:2, failed_requests:1, input_tokens:120, output_tokens:20,
+        unknown_token_requests:1, ..Default::default()
+    }).unwrap();
+    fixture.repository.record_active_duration(&old.token, 1_000).unwrap();
+    fixture.repository.release_attempt(&old.token, "shutdown-checkpoint").unwrap();
+    let before = fixture.repository.load(&task.task_id).unwrap();
+    assert!(fixture.repository.start_attempt(&task.task_id, before.version, "old-order", 60_000).is_err());
+    let next = fixture.repository.start_attempt_with_budget_extension(&task.task_id, before.version,
+        "cold-resume", 60_000, &[TaskAttemptBudgetExtension {
+            task_id:task.task_id.clone(), expected_version:before.version,
+            min_model_requests:66, min_execution_ms:1_801_000,
+        }]).unwrap();
+    let resumed = fixture.repository.load(&task.task_id).unwrap();
+    assert_eq!(resumed.task_id, task.task_id);
+    assert_eq!(resumed.usage, before.usage);
+    assert_eq!(resumed.budget.max_known_tokens, Some(10_000));
+    assert_eq!(resumed.budget.max_model_requests, 66);
+    assert_eq!(resumed.budget.max_execution_ms, Some(1_801_000));
+    let saved = fixture.repository.operations(&task.task_id).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].state, OperationState::Succeeded);
+    assert_eq!(saved[0].result_reference, Some(receipt));
+    fixture.repository.reserve_model_request(&next.token, "new-authorized-step").unwrap();
+    assert_eq!(fixture.repository.load(&task.task_id).unwrap().usage, before.usage);
+}
+
+#[test]
+fn failed_takeover_rolls_back_ancestor_extensions_and_keeps_real_token_caps() {
+    let fixture = Fixture::new();
+    let mut input = new_task("cold-budget-tree-root");
+    input.budget = TaskBudget { max_model_requests:2, max_known_tokens:Some(100), max_execution_ms:Some(1_000) };
+    let root = fixture.repository.accept_task(&input).unwrap();
+    let parent = fixture.attempt(&root);
+    let child_input = NewTask { request_id:"cold-budget-tree-child".into(), parent_task_id:Some(root.task_id.clone()), ..input };
+    let child = fixture.repository.accept_task(&child_input).unwrap();
+    let worker = fixture.attempt(&child);
+    let extensions = |child:&TaskRecord, root:&TaskRecord| vec![
+        TaskAttemptBudgetExtension {task_id:child.task_id.clone(), expected_version:child.version, min_model_requests:66, min_execution_ms:1_801_000},
+        TaskAttemptBudgetExtension {task_id:root.task_id.clone(), expected_version:root.version, min_model_requests:66, min_execution_ms:1_801_000},
+    ];
+    let live_child = fixture.repository.load(&child.task_id).unwrap();
+    let live_root = fixture.repository.load(&root.task_id).unwrap();
+    assert!(fixture.repository.start_attempt_with_budget_extension(&child.task_id, live_child.version,
+        "duplicate-live-owner", 60_000, &extensions(&live_child,&live_root)).is_err());
+    assert_eq!(fixture.repository.load(&root.task_id).unwrap().budget, root.budget);
+    fixture.repository.release_attempt(&worker.token, "shutdown-checkpoint").unwrap();
+    let stopped = fixture.repository.load(&child.task_id).unwrap();
+    let mut stale = extensions(&stopped, &live_root);
+    stale[1].expected_version += 1;
+    assert_eq!(fixture.repository.start_attempt_with_budget_extension(&child.task_id, stopped.version,
+        "stale-parent-budget", 60_000, &stale).unwrap_err().code(), "TASK_CONFLICT");
+    assert_eq!(fixture.repository.load(&child.task_id).unwrap().budget, child.budget);
+    assert_eq!(fixture.repository.load(&root.task_id).unwrap().budget, root.budget);
+    fixture.repository.record_usage(&parent.token, "real-token-cap", &TaskUsage {input_tokens:100, ..Default::default()}).unwrap();
+    let capped_root = fixture.repository.load(&root.task_id).unwrap();
+    assert!(fixture.repository.start_attempt_with_budget_extension(&child.task_id, stopped.version,
+        "token-cap-cannot-renew", 60_000, &extensions(&stopped,&capped_root)).is_err());
+    assert_eq!(fixture.repository.load(&root.task_id).unwrap().budget, root.budget);
+    assert_eq!(fixture.repository.load(&child.task_id).unwrap().budget, child.budget);
+    assert_eq!(fixture.repository.load(&root.task_id).unwrap().usage.input_tokens, 100);
+    assert_eq!(fixture.repository.read_events(&root.task_id,0,128).unwrap().iter()
+        .filter(|event|event.kind == "task.budget.extended").count(), 0);
 }
 
 #[test]
@@ -474,28 +531,25 @@ fn legacy_json_projection_mismatch_is_preserved_for_review_instead_of_chosen_as_
 }
 
 #[test]
-fn unknown_operation_acknowledgement_rejects_ambiguous_child_ids_and_supports_task_qualified_selection() {
-    let fixture=Fixture::new();
-    let root=fixture.task("qualified-ack-root",None);
-    let parent=fixture.attempt(&root);
-    let child_a=fixture.task("qualified-ack-a",Some(&root));
-    let child_b=fixture.task("qualified-ack-b",Some(&root));
-    let attempts=[fixture.attempt(&child_a),fixture.attempt(&child_b)];
+fn unknown_operations_keep_task_qualified_identity_without_blocking_siblings() {
+    let fixture = Fixture::new();
+    let root = fixture.task("qualified-unknown-root", None);
+    let parent = fixture.attempt(&root);
+    let child_a = fixture.task("qualified-unknown-a", Some(&root));
+    let child_b = fixture.task("qualified-unknown-b", Some(&root));
+    let attempts = [fixture.attempt(&child_a), fixture.attempt(&child_b)];
     for attempt in &attempts {
-        fixture.repository.record_operation(&attempt.token,&operation("same-local-operation")).unwrap();
-        fixture.repository.dispatch_operation(&attempt.token,"same-local-operation").unwrap();
+        fixture.repository.record_operation(&attempt.token, &operation("same-local-operation")).unwrap();
+        fixture.repository.dispatch_operation(&attempt.token, "same-local-operation").unwrap();
+        fixture.repository.finish_operation(&attempt.token, "same-local-operation", OperationState::Unknown, None, None).unwrap();
+        assert!(fixture.repository.dispatch_operation(&attempt.token, "same-local-operation").is_err());
     }
-    for attempt in &attempts {
-        fixture.repository.release_attempt(&attempt.token,"unknown-after-interruption").unwrap();
-    }
-    let current=fixture.repository.load(&root.task_id).unwrap();
-    let waiting=fixture.repository.transition(&parent.token,current.version,TaskState::WaitingVerification,None).unwrap();
-    fixture.repository.release_attempt(&parent.token,"verification-required").unwrap();
-    assert_eq!(fixture.repository.acknowledge_unknown_operations(&root.task_id,waiting.version,&["same-local-operation".into()]).unwrap_err().code(),"INVALID_TASK");
-    let selected=TaskOperationIdentity{task_id:child_a.task_id.clone(),operation_id:"same-local-operation".into()};
-    fixture.repository.acknowledge_unknown_task_operations(&root.task_id,waiting.version,&[selected]).unwrap();
-    assert!(fixture.repository.operation(&child_a.task_id,"same-local-operation").unwrap().unwrap().is_unknown_acknowledged());
-    assert!(!fixture.repository.operation(&child_b.task_id,"same-local-operation").unwrap().unwrap().is_unknown_acknowledged());
+    fixture.repository.record_operation(&parent.token, &operation("parent-next")).unwrap();
+    fixture.repository.finish_operation(&attempts[0].token, "same-local-operation", OperationState::Succeeded,
+        Some(json!({"id":"child-a-original"})), Some(json!({"kind":"verified-original"}))).unwrap();
+    assert_eq!(fixture.repository.operation(&child_a.task_id, "same-local-operation").unwrap().unwrap().state, OperationState::Succeeded);
+    assert_eq!(fixture.repository.operation(&child_b.task_id, "same-local-operation").unwrap().unwrap().state, OperationState::Unknown);
+    fixture.repository.record_operation(&attempts[1].token, &operation("sibling-next")).unwrap();
 }
 
 #[test]
@@ -850,7 +904,7 @@ fn takeover_preserves_unknown_effect_and_fences_old_executor() {
     );
     assert_eq!(
         fixture.repository.load(&task.task_id).unwrap().state,
-        TaskState::WaitingVerification
+        TaskState::Running
     );
     assert_eq!(
         fixture
@@ -868,14 +922,7 @@ fn takeover_preserves_unknown_effect_and_fences_old_executor() {
             .code(),
         "TASK_BLOCKED"
     );
-    assert_eq!(
-        fixture
-            .repository
-            .record_operation(&next.token, &operation("write-b"))
-            .unwrap_err()
-            .code(),
-        "TASK_BLOCKED"
-    );
+    fixture.repository.record_operation(&next.token, &operation("write-b")).unwrap();
     assert_eq!(
         fixture
             .repository
@@ -1325,7 +1372,7 @@ fn crash_reservation_stays_unknown_until_original_dispatch_is_verified() {
             .reserve_model_request(&next.token, "next-http")
             .unwrap_err()
             .code(),
-        "TASK_BLOCKED"
+        "TASK_BUDGET_EXHAUSTED"
     );
     fixture
         .repository
@@ -1393,59 +1440,24 @@ fn recoverable_wait_resumes_once_without_replaying_unknown_writes() {
 }
 
 #[test]
-fn acknowledged_unknown_effect_stays_unknown_and_stops_blocking_recovery() {
+fn legacy_waiting_verification_resumes_normally_and_preserves_unknown_operations() {
     let fixture = Fixture::new();
-    let task = fixture.task("acknowledge-unknown", None);
+    let task = fixture.task("legacy-waiting-verification", None);
     let first = fixture.attempt(&task);
-    let mut command = operation("run-a");
-    command.tool_name = "terminal.host.run".into();
-    command.effect = OperationEffect::Irreversible;
-    fixture.repository.record_operation(&first.token, &command).unwrap();
-    fixture.repository.dispatch_operation(&first.token, "run-a").unwrap();
-    let mut observation = operation("read-a");
-    observation.tool_name = "filesystem.read".into();
-    observation.effect = OperationEffect::Observation;
-    fixture.repository.record_operation(&first.token, &observation).unwrap();
-    fixture.repository.dispatch_operation(&first.token, "read-a").unwrap();
-    fixture.expire(&first);
-    // Before confirmation the takeover stays waiting and new mutations remain blocked.
-    // 确认前接管仍处于等待核验，新的修改操作继续被阻止。
-    let task = fixture.repository.load(&task.task_id).unwrap();
-    let recovery = fixture.repository.start_attempt(&task.task_id, task.version, "recovery", 60_000).unwrap();
-    assert_eq!(fixture.repository.load(&task.task_id).unwrap().state, TaskState::WaitingVerification);
-    assert_eq!(fixture.repository.record_operation(&recovery.token, &operation("write-b")).unwrap_err().code(), "TASK_BLOCKED");
-    fixture.repository.release_attempt(&recovery.token, "recovery-evidence-required").unwrap();
-    let waiting = fixture.repository.load(&task.task_id).unwrap();
-    assert_eq!(waiting.state, TaskState::WaitingVerification);
-    let ids = vec!["run-a".to_owned()];
-    assert_eq!(fixture.repository.acknowledge_unknown_operations(&task.task_id, waiting.version, &["read-a".into()]).unwrap_err().code(), "TASK_BLOCKED");
-    assert_eq!(fixture.repository.acknowledge_unknown_operations(&task.task_id, waiting.version, &["missing".into()]).unwrap_err().code(), "INVALID_TASK");
-    assert_eq!(fixture.repository.acknowledge_unknown_operations(&task.task_id, waiting.version + 1, &ids).unwrap_err().code(), "TASK_CONFLICT");
-    assert!(!fixture.repository.operation(&task.task_id, "run-a").unwrap().unwrap().is_unknown_acknowledged());
-
-    let acknowledged = fixture.repository.acknowledge_unknown_operations(&task.task_id, waiting.version, &ids).unwrap();
-    assert_eq!(acknowledged.version, waiting.version + 1);
-    let replayed = fixture.repository.acknowledge_unknown_operations(&task.task_id, waiting.version, &ids).unwrap();
-    assert_eq!(replayed.version, acknowledged.version, "Replaying the same confirmation is idempotent.");
-    let settled = fixture.repository.operation(&task.task_id, "run-a").unwrap().unwrap();
-    assert_eq!(settled.state, OperationState::Unknown, "Confirmation never turns an unknown outcome into success.");
-    assert!(settled.is_unknown_acknowledged() && !settled.blocks_recovery());
-    assert_eq!(settled.verification_reference.as_ref().unwrap()["kind"], UNKNOWN_ACKNOWLEDGED_KIND);
-    let events = fixture.repository.read_events(&task.task_id, 0, 512).unwrap();
-    assert_eq!(events.iter().filter(|event| event.kind == "task.operation.unknown-acknowledged").count(), 1);
-    assert!(events.iter().any(|event| event.kind == "task.unknown-acknowledged"));
-
-    // After confirmation the same root resumes, accepts new work and can finish without a fake receipt.
-    // 确认后同一根任务可继续、执行新工作并完成，原操作仍保持未知且没有伪造回执。
-    let resumed = fixture.repository.control(&task.task_id, acknowledged.version, TaskControl::Resume).unwrap();
-    assert_eq!(resumed.state, TaskState::Queued);
-    let next = fixture.repository.start_attempt(&task.task_id, resumed.version, "resumed", 60_000).unwrap();
-    assert_eq!(fixture.repository.load(&task.task_id).unwrap().state, TaskState::Running);
-    fixture.repository.record_operation(&next.token, &operation("write-b")).unwrap();
-    fixture.repository.dispatch_operation(&next.token, "write-b").unwrap();
-    fixture.repository.finish_operation(&next.token, "write-b", OperationState::Succeeded,
-        Some(json!({"resultId":"fixture-write"})), None).unwrap();
+    fixture.repository.record_operation(&first.token, &operation("unknown-write")).unwrap();
+    fixture.repository.dispatch_operation(&first.token, "unknown-write").unwrap();
+    fixture.repository.finish_operation(&first.token, "unknown-write", OperationState::Unknown, None, None).unwrap();
     let current = fixture.repository.load(&task.task_id).unwrap();
-    fixture.repository.transition(&next.token, current.version, TaskState::Completed, None).unwrap();
-    assert_eq!(fixture.repository.operation(&task.task_id, "run-a").unwrap().unwrap().state, OperationState::Unknown);
+    fixture.repository.transition(&first.token, current.version, TaskState::WaitingVerification, Some("legacy-evidence-required")).unwrap();
+    fixture.repository.release_attempt(&first.token, "legacy-process-exit").unwrap();
+    let waiting = fixture.repository.load(&task.task_id).unwrap();
+    let recovered = fixture.repository.start_attempt(&task.task_id, waiting.version, "ordinary-recovery", 60_000).unwrap();
+    assert_eq!(fixture.repository.load(&task.task_id).unwrap().state, TaskState::Running);
+    assert_eq!(fixture.repository.operation(&task.task_id, "unknown-write").unwrap().unwrap().state, OperationState::Unknown);
+    assert!(fixture.repository.dispatch_operation(&recovered.token, "unknown-write").is_err());
+    fixture.repository.record_operation(&recovered.token, &operation("unrelated-next")).unwrap();
+    fixture.repository.release_attempt(&recovered.token, "recovery-settled").unwrap();
+    let current = fixture.repository.load(&task.task_id).unwrap();
+    let paused = fixture.repository.control(&task.task_id, current.version, TaskControl::Pause).unwrap();
+    assert!(fixture.repository.start_attempt(&task.task_id, paused.version, "must-respect-pause", 60_000).is_err());
 }

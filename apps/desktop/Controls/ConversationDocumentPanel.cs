@@ -112,6 +112,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private readonly TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Dictionary<string, string> _viewStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Uri> _navigationUris = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _pendingAnchors = new(StringComparer.Ordinal);
     private readonly Queue<string> _viewOrder = new();
     private sealed record ChromeTab(ConversationChromeView View, Task Initialization) { public long Touched { get; set; } }
     private readonly Dictionary<string, ChromeTab> _chromeViews = new(StringComparer.Ordinal);
@@ -124,13 +125,14 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private Guid _conversationId;
     private string? _activeKey, _path, _title, _requestedVersion, _websiteKey;
     private bool _userSelected, _isWebsite, _isChanges, _showSource, _enabled = true, _disposed;
-    private bool _websiteActivationRequested, _clearingWebsiteData;
+    private bool _websiteActivationRequested, _clearingWebsiteData, _diagramExportPending;
     private Guid? _attachmentMessageId;
     private Guid? _mountId;
     private ChatAttachment? _attachment;
     private long _generation;
 
     public event EventHandler<string>? WebsiteRequested;
+    public event EventHandler<(Guid ConversationId, string Path, Guid? MountId)>? FileRequested;
     internal WebView2? DocumentBrowser => _document;
     internal WebView2? WebsiteBrowser => _website;
     internal ConversationChromeView? ChromeBrowser => _chrome;
@@ -213,6 +215,21 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _isChanges = false; _isWebsite = false; _path = attachment.Name; _title = attachment.Name;
         _requestedVersion = attachment.Sha256; _activeKey = key; _showSource = false; _current = null; _contentAddress = null;
         OpenCachedOrRead();
+    }
+
+    public void NavigateToAnchor(string fragment)
+    {
+        if (_activeKey is not { } key || string.IsNullOrEmpty(fragment)) return;
+        _pendingAnchors[key] = fragment;
+        if (_views.TryGetValue(key, out var view) && view.RenderedSignature is not null && !view.Preparing
+            && view.Rendered.Task.IsCompletedSuccessfully)
+            ApplyPendingAnchor(view);
+    }
+
+    private void ApplyPendingAnchor(BrowserView view)
+    {
+        if (view.Browser.CoreWebView2?.Source == PreviewPage && _pendingAnchors.Remove(view.Key, out var fragment))
+            view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "anchor", key = view.Key, fragment }));
     }
 
     public void ShowChanges(Guid conversationId, Guid? mountId = null)
@@ -469,7 +486,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             if (!IsLive(work)) return;
             if (next.Version != previous.Version) { if (IsSelected(work)) BeginRead(); return; }
             if (IsSelected(work)) SaveViewState();
-            work.Preview = next with { Text = (previous.Text ?? "") + (next.Text ?? "") };
+            work.Preview = next with { Text = (previous.Text ?? "") + (next.Text ?? ""),
+                Rows = previous.Rows is null ? next.Rows : [.. previous.Rows, .. next.Rows ?? []] };
             CacheDocument(work);
             await QueueDocument(work);
         }
@@ -534,7 +552,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 view.Rendered = NewReady(); view.BackgroundPreparing = false;
                 view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "show", key = work.Key,
                     renderId = ++view.RenderId,
-                    kind = source ? "text" : code ? "code" : preview.Kind, text, html,
+                    kind = source ? "text" : code ? "code" : preview.Kind, text, html, rows = preview.Rows, delimiter = preview.Delimiter,
                     contentUrl = IsDirectOfficeDocument(preview.Kind) ? DocumentContentAddress(preview.Kind, preview.Version) : work.ContentAddress?.AbsoluteUri,
                     state = _viewStates.GetValueOrDefault(work.Key), title = work.Title ?? preview.Title }));
                 try { await view.Rendered.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken); }
@@ -549,6 +567,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                     continue;
                 }
                 view.RenderedSignature = signature;
+                ApplyPendingAnchor(view);
             }
             if (work.ShowSource == source && ReferenceEquals(work.Preview, preview)) return;
         }
@@ -592,7 +611,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private void SetPreviewActions(WorkspacePreviewTarget preview)
     {
-        _source.Visibility = preview.Kind is "markdown" or "mermaid" ? Visibility.Visible : Visibility.Collapsed;
+        _source.Visibility = preview.Kind is "markdown" or "mermaid" or "delimited" ? Visibility.Visible : Visibility.Collapsed;
         _more.Visibility = preview.HasMore ? Visibility.Visible : Visibility.Collapsed;
         _source.Content = _showSource ? UiText.Get("显示预览") : UiText.Get("查看源码");
     }
@@ -647,6 +666,13 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += (sender, args) =>
         {
+            if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var imageUri)
+                && TranscriptMarkdown.TryImageSource(imageUri, out var imagePath))
+            {
+                var imageDeferral = args.GetDeferral();
+                _ = SupplyMarkdownImageAsync(view, args, environment, imagePath, imageDeferral.Complete);
+                return;
+            }
             if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var documentUri)
                 && documentUri.Scheme == "https" && documentUri.Host == DocumentContentHost
                 && documentUri.AbsolutePath is "/Workspace/document.docx" or "/Workspace/document.pptx" or "/Workspace/document.xlsx")
@@ -672,6 +698,27 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     }
 
     private static bool IsDirectOfficeDocument(string kind) => kind is "docx" or "pptx" or "xlsx";
+
+    private async Task SupplyMarkdownImageAsync(BrowserView view, CoreWebView2WebResourceRequestedEventArgs args,
+        CoreWebView2Environment environment, string path, Action completeDeferral)
+    {
+        try
+        {
+            var work = view.Work;
+            if (work is null || !IsLive(work) || args.Request.Method != "GET"
+                || view.Browser.CoreWebView2.Source != PreviewPage || work.Preview?.Kind != "markdown")
+            { args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", ""); return; }
+            string resolved = TranscriptMarkdown.ResolveFileLink(path, work.Path);
+            var image = await _api.ReadImageContentAsync(work.ConversationId, resolved, work.Cancellation.Token, work.MountId);
+            if (!IsLive(work))
+            { args.Response = environment.CreateWebResourceResponse(null, 409, "Document changed", ""); return; }
+            args.Response = environment.CreateWebResourceResponse(new MemoryStream(image.Bytes, writable: false).AsRandomAccessStream(), 200, "OK",
+                $"Content-Type: {image.ContentType}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff");
+        }
+        catch (Exception error) when (error is HttpRequestException or InvalidDataException or OperationCanceledException or System.Runtime.InteropServices.COMException)
+        { if (!_disposed) args.Response = environment.CreateWebResourceResponse(null, 404, "Image unavailable", ""); }
+        finally { completeDeferral(); }
+    }
 
     private static string DocumentContentAddress(string kind, string version) =>
         "https://" + DocumentContentHost + "/Workspace/document." + kind + "?version=" + Uri.EscapeDataString(version);
@@ -865,14 +912,52 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 return;
             }
             if (messageKey != _activeKey) return;
-            if (type == "link" && message.TryGetProperty("url", out var url) && TryWebsite(url.GetString(), out _)) OpenLink(url.GetString()!);
+            if (type == "exportDiagram") { _ = ExportWorkspaceDiagramAsync(view, message.Clone()); return; }
+            if (type == "link" && message.TryGetProperty("url", out var url) && url.GetString() is { } target && TranscriptMarkdown.IsSafeUrl(target))
+            {
+                if (TryWebsite(target, out _)) OpenLink(target);
+                else if (Uri.TryCreate(target, UriKind.Absolute, out var mail) && mail.Scheme == "mailto") _ = Launcher.LaunchUriAsync(mail);
+                else if (view.Work is { } work)
+                    FileRequested?.Invoke(this, (work.ConversationId, TranscriptMarkdown.ResolveFileLink(target, work.Path), work.MountId));
+            }
             else if (type == "copy" && message.TryGetProperty("text", out var text))
             {
-                var data = new DataPackage(); data.SetText(text.GetString() ?? ""); Clipboard.SetContent(data);
+                bool success = false;
+                try { var data = new DataPackage(); data.SetText(text.GetString() ?? ""); Clipboard.SetContent(data); Clipboard.Flush(); success = true; }
+                catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
+                view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "copyResult", key = view.Key,
+                    requestId = message.TryGetProperty("requestId", out var request) ? request.GetString() : null, success }));
             }
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
         { Debug.WriteLine($"Workspace preview message: {error.GetType().Name}"); }
+    }
+
+    private async Task ExportWorkspaceDiagramAsync(BrowserView view, JsonElement message)
+    {
+        if (!message.TryGetProperty("requestId", out var request) || request.GetString() is not { Length: > 0 and <= 80 } requestId
+            || !message.TryGetProperty("format", out var format) || !message.TryGetProperty("content", out var content)) return;
+        long renderId = view.RenderId;
+        void Reply(DiagramExportOutcome outcome)
+        {
+            if (_disposed || view.Closed || _activeKey != view.Key || view.RenderId != renderId) return;
+            view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "diagramExportResult", key = view.Key,
+                requestId, outcome = outcome switch { DiagramExportOutcome.Success => "success", DiagramExportOutcome.Cancelled => "cancelled", _ => "error" } }));
+        }
+        if (_diagramExportPending) { Reply(DiagramExportOutcome.Error); return; }
+        _diagramExportPending = true;
+        try
+        {
+            var export = await DiagramExport.ValidateAsync(format.GetString() ?? "", content.GetString() ?? "");
+            if (_disposed || view.Closed || _activeKey != view.Key || view.RenderId != renderId) return;
+            nint owner = XamlRoot is null ? 0 : Microsoft.UI.Win32Interop.GetWindowFromWindowId(XamlRoot.ContentIslandEnvironment.AppWindowId);
+            Reply(await DiagramExport.SaveAsync(export, owner));
+        }
+        catch (OperationCanceledException) { Reply(DiagramExportOutcome.Cancelled); }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or FormatException
+            or ArgumentException or InvalidOperationException or System.Xml.XmlException or NotSupportedException or TimeoutException
+            or System.Runtime.InteropServices.COMException) { Reply(DiagramExportOutcome.Error); }
+        finally { _diagramExportPending = false; }
     }
 
     private void SaveViewState()
@@ -974,7 +1059,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _viewStates[key] = state;
         while (_viewOrder.Count > 128)
         {
-            string removed = _viewOrder.Dequeue(); _viewStates.Remove(removed); _navigationUris.Remove(removed);
+            string removed = _viewOrder.Dequeue(); _viewStates.Remove(removed); _navigationUris.Remove(removed); _pendingAnchors.Remove(removed);
         }
     }
 
@@ -1144,6 +1229,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (_showingVerification) SetNotice(UiText.Get(_alternativeSearchAddress is null
             ? "此网页需要人工验证，请在网页中完成。" : "搜索服务需要人工验证，可在网页完成验证或切换搜索源。"));
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
+        ApplyAppearance();
     });
 
     private void ApplyAppearance()
@@ -1156,7 +1242,17 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _address.FocusVisualPrimaryBrush = border; _address.FocusVisualSecondaryBrush = border;
         _notice.Foreground = _loading.Foreground = new SolidColorBrush(AppearanceService.ParseColor(palette.Secondary));
         var appearance = new { type = "appearance", palette = new { main = palette.Main, soft = palette.Soft, accent = palette.Secondary,
-            text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar } };
+            text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar },
+            strings = new {
+                copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"),
+                copyBlock = UiText.Get("复制此内容块"), copyCurrentContent = UiText.Get("复制当前内容"), blockPlainText = UiText.Get("文本"),
+                blockWrap = UiText.Get("自动换行"), blockUnwrap = UiText.Get("原样显示"), blockExpand = UiText.Get("展开"), blockCollapse = UiText.Get("收起"),
+                blockLineCount = UiText.Get("{0} 行"), blockClearSelection = UiText.Get("请先取消文字选择，再调整显示。"),
+                tableBlockLabel = UiText.Get("表格"), copyTable = UiText.Get("复制表格（可粘贴到 Excel）"),
+                copyTableMarkdown = UiText.Get("复制为 Markdown"), tableCopyOptions = UiText.Get("更多复制格式"), tableEmpty = UiText.Get("空表格"),
+                diagramSource = UiText.Get("查看源码"), diagramHideSource = UiText.Get("收起源码"), diagramCopySource = UiText.Get("复制源码"),
+                diagramExportSvg = UiText.Get("导出 SVG"), diagramExportPng = UiText.Get("导出 PNG"), diagramExported = UiText.Get("图表已导出"),
+                diagramExportCancelled = UiText.Get("已取消导出"), diagramExportFailed = UiText.Get("导出失败，请重试。") } };
         foreach (var view in _views.Values)
         {
             view.Browser.DefaultBackgroundColor = AppearanceService.ParseColor(palette.Main);
@@ -1222,7 +1318,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         };
         if (key is null) return;
         if (_documentWork.Remove(key, out var work)) CloseDocumentWork(work);
-        _documents.Remove(key); _viewStates.Remove(key); _navigationUris.Remove(key); CloseView(key);
+        _documents.Remove(key); _viewStates.Remove(key); _navigationUris.Remove(key); _pendingAnchors.Remove(key); CloseView(key);
         RemoveStateOrder(item => item == key);
         if (_chromeViews.Remove(key, out var chrome)) { _viewport.Children.Remove(chrome.View); CloseChromeView(chrome.View); }
     }

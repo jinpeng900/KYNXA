@@ -26,6 +26,7 @@ pub mod memory_lifecycle;
 pub mod memory_repository;
 pub mod memory_service;
 pub mod message_attachments;
+pub mod model_images;
 #[cfg(test)]
 mod native_services_tests;
 pub mod raw_json;

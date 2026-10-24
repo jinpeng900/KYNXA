@@ -113,16 +113,16 @@ public partial class App : Application
         NativeUi.RequestClose(shell.Window);
         await WaitAsync(() => !shell.Window.AppWindow.IsVisible && !secondary.Window.AppWindow.IsVisible,
             "WM_CLOSE immediately hides the main and secondary windows while metadata is busy");
-        Check(elapsed.Elapsed < TimeSpan.FromSeconds(1) && !shell.IsClosed && !page.IsEnabled && page.PauseCalls == 1,
+        Check(elapsed.Elapsed < TimeSpan.FromSeconds(1) && !shell.IsClosed && !page.IsEnabled && page.PauseCalls == 0,
             "visible exit feedback arrives within one second without ending the pending transaction");
         Check(store.SaveCalls == 0 && _anchor is { AppWindow.IsVisible: false },
             "close waits for existing metadata and preserves the hidden fixture host");
         NativeUi.RequestClose(shell.Window);
         await Task.Delay(100);
-        Check(store.SaveCalls == 0 && page.PauseCalls == 1, "a repeated WM_CLOSE does not start another close operation");
+        Check(store.SaveCalls == 0 && page.PauseCalls == 0, "a repeated WM_CLOSE does not start another close operation");
         page.SetMetadataBusy(false);
         await WaitAsync(() => store.SaveCalls == 1, "finishing existing metadata starts one combined catalog save");
-        Check(!shell.IsClosed && !shell.Window.AppWindow.IsVisible && store.SaveToken.CanBeCanceled,
+        Check(!shell.IsClosed && !shell.Window.AppWindow.IsVisible && store.SaveToken.CanBeCanceled && page.PauseCalls == 1,
             "the native window stays hidden and open until the cancellable save settles");
         Check(store.SavedProjects.SequenceEqual(["synthetic-project"]) && store.SavedChats.SequenceEqual(["synthetic-chat"]) &&
             page.ProjectCaptures == 1 && page.StandaloneCaptures == 1 && page.CapturedDraft == draft,

@@ -68,7 +68,7 @@ public sealed partial class ShellPage
             _runningTaskRecovery = null;
         }
         if (chat is not { IsPersisted: true } || _chatClosing || _savingOnClose || _projectViewClosed ||
-            _pendingReplies.ContainsKey(chat.Id) || _resumingTaskConversations.Contains(chat.Id)) return;
+            _pendingReplies.ContainsKey(chat.Id)) return;
         if (_runningTaskRecovery is null)
         {
             var recovery = new RunningTaskRecovery(chat, projectId,
@@ -123,7 +123,7 @@ public sealed partial class ShellPage
     private async Task AttachRunningTaskObservationAsync(RunningTaskRecovery recovery)
     {
         if (!IsCurrentTaskRecovery(recovery) || _sendingPrompt || recovery.Attaching || recovery.Finished ||
-            _pendingReplies.ContainsKey(recovery.Chat.Id) || _resumingTaskConversations.Contains(recovery.Chat.Id)) return;
+            _pendingReplies.ContainsKey(recovery.Chat.Id)) return;
         recovery.Attaching = true;
         try
         {
@@ -139,22 +139,33 @@ public sealed partial class ShellPage
                 if (!recovery.Chat.Messages.Any(message => message.Role == "assistant" &&
                     message.SupersededByUserMessageId is null && message.Status == "streaming"))
                 { recovery.Finished = true; return; }
-                candidate = (recovery.Tasks ?? []).Where(task => task.ParentTaskId is null && TaskStates.IsTerminal(task.State))
+                candidate = (recovery.Tasks ?? []).Where(task => task.ParentTaskId is null
+                    && (TaskStates.IsTerminal(task.State) || TaskStates.CanResume(task.State)))
                     .OrderByDescending(task => task.UpdatedAtMs).FirstOrDefault();
             }
             if (candidate is null) { recovery.Finished = true; return; }
             recovery.Detail ??= await _tasksApiClient.GetAsync(recovery.Chat.Id, candidate.TaskId, recovery.ProjectId,
                 recovery.Cancellation.Token);
-            if (!IsCurrentTaskRecovery(recovery) || _sendingPrompt || _pendingReplies.ContainsKey(recovery.Chat.Id) ||
-                _resumingTaskConversations.Contains(recovery.Chat.Id)) return;
+            if (!IsCurrentTaskRecovery(recovery) || _sendingPrompt || _pendingReplies.ContainsKey(recovery.Chat.Id)) return;
             var current = recovery.Detail.Task;
-            if (TaskStates.IsTerminal(current.State))
+            if (TaskStates.IsTerminal(current.State) || current.State is "paused" or "waiting-config" or "waiting-verification")
             {
                 if (!_historyPages.TryGetValue(recovery.Chat.Id, out var history) || history.Loading) return;
                 recovery.Finished = true;
                 // Discovery may race completion; reload the formal reply, including partial outcomes.
                 // 发现期间任务可能结束；仅刷新正式回复，照常显示 partial，不恢复或重做操作。
                 await LoadHistoryAsync(history, "refresh");
+                if (Guid.TryParse(current.RequestId, out var requestId)
+                    && FindTaskSteeringReply(recovery.Chat, requestId) is { Status: "streaming" } saved)
+                {
+                    // A saved waiting task is not generating; settle only its replaceable display projection.
+                    // 已保存的等待任务没有生成；仅结束可重建的展示状态，原文和回执保持不变。
+                    saved.Status = "interrupted"; saved.ExecutionPhase = string.Empty;
+                    for (int i = 0; i < saved.AssistantSegments.Count; i++)
+                        if (saved.AssistantSegments[i].Status == "streaming")
+                            saved.AssistantSegments[i] = saved.AssistantSegments[i] with { Status = "interrupted" };
+                    if (IsCurrentTaskRecovery(recovery)) UpdateConversationPresentation(openAtBottom: false);
+                }
                 return;
             }
             if (current.State is "queued" or "running")

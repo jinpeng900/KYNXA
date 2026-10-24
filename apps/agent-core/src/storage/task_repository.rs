@@ -151,14 +151,6 @@ fn ancestors(connection: &Connection, task: &TaskRecord) -> Result<Vec<TaskRecor
 fn pending_reservations(connection: &Connection, task_id: &str) -> Result<u64> {
     connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT COUNT(*) FROM task_model_reservations r JOIN tree t ON r.task_id=t.id WHERE r.state IN ('reserved','unknown')",[task_id],|row|row.get(0)).map_err(|_|failure())
 }
-fn blocking_model_reservations(connection: &Connection, task_id: &str) -> Result<u64> {
-    connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT COUNT(*) FROM task_model_reservations r JOIN tree t ON r.task_id=t.id WHERE r.state='reserved' OR (r.state='unknown' AND COALESCE(json_extract(r.document,'$.verificationReference.kind'),'')<>?2)",params![task_id,UNKNOWN_MODEL_COST_ACKNOWLEDGED_KIND],|row|row.get(0)).map_err(|_|failure())
-}
-fn tree_has_unknown_mutation(connection: &Connection, task: &TaskRecord) -> Result<bool> {
-    let lineage = ancestors(connection, task)?;
-    let root = lineage.last().ok_or_else(failure)?;
-    connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT EXISTS(SELECT 1 FROM task_operations o JOIN tree t ON o.task_id=t.id WHERE o.state='unknown' AND o.effect<>'observation' AND COALESCE(json_extract(o.document,'$.verificationReference.kind'),'')<>?2)",params![&root.task_id,UNKNOWN_ACKNOWLEDGED_KIND],|row|row.get(0)).map_err(|_|failure())
-}
 fn same_authorization(left: &TaskScope, right: &TaskScope) -> Result<bool> {
     Ok(left.project_id == right.project_id
         && fingerprint(&left.permission_snapshot)? == fingerprint(&right.permission_snapshot)?)
@@ -186,35 +178,6 @@ fn verify_fence(
     Ok(task)
 }
 
-/// Quiescence is tied to the current lease and latest state transition, not an old confirmation flag.
-/// 静止状态绑定当前租约和最近状态转换；旧标记不能为新执行者或后续运行放行确认。
-fn verification_is_quiescent(connection: &Connection, task: &TaskRecord) -> Result<bool> {
-    if task.state != TaskState::WaitingVerification { return Ok(false); }
-    let event: Option<String> = connection.query_row("SELECT document FROM task_events WHERE task_id=? AND json_extract(document,'$.kind') IN ('task.state','task.waiting','task.control','task.attempt.started','task.plan-superseded','task.child.review-return','task.verification.quiescent') ORDER BY sequence DESC LIMIT 1", [&task.task_id], |row|row.get(0)).optional().map_err(|_|failure())?;
-    let Some(event) = event else { return Ok(false); };
-    let event: TaskEvent = decode(event)?;
-    Ok(event.kind == "task.verification.quiescent"
-        && event.payload["attemptId"].as_str() == task.current_attempt_id.as_deref()
-        && event.payload["executionVersion"].as_u64() == Some(task.execution_version))
-}
-
-fn verify_acknowledgement_executor(connection: &Connection, task: &TaskRecord) -> Result<()> {
-    if let Some(id) = task.current_attempt_id.as_deref() {
-        let active: bool = connection.query_row("SELECT ended=0 AND lease_expires_at_ms>? FROM task_attempts WHERE attempt_id=?", params![now_ms(),id], |row|row.get(0)).map_err(|_|failure())?;
-        if active && !verification_is_quiescent(connection, task)? {
-            return Err(blocked("A live executor has not reached verification quiescence. / 原执行者尚未进入核验静止状态。"));
-        }
-    }
-    Ok(())
-}
-
-fn verify_new_work_fence(connection: &Connection, token: &AttemptToken) -> Result<TaskRecord> {
-    let task = verify_fence(connection, token, false)?;
-    if ancestors(connection, &task)?.iter().any(|member|member.state==TaskState::WaitingVerification) {
-        return Err(blocked("Verification suspends new dispatch while original receipts remain writable. / 核验期间暂停新派发，仍可记录原始回执。"));
-    }
-    Ok(task)
-}
 fn append(
     connection: &Connection,
     task: &mut TaskRecord,
@@ -254,6 +217,27 @@ fn append(
     connection.execute("INSERT INTO task_events(task_id,sequence,event_id,fingerprint,document) VALUES(?,?,?,?,?)",params![task.task_id,event.sequence,event_id,digest,document]).map_err(|_| failure())?;
     save_task(connection, task)?;
     Ok(event)
+}
+
+fn extend_budget(
+    connection: &Connection,
+    task: &mut TaskRecord,
+    min_model_requests: u64,
+    min_execution_ms: u64,
+    reason: &str,
+    attempt_id: &str,
+) -> Result<()> {
+    let previous = task.budget.clone();
+    task.budget.max_model_requests = task.budget.max_model_requests.max(min_model_requests);
+    // None already means unlimited; renewal cannot introduce a cap or alter token limits.
+    // None 已表示不限时；续展不能新增时限，也不修改 token 上限。
+    task.budget.max_execution_ms = task.budget.max_execution_ms.map(|limit|limit.max(min_execution_ms));
+    if task.budget == previous { return Ok(()); }
+    task.version += 1;
+    let event_id = format!("budget:{attempt_id}:{}", task.version);
+    let payload = json!({"previous":previous,"budget":task.budget,"reason":reason,"attemptId":attempt_id});
+    append(connection, task, &event_id, "task.budget.extended", &payload)?;
+    Ok(())
 }
 
 /// Use GatewayConfig.data_root; do not hardcode paths or duplicate tool/body stores.
@@ -730,6 +714,19 @@ impl TaskRepository {
         executor_id: &str,
         lease_ms: u64,
     ) -> Result<TaskAttempt> {
+        self.start_attempt_with_budget_extension(task_id, expected_version, executor_id, lease_ms, &[])
+    }
+
+    /// Renew proven implicit segments atomically with takeover; failed claims change no ancestor budget.
+    /// 已确认的隐式执行段随接管原子续展，接管失败不能改变祖先预算。
+    pub fn start_attempt_with_budget_extension(
+        &self,
+        task_id: &str,
+        expected_version: u64,
+        executor_id: &str,
+        lease_ms: u64,
+        extensions: &[TaskAttemptBudgetExtension],
+    ) -> Result<TaskAttempt> {
         identifier(executor_id)?;
         if !(1_000..=3_600_000).contains(&lease_ms) {
             return Err(invalid(
@@ -740,34 +737,58 @@ impl TaskRepository {
             let mut task=row_task(connection,task_id)?;
             if task.version!=expected_version {return Err(conflict("Task changed before execution claim. / 接管前任务已变化。"));}
             if task.state.is_terminal() || task.state==TaskState::Paused {return Err(blocked("Task is paused or ended. / 任务已暂停或结束。"));}
+            let mut tree = ancestors(connection, &task)?;
+            if tree.iter().any(|record| record.state.is_terminal() || record.state == TaskState::Paused) {
+                return Err(blocked("Task tree is paused or ended. / 任务树已暂停或结束。"));
+            }
+            let timestamp = now_ms();
+            let mut previous = if let Some(attempt_id) = task.current_attempt_id.as_deref() {
+                let document: String = connection.query_row("SELECT document FROM task_attempts WHERE attempt_id=?",
+                    [attempt_id], |row| row.get(0)).map_err(|_|failure())?;
+                let previous: TaskAttempt = decode(document)?;
+                if previous.ended_at_ms.is_none() && previous.lease_expires_at_ms > timestamp {
+                    return Err(blocked("Task already has a live executor. / 任务已有有效执行者。"));
+                }
+                Some(previous)
+            } else { None };
+            for dependency_id in &task.dependency_ids {if row_task(connection,dependency_id)?.state!=TaskState::Completed {return Err(blocked("Required dependency is not verified complete. / 必需依赖尚未核验完成。"));}}
+            let attempt_id = uuid::Uuid::new_v4().to_string();
+            let mut extended = std::collections::HashSet::new();
+            for extension in extensions {
+                if !extended.insert(&extension.task_id) {
+                    return Err(invalid("Duplicate takeover budget owner. / 接管预算所有者不能重复。"));
+                }
+                let record = tree.iter_mut().find(|record|record.task_id == extension.task_id)
+                    .ok_or_else(||invalid("Budget extension must belong to this task's ancestors. / 预算续展必须属于本任务及其祖先。"))?;
+                if record.version != extension.expected_version {
+                    return Err(conflict("Budget owner changed before takeover. / 接管前预算所有者已变化。"));
+                }
+                extend_budget(connection, record, extension.min_model_requests, extension.min_execution_ms,
+                    "resume-authorized-unfinished-work", &attempt_id)?;
+            }
+            task = tree[0].clone();
             let reconciliation_needed=task.current_attempt_id.is_some()
-                && (read_operations(connection,task_id)?.iter().any(|operation|matches!(operation.state,OperationState::Dispatched|OperationState::Unknown) && !operation.is_unknown_acknowledged())
-                    || read_reservations(connection,task_id)?.iter().any(ModelRequestReservation::blocks_recovery));
-            for record in ancestors(connection,&task)? {
+                && (read_operations(connection,task_id)?.iter().any(|operation|matches!(operation.state,OperationState::Dispatched|OperationState::Unknown))
+                    || read_reservations(connection,task_id)?.iter().any(|reservation| matches!(reservation.state, ModelReservationState::Reserved | ModelReservationState::Unknown)));
+            for record in tree {
                 if record.state.is_terminal() || record.state==TaskState::Paused || (!reconciliation_needed && (record.usage.is_exhausted(&record.budget) || record.usage.model_requests.saturating_add(pending_reservations(connection,&record.task_id)?)>=record.budget.max_model_requests)) {return Err(blocked("Task tree is controlled or its budget is exhausted. / 任务树已暂停、取消或总预算耗尽。"));}
             }
-            for dependency_id in &task.dependency_ids {if row_task(connection,dependency_id)?.state!=TaskState::Completed {return Err(blocked("Required dependency is not verified complete. / 必需依赖尚未核验完成。"));}}
-            let timestamp=now_ms();
-            if let Some(attempt_id)=task.current_attempt_id.as_deref() {
-                let document:String=connection.query_row("SELECT document FROM task_attempts WHERE attempt_id=?",[attempt_id],|row|row.get(0)).map_err(|_|failure())?;
-                let mut previous:TaskAttempt=decode(document)?;
-                if previous.ended_at_ms.is_none() && previous.lease_expires_at_ms>timestamp {return Err(blocked("Task already has a live executor. / 任务已有有效执行者。"));}
+            if let Some(previous)=previous.as_mut() {
                 if previous.ended_at_ms.is_none() {
                     previous.ended_at_ms=Some(timestamp);previous.stop_reason=Some("ownership-expired".into());
-                    connection.execute("UPDATE task_attempts SET ended=1,document=? WHERE attempt_id=?",params![raw(&previous)?,attempt_id]).map_err(|_|failure())?;
+                    connection.execute("UPDATE task_attempts SET ended=1,document=? WHERE attempt_id=?",params![raw(&previous)?,previous.token.attempt_id]).map_err(|_|failure())?;
                     let unsettled=read_operations(connection,task_id)?;
                     for mut operation in unsettled.into_iter().filter(|operation|operation.state==OperationState::Dispatched) {
                         operation.state=OperationState::Unknown;operation.updated_at_ms=timestamp;save_operation(connection,&operation)?;
                     }
-                    preserve_unsettled_reservations(connection,task_id,attempt_id)?;
+                    preserve_unsettled_reservations(connection,task_id,&previous.token.attempt_id)?;
                 }
             }
             task.execution_version+=1;task.version+=1;
-            let token=AttemptToken {task_id:task_id.to_owned(),attempt_id:uuid::Uuid::new_v4().to_string(),execution_version:task.execution_version};
+            let token=AttemptToken {task_id:task_id.to_owned(),attempt_id,execution_version:task.execution_version};
             let attempt=TaskAttempt {token:token.clone(),executor_id:executor_id.to_owned(),lease_expires_at_ms:timestamp.saturating_add(lease_ms as i64),started_at_ms:timestamp,ended_at_ms:None,stop_reason:None,active_duration_ms:0};
             task.current_attempt_id=Some(token.attempt_id.clone());
-            task.state=if read_operations(connection,task_id)?.iter().any(|operation|operation.state==OperationState::Unknown && operation.blocks_recovery())
-                || read_reservations(connection,task_id)?.iter().any(|reservation| reservation.state==ModelReservationState::Unknown && reservation.blocks_recovery()) {TaskState::WaitingVerification} else {TaskState::Running};
+            task.state=TaskState::Running;
             task.stop_reason=None;
             connection.execute("INSERT INTO task_attempts(attempt_id,task_id,execution_version,ended,lease_expires_at_ms,document) VALUES(?,?,?,0,?,?)",params![token.attempt_id,task_id,token.execution_version,attempt.lease_expires_at_ms,raw(&attempt)?]).map_err(|_|failure())?;
             let payload=json!({"attempt":attempt,"state":task.state});
@@ -857,19 +878,11 @@ impl TaskRepository {
         self.write(|connection| {
             let mut task=verify_fence(connection,token,false)?;
             if task.version!=expected_version {return Err(conflict("Task changed before transition. / 状态提交前任务已变化。"));}
-            if state==TaskState::Running && task.state==TaskState::WaitingVerification
-                && (read_operations(connection,&task.task_id)?.iter().any(TaskOperation::blocks_recovery)
-                    || blocking_model_reservations(connection,&task.task_id)?>0 || tree_has_unknown_mutation(connection,&task)?) {
-                return Err(blocked("Verification must settle or explicitly acknowledge unknown outcomes before execution continues. / 须先结算或显式确认未知结果，才能继续执行。"));
-            }
             if state==TaskState::Completed {
-                // Keep interrupted observations Unknown without making unrelated reads a write barrier.
-                // 中断观察保持 Unknown，不把无关读取当作写入屏障。
-                // Acknowledged Unknown no longer blocks completion, but never becomes success.
-                // 用户确认的 Unknown 不再阻止完成，但不改记成功。
-                if read_operations(connection,&task.task_id)?.iter().any(TaskOperation::blocks_recovery) {return Err(blocked("Unknown effects prevent verified completion. / 结果未知的副作用阻止核验完成。"));}
-                if blocking_model_reservations(connection,&task.task_id)?>0 {return Err(blocked("Unsettled model requests prevent verified completion. / 未结算模型请求阻止核验完成。"));}
-                if tree_has_unknown_mutation(connection,&task)? { return Err(blocked("Unknown delegated effects still require verification after a plan update. / 更新方案后，子任务未知副作用仍须核验。")); }
+                // Historical uncertainty is not a global barrier; actual in-flight I/O must still settle.
+                // 历史未知不阻塞整个任务；真正仍在途的调用仍须先结算。
+                let inflight:bool=connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT EXISTS(SELECT 1 FROM task_operations o JOIN tree t ON o.task_id=t.id WHERE o.state='dispatched') OR EXISTS(SELECT 1 FROM task_model_reservations r JOIN tree t ON r.task_id=t.id WHERE r.state='reserved')", [&task.task_id], |row|row.get(0)).map_err(|_|failure())?;
+                if inflight { return Err(blocked("In-flight operations must settle before completion. / 在途操作须先结算再记录完成。")); }
                 let incomplete:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id=? AND state<>'completed' AND NOT(state='cancelled' AND json_extract(document,'$.stopReason')='superseded-by-user-steering'))",[&task.task_id],|row|row.get(0)).map_err(|_|failure())?;
                 if incomplete {return Err(blocked("Child tasks remain incomplete; use a partial outcome. / 子任务未全部完成，应记录部分结果。"));}
             }
@@ -879,25 +892,6 @@ impl TaskRepository {
         })
     }
 
-    /// Require settled I/O and dispatch records; retain leases and original Unknown outcomes.
-    /// 须先结束 I/O 并结算在途记录，保留租约及原始 Unknown 结果。
-    pub fn mark_verification_quiescent(&self, token: &AttemptToken, reason: &str) -> Result<TaskRecord> {
-        identifier(reason)?;
-        self.write(|connection| {
-            let mut task = verify_fence(connection, token, false)?;
-            let inflight: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM task_operations WHERE task_id=?1 AND state='dispatched') OR EXISTS(SELECT 1 FROM task_model_reservations WHERE task_id=?1 AND state='reserved')", [&task.task_id], |row|row.get(0)).map_err(|_|failure())?;
-            if inflight { return Err(blocked("In-flight operations or model reservations have not settled. / 仍有进行中的操作或模型预约，不能宣告静止。")); }
-            if verification_is_quiescent(connection, &task)? { return Ok(task); }
-            task.state = TaskState::WaitingVerification;
-            task.stop_reason = Some(reason.to_owned());
-            task.version += 1;
-            let state = json!({"state":task.state,"reason":reason});
-            append(connection,&mut task,&uuid::Uuid::new_v4().to_string(),"task.state",&state)?;
-            let payload = json!({"attemptId":token.attempt_id,"executionVersion":token.execution_version,"stateVersion":task.version,"reason":reason});
-            append(connection,&mut task,&uuid::Uuid::new_v4().to_string(),"task.verification.quiescent",&payload)?;
-            Ok(task)
-        })
-    }
     pub fn control(
         &self,
         task_id: &str,
@@ -1031,161 +1025,6 @@ impl TaskRepository {
             append(connection,&mut child,&event_id,"task.child.review-return",&payload)?;
             append(connection,&mut parent,&parent_event_id,"task.child.review",&parent_review)?;
             Ok(child)
-        })
-    }
-
-    /// Record acknowledged unknown effects without marking success or replaying them; unblock recovery only.
-    /// 记录用户确认的未知操作，不改记成功或重放，仅解除恢复阻塞。
-    pub fn acknowledge_unknown_operations(
-        &self,
-        root_task_id: &str,
-        expected_version: u64,
-        operation_ids: &[String],
-    ) -> Result<TaskRecord> {
-        self.acknowledge_unknown_operation_selection(root_task_id, expected_version, operation_ids, None)
-    }
-
-    /// Qualify operation IDs by task; accept legacy bare IDs only when unambiguous.
-    /// 操作 ID 带任务身份，旧裸 ID 仅在无歧义时兼容。
-    pub fn acknowledge_unknown_task_operations(
-        &self,
-        root_task_id: &str,
-        expected_version: u64,
-        identities: &[TaskOperationIdentity],
-    ) -> Result<TaskRecord> {
-        for identity in identities { identifier(&identity.task_id)?; }
-        let operation_ids = identities.iter().map(|identity|identity.operation_id.clone()).collect::<Vec<_>>();
-        let task_ids = identities.iter().map(|identity|identity.task_id.clone()).collect::<Vec<_>>();
-        self.acknowledge_unknown_operation_selection(root_task_id, expected_version, &operation_ids, Some(&task_ids))
-    }
-
-    fn acknowledge_unknown_operation_selection(
-        &self,
-        root_task_id: &str,
-        expected_version: u64,
-        operation_ids: &[String],
-        task_ids: Option<&[String]>,
-    ) -> Result<TaskRecord> {
-        if operation_ids.is_empty() || operation_ids.len() > 64 {
-            return Err(invalid("Choose between one and 64 unknown operations. / 须确认 1 至 64 个结果未知的操作。"));
-        }
-        let mut unique = std::collections::HashSet::new();
-        for (index, operation_id) in operation_ids.iter().enumerate() {
-            identifier(operation_id)?;
-            if !unique.insert((task_ids.map(|ids|ids[index].as_str()), operation_id.as_str())) {
-                return Err(invalid("An operation was listed twice. / 同一操作不能重复选择。"));
-            }
-        }
-        self.write(|connection| {
-            let mut root=row_task(connection,root_task_id)?;
-            if root.parent_task_id.is_some() {return Err(invalid("Confirm unknown outcomes on the root task. / 须在根任务上确认未知结果。"));}
-            let mut members=vec![root.clone()];
-            {
-                let mut query=connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;
-                let ids=query.query_map([root_task_id],|row|row.get::<_,String>(0)).map_err(|_|failure())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|_|failure())?;
-                drop(query);
-                for id in ids {members.push(row_task(connection,&id)?);}
-            }
-            let mut targets=Vec::new();
-            for (index, operation_id) in operation_ids.iter().enumerate() {
-                let mut found=None;
-                for member in members.iter().filter(|member|task_ids.is_none_or(|ids|ids[index]==member.task_id)) {
-                    if let Some(operation)=find_operation(connection,&member.task_id,operation_id)? {
-                        if found.is_some() { return Err(invalid("Operation identity is ambiguous; include its task ID. / 操作身份存在歧义，须同时提供任务ID。")); }
-                        found=Some(operation);
-                    }
-                }
-                let operation=found.ok_or_else(||invalid("Operation is not part of this task tree. / 该操作不属于此任务树。"))?;
-                if operation.intent.effect==OperationEffect::Observation || operation.state!=OperationState::Unknown {
-                    return Err(blocked("Only unknown non-observation outcomes can be confirmed. / 只能确认结果未知的非观察操作。"));
-                }
-                targets.push(operation);
-            }
-            // Replaying the same confirmation after success is idempotent even though the version moved.
-            // 成功后重放同一确认为幂等操作，即使任务版本已经前进。
-            if targets.iter().all(TaskOperation::is_unknown_acknowledged) {return Ok(root);}
-            if root.version!=expected_version {return Err(conflict("Task changed before confirming unknown outcomes. / 确认未知结果前任务已变化。"));}
-            if root.state!=TaskState::WaitingVerification {return Err(blocked("Task is not waiting for verification. / 任务并非等待核验状态。"));}
-            for member in &members { verify_acknowledgement_executor(connection, member)?; }
-            let timestamp=now_ms();
-            root.version+=1;
-            for mut operation in targets.into_iter().filter(|operation|!operation.is_unknown_acknowledged()) {
-                operation.verification_reference=Some(json!({"kind":UNKNOWN_ACKNOWLEDGED_KIND,"outcome":"unknown",
-                    "rootTaskId":root_task_id,"rootVersion":expected_version,"acknowledgedAtMs":timestamp}));
-                operation.updated_at_ms=timestamp;
-                save_operation(connection,&operation)?;
-                let payload=json!({"operationId":operation.intent.operation_id,"toolCallId":operation.intent.tool_call_id,
-                    "toolName":operation.intent.tool_name,"effect":operation.intent.effect,"state":operation.state,
-                    "verificationReference":operation.verification_reference,"rootTaskId":root_task_id});
-                let event_id=format!("operation:{}:unknown-acknowledged",operation.intent.operation_id);
-                if operation.task_id==root.task_id {
-                    append(connection,&mut root,&event_id,"task.operation.unknown-acknowledged",&payload)?;
-                } else {
-                    let mut member=row_task(connection,&operation.task_id)?;
-                    append(connection,&mut member,&event_id,"task.operation.unknown-acknowledged",&payload)?;
-                }
-            }
-            let payload=json!({"operationIds":operation_ids,"state":root.state});
-            append(connection,&mut root,&format!("acknowledge-unknown:{root_task_id}:{expected_version}"),"task.unknown-acknowledged",&payload)?;
-            Ok(root)
-        })
-    }
-    /// Acknowledge listed unknown costs without inventing dispatch/usage; retain reservations for later proof.
-    /// 确认指定未知成本，不推测派发或用量，保留预约供后续核验。
-    pub fn acknowledge_unknown_model_reservations(
-        &self,
-        root_task_id: &str,
-        expected_version: u64,
-        identities: &[ModelReservationIdentity],
-    ) -> Result<TaskRecord> {
-        if identities.is_empty() || identities.len() > 128 {
-            return Err(invalid("Choose 1 to 128 model reservations. / 须选择 1 至 128 个模型预约。"));
-        }
-        let mut unique = std::collections::HashSet::new();
-        for identity in identities {
-            identifier(&identity.task_id)?; identifier(&identity.reservation_id)?;
-            if !unique.insert((&identity.task_id, &identity.reservation_id)) { return Err(invalid("A reservation was listed twice. / 同一预约不能重复选择。")); }
-        }
-        self.write(|connection| {
-            let mut root = row_task(connection, root_task_id)?;
-            if root.parent_task_id.is_some() { return Err(invalid("Confirm unknown costs on the root task. / 须在根任务上确认未知成本。")); }
-            let mut targets = Vec::new();
-            for identity in identities {
-                let owner = row_task(connection, &identity.task_id)?;
-                if ancestors(connection, &owner)?.last().is_none_or(|ancestor| ancestor.task_id != root_task_id) {
-                    return Err(invalid("Reservation is outside this task tree. / 预约不属于该任务树。"));
-                }
-                let reservation = find_reservation(connection, &identity.task_id, &identity.reservation_id)?
-                    .ok_or_else(|| invalid("Model reservation was not found. / 模型预约不存在。"))?;
-                if reservation.state != ModelReservationState::Unknown {
-                    return Err(blocked("Only an unknown model cost can be acknowledged. / 只能确认未知模型成本。"));
-                }
-                targets.push(reservation);
-            }
-            if targets.iter().all(ModelRequestReservation::is_unknown_acknowledged) { return Ok(root); }
-            if root.version != expected_version { return Err(conflict("Task changed before confirming costs. / 确认成本前任务已变化。")); }
-            if root.state != TaskState::WaitingVerification { return Err(blocked("Task is not awaiting verification. / 任务并非等待核验。")); }
-            let mut query = connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT t.document FROM tasks t JOIN tree p ON t.task_id=p.id").map_err(|_|failure())?;
-            let members = query.query_map([root_task_id],|row|row.get::<_,String>(0)).map_err(|_|failure())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|_|failure())?;
-            drop(query);
-            for member in members { verify_acknowledgement_executor(connection, &decode(member)?)?; }
-            root.version += 1;
-            for mut reservation in targets.into_iter().filter(|reservation| !reservation.is_unknown_acknowledged()) {
-                reservation.verification_reference = Some(json!({"kind":UNKNOWN_MODEL_COST_ACKNOWLEDGED_KIND,
-                    "outcome":"unknown","rootTaskId":root_task_id,"rootVersion":expected_version,"acknowledgedAtMs":now_ms()}));
-                reservation.updated_at_ms = now_ms();
-                connection.execute("UPDATE task_model_reservations SET document=? WHERE task_id=? AND reservation_id=?", params![raw(&reservation)?,reservation.task_id,reservation.reservation_id]).map_err(|_|failure())?;
-                let payload = json!({"taskId":reservation.task_id,"reservationId":reservation.reservation_id,"state":"unknown","verificationReference":reservation.verification_reference});
-                let event_id = format!("model:{}:unknown-cost-acknowledged", reservation.reservation_id);
-                if reservation.task_id == root_task_id {
-                    append(connection, &mut root, &event_id, "task.model.unknown-cost-acknowledged", &payload)?;
-                } else {
-                    let mut owner = row_task(connection, &reservation.task_id)?;
-                    append(connection, &mut owner, &event_id, "task.model.unknown-cost-acknowledged", &payload)?;
-                }
-            }
-            save_task(connection, &mut root)?;
-            Ok(root)
         })
     }
 
@@ -1456,13 +1295,12 @@ impl TaskRepository {
         sha256(&intent.input_sha256)?;
         raw(intent)?;
         self.write(|connection| {
-            let mut task=verify_new_work_fence(connection,token)?;
+            let mut task=verify_fence(connection,token,false)?;
             if let Some(mut existing)=find_operation(connection,&token.task_id,&intent.operation_id)? {
                 if fingerprint(&existing.intent)?!=fingerprint(intent)? {return Err(conflict("Operation identity was reused for different input. / 操作身份不能复用于不同输入。"));}
                 if existing.state==OperationState::Pending && existing.attempt_id!=token.attempt_id {existing.attempt_id=token.attempt_id.clone();existing.updated_at_ms=now_ms();save_operation(connection,&existing)?;}
                 return Ok(existing);
             }
-            if intent.effect!=OperationEffect::Observation && tree_has_unknown_mutation(connection,&task)? {return Err(blocked("Verify unknown effects before another mutation in this task tree. / 本任务树再次修改前须核验结果未知的副作用。"));}
             let operation=TaskOperation {task_id:token.task_id.clone(),attempt_id:token.attempt_id.clone(),intent:intent.clone(),state:OperationState::Pending,result_reference:None,verification_reference:None,updated_at_ms:now_ms()};
             connection.execute("INSERT INTO task_operations(task_id,operation_id,state,effect,attempt_id,fingerprint,document) VALUES(?,?,'pending',?,?,?,?)",params![token.task_id,intent.operation_id,state_text(&intent.effect),token.attempt_id,fingerprint(intent)?,raw(&operation)?]).map_err(|_|failure())?;
             append(connection,&mut task,&format!("operation:{}:intent",intent.operation_id),"task.operation.intent",&json!({"operationId":intent.operation_id,"toolCallId":intent.tool_call_id,"toolName":intent.tool_name}))?;
@@ -1474,11 +1312,32 @@ impl TaskRepository {
         token: &AttemptToken,
         operation_id: &str,
     ) -> Result<TaskOperation> {
+        self.dispatch_operation_with_ancestor_scope(token, operation_id, &Value::Null)
+    }
+    /// Compare the caller's observed ancestor steering within the dispatch transaction.
+    /// 派发事务内核对调用方已读取的祖先引导，刷新后的新限制不能被旧调用越过。
+    pub fn dispatch_operation_with_ancestor_scope(
+        &self, token: &AttemptToken, operation_id: &str, observed_ancestors: &Value,
+    ) -> Result<TaskOperation> {
         self.write(|connection| {
-            let mut task=verify_new_work_fence(connection,token)?;
+            let mut task=verify_fence(connection,token,false)?;
+            for ancestor in ancestors(connection, &task)?.into_iter().skip(1) {
+                if ancestor.state.is_terminal() || ancestor.state == TaskState::Paused {
+                    return Err(blocked("Parent task is paused or ended. / 父任务已暂停或结束。"));
+                }
+                if let Some(observed) = observed_ancestors.as_array() {
+                    let sequence: u64 = connection.query_row("SELECT COALESCE(MAX(sequence),0) FROM task_events WHERE task_id=? AND json_extract(document,'$.kind')='task.user-steering'",
+                        [&ancestor.task_id], |row| row.get(0)).map_err(|_|failure())?;
+                    let directive: u64 = connection.query_row("SELECT COALESCE(MAX(sequence),0) FROM task_events WHERE task_id=? AND json_extract(document,'$.kind')='task.user-directive'",
+                        [&ancestor.task_id], |row| row.get(0)).map_err(|_|failure())?;
+                    if !observed.iter().any(|item| item["taskId"] == ancestor.task_id && item["sequence"].as_u64() == Some(sequence)
+                        && item["directiveSequence"].as_u64() == Some(directive)) {
+                        return Err(ContractError::new("Parent instructions changed before dispatch. / 父级要求已变化，旧调用未派发，进度与回执保留。", "TASK_PARENT_SCOPE_CHANGED", 409));
+                    }
+                }
+            }
             let mut operation=find_operation(connection,&token.task_id,operation_id)?.ok_or_else(||invalid("Operation intent is missing. / 操作意图尚未登记。"))?;
             if operation.state!=OperationState::Pending || operation.attempt_id!=token.attempt_id {return Err(blocked("Operation was dispatched, settled or belongs to another attempt. / 操作已派发、已结算或属于其他尝试。"));}
-            if operation.intent.effect!=OperationEffect::Observation && tree_has_unknown_mutation(connection,&task)? {return Err(blocked("Unknown effects in the task tree must be verified. / 必须先核验任务树内结果未知的副作用。"));}
             operation.state=OperationState::Dispatched;operation.updated_at_ms=now_ms();save_operation(connection,&operation)?;
             append(connection,&mut task,&format!("operation:{operation_id}:dispatch"),"task.operation.dispatched",&json!({"operationId":operation_id}))?;Ok(operation)
         })
@@ -1522,16 +1381,7 @@ impl TaskRepository {
         identifier(reason)?;
         self.write(|connection| {
             let mut task = verify_fence(connection, token, false)?;
-            let previous = task.budget.clone();
-            task.budget.max_model_requests = task.budget.max_model_requests.max(u64::from(min_model_requests));
-            // None means unlimited execution time; do not replace it with a smaller cap.
-            // None 已表示无执行时长上限，不能改成更小限额。
-            task.budget.max_execution_ms = task.budget.max_execution_ms.map(|limit|limit.max(min_execution_ms));
-            if task.budget == previous { return Ok(task); }
-            task.version += 1;
-            let event_id = format!("budget:{}:{}", token.attempt_id, task.version);
-            let payload = json!({"previous":previous,"budget":task.budget,"reason":reason,"attemptId":token.attempt_id});
-            append(connection, &mut task, &event_id, "task.budget.extended", &payload)?;
+            extend_budget(connection, &mut task, u64::from(min_model_requests), min_execution_ms, reason, &token.attempt_id)?;
             Ok(task)
         })
     }
@@ -1612,7 +1462,7 @@ impl TaskRepository {
     ) -> Result<ModelRequestReservation> {
         identifier(reservation_id)?;
         self.write(|connection| {
-            let task=verify_new_work_fence(connection,token)?;
+            let task=verify_fence(connection,token,false)?;
             if let Some(existing)=find_reservation(connection,&token.task_id,reservation_id)? {return Ok(existing);}
             for ancestor in ancestors(connection,&task)? {
                 if ancestor.state.is_terminal() || ancestor.state==TaskState::Paused {return Err(blocked("Parent task is controlled or ended. / 父任务已暂停、取消或结束。"));}

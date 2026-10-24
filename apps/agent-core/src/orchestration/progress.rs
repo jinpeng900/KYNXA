@@ -8,9 +8,13 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod validation_scope;
+pub(super) use validation_scope::{ValidationRequirement, ValidationScope, ValidationTarget};
+
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const DIAGNOSTIC_ERROR: &str = "INVALID_TOOL_RUN_DIAGNOSTICS";
 const MAX_DOCUMENT_TARGETS: usize = 4096;
+const HOST_EFFECT_CLASSIFICATION_VERSION: u64 = 3;
 
 /// Document artifacts use complete, hash-matched reads; code still needs execution checks.
 /// 文档产物依据完整且哈希一致的回读核验；代码修改仍须真实执行检查，回读不证明语义正确。
@@ -49,6 +53,7 @@ pub struct RunProgress {
     // Latest code-change obligation; settled host effects keep their counters without inventing code targets.
     // 最近一次代码变更义务；已结算宿主效果保留原计数，不凭空创造代码目标。
     code_mutation_revision: u64,
+    host_effect_classification_version: u64,
     document_validations: BTreeMap<String, DocumentValidation>,
 }
 
@@ -66,6 +71,7 @@ impl Default for RunProgress {
             task_completion: Value::Null,
             artifact_revisions: BTreeSet::new(),
             code_mutation_revision: 0,
+            host_effect_classification_version: HOST_EFFECT_CLASSIFICATION_VERSION,
             document_validations: BTreeMap::new(),
             diagnostics: json!({
                 "version": 1,
@@ -147,6 +153,7 @@ impl RunProgress {
                 "requiredChecks": self.required_checks.values().collect::<Vec<_>>(),
                 "artifactRevisions": self.artifact_revisions,
                 "codeMutationRevision": self.code_mutation_revision,
+                "hostEffectClassificationVersion": self.host_effect_classification_version,
                 "uncertainMutations": self.uncertain_mutations,
                 "unclassifiedTerminalEffects": self.unclassified_terminal_effects,
                 "latestCodeVersion": self.latest_code_version,
@@ -163,6 +170,7 @@ impl RunProgress {
         Ok(match name {
             "mutationRevision" => json!(self.mutation_revision),
             "codeMutationRevision" => json!(self.code_mutation_revision),
+            "hostEffectClassificationVersion" => json!(self.host_effect_classification_version),
             "checkedMutationRevision" => json!(self.checked_mutation_revision),
             "validationReceipts" => json!(self.validation_receipts),
             "requiredChecks" => json!(self.required_checks.values().collect::<Vec<_>>()),
@@ -305,20 +313,30 @@ impl RunProgress {
         } else {
             let mut revision = self.mutation_revision;
             while revision > 0 && self.artifact_revisions.contains(&revision) { revision -= 1; }
-            self.code_mutation_revision = if self.legacy_host_effects_settled(&args["legacyCalls"]) { 0 } else { revision };
+            self.code_mutation_revision = revision;
         }
-        Ok(Value::Null)
+        self.host_effect_classification_version = state.get("hostEffectClassificationVersion")
+            .map(safe_integer).transpose()?.unwrap_or(0);
+        if needs_host_effect_reclassification(state) {
+            if self.legacy_host_effects_have_no_code_targets(&args["legacyCalls"]) {
+                self.code_mutation_revision = 0;
+                self.host_effect_classification_version = HOST_EFFECT_CLASSIFICATION_VERSION;
+            }
+        } else {
+            self.host_effect_classification_version = self.host_effect_classification_version.max(HOST_EFFECT_CLASSIFICATION_VERSION);
+        }
+        Ok(json!({"hostEffectClassificationVersion":self.host_effect_classification_version}))
     }
 
     fn code_mutation_since(&self, revision: u64) -> bool {
         self.code_mutation_revision > revision
     }
 
-    fn legacy_host_effects_settled(&self, legacy_calls: &Value) -> bool {
-        // Legacy counters alone cannot certify a host result; every unexplained revision needs its owned receipt.
-        // 旧计数不证明宿主结果；仅在自有成功回执完整解释全部未分类修改时恢复分类，不改原计数或账本。
+    fn legacy_host_effects_have_no_code_targets(&self, legacy_calls: &Value) -> bool {
+        // Owned receipts classify targets, not success; retain every original status and counter.
+        // 自有回执用于分类目标，不证明成功；原状态与计数全部保留。
         if self.unclassified_terminal_effects == 0
-            || !self.uncertain_mutations.is_empty() || !self.required_checks.is_empty()
+            || !self.required_checks.is_empty()
             || observed_code_targets(&self.latest_code_version) || observed_code_targets(&self.validated_code_version)
             || self.mutation_revision.saturating_sub(self.artifact_revisions.len() as u64) != self.unclassified_terminal_effects {
             return false;
@@ -329,15 +347,21 @@ impl RunProgress {
         let ids = calls.iter().filter_map(|saved| saved["call"]["id"].as_str().filter(|id| !id.is_empty()))
             .collect::<BTreeSet<_>>();
         calls.len() as u64 == self.unclassified_terminal_effects && ids.len() == calls.len()
+            && self.uncertain_mutations.iter().all(|id| ids.contains(id.as_str()))
             && calls.iter().all(|saved| {
                 let output = execution_output(&saved["output"]);
-                settled_host_output(&saved["result"], output)
+                saved["result"]["executed"] != false && output.is_object()
+                    && matches!(saved["result"]["status"].as_str(), Some("completed" | "error" | "unknown" | "cancelled"))
                     && !observed_code_targets(&saved["beforeVersion"]) && !observed_code_targets(&saved["afterVersion"])
                     && !(output["sandbox"] == "appcontainer" && output["tokenVerified"] == true && output["workspaceCopy"] == true)
             })
     }
 
     fn required_check_views(&self) -> Vec<Value> {
+        self.required_check_views_for_scope(None)
+    }
+
+    fn required_check_views_for_scope(&self, scope: Option<&ValidationScope>) -> Vec<Value> {
         let latest_check = self.validation_receipts.last().unwrap_or(&Value::Null);
         self.required_checks.values().map(|receipt| {
             let observed = &receipt["codeVersionCoverage"]["after"];
@@ -345,7 +369,8 @@ impl RunProgress {
             // 重启后的观察子集可能不同，只有程序明确记录工作区切换时才允许旧目标退出当前核验。
             let workspace_changed = receipt["workspaceKnown"] == true && latest_check["workspaceKnown"] == true
                 && receipt["workspaceId"] != latest_check["workspaceId"];
-            let active = !(workspace_changed && disjoint_targets(observed, &self.latest_code_version));
+            let outside_scope = scope.is_some_and(|scope| scope.excludes(receipt));
+            let active = !(outside_scope || workspace_changed && disjoint_targets(observed, &self.latest_code_version));
             let changed = observed["complete"] == true && self.latest_code_version["complete"] == true
                 && observed["signature"] != self.latest_code_version["signature"]
                 || self.code_mutation_since(receipt["mutationRevision"].as_u64().unwrap_or(0));
@@ -363,6 +388,8 @@ impl RunProgress {
             view["active"] = json!(active);
             view["current"] = json!(active && !changed && (receipt["passed"] != true || covered));
             view["resolution"] = json!(resolution);
+            if outside_scope { view["scopeResolution"] = json!("outside-current-requirements"); }
+            view.as_object_mut().unwrap().remove("acceptanceScope");
             view
         }).collect()
     }
@@ -483,7 +510,8 @@ impl RunProgress {
             .filter(|value| value.is_object())
             .or_else(|| canonical.get("value").filter(|value| value.is_object()))
             .unwrap_or(canonical);
-        let uncertain = uncertain || output["cancelled"] == true || output["timedOut"] == true
+        let uncertain = uncertain || result["outcomeUnknown"] == true || output["outcomeUnknown"] == true
+            || output["cancelled"] == true || output["timedOut"] == true
             || result["code"] == "TOOL_TIMED_OUT";
         if completed && matches!(name, "filesystem.stat" | "artifact.open") {
             self.observe_document_version(output, name == "artifact.open");
@@ -520,7 +548,15 @@ impl RunProgress {
             {
                 self.artifact_revisions.insert(self.mutation_revision);
             }
-            if (completed || uncertain) && !self.artifact_revisions.contains(&self.mutation_revision) {
+            let document_path = output["path"].as_str().or_else(|| call["arguments"]["path"].as_str())
+                .filter(|path| matches!(name, "filesystem.write" | "filesystem.edit" | "document.create") && is_document_target(path));
+            if uncertain {
+                if let Some(document) = document_path.and_then(|path| self.document_validations.get_mut(path)) {
+                    document.version_check_required = true;
+                }
+            }
+            if (completed || uncertain) && !self.artifact_revisions.contains(&self.mutation_revision)
+                && !(uncertain && document_path.is_some()) {
                 self.code_mutation_revision = self.mutation_revision;
             }
             if uncertain {
@@ -547,9 +583,9 @@ impl RunProgress {
                     || observed_code_targets(&self.latest_code_version) || !self.required_checks.is_empty();
                 let same_observed_version = before["complete"] == true && after["complete"] == true
                     && before["signature"] == after["signature"];
-                // A settled effect is not proof of a read-only command or unchanged machine.
-                // 已结算不代表命令只读或整机未变；只让真实或仍需核对的代码变化推进代码水位。
-                if !settled_host_output(result, output) || uncertain || targets_known && !same_observed_version {
+                // Code checks follow observed code targets; unrelated host uncertainty stays in its receipt.
+                // 代码检查跟随实际代码目标，无关宿主操作未确认只记在原回执中。
+                if targets_known && !same_observed_version {
                     self.code_mutation_revision = self.mutation_revision;
                 }
                 if observed_code_targets(&after) { self.latest_code_version = after; }
@@ -591,9 +627,9 @@ impl RunProgress {
             && after["complete"] == true
             && !before["signature"].is_null()
             && before["signature"] == after["signature"];
-        // Host observations do not certify the copied sandbox version or unknown effects.
-        // 宿主观察不能认证沙箱副本版本或未知副作用。
-        let covered = passed && same_version && self.uncertain_mutations.is_empty() && !isolated;
+        // A real passing check covers its observed version, not unrelated effects or a sandbox copy.
+        // 真实通过的检查覆盖其观察版本，不认证无关副作用或沙箱副本。
+        let covered = passed && same_version && !isolated;
         self.latest_code_version = after.clone();
         let state = if unknown {
             "unknown"
@@ -629,6 +665,9 @@ impl RunProgress {
             }
         });
         attach_check_identity(&mut receipt, call, output, &args["validationScope"]);
+        if let Some(scope) = ValidationScope::read_checkpoint(&args["validationScope"]["acceptanceScope"]) {
+            receipt["acceptanceScope"] = scope.checkpoint();
+        }
         if truthy(&result["resultRef"]) {
             receipt["resultRef"] = result["resultRef"].clone();
         }
@@ -821,7 +860,6 @@ impl RunProgress {
             document.result_ref = result["resultRef"].clone();
         }
         if !self.pending_code_mutation()
-            && self.uncertain_mutations.is_empty()
             && self.required_check_views().iter().all(|check| check["active"] == false || check["resolution"] == "passed")
         {
             self.checked_mutation_revision = self.mutation_revision;
@@ -833,17 +871,23 @@ impl RunProgress {
     }
 
     fn needs_validation(&self, task: &str) -> bool {
-        let checks = self.required_check_views();
-        let unresolved: Vec<&Value> = checks.iter().filter(|check| check["active"] == true && check["resolution"] != "passed").collect();
+        self.needs_validation_from(task, &self.verification())
+    }
+
+    pub(super) fn needs_validation_for_scope(&self, task: &str, scope: &ValidationScope) -> bool {
+        self.needs_validation_from(task, &self.verification_for_scope(scope))
+    }
+
+    fn needs_validation_from(&self, task: &str, verification: &Value) -> bool {
+        let unresolved = verification["unresolvedChecks"].as_array().into_iter().flatten().collect::<Vec<_>>();
         let retryable_check = unresolved.iter().any(|check| matches!(check["resolution"].as_str(), Some("failed" | "needs-revalidation")));
-        if !self.uncertain_mutations.is_empty()
-            || unresolved.iter().any(|check| check["resolution"] == "execution-unconfirmed")
+        if unresolved.iter().any(|check| check["resolution"] == "execution-unconfirmed")
             || !retryable_check && unresolved.iter().any(|check| check["resolution"] == "version-unverified")
         {
             return false;
         }
         static TASK_PATTERN: OnceLock<Regex> = OnceLock::new();
-        (self.pending_code_mutation() || retryable_check)
+        (verification["pendingValidation"] == true || retryable_check)
             && TASK_PATTERN
                 .get_or_init(|| {
                     Regex::new(r"(?i)代码|修复|实现|重构|\b(?:code|fix|implement|refactor)\b|\.(?:rs|py|js|jsx|ts|tsx|cs|java|go|c|cpp|h|hpp|sql|html|css)\b")
@@ -855,9 +899,14 @@ impl RunProgress {
     /// Transport completion and task outcome are separate; failed checks cannot become successful facts.
     /// 传输完成与任务结果分别记录；核验失败不能被提升为已完成事实。
     fn complete(&mut self, arguments: &Value) -> Value {
-        let mut result = self.verification();
-        let unknown =
-            arguments["unknownEffects"] == true || result["state"] == "execution-unconfirmed";
+        self.complete_with_verification(arguments, self.verification())
+    }
+
+    pub(super) fn complete_for_scope(&mut self, arguments: &Value, scope: &ValidationScope) -> Value {
+        self.complete_with_verification(arguments, self.verification_for_scope(scope))
+    }
+
+    fn complete_with_verification(&mut self, arguments: &Value, mut result: Value) -> Value {
         let evidence_invalid = arguments["evidenceValidation"]["current"] == false;
         let checks_failed = result["state"] == "checks-failed";
         let model_state = arguments["modelTaskState"]["state"].as_str();
@@ -867,6 +916,9 @@ impl RunProgress {
         // Without a reviewed state, real external effects leave the task unassessed rather than complete.
         // 有真实外部操作却没有核对状态时，任务属于尚未评估，不能记为完成。
         let acceptance_unreviewed = arguments["requiresVerification"] == true && arguments["acceptanceReviewed"] != true;
+        // A settled broker decision is distinct from the model's preserved next-step proposal.
+        // 程序已核验的完成结论，与保留的模型下一步提议分别记录。
+        let broker_final = arguments["brokerDecision"] == "final" && arguments["acceptanceReviewed"] == true;
         let readback_missing = arguments["requiresReadback"] == true && arguments["hasReadback"] != true
             || arguments["requiresVisualReadback"] == true && arguments["hasVisualReadback"] != true;
         let unassessed = arguments["effectfulWork"] == true && model_state == Some("unknown")
@@ -874,12 +926,11 @@ impl RunProgress {
         let incomplete = arguments["interrupted"] == true
             || arguments["code"].as_str().is_some()
             || result["pendingValidation"] == true
-            || matches!(model_state, Some("continue" | "blocked" | "review"))
+            || matches!(model_state, Some("blocked" | "review"))
+            || model_state == Some("continue") && !broker_final
             || unmet
             || unassessed;
-        result["completionState"] = json!(if unknown {
-            "execution-unknown"
-        } else if evidence_invalid || checks_failed {
+        result["completionState"] = json!(if evidence_invalid || checks_failed {
             "verification-failed"
         } else if incomplete {
             "partial"
@@ -889,9 +940,8 @@ impl RunProgress {
         result["correctnessCertified"] = json!(false);
         result["acceptanceReviewRequired"] = arguments["requiresVerification"].clone();
         result["acceptanceReviewed"] = json!(arguments["acceptanceReviewed"] == true);
-        if unknown {
-            result["state"] = json!("execution-unconfirmed");
-        } else if arguments["interrupted"] == true {
+        if broker_final { result["brokerDecision"] = json!("final"); }
+        if arguments["interrupted"] == true {
             result["state"] = json!("incomplete");
         }
         if let Some(validation) = arguments["evidenceValidation"].as_object() {
@@ -921,7 +971,15 @@ impl RunProgress {
     }
 
     pub(super) fn verification(&self) -> Value {
-        let checks = self.required_check_views();
+        self.verification_with_scope(None)
+    }
+
+    pub(super) fn verification_for_scope(&self, scope: &ValidationScope) -> Value {
+        self.verification_with_scope(Some(scope))
+    }
+
+    fn verification_with_scope(&self, scope: Option<&ValidationScope>) -> Value {
+        let checks = self.required_check_views_for_scope(scope);
         let unresolved: Vec<&Value> = checks.iter().filter(|check| check["active"] == true && check["resolution"] != "passed").collect();
         let failed = unresolved.iter().any(|check| check["resolution"] == "failed");
         let version_unverified = unresolved.iter().any(|check| check["resolution"] == "version-unverified");
@@ -929,14 +987,17 @@ impl RunProgress {
             .document_validations
             .values()
             .any(|document| !document.read_back || document.version_check_required);
-        let needs_check = self.pending_code_mutation();
-        let pending = needs_check || !unresolved.is_empty() || !self.uncertain_mutations.is_empty();
-        let state = if !self.uncertain_mutations.is_empty()
-            || unresolved.iter().any(|check| check["resolution"] == "execution-unconfirmed")
-        {
-            "execution-unconfirmed"
-        } else if failed {
+        // A current passing check or an entirely withdrawn target closes only the scoped debt.
+        // 当前通过的检查或已完全撤销的目标只消除本次范围内的检查欠账，不改原计数。
+        let scope_covered = scope.is_some() && checks.iter().any(|check| check["active"] == true && check["resolution"] == "passed");
+        let withdrawn_latest = scope.is_some_and(|scope| self.validation_receipts.last().is_some_and(|receipt|
+            scope.excludes(receipt) && receipt["codeVersionCoverage"]["after"]["signature"] == self.latest_code_version["signature"]));
+        let needs_check = self.pending_code_mutation() && !scope_covered && !withdrawn_latest;
+        let pending = needs_check || !unresolved.is_empty();
+        let state = if failed {
             "checks-failed"
+        } else if unresolved.iter().any(|check| check["resolution"] == "execution-unconfirmed") {
+            "execution-unconfirmed"
         } else if version_unverified {
             "checks-version-unverified"
         } else if needs_check || unresolved.iter().any(|check| check["resolution"] == "needs-revalidation") {
@@ -959,6 +1020,7 @@ impl RunProgress {
                 let mut view = receipt.clone();
                 view["active"] = json!(latest.is_none_or(|check| check["active"] == true));
                 view["current"] = json!(latest.is_some_and(|check| check["toolCallId"] == receipt["toolCallId"] && check["current"] == true));
+                view.as_object_mut().unwrap().remove("acceptanceScope");
                 view
             }).collect::<Vec<_>>(),
             "requiredChecks": checks,
@@ -978,6 +1040,7 @@ impl RunProgress {
                 "actualFileHashesVerified": !self.validated_code_version.is_null() && !pending,
                 "observedMutationRevision": self.mutation_revision,
                 "codeMutationRevision": self.code_mutation_revision,
+                "hostEffectClassificationVersion": self.host_effect_classification_version,
                 "checkedMutationRevision": self.checked_mutation_revision,
                 "uncertainMutations": self.uncertain_mutations.len(),
                 "unclassifiedTerminalEffects": self.unclassified_terminal_effects,
@@ -1231,13 +1294,20 @@ fn execution_output(canonical: &Value) -> &Value {
         .or_else(|| canonical.get("value").filter(|value| value.is_object())).unwrap_or(canonical)
 }
 
-fn settled_host_output(receipt: &Value, output: &Value) -> bool {
-    receipt["status"] == "completed" && !truthy(&receipt["isError"]) && receipt["executed"] != false
-        && output.is_object() && output["isError"] != true && output["success"] != false && output["completed"] != false
-        && output["timedOut"] != true && output["cancelled"] != true
-        && receipt["code"] != "TOOL_TIMED_OUT" && receipt["code"] != "TOOL_CANCELLED"
-        && output["exitCode"].as_i64().is_none_or(|code| code == 0)
-        && output.get("error").is_none_or(|error| error.is_null() || error == false || error == "")
+/// Old, targetless host debt needs owned receipts once; current classifications require no archive scan.
+/// 旧的无目标宿主债务只需凭自有回执迁移一次；当前分类不再扫描归档。
+pub(super) fn needs_host_effect_reclassification(state: &Value) -> bool {
+    let mutation = state["mutationRevision"].as_u64().unwrap_or(0);
+    let host_effects = state["unclassifiedTerminalEffects"].as_u64().unwrap_or(0);
+    let artifact_count = state["artifactRevisions"].as_array().into_iter().flatten()
+        .filter_map(Value::as_u64).collect::<BTreeSet<_>>().len() as u64;
+    state["hostEffectClassificationVersion"].as_u64().unwrap_or(0) < HOST_EFFECT_CLASSIFICATION_VERSION
+        && state["codeMutationRevision"].as_u64().unwrap_or(mutation)
+            > state["checkedMutationRevision"].as_u64().unwrap_or(0)
+        && host_effects > 0 && mutation.saturating_sub(artifact_count) == host_effects
+        && !observed_code_targets(&state["latestCodeVersion"]) && !observed_code_targets(&state["validatedCodeVersion"])
+        && ["requiredChecks", "validationReceipts"].iter()
+            .all(|field| state[*field].is_null() || state[*field].as_array().is_some_and(Vec::is_empty))
 }
 
 fn observed_code_targets(snapshot: &Value) -> bool {
@@ -1251,11 +1321,15 @@ fn version_identity(snapshot: &Value) -> Value {
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let file_count = snapshot["files"].as_array().map_or(0, Vec::len);
     let files: Vec<Value> = snapshot["files"].as_array().into_iter().flatten().take(64).map(|file| {
-        if let Some(id) = file["pathId"].as_str().filter(|value| !value.is_empty()) {
+        let mut identity = if let Some(id) = file["pathId"].as_str().filter(|value| !value.is_empty()) {
             json!({"pathId":id,"identitySource":file["identitySource"].as_str().unwrap_or("pathId")})
         } else if let Some(path) = file["path"].as_str().filter(|value| !value.is_empty()) {
             json!({"pathId":stable_hash(&json!(normalize_workdir(path))),"identitySource":"legacy-path"})
-        } else { Value::Null }
+        } else { Value::Null };
+        if identity.is_object() && let Some(hash) = content_hash(&file["sha256"]) {
+            identity["sha256"] = json!(hash.to_ascii_lowercase());
+        }
+        identity
     }).collect();
     let mut result = json!({
         "signature": signature,
@@ -1497,7 +1571,7 @@ mod document_validation_tests {
     }
 
     #[test]
-    fn prose_readback_cannot_clear_code_changes_failed_checks_or_unknown_effects() {
+    fn prose_readback_cannot_clear_code_changes_or_failed_checks() {
         let mut progress = RunProgress::default();
         write(&mut progress, "/work/source.rs", 'a');
         read(&mut progress, "/work/source.rs", 'a', 0, 4, "code");
@@ -1515,7 +1589,7 @@ mod document_validation_tests {
         read(&mut progress, "/work/notes.md", 'b', 0, 4, "note");
         assert_eq!(
             progress.complete(&json!({}))["completionState"],
-            "execution-unknown"
+            "verification-failed"
         );
     }
 
@@ -1584,21 +1658,51 @@ mod tests {
     }
 
     #[test]
-    fn host_code_changes_uncertain_results_and_failed_checks_still_require_validation() {
+    fn known_failed_host_exits_do_not_create_targetless_code_debt_or_success() {
+        for status in ["completed", "error"] {
+            let failed = json!({"status":status,"isError":true,"executed":true});
+            let mut progress = RunProgress::default();
+            progress.apply("progress.observeOutcome", &json!({"call":{"id":"failed-download","name":"terminal.host.run",
+                "arguments":{"script":"Invoke-FixtureDownload"}},"result":failed,
+                "canonicalResult":{"exitCode":1,"success":false,"error":"fixture download rejected"}})).unwrap();
+            progress.apply("progress.observeOutcome", &json!({"call":{"id":"alternate-download","name":"terminal.host.run"},
+                "result":{"status":"completed","isError":false,"executed":true},"canonicalResult":{"exitCode":0}})).unwrap();
+            assert_eq!(progress.verification()["pendingValidation"], false);
+            assert_eq!(progress.code_mutation_revision, 0);
+            assert_eq!(progress.unclassified_terminal_effects, 2);
+            assert_eq!(progress.mutation_revision, 2);
+            assert_eq!(failed["isError"], true);
+            assert!(progress.validation_receipts.is_empty());
+            assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete","unmet":["missing user output"]}}))
+                ["completionState"], "partial");
+        }
+    }
+
+    #[test]
+    fn host_uncertainty_stays_auditable_without_blocking_unrelated_work() {
         for (status, output) in [("unknown", json!({"exitCode":null})),
             ("cancelled", json!({"exitCode":null,"cancelled":true})),
-            ("completed", json!({"exitCode":0,"timedOut":true}))] {
+            ("completed", json!({"exitCode":0,"timedOut":true})),
+            ("completed", json!({"exitCode":1,"outcomeUnknown":true}))] {
             let mut progress = RunProgress::default();
             progress.apply("progress.observeOutcome", &json!({"call":{"id":"uncertain","name":"terminal.host.run",
                 "arguments":{"script":"Invoke-FixtureOperation"}},
                 "result":{"status":status,"isError":status!="completed"},"canonicalResult":output})).unwrap();
-            assert_eq!(progress.verification()["state"], "execution-unconfirmed");
-            assert_eq!(progress.code_mutation_revision, progress.mutation_revision);
+            assert_eq!(progress.verification()["pendingValidation"], false);
+            assert_eq!(progress.code_mutation_revision, 0);
+            assert_eq!(progress.uncertain_mutations.len(), 1);
+            assert!(progress.validation_receipts.is_empty());
+            assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"continue","unmet":["deliver output"]}}))["completionState"], "partial");
+            let state = progress.apply("progress.state", &json!({})).unwrap();
+            let mut restored = RunProgress::default();
+            restored.apply("progress.restoreValidation", &json!({"state":state})).unwrap();
+            assert_eq!(restored.verification()["pendingValidation"], false);
+            assert_eq!(restored.uncertain_mutations.len(), 1);
         }
         let mut progress = RunProgress::default();
         progress.apply("progress.observeOutcome", &json!({"call":{"id":"changed-code","name":"terminal.host.run",
-            "arguments":{"script":"Invoke-FixtureOperation"}},"result":{"status":"completed","isError":false},
-            "canonicalResult":{"exitCode":0},"beforeVersion":snapshot('a'),"afterVersion":snapshot('b')})).unwrap();
+            "arguments":{"script":"Invoke-FixtureOperation"}},"result":{"status":"error","isError":true},
+            "canonicalResult":{"exitCode":1},"beforeVersion":snapshot('a'),"afterVersion":snapshot('b')})).unwrap();
         assert_eq!(progress.verification()["pendingValidation"], true);
         assert_eq!(progress.code_mutation_revision, progress.mutation_revision);
         let mut observed = RunProgress::default();
@@ -1612,30 +1716,63 @@ mod tests {
         assert_eq!(progress.verification()["pendingValidation"], true);
         assert!(progress.verification()["unresolvedChecks"].as_array().unwrap().iter()
             .any(|check| check["toolCallId"] == "test-failed" && check["resolution"] == "failed"));
+        let mut uncertain_check = RunProgress::default();
+        uncertain_check.apply("progress.observeOutcome", &json!({"call":{"id":"test-unknown","name":"terminal.host.run",
+            "arguments":{"script":"cargo test"}},"result":{"status":"unknown","isError":true},
+            "canonicalResult":{"exitCode":null},"beforeVersion":snapshot('a'),"afterVersion":snapshot('a')})).unwrap();
+        assert_eq!(uncertain_check.verification()["pendingValidation"], true);
+        assert_eq!(uncertain_check.complete(&json!({}))["completionState"], "partial");
+        assert_eq!(uncertain_check.verification()["state"], "execution-unconfirmed");
     }
 
     #[test]
-    fn legacy_targetless_host_reclassification_requires_complete_owned_successful_receipts() {
+    fn legacy_targetless_host_reclassification_requires_complete_owned_receipts() {
         let state = json!({"mutationRevision":2,"checkedMutationRevision":0,"unclassifiedTerminalEffects":2,
             "artifactRevisions":[],"requiredChecks":[],"uncertainMutations":[],
+            "codeMutationRevision":2,"hostEffectClassificationVersion":1,
             "latestCodeVersion":{"complete":false,"files":[]}});
-        let calls = ["directory", "application"].into_iter().map(|id| json!({
+        let calls = ["failed-download", "alternate-download"].into_iter().enumerate().map(|(index,id)| json!({
             "call":{"id":id,"name":"terminal.host.run","arguments":{"script":"Invoke-FixtureOperation"}},
-            "result":{"status":"completed","isError":false,"executed":true},"output":{"exitCode":0}
+            "result":{"status":if index == 0 {"error"} else {"completed"},"isError":index == 0,"executed":true},
+            "output":{"exitCode":if index == 0 {1} else {0}}
         })).collect::<Vec<_>>();
+        assert!(needs_host_effect_reclassification(&state));
         let mut restored = RunProgress::default();
         restored.apply("progress.restoreValidation", &json!({"state":state,"legacyCalls":calls})).unwrap();
         assert_eq!(restored.verification()["pendingValidation"], false);
         assert_eq!(restored.mutation_revision, 2);
         assert_eq!(restored.checked_mutation_revision, 0);
         assert_eq!(restored.unclassified_terminal_effects, 2);
-        for legacy in [json!([]), json!([calls[0]]),
-            json!([calls[0],{"call":{"id":"unconfirmed","name":"terminal.host.run"},
-                "result":{"status":"unknown","isError":true},"output":{"exitCode":null}}])] {
+        let migrated = restored.apply("progress.state", &json!({})).unwrap();
+        assert_eq!(migrated["hostEffectClassificationVersion"], HOST_EFFECT_CLASSIFICATION_VERSION);
+        assert!(!needs_host_effect_reclassification(&migrated));
+        restored.apply("progress.restoreValidation", &json!({"state":migrated})).unwrap();
+        assert_eq!(restored.verification()["pendingValidation"], false);
+        assert_eq!(calls[0]["result"]["isError"], true);
+        let mut oldest = state.clone();
+        oldest.as_object_mut().unwrap().remove("codeMutationRevision");
+        oldest.as_object_mut().unwrap().remove("hostEffectClassificationVersion");
+        restored.apply("progress.restoreValidation", &json!({"state":oldest,"legacyCalls":calls})).unwrap();
+        assert_eq!(restored.verification()["pendingValidation"], false);
+        for legacy in [json!([]), json!([calls[0]]), json!([calls[0],calls[0]]),
+            json!([calls[0],{"call":{"id":"missing-receipt","name":"terminal.host.run"},"output":{}}])] {
             let mut conservative = RunProgress::default();
             conservative.apply("progress.restoreValidation", &json!({"state":state,"legacyCalls":legacy})).unwrap();
             assert_eq!(conservative.verification()["pendingValidation"], true);
+            assert_eq!(conservative.host_effect_classification_version, 1);
         }
+        let mut uncertain_state = state.clone();
+        uncertain_state["hostEffectClassificationVersion"] = json!(2);
+        uncertain_state["uncertainMutations"] = json!(["unconfirmed"]);
+        let unknown_receipt = json!({"call":{"id":"unconfirmed","name":"terminal.host.run"},
+            "result":{"status":"unknown","isError":true,"executed":true},"output":{"exitCode":null}});
+        assert!(needs_host_effect_reclassification(&uncertain_state));
+        let mut unconfirmed = RunProgress::default();
+        unconfirmed.apply("progress.restoreValidation", &json!({"state":uncertain_state,"legacyCalls":[calls[0],unknown_receipt]})).unwrap();
+        assert_eq!(unconfirmed.verification()["pendingValidation"], false);
+        assert_eq!(unconfirmed.uncertain_mutations.len(), 1);
+        assert!(unconfirmed.validation_receipts.is_empty());
+        assert_eq!(unknown_receipt["result"]["status"], "unknown");
     }
 
     #[test]
@@ -1820,8 +1957,13 @@ mod tests {
             "result": {"status": "unknown", "isError": true}}),
             )
             .unwrap();
-        assert_eq!(progress.verification()["state"], "execution-unconfirmed");
-        assert!(!progress.needs_validation("修复代码"));
+        assert_eq!(progress.verification()["state"], "needs-validation");
+        assert!(progress.needs_validation("修复代码"));
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"after-edit","name":"terminal.host.run",
+            "arguments":{"script":"node --test check.mjs"}},"result":{"status":"completed","isError":false},
+            "canonicalResult":{"exitCode":0},"beforeVersion":snapshot('b'),"afterVersion":snapshot('b')})).unwrap();
+        assert_eq!(progress.verification()["pendingValidation"], false);
+        assert_eq!(progress.uncertain_mutations.len(), 1);
     }
 
     #[test]
@@ -1921,13 +2063,23 @@ mod tests {
         assert_eq!(failed["completionState"], "verification-failed");
         assert_eq!(failed["sourceValidation"]["current"], false);
         assert_eq!(failed["correctnessCertified"], false);
+        assert_eq!(progress.complete(&json!({"unknownEffects":true}))["completionState"], "completed");
         let unknown = progress.complete(&json!({"unknownEffects": true, "interrupted": true}));
-        assert_eq!(unknown["completionState"], "execution-unknown");
-        assert_eq!(unknown["state"], "execution-unconfirmed");
+        assert_eq!(unknown["completionState"], "partial");
+        assert_eq!(unknown["state"], "incomplete");
         let partial = progress.complete(&json!({"interrupted": true, "code": "TASK_BLOCKED"}));
         assert_eq!(partial["completionState"], "partial");
         assert_eq!(partial["state"], "incomplete");
         assert_eq!(progress.task_completion, partial);
+        let proposed = json!({"state":"continue","next":"Optional additional work","unmet":[]});
+        let mut accepted = json!({"modelTaskState":proposed,"requiresVerification":true,"acceptanceReviewed":true});
+        assert_eq!(progress.complete(&accepted)["completionState"], "partial");
+        accepted["brokerDecision"] = json!("final");
+        let complete = progress.complete(&accepted);
+        assert_eq!(complete["completionState"], "completed");
+        assert_eq!(complete["modelTaskState"], proposed, "Keep the model proposal rather than rewrite its history");
+        accepted["modelTaskState"]["unmet"] = json!(["A required current item is missing"]);
+        assert_eq!(progress.complete(&accepted)["completionState"], "partial");
         progress.apply("progress.observeOutcome", &json!({"call": {"id": "check", "name": "terminal.host.run",
             "arguments": {"script": "node --test fixture.mjs"}}, "result": {"status": "completed", "isError": true},
             "canonicalResult": {"exitCode": 1}})).unwrap();
@@ -1935,6 +2087,9 @@ mod tests {
             progress.complete(&json!({}))["completionState"],
             "verification-failed"
         );
+        accepted["modelTaskState"]["unmet"] = json!([]);
+        assert_eq!(progress.complete(&accepted)["completionState"], "verification-failed",
+            "A broker delivery cannot override an actual failed check");
     }
 }
 

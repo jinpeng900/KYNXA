@@ -335,7 +335,8 @@ public sealed class ModelApiClient : IDisposable
             || task.TryGetProperty("parentTaskId", out var parent) && parent.ValueKind != JsonValueKind.Null)
             throw new InvalidDataException(UiText.Get("任务接口返回的范围或版本无效。"));
         string? taskState = task.GetProperty("state").GetString();
-        if (taskState is not ("completed" or "partial" or "failed" or "cancelled"))
+        bool waitingForUser = taskState is "paused" or "waiting-config" or "waiting-verification";
+        if (!waitingForUser && taskState is not ("completed" or "partial" or "failed" or "cancelled"))
             return new(conversationId, requestId, "running", null);
 
         // After restart, restore terminal state only from the matching durable task and message.
@@ -360,15 +361,17 @@ public sealed class ModelApiClient : IDisposable
             {
                 var reply = stored.Deserialize<StoredReply>(JsonOptions)
                     ?? throw new InvalidDataException(UiText.Get("模型接口返回了无效的回复。"));
-                if (reply.Role != "assistant" || reply.Status is not ("completed" or "interrupted" or "error")) break;
+                if (reply.Role != "assistant" || !waitingForUser && reply.Status is not ("completed" or "interrupted" or "error")) break;
                 JsonElement? completion = reply.ToolRun is { ValueKind: JsonValueKind.Object } toolRun
                     && toolRun.TryGetProperty("taskCompletion", out var outcome) ? outcome.Clone() : null;
-                var terminal = new ChatStreamEvent(reply.Status, conversationId, requestId, reply.CreatedAt,
+                var segments = waitingForUser ? reply.AssistantSegments?.Select(segment => segment.Status == "streaming"
+                    ? segment with { Status = "interrupted" } : segment).ToArray() : reply.AssistantSegments;
+                var terminal = new ChatStreamEvent(waitingForUser ? "interrupted" : reply.Status, conversationId, requestId, reply.CreatedAt,
                     Content: reply.Content, Reasoning: reply.Reasoning, Error: reply.Error,
-                    AssistantSegments: reply.AssistantSegments is { Length: > 0 } ? reply.AssistantSegments : null,
-                    ToolStreamProtocol: reply.AssistantSegments is { Length: > 0 } ? 3 : null,
+                    AssistantSegments: segments is { Length: > 0 } ? segments : null,
+                    ToolStreamProtocol: segments is { Length: > 0 } ? 3 : null,
                     DurationMs: reply.DurationMs, TaskCompletion: completion, TaskId: taskId,
-                    RootRequestTaskId: taskId, ReplyMessageId: reply.Id);
+                    RootRequestTaskId: taskId, ReplyMessageId: reply.Id, Code: taskState == "paused" ? "TASK_PAUSED" : null);
                 ChatStreamEvent? anchor = reply.Id != requestId && (reply.ReplyTo ?? reply.InReplyToUserMessageId) is Guid userId
                     ? new("reply_anchor", conversationId, requestId, reply.CreatedAt, TaskId: taskId,
                         RootRequestTaskId: taskId, ReplyMessageId: reply.Id, UserMessageId: userId) : null;

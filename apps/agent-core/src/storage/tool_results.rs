@@ -71,6 +71,14 @@ fn depth(value: &Value, level: usize) -> Result<(), ContractError> {
     Ok(())
 }
 
+pub(crate) fn validate_result_shape(call: &Value, canonical: &Value) -> Result<(), ContractError> {
+    if !call["id"].as_str().is_some_and(|value| !value.is_empty() && utf16_length(value) <= 200
+        && !value.contains(['\0', '\r', '\n']))
+        || !call["name"].as_str().is_some_and(|value| !value.is_empty() && utf16_length(value) <= 256)
+        || !canonical.is_object() { return Err(invalid()); }
+    depth(canonical, 0)
+}
+
 fn validate_archive(arguments: &Value) -> ContractResult {
     let document = &arguments["document"];
     if !matches!(document["version"].as_u64(), Some(1 | 2))
@@ -122,7 +130,7 @@ fn projection(
         }
         let binary = kind == "block"
             && matches!(value["type"].as_str(), Some("image" | "audio"))
-            && value["data"].is_string();
+            && (value["data"].is_string() || value["data"]["kynxaImageRef"]["version"] == 1);
         let blob = kind == "resource" && value["blob"].is_string();
         for (key, child) in fields {
             path.push(key.clone());
@@ -132,7 +140,8 @@ fn projection(
             {
                 removals.push(json!(path));
             } else {
-                let next = if path.len() == 1 && key == "content" && child.is_array() {
+                let next = if (path.len() == 1 || path.len() == 2 && path[0] == "value")
+                    && key == "content" && child.is_array() {
                     "content"
                 } else if kind == "block" && value["type"] == "resource" && key == "resource" {
                     "resource"
@@ -276,18 +285,7 @@ fn apply_service(operation: &str, arguments: &Value) -> ContractResult {
             return Ok(Value::Null);
         }
         "storage.toolResults.prepare" => {
-            let call = &arguments["identity"];
-            if !call["id"].as_str().is_some_and(|value| {
-                !value.is_empty()
-                    && utf16_length(value) <= 200
-                    && !value.contains(['\0', '\r', '\n'])
-            }) || !call["name"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty() && utf16_length(value) <= 256)
-                || !arguments["canonical"].is_object()
-            {
-                return Err(invalid());
-            }
+            validate_result_shape(&arguments["identity"], &arguments["canonical"])?;
             if arguments["bytes"].as_u64().unwrap_or(u64::MAX) > RESULT_BYTES {
                 return Err(failure(
                     "完整工具结果超过 8 MiB 保存上限。",
@@ -295,7 +293,6 @@ fn apply_service(operation: &str, arguments: &Value) -> ContractResult {
                     413,
                 ));
             }
-            depth(&arguments["canonical"], 0)?;
             return Ok(Value::Null);
         }
         "storage.toolResults.validate" => return validate_archive(arguments),

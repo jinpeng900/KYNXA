@@ -16,6 +16,7 @@ public partial class App
         try
         {
             await WaitAsync(() => shell.XamlRoot is not null, "production Shell result-routing partial has a live fixture XamlRoot");
+            await WaitAsync(() => shell.ScreenshotPanel.Items.Count == 1, "the owned screenshot catalog resolves before its explicit open action");
             shell.OpenScreenshot(new(Guid.NewGuid(), row.Message.Id, tool));
             shell.OpenScreenshot(new(conversation, Guid.NewGuid(), tool));
             Check(api.Reads.Count == 0, "Shell refuses screenshot requests belonging to another chat or message");

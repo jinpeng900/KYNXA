@@ -1177,7 +1177,7 @@ impl ProtocolState {
                 unknown["cancelled"] = json!(stop["name"] == "AbortError");
                 unknown["timedOut"] = json!(stop["code"] == "HOST_TERMINAL_TIMED_OUT");
                 unknown["message"] = json!(
-                    "命令已发送，但没有完整完成回执，执行结果未知；请核验结果，不要自动重做。"
+                    "命令已派发，尚未收到最终回执；保留原调用，可读取现有状态。"
                 );
                 return Ok(json!({"action":"value","value":unknown}));
             }

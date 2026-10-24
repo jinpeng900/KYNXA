@@ -292,22 +292,55 @@ pub(crate) fn apply_minimum_active(resolved: &mut Value, minimum: u64) {
 
 /// User steering may replace or revoke a minimum; omitted changes retain the accepted value.
 /// 用户引导可替换或撤销最低时长；未提及时保留原值，不重置累计工作时间。
-pub(super) fn revised_minimum_active(current: u64, requested: Option<&Value>, stopped: bool) -> Result<u64, String> {
+pub(super) fn revised_minimum_active(current: u64, requested: Option<&Value>) -> Result<u64, String> {
     let requested = requested.map(|value| value.as_u64()
         .filter(|minimum| *minimum <= MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS)
         .ok_or_else(|| "INVALID_STEERING_MINIMUM_ACTIVE".to_owned())).transpose()?;
-    if stopped {
-        if requested.is_some_and(|minimum| minimum > 0) { return Err("INVALID_STEERING_MINIMUM_ACTIVE".into()); }
-        Ok(0)
-    } else {
-        Ok(requested.unwrap_or(current))
-    }
+    Ok(requested.unwrap_or(current))
 }
 
 /// Scale tree-wide model requests at one per 10 seconds, with a minimum of 256.
 /// 任务树按每 10 秒一次估算模型额度，最少 256 次。
 pub(crate) fn model_request_allowance(max_duration_ms: u64) -> u64 {
     (max_duration_ms / 10_000).max(256)
+}
+
+/// Only verified accepted input distinguishes renewable segments from explicit limits.
+/// 只按核验过的原始接受输入区分可续执行段和明确上限。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OperationalBudgetPolicy {
+    pub(super) renew_model_requests: bool,
+    pub(super) renew_execution_time: bool,
+}
+
+impl OperationalBudgetPolicy {
+    pub(super) fn from_input(input: &Value) -> Self {
+        Self {
+            renew_model_requests: input["runLimits"]["maxModelRequests"].is_null(),
+            renew_execution_time: input["runLimits"]["maxDurationMs"].is_null(),
+        }
+    }
+}
+
+/// Live dispatch and cold takeover use the same headroom without resetting accumulated usage.
+/// 实时派发与冷接管使用同一余量规则，不清零累计用量。
+pub(super) fn operational_budget_floor(
+    policy: OperationalBudgetPolicy,
+    used_requests: u64,
+    active_ms: u64,
+    request_limit: u64,
+    execution_limit_ms: Option<u64>,
+) -> (u64, u64) {
+    let requests = if policy.renew_model_requests {
+        request_limit.max(used_requests.saturating_add(64))
+    } else { request_limit };
+    let execution_ms = match execution_limit_ms {
+        Some(limit) if policy.renew_execution_time && limit.saturating_sub(active_ms) < 5 * 60 * 1000 => {
+            limit.max(active_ms.saturating_add(30 * 60 * 1000))
+        }
+        limit => limit.unwrap_or(0),
+    };
+    (requests, execution_ms)
 }
 
 /// An explicit "at least N minutes/hours" requirement; plain mentions of time are ignored.
@@ -524,6 +557,17 @@ mod tests {
         }
         assert_eq!(model_request_allowance(1_800_000), 256);
         assert_eq!(model_request_allowance(5_400_000), 540);
+    }
+
+    #[test]
+    fn operational_renewal_preserves_each_explicit_dimension_and_accumulated_time() {
+        let implicit = OperationalBudgetPolicy::from_input(&json!({"message":"继续完成原任务"}));
+        assert_eq!(operational_budget_floor(implicit, 256, 1_800_000, 256, Some(1_800_000)), (320, 3_600_000));
+        let explicit_time = OperationalBudgetPolicy::from_input(&json!({"runLimits":{"maxDurationMs":1_800_000}}));
+        assert_eq!(operational_budget_floor(explicit_time, 256, 1_800_000, 256, Some(1_800_000)), (320, 1_800_000));
+        let explicit_requests = OperationalBudgetPolicy::from_input(&json!({"runLimits":{"maxModelRequests":256}}));
+        assert_eq!(operational_budget_floor(explicit_requests, 256, 1_800_000, 256, Some(1_800_000)), (256, 3_600_000));
+        assert_eq!(operational_budget_floor(implicit, 10, 9_000_000, 256, None), (256, 0));
     }
 
     #[test]
