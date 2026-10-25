@@ -4,13 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { checkRustArchitecture } from './check-rust-architecture.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const manifest = JSON.parse(await readFile(resolve(repositoryRoot, 'docs/team/module-ownership.json'), 'utf8'));
+const manifest = JSON.parse(await readFile(resolve(repositoryRoot, 'tools/development/architecture-rules.json'), 'utf8'));
 const violations = [];
 const toRepositoryPath = path => relative(repositoryRoot, path).split(sep).join('/');
 const matchesRule = (path, rule) => (!rule.extensions || rule.extensions.includes(extname(path))) &&
   (rule.files?.includes(path) || (rule.prefix && path.startsWith(rule.prefix)) ||
     (rule.directory && path.slice(0, path.lastIndexOf('/')) === rule.directory));
-const ownersOf = path => manifest.ownershipRules.filter(rule => matchesRule(path, rule)).map(rule => rule.role);
+const componentsOf = path => manifest.componentRules.filter(rule => matchesRule(path, rule)).map(rule => rule.component);
 
 async function listFiles(directory, excludedNames = [], includedDirectories = []) {
   const files = [];
@@ -148,12 +148,12 @@ for (const scope of manifest.sourceScopes) {
       (manifest.sourceExtensions.includes(extname(path)) || (manifest.resourceScopes ?? []).some(resource =>
         toRepositoryPath(path).startsWith(`${resource.root}/`) && resource.extensions.includes(extname(path))))));
 }
-const ownerCounts = Object.fromEntries(Object.keys(manifest.roles).map(role => [role, 0]));
+const componentCounts = Object.fromEntries(Object.keys(manifest.components).map(component => [component, 0]));
 for (const path of sourceFiles) {
   const source = toRepositoryPath(path);
-  const owners = ownersOf(source);
-  if (owners.length !== 1 || !Object.hasOwn(manifest.roles, owners[0])) violations.push({ code: 'SOURCE_OWNERSHIP', source, owners });
-  else ownerCounts[owners[0]]++;
+  const components = componentsOf(source);
+  if (components.length !== 1 || !Object.hasOwn(manifest.components, components[0])) violations.push({ code: 'SOURCE_COMPONENT', source, components });
+  else componentCounts[components[0]]++;
 }
 
 const scriptFiles = sourceFiles.filter(path => ['.mjs', '.js'].includes(extname(path)));
@@ -175,17 +175,17 @@ for (const path of scriptFiles) {
   }
 }
 
-// Tests inherit their direct implementation dependencies; cross-domain tests retain all relevant owners.
-// 测试继承直接实现依赖的负责人；跨域测试保留所有相关角色。
+// Test suites are described by their direct implementation dependencies.
+// 测试套件按直接实现依赖统计技术组件。
 const testSuites = new Map();
 const missingLocalTestRoots = [];
 let testSourceCount = 0;
-for (const testRoot of manifest.testAttribution.roots) {
+for (const testRoot of manifest.localTests.roots) {
   try { await stat(resolve(repositoryRoot, testRoot)); }
   catch (error) {
     // Local test files are optional; missing production scopes still fail above.
     // 本地测试可不提供；前面的生产目录缺失仍然报错。
-    if (!manifest.testAttribution.localOnly || error.code !== 'ENOENT') throw error;
+    if (!manifest.localTests.localOnly || error.code !== 'ENOENT') throw error;
     missingLocalTestRoots.push(testRoot);
     continue;
   }
@@ -194,34 +194,34 @@ for (const testRoot of manifest.testAttribution.roots) {
     if (!['.mjs', '.csproj'].includes(extname(path))) continue;
     testSourceCount++;
     const suite = `${testRoot}/${relative(resolve(repositoryRoot, testRoot), path).split(sep)[0]}`;
-    const owners = testSuites.get(suite) ?? new Set();
+    const components = testSuites.get(suite) ?? new Set();
     const source = await readFile(path, 'utf8');
     const targets = extname(path) === '.mjs' ? staticReferences(source).filter(reference => reference.kind === 'module').map(reference => reference.specifier) :
       [...source.matchAll(/<Compile\s+Include="([^"]+)"/g)].map(match => match[1].replaceAll('\\', '/'));
     for (const target of targets) {
-      for (const owner of ownersOf(toRepositoryPath(resolve(dirname(path), target)))) owners.add(owner);
+      for (const component of componentsOf(toRepositoryPath(resolve(dirname(path), target)))) components.add(component);
     }
-    testSuites.set(suite, owners);
+    testSuites.set(suite, components);
   }
 }
-const testAssignments = [...testSuites].sort(([first], [second]) => first.localeCompare(second)).map(([suite, owners]) => ({
-  suite, roles: owners.size ? [...owners].sort() : [manifest.testAttribution.fallbackRole],
-  attribution: owners.size ? 'direct-production-dependency' : 'integration-coordination'
+const testDependencies = [...testSuites].sort(([first], [second]) => first.localeCompare(second)).map(([suite, components]) => ({
+  suite, components: components.size ? [...components].sort() : [manifest.localTests.fallbackComponent],
+  basis: components.size ? 'direct-production-dependency' : 'integration'
 }));
 const report = {
   passed: violations.length === 0,
   productionSourceFiles: sourceFiles.length,
-  ownershipByRole: ownerCounts,
+  sourceFilesByComponent: componentCounts,
   scriptModuleFiles: scriptFiles.length,
   relativeModuleReferences: relativeModuleCount,
   relativeResourceReferences: relativeResourceCount,
   testSourceOrProjectFiles: testSourceCount,
   missingLocalTestRoots,
-  testSuiteAssignments: testAssignments.length,
-  testAssignmentsByRole: Object.fromEntries(Object.keys(manifest.roles).map(role =>
-    [role, testAssignments.filter(assignment => assignment.roles.includes(role)).length])),
+  testSuites: testDependencies.length,
+  testSuitesByComponent: Object.fromEntries(Object.keys(manifest.components).map(component =>
+    [component, testDependencies.filter(dependency => dependency.components.includes(component)).length])),
   detailsCommand: 'node tools/development/check-architecture.mjs --details',
-  ...(process.argv.includes('--details') ? { testAssignments } : {}),
+  ...(process.argv.includes('--details') ? { testDependencies } : {}),
   coverageNotes: manifest.coverageNotes,
   violations
 };

@@ -1,9 +1,3 @@
-# KYNXA UI resources
+# 界面资源
 
-This directory contains the approved UI source assets and visual references.
-
-- `Brand/`: the approved PNG brand mark used by the shell.
-- `Icons/`: the 20 independent SVG component assets.
-- `References/`: immutable default-interface and component-sheet reference images.
-
-Reference images are not packaged at runtime. Component icons use SVG; the brand mark uses the original PNG without vector redrawing.
+提供软件品牌图像、图标和界面展示资源。

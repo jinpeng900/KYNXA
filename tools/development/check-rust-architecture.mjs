@@ -239,8 +239,8 @@ async function isFile(path) {
   catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false; throw error; }
 }
 
-/** Check the declared native-core boundary without introducing a second ownership manifest.
- * 使用主责清单声明的原生核心边界检查结构，不再维护第二份负责人配置。 */
+/** Use the shared architecture configuration to check native-core boundaries.
+ * 使用同一技术配置检查原生核心边界。 */
 export async function checkRustArchitecture({ repositoryRoot, manifest, sourceFiles }) {
   const violations = [];
   const localTestFiles = new Set((manifest.localTestFiles ?? []).map(path => resolve(repositoryRoot, path)));

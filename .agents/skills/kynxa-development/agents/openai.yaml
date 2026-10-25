@@ -1,6 +1,0 @@
-interface:
-  display_name: "KYNXA 项目开发"
-  short_description: "维护 KYNXA 的 Rust 原生核心、C# 桌面与 WebView，遵守模块及数据边界"
-  default_prompt: "使用 $kynxa-development 按 KYNXA 当前 Windows 原生架构完成任务，核对语言职责、接口与数据所有权，并验证受影响行为。"
-policy:
-  allow_implicit_invocation: true

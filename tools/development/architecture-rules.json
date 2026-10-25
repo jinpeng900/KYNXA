@@ -1,12 +1,5 @@
 {
-  "schemaVersion": 1,
-  "roles": {
-    "A": "编排、基础合同、集成与打包 / orchestration, platform, integration and packaging",
-    "B": "桌面展示与交互 / desktop presentation and interaction",
-    "C": "模型、协议、流式与上下文 / models, protocols, streaming and context",
-    "D": "权限、工具与原生执行 / permissions, tools and native execution",
-    "E": "会话、记忆、路径与迁移 / conversations, memory, paths and migration"
-  },
+  "schemaVersion": 2,
   "sourceScopes": [
     "apps/desktop",
     "apps/desktop-preview",
@@ -40,210 +33,21 @@
     "apps/agent-core/src/retrieval/gateway_legacy_word_tests.rs",
     "apps/agent-core/src/storage/native_services_tests.rs"
   ],
-  "ownershipRules": [
-    {
-      "prefix": "apps/agent-core/src/resources/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/agent-core/src/storage/",
-      "role": "E"
-    },
-    {
-      "prefix": "apps/agent-core/src/models/",
-      "role": "C"
-    },
-    {
-      "prefix": "apps/agent-core/src/orchestration/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/agent-core/src/tools/",
-      "role": "D"
-    },
-    {
-      "prefix": "apps/agent-core/src/retrieval/",
-      "role": "E"
-    },
-    {
-      "files": [
-        "apps/agent-core/src/lib.rs",
-        "apps/agent-core/src/main.rs",
-        "apps/agent-core/src/text_metrics.rs",
-        "apps/agent-core/src/file_identity.rs",
-        "apps/agent-core/src/transport.rs",
-        "apps/agent-core/src/service_cancellation.rs",
-        "apps/agent-core/src/gateway.rs",
-        "apps/agent-core/src/gateway/startup.rs",
-        "apps/agent-core/src/gateway_contract.rs",
-        "apps/agent-core/src/document_formats.rs",
-        "apps/agent-core/src/gateway_storage.rs"
-      ],
-      "role": "A"
-    },
-    {
-      "prefix": "apps/resource-service/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/desktop-preview/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/desktop/Build/",
-      "role": "A"
-    },
-    {
-      "files": [
-        "apps/desktop/KYNXA.Desktop.csproj",
-        "apps/tool-host/KYNXA.ToolHost.csproj"
-      ],
-      "role": "A"
-    },
-    {
-      "directory": "apps/desktop",
-      "extensions": [
-        ".cs",
-        ".xaml"
-      ],
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Views/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Controls/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/ViewModels/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Models/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Layout/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Resources/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/UI/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Styles/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Services/Integration/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/desktop/Services/Presentation/",
-      "role": "B"
-    },
-    {
-      "prefix": "apps/desktop/Services/Models/",
-      "role": "C"
-    },
-    {
-      "prefix": "apps/desktop/Services/Tools/",
-      "role": "D"
-    },
-    {
-      "prefix": "apps/desktop/Services/Data/",
-      "role": "E"
-    },
-    {
-      "prefix": "apps/shared/Chat/",
-      "extensions": [
-        ".cs"
-      ],
-      "role": "C"
-    },
-    {
-      "prefix": "apps/shared/Tools/",
-      "extensions": [
-        ".cs"
-      ],
-      "role": "D"
-    },
-    {
-      "prefix": "apps/shared/Memory/",
-      "extensions": [
-        ".cs"
-      ],
-      "role": "E"
-    },
-    {
-      "prefix": "apps/shared/",
-      "extensions": [
-        ".csproj"
-      ],
-      "role": "A"
-    },
-    {
-      "prefix": "apps/tool-host/Desktop/",
-      "role": "D"
-    },
-    {
-      "prefix": "apps/tool-host/Terminal/",
-      "role": "D"
-    },
-    {
-      "prefix": "apps/tool-host/Sandbox/",
-      "role": "D"
-    },
-    {
-      "prefix": "apps/tool-host/Native/",
-      "role": "D"
-    },
-    {
-      "files": [
-        "apps/tool-host/Program.cs"
-      ],
-      "role": "A"
-    },
-    {
-      "prefix": "apps/agent-core/src/bin/",
-      "role": "A"
-    },
-    {
-      "prefix": "apps/official-tools/",
-      "role": "D"
-    }
-  ],
   "developmentEntrypoints": [
     {
       "files": [
         "Directory.Build.props",
         "Directory.Build.targets"
       ],
-      "role": "A",
-      "inventory": "shared build configuration outside apps / apps 范围外的共享构建配置"
+      "inventory": "shared build configuration outside apps / apps 范围外的共享构建配置",
+      "component": "integration"
     },
     {
       "prefix": "tools/development/",
-      "role": "A",
-      "inventory": "outside apps production inventory / 不计入 apps 生产源码统计"
+      "inventory": "outside apps production inventory / 不计入 apps 生产源码统计",
+      "component": "integration"
     }
   ],
-  "testAttribution": {
-    "localOnly": true,
-    "strategy": "Direct test source/Compile Include resolve to implementation owners; native unit tests remain with the owning Rust modules / 直接测试源码或 Compile Include 映射实现负责人；原生单元测试归所属 Rust 模块",
-    "fallbackRole": "A",
-    "fallbackMeaning": "Fixtures or integration checks without direct owned sources are coordinated by A, not automatically assigned to data / 无直接主责源码的夹具或集成检查由 A 协调，不统一归数据负责人",
-    "limitation": "Indirect runtime calls and nested fixture ownership require suite README review / 间接运行调用及嵌套夹具归属仍需查阅套件 README",
-    "roots": [
-      "tests"
-    ]
-  },
   "rustApps": [
     {
       "root": "apps/agent-core",
@@ -1259,8 +1063,7 @@
     "Production source and official static resources are inventoried; src/bin is explicitly included while generated bin/obj, dependencies and tests are excluded / 统计生产源码和官方静态资源；显式包含 src/bin，排除生成的 bin/obj、依赖和测试",
     "Windows native Rust gateway owns HTTP/SSE, provider, MCP, inference and formal data execution; WebView interface JavaScript remains unchanged / Windows 原生 Rust 网关负责 HTTP/SSE、供应商、MCP、推理和正式数据执行；WebView 界面 JavaScript 保持不变",
     "Integration modules are declared individually with their permitted domains; pure rules cannot depend on integration and their domain cycles remain prohibited / 集成模块逐文件声明准许调用的领域；纯规则不得反向依赖集成层，纯域循环继续禁止",
-    "JavaScript static reference checking remains a development-only bounded lexical check for interface assets, not a runtime dependency or native functionality test / JavaScript 静态引用检查仍为仅开发使用的界面资源限定词法检查，不是运行依赖或原生功能测试",
-    "Role labels are local responsibility identifiers, not Git account names / 角色标记是本地职责标识，不是 Git 账号"
+    "JavaScript static reference checking remains a development-only bounded lexical check for interface assets, not a runtime dependency or native functionality test / JavaScript 静态引用检查仍为仅开发使用的界面资源限定词法检查，不是运行依赖或原生功能测试"
   ],
   "includedSourceDirectories": [
     "apps/agent-core/src/bin"
@@ -1274,5 +1077,198 @@
         ".txt"
       ]
     }
-  ]
+  ],
+  "components": {
+    "integration": "编排、基础合同、集成与打包 / orchestration, platform, integration and packaging",
+    "ui": "桌面展示与交互 / desktop presentation and interaction",
+    "models": "模型、协议、流式与上下文 / models, protocols, streaming and context",
+    "tools": "权限、工具与原生执行 / permissions, tools and native execution",
+    "data": "会话、记忆、路径与迁移 / conversations, memory, paths and migration"
+  },
+  "componentRules": [
+    {
+      "prefix": "apps/agent-core/src/resources/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/agent-core/src/storage/",
+      "component": "data"
+    },
+    {
+      "prefix": "apps/agent-core/src/models/",
+      "component": "models"
+    },
+    {
+      "prefix": "apps/agent-core/src/orchestration/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/agent-core/src/tools/",
+      "component": "tools"
+    },
+    {
+      "prefix": "apps/agent-core/src/retrieval/",
+      "component": "data"
+    },
+    {
+      "files": [
+        "apps/agent-core/src/lib.rs",
+        "apps/agent-core/src/main.rs",
+        "apps/agent-core/src/text_metrics.rs",
+        "apps/agent-core/src/file_identity.rs",
+        "apps/agent-core/src/transport.rs",
+        "apps/agent-core/src/service_cancellation.rs",
+        "apps/agent-core/src/gateway.rs",
+        "apps/agent-core/src/gateway/startup.rs",
+        "apps/agent-core/src/gateway_contract.rs",
+        "apps/agent-core/src/document_formats.rs",
+        "apps/agent-core/src/gateway_storage.rs"
+      ],
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/resource-service/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/desktop-preview/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/desktop/Build/",
+      "component": "integration"
+    },
+    {
+      "files": [
+        "apps/desktop/KYNXA.Desktop.csproj",
+        "apps/tool-host/KYNXA.ToolHost.csproj"
+      ],
+      "component": "integration"
+    },
+    {
+      "directory": "apps/desktop",
+      "extensions": [
+        ".cs",
+        ".xaml"
+      ],
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Views/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Controls/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/ViewModels/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Models/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Layout/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Resources/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/UI/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Styles/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Services/Integration/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/desktop/Services/Presentation/",
+      "component": "ui"
+    },
+    {
+      "prefix": "apps/desktop/Services/Models/",
+      "component": "models"
+    },
+    {
+      "prefix": "apps/desktop/Services/Tools/",
+      "component": "tools"
+    },
+    {
+      "prefix": "apps/desktop/Services/Data/",
+      "component": "data"
+    },
+    {
+      "prefix": "apps/shared/Chat/",
+      "extensions": [
+        ".cs"
+      ],
+      "component": "models"
+    },
+    {
+      "prefix": "apps/shared/Tools/",
+      "extensions": [
+        ".cs"
+      ],
+      "component": "tools"
+    },
+    {
+      "prefix": "apps/shared/Memory/",
+      "extensions": [
+        ".cs"
+      ],
+      "component": "data"
+    },
+    {
+      "prefix": "apps/shared/",
+      "extensions": [
+        ".csproj"
+      ],
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/tool-host/Desktop/",
+      "component": "tools"
+    },
+    {
+      "prefix": "apps/tool-host/Terminal/",
+      "component": "tools"
+    },
+    {
+      "prefix": "apps/tool-host/Sandbox/",
+      "component": "tools"
+    },
+    {
+      "prefix": "apps/tool-host/Native/",
+      "component": "tools"
+    },
+    {
+      "files": [
+        "apps/tool-host/Program.cs"
+      ],
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/agent-core/src/bin/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/official-tools/",
+      "component": "tools"
+    }
+  ],
+  "localTests": {
+    "localOnly": true,
+    "roots": [
+      "tests"
+    ],
+    "fallbackComponent": "integration"
+  }
 }

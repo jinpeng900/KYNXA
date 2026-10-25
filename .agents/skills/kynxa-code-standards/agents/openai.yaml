@@ -1,6 +1,0 @@
-interface:
-  display_name: "KYNXA 代码规范"
-  short_description: "规范 KYNXA 原生 Rust、C# 与 WebView 代码，保留合同和现有行为"
-  default_prompt: "使用 $kynxa-code-standards 按 KYNXA 当前原生架构整理相关代码的语义命名、简明中英注释和格式，保持公开合同、异步生命周期与功能兼容并执行相称验证。"
-policy:
-  allow_implicit_invocation: true
