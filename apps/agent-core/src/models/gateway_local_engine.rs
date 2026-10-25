@@ -365,25 +365,29 @@ async fn install_runtime(root: &Path, asset: &'static Asset, owner: &Arc<Engine>
 fn hardware_plan(model: &Value, snapshot: &Value) -> (u64, usize, bool, u64, u64) {
     let cores = snapshot["cpu"]["logicalCores"].as_u64().unwrap_or_else(||
         std::thread::available_parallelism().map(usize::from).unwrap_or(4) as u64);
-    let available = snapshot["accounting"]["availableMemoryBytes"].as_u64()
-        .or_else(|| snapshot["memory"]["availableBytes"].as_u64()).unwrap_or(4 * 1024 * MIB);
-    let requested = model["contextTokens"].as_u64().unwrap_or(16384).clamp(512, 131072);
+    let requested = requested_context(model);
     let bytes = model["bytes"].as_u64().unwrap_or(0);
     let gpu_available = snapshot["accounting"]["availableGpuMemoryBytes"].as_u64().unwrap_or(0);
     let vulkan = gpu_available > 1024 * MIB
         && std::env::var_os("SystemRoot").is_some_and(|root| PathBuf::from(root).join("System32/vulkan-1.dll").is_file());
     let gpu_capacity = if vulkan { gpu_available.saturating_sub(1024 * MIB) } else { 0 };
-    let (context, host_memory, gpu_memory) = residency_plan(bytes, requested, available, gpu_capacity);
+    let (context, host_memory, gpu_memory) = residency_plan(bytes, requested, gpu_capacity);
     let threads = if snapshot["cpu"]["usagePercent"].as_f64().unwrap_or(0.0) > 80.0 { cores / 2 } else { cores.saturating_sub(1) }.clamp(1, 64) as usize;
     (context, threads, vulkan, host_memory, gpu_memory)
 }
-fn residency_plan(bytes: u64, requested: u64, host_available: u64, gpu_capacity: u64) -> (u64, u64, u64) {
+fn requested_context(model: &Value) -> u64 {
+    model["contextTokens"].as_u64().unwrap_or(16384).clamp(512, 131072)
+}
+fn context_sufficient(model: &Value, observed: &Value) -> bool {
+    observed["runtimeContextTokens"].as_u64().unwrap_or(0) >= requested_context(model)
+}
+fn residency_plan(bytes: u64, requested: u64, gpu_capacity: u64) -> (u64, u64, u64) {
     // Charge offloaded weights/KV to real VRAM, retaining host buffers instead of double charging all weights.
     // 已卸载到显卡的权重和KV计入实际显存，主存保留缓冲，不将全部权重在两处重复计量。
     let host_buffers = 512 * MIB;
-    let fit = host_available.saturating_add(gpu_capacity)
-        .saturating_sub(bytes.saturating_add(host_buffers)) / 65536;
-    let context = requested.min(fit.max(512));
+    // Admission waits for the configured window; memory pressure must not create an unusable tiny model.
+    // 按配置窗口申请资源；内存紧张时正常排队，不把模型静默缩成无法承载请求的小窗口。
+    let context = requested;
     let total = bytes.saturating_add(context * 65536);
     let gpu = total.min(gpu_capacity);
     (context, total.saturating_sub(gpu).saturating_add(host_buffers), gpu)
@@ -414,6 +418,17 @@ async fn admit(bytes: u64, gpu_bytes: u64, mut token: watch::Receiver<bool>, loa
             },
         }
     }
+}
+async fn register_executor(lease: &ResourceLease, process_id: u32) -> Result<(), ModelError> {
+    let service = crate::resources::gateway::global()
+        .ok_or_else(|| error("RESOURCE_RUNTIME_UNAVAILABLE", "本地模型资源服务尚未就绪。", 503))?;
+    let registered = service.request("registerExecutor", json!({
+        "leaseId":lease.allocation["leaseId"],"processId":process_id,
+    }), Duration::from_secs(5)).await.map_err(map_error)?;
+    if registered["status"] != "registered" {
+        return Err(error("LOCAL_MODEL_EXECUTOR_UNVERIFIED", "本地模型驻留内存归属尚未确认。", 503));
+    }
+    Ok(())
 }
 fn local_client() -> Result<reqwest::Client, ModelError> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -550,6 +565,12 @@ async fn observe_model(owner: &Arc<Engine>, base: &str, process_id: u32, selecte
     let context = props["default_generation_settings"]["n_ctx"].as_u64()
         .filter(|tokens| *tokens > 0)
         .ok_or_else(|| error("LOCAL_MODEL_CONTEXT_UNCONFIRMED", "本地服务未报告实际上下文窗口，尚不能开始生成。", 503))?;
+    let requested = owner.state.lock().unwrap()["requestedContextTokens"].as_u64().unwrap_or(0);
+    if context < requested {
+        let mut failure = error("LOCAL_MODEL_CONTEXT_TOO_SMALL", "本地模型实际窗口小于配置，尚不能开始生成。", 503);
+        failure.details = json!({"contextWindowTokens":context,"requestedContextTokens":requested});
+        return Err(failure);
+    }
     patch(owner, template_status(&props, adapted));
     patch(owner, json!({"modelIdentityVerified":true,"loadedModelPath":props["model_path"],
         "baseUrl":format!("{base}/v1"),"processId":process_id,"runtimeContextTokens":context,"contextTokens":context}));
@@ -705,40 +726,65 @@ async fn ensure_owned(root: &Path, connection: &Value, model: &str, token: watch
                 binding_failure(&owner, &failure);
                 return Err(failure);
             }
-            let needs_wake = running.lease.is_none() || owner.state.lock().unwrap()["state"] != "ready";
-            if running.lease.is_none() {
-                let requested = owner.state.lock().unwrap()["memoryBytes"].as_u64().unwrap_or(512 * MIB);
-                let gpu = owner.state.lock().unwrap()["gpuMemoryBytes"].as_u64().unwrap_or(0);
-                patch(&owner, json!({"state":"waiting-resource"}));
-                running.lease = Some(admit(requested, gpu, token.clone(), load).await?);
-            }
-            if needs_wake {
-                patch(&owner, json!({"state":"loading"}));
-                wake(&base, token.clone()).await?;
-            }
-            if needs_wake {
-                if let Err(failure) = observe_model(&owner, &base, process_id, &files).await {
-                    binding_failure(&owner, &failure);
-                    return Err(failure);
+            let reload = {
+                let mut state = owner.state.lock().unwrap();
+                let reload = !context_sufficient(&metadata, &state);
+                if reload {
+                    if state["activeRequests"].as_u64().unwrap_or(0) > 0 {
+                        return Err(error("LOCAL_MODEL_BUSY", "本地模型正在生成，窗口调整将在当前回复结束后生效。", 409));
+                    }
+                    // Close generation admission before retiring the undersized child; formal task state stays intact.
+                    // 关闭生成准入后再替换窗口不足的自有进程，正式任务和上下文保持原样。
+                    state["state"] = json!("preparing-runtime");
+                    state["modelIdentityVerified"] = json!(false);
                 }
+                reload
+            };
+            if reload {
+                retire_process(running).await?;
+            } else {
+                let needs_wake = running.lease.is_none() || owner.state.lock().unwrap()["state"] != "ready";
+                if running.lease.is_none() {
+                    let requested = owner.state.lock().unwrap()["memoryBytes"].as_u64().unwrap_or(512 * MIB);
+                    let gpu = owner.state.lock().unwrap()["gpuMemoryBytes"].as_u64().unwrap_or(0);
+                    patch(&owner, json!({"state":"waiting-resource"}));
+                    running.lease = Some(admit(requested, gpu, token.clone(), load).await?);
+                }
+                if needs_wake {
+                    // Register before weights return, so materialized memory offsets the same lease once.
+                    // 权重恢复前登记进程，实际驻留抵扣原预约，避免同一份内存重复计量。
+                    register_executor(running.lease.as_ref().unwrap(), process_id).await?;
+                    patch(&owner, json!({"state":"loading"}));
+                    wake(&base, token.clone()).await?;
+                }
+                if needs_wake {
+                    if let Err(failure) = observe_model(&owner, &base, process_id, &files).await {
+                        binding_failure(&owner, &failure);
+                        return Err(failure);
+                    }
+                }
+                patch(&owner, json!({"state":"ready"}));
+                return Ok(());
             }
-            patch(&owner, json!({"state":"ready"}));
-            return Ok(());
         }
     }
     *process = None;
     let service = crate::resources::gateway::global().ok_or_else(|| error("RESOURCE_RUNTIME_UNAVAILABLE", "本地模型资源服务尚未就绪。", 503))?;
     let snapshot = service.request("snapshot", json!({}), Duration::from_secs(5)).await.map_err(map_error)?;
     let (context, threads, vulkan, memory, gpu_memory) = hardware_plan(&metadata, &snapshot);
-    patch(&owner, json!({"state":"preparing-runtime","modelId":id,"contextTokens":context,"cpuThreads":threads,
+    patch(&owner, json!({"state":"preparing-runtime","modelId":id,"contextTokens":context,"requestedContextTokens":context,"cpuThreads":threads,
         "memoryBytes":memory,"gpuMemoryBytes":gpu_memory,"supportsTools":Value::Null,
+        "runtimePreparationMs":0,"resourceWaitMs":0,"modelLoadMs":0,
         "chatTemplateCapabilities":Value::Null,"toolCallingMode":"unknown","toolCapabilityState":"unknown",
         "modelIdentityVerified":false,"loadedModelPath":Value::Null,"baseUrl":format!("{base}/v1"),"toolTemplate":metadata["toolTemplate"]}));
     let asset = if vulkan { &VULKAN } else { &CPU };
+    let stage_started = tokio::time::Instant::now();
     let path = install_runtime(root, asset, &owner, &token).await?;
     cancelled(&token, &owner)?;
-    patch(&owner, json!({"state":"waiting-resource"}));
+    patch(&owner, json!({"state":"waiting-resource","runtimePreparationMs":stage_started.elapsed().as_millis() as u64}));
+    let stage_started = tokio::time::Instant::now();
     let lease = admit(memory, gpu_memory, token.clone(), load).await?;
+    patch(&owner, json!({"resourceWaitMs":stage_started.elapsed().as_millis() as u64}));
     let mut command = Command::new(&path);
     command.current_dir(path.parent().unwrap()).env_clear();
     for key in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
@@ -771,20 +817,24 @@ async fn ensure_owned(root: &Path, connection: &Value, model: &str, token: watch
             patch(&diagnostic_owner, json!({"runtimeDiagnostic":String::from_utf8_lossy(&tail)}));
         }
     });
-    let mut progress_at = tokio::time::Instant::now();
+    let stage_started = tokio::time::Instant::now();
+    let mut progress_at = stage_started;
     let mut last_diagnostic = Value::Null;
-    let loaded = loop {
-        if let Err(error) = cancelled(&token, &owner) { break Err(error); }
-        if child.try_wait().map_err(io_error)?.is_some() { break Err(error("LOCAL_MODEL_START_FAILED", "本地推理服务退出，请检查模型与可用内存。", 503)); }
-        if response(&base, "/health").await.is_ok() {
-            break observe_model(&owner, &base, child.id().unwrap_or(0), &files).await;
-        }
-        let diagnostic = owner.state.lock().unwrap()["runtimeDiagnostic"].clone();
-        if diagnostic != last_diagnostic { last_diagnostic = diagnostic; progress_at = tokio::time::Instant::now(); }
-        // Only a genuinely stalled owned startup expires; continuing load diagnostics extend its lifetime.
-        // 只有真正无装载进展的自有启动才到期；持续产生装载诊断时继续等待，不用观察期限反复冷装。
-        if progress_at.elapsed() >= Duration::from_secs(900) { break Err(error("LOCAL_MODEL_LOAD_STALLED", "本地模型长时间没有装载进展，请检查运行时诊断。", 504)); }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let loaded = match register_executor(&lease, child.id().unwrap_or(0)).await {
+        Err(failure) => Err(failure),
+        Ok(()) => loop {
+            if let Err(error) = cancelled(&token, &owner) { break Err(error); }
+            if child.try_wait().map_err(io_error)?.is_some() { break Err(error("LOCAL_MODEL_START_FAILED", "本地推理服务退出，请检查模型与可用内存。", 503)); }
+            if response(&base, "/health").await.is_ok() {
+                break observe_model(&owner, &base, child.id().unwrap_or(0), &files).await;
+            }
+            let diagnostic = owner.state.lock().unwrap()["runtimeDiagnostic"].clone();
+            if diagnostic != last_diagnostic { last_diagnostic = diagnostic; progress_at = tokio::time::Instant::now(); }
+            // Only a genuinely stalled owned startup expires; continuing load diagnostics extend its lifetime.
+            // 只有真正无装载进展的自有启动才到期；持续产生装载诊断时继续等待，不用观察期限反复冷装。
+            if progress_at.elapsed() >= Duration::from_secs(900) { break Err(error("LOCAL_MODEL_LOAD_STALLED", "本地模型长时间没有装载进展，请检查运行时诊断。", 504)); }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        },
     };
     if let Err(mut error) = loaded {
         let _ = owned.terminate_and_wait().await; let _ = child.wait().await; lease.release().await;
@@ -795,7 +845,7 @@ async fn ensure_owned(root: &Path, connection: &Value, model: &str, token: watch
         return Err(error);
     }
     *process = Some(Process { child, owned, lease:Some(lease), base, files, diagnostic });
-    patch(&owner, json!({"state":"ready","code":Value::Null}));
+    patch(&owner, json!({"state":"ready","code":Value::Null,"modelLoadMs":stage_started.elapsed().as_millis() as u64}));
     drop(process);
     if let Some(previous) = owner.monitor.lock().unwrap().take() { previous.abort(); }
     let monitored = owner.clone();
@@ -848,13 +898,17 @@ async fn terminate(owner: &Arc<Engine>) -> Result<(), ModelError> {
     if let Some(monitor) = owner.monitor.lock().unwrap().take() { monitor.abort(); }
     let mut process = owner.process.lock().await;
     if let Some(running) = process.as_mut() {
-        running.owned.terminate_and_wait().await.map_err(map_error)?;
-        let _ = running.child.wait().await;
-        if let Some(lease) = running.lease.take() { lease.release().await; }
+        retire_process(running).await?;
     }
     *process = None;
     patch(owner, json!({"state":"stopped","processId":Value::Null,"modelIdentityVerified":false,
         "supportsTools":Value::Null,"toolCallingMode":"unknown","toolCapabilityState":"unknown"}));
+    Ok(())
+}
+async fn retire_process(running: &mut Process) -> Result<(), ModelError> {
+    running.owned.terminate_and_wait().await.map_err(map_error)?;
+    let _ = running.child.wait().await;
+    if let Some(lease) = running.lease.take() { lease.release().await; }
     Ok(())
 }
 pub async fn shutdown_for(root: &Path) {
@@ -1022,11 +1076,22 @@ mod tests {
             &json!({"cpu":{"logicalCores":8},"accounting":{"availableMemoryBytes":4*1024*MIB}}));
         let large = hardware_plan(&json!({"bytes":2*1024*MIB,"contextTokens":32768}),
             &json!({"cpu":{"logicalCores":16},"accounting":{"availableMemoryBytes":16*1024*MIB}}));
-        assert!(small.0 < large.0); assert!(small.1 < large.1);
-        let offloaded = residency_plan(18*1024*MIB, 16384, 8*1024*MIB, 23*1024*MIB);
+        assert_eq!(small.0, 32768); assert_eq!(large.0, 32768); assert!(small.1 < large.1);
+        let offloaded = residency_plan(18*1024*MIB, 16384, 23*1024*MIB);
         assert_eq!(offloaded.0, 16384);
         assert!(offloaded.1 < 8*1024*MIB);
         assert!(offloaded.2 >= 18*1024*MIB);
+    }
+
+    #[test]
+    fn configured_windows_survive_memory_pressure_and_reuse_requires_sufficient_capacity() {
+        let metadata = json!({"bytes":1_894_532_128u64,"contextTokens":8192});
+        let plan = hardware_plan(&metadata, &json!({"accounting":{"availableMemoryBytes":600*MIB}}));
+        assert_eq!(plan.0, 8192);
+        assert_eq!(plan.3, 1_894_532_128u64 + 512*MIB + 8192*65536);
+        assert!(!context_sufficient(&metadata, &json!({"runtimeContextTokens":512,"state":"ready"})));
+        assert!(context_sufficient(&metadata, &json!({"runtimeContextTokens":8192})));
+        assert!(!context_sufficient(&json!({"contextTokens":16384}), &json!({"runtimeContextTokens":8192})));
     }
 
     #[test]

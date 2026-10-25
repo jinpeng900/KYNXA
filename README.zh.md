@@ -1,4 +1,4 @@
-# KYNXA 1.8
+# KYNXA 1.8.1
 
 <p align="center">
   <a href="./README.md">English</a> | 中文
@@ -6,9 +6,9 @@
 
 **KYNXA** 是面向 Windows 的本地优先个人 Agent 应用，将云端与本地模型、长任务、文档检索、工具，以及文件／网页／终端工作区整合在桌面中。
 
-**当前正式版：`1.8` · 安装发行版本：`1.8.0` · Windows x64**
+**当前正式版：`1.8.1` · 安装发行版本：`1.8.1` · Windows x64**
 
-1.8 改进任务范围、回复交付和恢复。只要求方案时交付方案，不因未来实施或待授权事项继续执行；任务确实未完成时，回复也能正常显示实际结论。退出软件直接保存进度并暂停，不再绕进草稿确认流程。消息排队、显式引导、暂停续作、成功回执，以及已有检索和缓存能力继续保留。版本变化见 [1.8 更新说明](docs/releases/1.8.md)，安装入口见 [1.8 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.0)，架构与使用入口见 [文档索引](docs/README.md)。[1.7 更新说明](docs/releases/1.7.md)保留首个正式版的历史记录。
+1.8.1 减少普通制作任务的额外验证，修复设置加载期间关闭误报，并改进本地模型窗口规划、进程复用和托盘退出。任务按当前要求、真实成果及必要检查收尾；消息排队、显式引导、暂停续作、上下文、成功回执，以及已有检索和缓存能力继续保留。版本变化见 [1.8.1 更新说明](docs/releases/1.8.1.md)，安装入口见 [1.8.1 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.1)，架构与使用入口见 [文档索引](docs/README.md)。[1.7 更新说明](docs/releases/1.7.md)保留首个正式版的历史记录。
 
 **成品与源码说明：** 从源码构建已发布版本时，请使用对应的发布标签；不同分支或修订可能包含不同实现。
 
@@ -16,7 +16,7 @@
 
 独立测试、夹具和评测脚本只保留本地，不再随当前 Git 版本分发。干净克隆可构建生产程序、运行源码架构守卫；完整测试命令需要本地保留的测试文件，详见[验证说明](.agents/skills/kynxa-development/references/validation.md)。
 
-## 1.8 成品能力
+## 1.8.1 成品能力
 
 | 领域 | 已接入的功能 |
 | --- | --- |
@@ -42,16 +42,16 @@ DOCX 先显示可操作页面，嵌入字体和图片在后台补齐；长文档
 
 ## 安装与数据位置
 
-Windows x64 [1.8 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.0)提供以下下载：
+Windows x64 [1.8.1 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.1)提供以下下载：
 
 | 下载 | 用途 |
 | --- | --- |
-| [安装包 ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.0/KYNXA-1.8.0-windows-x64-setup.zip) | 解压后运行其中的 EXE，安装软件及完整基础运行资源。 |
-| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.0/KYNXA-1.8.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
+| [EXE 安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.1/KYNXA-1.8.1-windows-x64-setup.exe) | 直接运行，安装软件及完整基础运行资源。 |
+| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.1/KYNXA-1.8.1-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
 
 EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
 
-1.8 公开分发仅安装包 ZIP 与运行资源 ZIP，安装 EXE 位于安装包 ZIP 内；不单独上传 EXE、在线安装器、校验旁文件或维护清单。源码中的维护工具继续保留。
+1.8.1 公开分发直接可运行的 EXE 安装包和独立运行资源 ZIP；不额外上传在线安装器、校验旁文件或维护清单。源码中的维护工具继续保留。
 
 **使用完整安装包的普通用户不需要安装开发 SDK、Rust、Node、Python 或手动配置 PATH。** 云端模型凭据及需要账号的第三方服务仍由用户配置。当前安装器构建尚未配置生产代码签名，生成的 EXE 尚未进行安装运行测试，详见 [安装打包说明](apps/desktop/Build/Installer/README.md)。
 
@@ -75,7 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-des
 
 已有完整运行资源包可传入 `-ResourcePackRoot <ZIP路径>`；离线源码构建还需要对应 SDK、Cargo／NuGet 缓存，运行资源 ZIP 不能替代开发环境。已准备好的资源会继续复用。构建档位、下载源与离线选项见 [构建指南](apps/desktop/Build/README.md)。
 
-安装包 ZIP 内的 EXE、安装选项和升级行为见 [打包指南](apps/desktop/Build/Installer/README.md)。
+EXE 安装器、安装选项和升级行为见 [打包指南](apps/desktop/Build/Installer/README.md)。
 
 ## 当前架构
 
@@ -112,11 +112,11 @@ Rust 拥有正式 HTTP／SSE 后端、模型与工具 I/O、任务状态、检�
 | `docs/` | 持续维护的 Markdown 指南、架构、版本说明及团队文档。 |
 | `tests/` | 按需使用的桌面、存储、协议、打包和交互检查。 |
 
-源码仓库保留当前文档、代码、清单与准备脚本。本版通过 Release 附件分发安装包 ZIP 和运行资源 ZIP；验证产物不进入源码版本管理，历史设计压缩包不是当前构建或安装的前置条件。
+源码仓库保留当前文档、代码、清单与准备脚本。本版通过 Release 附件分发 EXE 安装包和运行资源 ZIP；验证产物不进入源码版本管理，历史设计压缩包不是当前构建或安装的前置条件。
 
 常用入口：
 
-* [文档索引](docs/README.md) 与 [1.8 更新说明](docs/releases/1.8.md)
+* [文档索引](docs/README.md) 与 [1.8.1 更新说明](docs/releases/1.8.1.md)
 * [核心指南](apps/agent-core/README.md) 与 [原生架构](docs/architecture/native-gateway.md)
 * [聊天与工作记忆](docs/architecture/chat-work-memory.md)
 * [文档解析](docs/architecture/document-ingestion.md) 与 [检索](docs/architecture/retrieval.md)

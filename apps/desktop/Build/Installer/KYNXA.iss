@@ -7,7 +7,7 @@
   #define PackageOutputDir "..\..\..\..\artifacts\installer\output"
 #endif
 #ifndef PackageVersion
-  #define PackageVersion "1.8.0"
+  #define PackageVersion "1.8.1"
 #endif
 #ifndef LauncherFile
   #define LauncherFile "KYNXA.Desktop.exe"

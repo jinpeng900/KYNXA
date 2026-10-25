@@ -180,17 +180,22 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
                 _nextRecoverableTaskId = recoverable.HasMore ? recoverable.NextTaskId : null;
             if (!loadMore && !recoverable.HasMore)
             {
-                var currentRoots = recoverable.Tasks.Select(task => task.TaskId).ToHashSet();
+                var currentRoots = recoverable.Tasks.Where(ShouldDisplay).Select(task => task.TaskId).ToHashSet();
                 foreach (var row in _rows.Where(row => _recoverableTaskIds.Contains(row.Record.TaskId) &&
                     !currentRoots.Contains(row.Record.TaskId) && !page.Tasks.Any(task => task.TaskId == row.Record.TaskId)).ToArray())
                     _rows.Remove(row);
                 _recoverableTaskIds.IntersectWith(currentRoots);
             }
-            // Recoverable roots remain visible in this chat without selecting or controlling execution.
-            // 当前聊天的可恢复根任务仍可查看，不选择执行目标，也不改变任务状态。
+            // Recovery remains independent of presentation; hidden reply records stay resumable.
+            // 恢复与展示分开；隐藏的回复记录仍可续作，不因暂停变成可见待办。
             int recoveryPosition = loadMore ? _rows.Count(row => _recoverableTaskIds.Contains(row.Record.TaskId)) : 0;
             foreach (var task in recoverable.Tasks)
             {
+                if (!ShouldDisplay(task))
+                {
+                    RemoveHiddenTask(task.TaskId);
+                    continue;
+                }
                 _recoverableTaskIds.Add(task.TaskId);
                 var row = _rows.FirstOrDefault(item => item.Record.TaskId == task.TaskId);
                 if (row is null) _rows.Insert(recoveryPosition, new(task));
@@ -207,10 +212,9 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
             foreach (var task in page.Tasks.Where(task => task.ParentTaskId is null))
             {
                 var row = _rows.FirstOrDefault(item => item.Record.TaskId == task.TaskId);
-                if (task.DisplayInTaskList == false && !_recoverableTaskIds.Contains(task.TaskId))
+                if (!ShouldDisplay(task))
                 {
-                    if (row is not null) _rows.Remove(row);
-                    _expanded.Remove(task.TaskId);
+                    RemoveHiddenTask(task.TaskId);
                     continue;
                 }
                 if (row is null)
@@ -242,6 +246,15 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     }
 
     private bool Current(long generation) => CanRead && _generation == generation;
+
+    private static bool ShouldDisplay(TaskRecord task) => task.ParentTaskId is null && task.DisplayInTaskList == true;
+
+    private void RemoveHiddenTask(Guid taskId)
+    {
+        if (_rows.FirstOrDefault(row => row.Record.TaskId == taskId) is { } row) _rows.Remove(row);
+        _recoverableTaskIds.Remove(taskId);
+        _expanded.Remove(taskId);
+    }
 
     private void ContainerChanged(ListViewBase sender, ContainerContentChangingEventArgs args)
     {

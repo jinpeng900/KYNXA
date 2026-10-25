@@ -12,6 +12,9 @@ public static class ModelGatewayService
 {
     private static readonly SemaphoreSlim StartupLock = new(1, 1);
     private static readonly object ReadinessSync = new();
+    private static readonly CancellationTokenSource ShutdownCancellation = new();
+    private static bool _shutdownRequested;
+    private static Process? _ownedGateway;
     private static Task? _readinessTask;
     private static Uri? _readinessAddress;
     private static readonly HttpClient Probe = new(new SocketsHttpHandler { UseProxy = false })
@@ -25,8 +28,58 @@ public static class ModelGatewayService
     public static async Task WarmUpModelsAsync(string? providerId = null, string? modelId = null,
         CancellationToken cancellationToken = default)
     {
+        using var preparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, ShutdownCancellation.Token);
         using var client = new ModelApiClient();
-        await client.SchedulePreparationAsync(providerId, modelId, cancellationToken);
+        await client.SchedulePreparationAsync(providerId, modelId, preparation.Token);
+    }
+
+    /// <summary>Await local shutdown acceptance; the gateway owns durable task suspension and cleanup.</summary>
+    /// <remarks>仅等待本机接受退出；任务中断保存和资源清理由网关自行完成。</remarks>
+    public static async Task RequestShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        Process? ownedGateway;
+        lock (ReadinessSync)
+        {
+            if (_shutdownRequested) return;
+            _shutdownRequested = true;
+            ownedGateway = _ownedGateway;
+        }
+        // Stop startup and warmup before notifying the gateway, so they cannot start a replacement during exit.
+        // 先停止启动及预热，再通知网关退出，避免收尾期间又拉起新网关。
+        ShutdownCancellation.Cancel();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
+        if (ownedGateway is not null)
+        {
+            try
+            {
+                if (!ownedGateway.HasExited)
+                {
+                    // The owned pipe accepts shutdown before HTTP is listening; process exit also closes it as EOF.
+                    // 自有管道在 HTTP 监听前即可接收退出；前台结束也会关闭写端并发送 EOF。
+                    await ownedGateway.StandardInput.WriteLineAsync("shutdown").WaitAsync(deadline.Token).ConfigureAwait(false);
+                    await ownedGateway.StandardInput.FlushAsync(deadline.Token).ConfigureAwait(false);
+                    return;
+                }
+            }
+            catch (Exception error) when (error is IOException or InvalidOperationException or OperationCanceledException)
+            {
+                Debug.WriteLine($"Owned gateway shutdown signal: {error.GetType().Name}");
+            }
+        }
+        Uri address = Address;
+        if (!address.IsLoopback || address.Scheme != "http") return;
+        using var client = GatewayHttpClient.Create(address, TimeSpan.FromSeconds(2));
+        using var response = await client.PostAsJsonAsync("/api/lifecycle/shutdown", new
+        {
+            modelDataHome = ApplicationPaths.ModelHome,
+            extensionRoot = ExtensionPaths.Root
+        }, deadline.Token).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        using var body = await response.Content.ReadFromJsonAsync<JsonDocument>(deadline.Token).ConfigureAwait(false);
+        if (response.StatusCode != System.Net.HttpStatusCode.Accepted || body is null
+            || !body.RootElement.TryGetProperty("accepted", out var accepted) || accepted.ValueKind != JsonValueKind.True)
+            throw new InvalidOperationException("Gateway shutdown was not accepted. / 网关未接受退出请求。");
     }
 
     /// <summary>
@@ -86,11 +139,14 @@ public static class ModelGatewayService
     public static Task EnsureReadyAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        ShutdownCancellation.Token.ThrowIfCancellationRequested();
         var address = Address;
         if (address.Scheme != "http" || address.Host is not ("127.0.0.1" or "localhost")) return Task.CompletedTask;
         Task readiness;
         lock (ReadinessSync)
         {
+            if (_shutdownRequested) throw new OperationCanceledException(ShutdownCancellation.Token);
+            ShutdownCancellation.Token.ThrowIfCancellationRequested();
             // Concurrent catalog, preparation and chat requests share one readiness check.
             // 目录、准备和聊天并发共用一次检查；后续请求仍核对协议及存储范围。
             if (_readinessTask is null || _readinessTask.IsCompleted || _readinessAddress != address)
@@ -107,7 +163,8 @@ public static class ModelGatewayService
 
     private static async Task EnsureLocalReadyAsync(Uri address)
     {
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ShutdownCancellation.Token);
+        cancellation.CancelAfter(TimeSpan.FromSeconds(20));
         CancellationToken cancellationToken = cancellation.Token;
         await StartupLock.WaitAsync(cancellationToken);
         try
@@ -116,15 +173,33 @@ public static class ModelGatewayService
             var start = new ProcessStartInfo(FindNativeGateway())
             {
                 UseShellExecute = false, CreateNoWindow = true,
-                WorkingDirectory = ApplicationPaths.Root
+                WorkingDirectory = ApplicationPaths.Root,
+                RedirectStandardInput = true
             };
+            start.ArgumentList.Add("--desktop-lifetime");
             start.Environment["KYNXA_APPLICATION_ROOT"] = ApplicationPaths.Root;
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
             ConfigureNativeRuntime(start);
             if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
                 start.Environment["KYNXA_LEGACY_DESKTOP_HOME"] = LegacyDesktopDirectory;
-            using var process = Process.Start(start)
-                ?? throw new InvalidOperationException(UiText.Get("无法启动模型网关。"));
+            Process started;
+            lock (ReadinessSync)
+            {
+                if (_shutdownRequested) throw new OperationCanceledException(ShutdownCancellation.Token);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_ownedGateway is { HasExited: false } existing)
+                {
+                    started = existing;
+                }
+                else
+                {
+                    _ownedGateway?.Dispose();
+                    started = Process.Start(start)
+                        ?? throw new InvalidOperationException(UiText.Get("无法启动模型网关。"));
+                    _ownedGateway = started;
+                }
+            }
+            var process = started;
             var deadline = Stopwatch.StartNew();
             while (deadline.Elapsed < TimeSpan.FromSeconds(15))
             {
@@ -147,41 +222,52 @@ public static class ModelGatewayService
     {
         try
         {
-            using var response = await Probe.GetAsync(new Uri(address, "/health"), cancellationToken);
-            if (!response.IsSuccessStatusCode) return false;
-            using var body = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken);
-            bool ready = body?.RootElement.TryGetProperty("service", out var service) == true
-                && service.GetString() == "kynxa-model-gateway"
-                && body.RootElement.TryGetProperty("status", out var status) && status.GetString() == "ok";
-            if (ready && (!body!.RootElement.TryGetProperty("runtime", out var runtime) || runtime.GetString() != "rust"))
-                throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
-            if (ready && (!body!.RootElement.TryGetProperty("conversationProtocol", out var protocol) ||
-                !protocol.TryGetInt32(out int version) || version < 1 ||
-                !body.RootElement.TryGetProperty("dataLayoutVersion", out var layout) ||
-                !layout.TryGetInt32(out int layoutVersion) || layoutVersion < 1 ||
-                !body.RootElement.TryGetProperty("memoryProtocol", out var memory) ||
-                !memory.TryGetInt32(out int memoryVersion) || memoryVersion < 1 ||
-                !body.RootElement.TryGetProperty("contextProtocol", out var context) ||
-                !context.TryGetInt32(out int contextVersion) || contextVersion < 3 ||
-                !body.RootElement.TryGetProperty("agentProtocol", out var agent) ||
-                !agent.TryGetInt32(out int agentVersion) || agentVersion < 5 ||
-                !body.RootElement.TryGetProperty("officialToolsProtocol", out var officialTools) ||
-                !officialTools.TryGetInt32(out int officialToolsVersion) || officialToolsVersion < 2 ||
-                !body.RootElement.TryGetProperty("hostTerminalProtocol", out var hostTerminal) ||
-                !hostTerminal.TryGetInt32(out int hostTerminalVersion) || hostTerminalVersion < 3 ||
-                !body.RootElement.TryGetProperty("browserAutomationProtocol", out var browserAutomation) ||
-                !browserAutomation.TryGetInt32(out int browserAutomationVersion) || browserAutomationVersion < 2 ||
-                !body.RootElement.TryGetProperty("extensionStorageProtocol", out var extensions) ||
-                !extensions.TryGetInt32(out int extensionVersion) || extensionVersion < 1 ||
-                !body.RootElement.TryGetProperty("toolStreamProtocol", out var toolStream) ||
-                !toolStream.TryGetInt32(out int toolStreamVersion) || toolStreamVersion < 3 ||
-                !body.RootElement.TryGetProperty("retrievalProtocol", out var retrieval) ||
-                !retrieval.TryGetInt32(out int retrievalVersion) || retrievalVersion < 1))
-                throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
-            if (ready && (!HasMatchingPath(body!.RootElement, "modelDataHome", ApplicationPaths.ModelHome)
-                || !HasMatchingPath(body.RootElement, "extensionRoot", ExtensionPaths.Root)))
-                throw new InvalidOperationException(UiText.Get("桌面与网关的数据目录不一致，请统一启动配置后再迁移。"));
-            return ready;
+            while (true)
+            {
+                using var response = await Probe.GetAsync(new Uri(address, "/health"), cancellationToken);
+                if (!response.IsSuccessStatusCode) return false;
+                using var body = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken);
+                bool ready = body?.RootElement.TryGetProperty("service", out var service) == true
+                    && service.GetString() == "kynxa-model-gateway"
+                    && body.RootElement.TryGetProperty("status", out var status) && status.GetString() == "ok";
+                if (ready && (!body!.RootElement.TryGetProperty("runtime", out var runtime) || runtime.GetString() != "rust"))
+                    throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
+                if (ready && (!body!.RootElement.TryGetProperty("conversationProtocol", out var protocol) ||
+                    !protocol.TryGetInt32(out int version) || version < 1 ||
+                    !body.RootElement.TryGetProperty("dataLayoutVersion", out var layout) ||
+                    !layout.TryGetInt32(out int layoutVersion) || layoutVersion < 1 ||
+                    !body.RootElement.TryGetProperty("memoryProtocol", out var memory) ||
+                    !memory.TryGetInt32(out int memoryVersion) || memoryVersion < 1 ||
+                    !body.RootElement.TryGetProperty("contextProtocol", out var context) ||
+                    !context.TryGetInt32(out int contextVersion) || contextVersion < 3 ||
+                    !body.RootElement.TryGetProperty("agentProtocol", out var agent) ||
+                    !agent.TryGetInt32(out int agentVersion) || agentVersion < 5 ||
+                    !body.RootElement.TryGetProperty("officialToolsProtocol", out var officialTools) ||
+                    !officialTools.TryGetInt32(out int officialToolsVersion) || officialToolsVersion < 2 ||
+                    !body.RootElement.TryGetProperty("hostTerminalProtocol", out var hostTerminal) ||
+                    !hostTerminal.TryGetInt32(out int hostTerminalVersion) || hostTerminalVersion < 3 ||
+                    !body.RootElement.TryGetProperty("browserAutomationProtocol", out var browserAutomation) ||
+                    !browserAutomation.TryGetInt32(out int browserAutomationVersion) || browserAutomationVersion < 2 ||
+                    !body.RootElement.TryGetProperty("extensionStorageProtocol", out var extensions) ||
+                    !extensions.TryGetInt32(out int extensionVersion) || extensionVersion < 1 ||
+                    !body.RootElement.TryGetProperty("toolStreamProtocol", out var toolStream) ||
+                    !toolStream.TryGetInt32(out int toolStreamVersion) || toolStreamVersion < 3 ||
+                    !body.RootElement.TryGetProperty("retrievalProtocol", out var retrieval) ||
+                    !retrieval.TryGetInt32(out int retrievalVersion) || retrievalVersion < 1))
+                    throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
+                if (ready && (!HasMatchingPath(body!.RootElement, "modelDataHome", ApplicationPaths.ModelHome)
+                    || !HasMatchingPath(body.RootElement, "extensionRoot", ExtensionPaths.Root)))
+                    throw new InvalidOperationException(UiText.Get("桌面与网关的数据目录不一致，请统一启动配置后再迁移。"));
+                if (ready && body!.RootElement.TryGetProperty("shuttingDown", out var shuttingDown)
+                    && shuttingDown.ValueKind == JsonValueKind.True)
+                {
+                    // A matching gateway retires its own tasks before replacement; normal healthy probes never wait.
+                    // 同范围网关先完成自身退出再替换；正常就绪探测不增加等待。
+                    await Task.Delay(100, cancellationToken);
+                    continue;
+                }
+                return ready;
+            }
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or OperationCanceledException)
         {

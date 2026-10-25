@@ -20,7 +20,7 @@ pub(super) struct ToolProgressOutcome {
 
 pub(super) fn progress_interruption(plan: &WorkProgressPlan) -> Option<GatewayError> {
     plan.wait_for_user.then(||GatewayError::new("TASK_CONTINUATION_NO_PROGRESS",
-        "No new result is available; unfinished work and existing outputs are saved. / 暂无新的有效结果，未完成工作和已有成果已保存。",409))
+        "后续处理未能继续推进，已有结果和进度已保留。",409))
 }
 
 /// Successful dispatch alone is not a changed artifact; native file preconditions and hashes are authoritative.
@@ -441,9 +441,16 @@ pub(crate) fn is_read_only_tool(name: &str) -> bool {
 fn completion_evidence_needs_restore(observation: &Value) -> bool {
     observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none()
         || observation["completionProofVerification"] == "pending"
+        || preview_proof_needs_upgrade(observation)
         || observation["verifiedSuccess"] == true && observation["name"].as_str()
             .and_then(|name| name.strip_prefix("mcp.")).and_then(|name| name.split_once('.'))
             .is_some_and(|(_, tool)| tool == "execute_blender_code")
+}
+
+fn preview_proof_needs_upgrade(observation: &Value) -> bool {
+    observation["name"] == "artifact.open"
+        && observation["completionProof"]["targets"].as_array().into_iter().flatten()
+            .any(|target| target["kind"] == "file" && target["version"].is_null())
 }
 
 /// Recover legacy proofs and reject known false-success wrappers without replaying operations.
@@ -462,7 +469,8 @@ pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversa
             for observation in round["observations"].as_array_mut().into_iter().flatten()
                 .filter(|observation| completion_evidence_needs_restore(observation)) {
                 if observation["status"] != "completed" { continue; }
-                let legacy = observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none();
+                let legacy = observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none()
+                    || preview_proof_needs_upgrade(observation);
                 if !legacy {
                     // Unchecked old wrappers remain historical facts, not current acceptance evidence.
                     // 未核验的旧包装保留历史事实，暂不参与当前验收。
@@ -500,7 +508,14 @@ pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversa
                 observation["completionEvidence"] = json!(completed_output_paths(observation["name"].as_str().unwrap_or(""), &receipt));
                 let call = json!({"id":observation["id"],"name":observation["name"]});
                 let mut proof = super::completion_evidence::from_receipt(&call, &receipt);
-                if proof.is_object() { proof["mutationSequence"] = observation["mutationSequence"].clone(); }
+                if proof.is_object() {
+                    proof["mutationSequence"] = observation["mutationSequence"].clone();
+                    // Upgrade receipt-derived fields without reviving an invalidated observation.
+                    // 只升级回执推导字段，不复活已失效的观察，也不重新执行操作。
+                    for field in ["mutationSequence", "mutating", "current", "observationCurrent", "visualObserved", "validation"] {
+                        if let Some(value) = observation["completionProof"].get(field) { proof[field] = value.clone(); }
+                    }
+                }
                 observation["completionProof"] = proof;
             }
         }

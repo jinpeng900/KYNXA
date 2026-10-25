@@ -529,7 +529,9 @@ pub fn embed_query_cached(config:&GatewayConfig, texts:&[String], scope:&Value, 
         let owned_scope=scope.clone(); let owned_identity=identity.clone();
         let input_bytes=owned_texts.iter().map(|text|text.capacity()+std::mem::size_of::<String>()).sum::<usize>()
             .saturating_add(super::cache::retained_json_bytes(local)).saturating_add(8192);
-        let computed=query_cache().compute(text_key(&identity,"flight",texts),input_bytes,cancel.clone(),permit,true,move |token| {
+        // Coalesce only in-flight work; the ready device key below owns the retained vector batch.
+        // 这里只合并在途计算，由下方实际设备就绪键保留向量，避免同批结果重复常驻。
+        let computed=query_cache().compute(text_key(&identity,"flight",texts),input_bytes,cancel.clone(),permit,false,move |token| {
             let batch=run_query_inference(&owned_config,&owned_texts,&owned_local,token.clone(),cold)?;
             // Publish the actual-device entry before retiring its flight, closing the completion race.
             // 必须先发布实际设备的就绪条目，再结束共享计算，避免完成瞬间的新请求重复推理。

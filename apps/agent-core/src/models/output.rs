@@ -117,4 +117,33 @@ mod tiny_window_tests {
         }
         assert_eq!(calculate("context.outputBudget", &json!({"contextWindowTokens":512,"requiredInputTokens":400})).unwrap_err(), "CONTEXT_INPUT_TOO_LARGE");
     }
+
+    #[test]
+    fn small_window_reserves_irreducible_input_before_answer_output() {
+        for required_input in [5218, 5266] {
+            let budget = calculate("context.outputBudget", &json!({
+                "contextWindowTokens":8192,"requiredInputTokens":required_input,"phase":"answer"
+            })).unwrap();
+            assert!(budget["inputBudgetTokens"].as_u64().unwrap() >= required_input);
+            assert!(budget["maxOutputTokens"].as_u64().unwrap() >= 256);
+            assert_eq!(budget["inputBudgetTokens"].as_u64().unwrap()
+                + budget["maxOutputTokens"].as_u64().unwrap()
+                + budget["safetyMarginTokens"].as_u64().unwrap(), 8192);
+        }
+    }
+
+    #[test]
+    fn sufficient_windows_keep_the_normal_output_share() {
+        for window in [32768, 131072] {
+            for phase in ["answer", "tool"] {
+                let previous = calculate("context.outputBudget", &json!({
+                    "contextWindowTokens":window,"requiredInputTokens":0,"phase":phase
+                })).unwrap();
+                let reserved = calculate("context.outputBudget", &json!({
+                    "contextWindowTokens":window,"requiredInputTokens":5218,"phase":phase
+                })).unwrap();
+                assert_eq!(reserved, previous);
+            }
+        }
+    }
 }

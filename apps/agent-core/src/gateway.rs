@@ -421,10 +421,17 @@ async fn handle(
     }
     if uri.path() == "/health" && method == Method::GET {
         let health = lifecycle.health().await;
-        if health["migrating"] != true {
+        if health["migrating"] != true && health["shuttingDown"] != true {
             lifecycle.current().await.schedule_extension_prewarm();
         }
         return response(Ok((200, health)));
+    }
+    if uri.path() == "/api/lifecycle/shutdown" && method == Method::POST {
+        let body = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(body) => body,
+            Err(_) => return response(Err(GatewayError::new("INVALID_JSON", "请求 JSON 无效。", 400))),
+        };
+        return response(lifecycle.request_shutdown(&body).await.map(|()| (202, json!({"accepted":true}))));
     }
     let control = method == Method::POST
         && (["/api/chat/cancel", "/api/chat/pause", "/api/agent/approvals"].contains(&uri.path())
@@ -441,15 +448,20 @@ async fn handle(
     };
     // Keep admitted writes alive until I/O settles, even if HTTP disconnects.
     // HTTP 断开后，已准入写入仍等到 I/O 结束再结算。
+    let shutdown_signal = lifecycle.shutdown_signal();
     tokio::spawn(async move {
         let result = handle_request(runtime, method, uri, headers, bytes).await;
         let (parts, body) = result.into_parts();
         // Keep admission ownership until SSE finishes or disconnects, including terminal journal reads.
         // SSE 发完或断开后才释放准入所有权，任务结束后的日志读取也一样。
         let source = stream::unfold(
-            (body.into_data_stream(), admission),
-            |(mut body, admission)| async move {
-                body.next().await.map(|chunk| (chunk, (body, admission)))
+            (body.into_data_stream(), admission, shutdown_signal),
+            |(mut body, admission, mut shutdown)| async move {
+                if *shutdown.borrow() { return None; }
+                tokio::select! {
+                    chunk = body.next() => chunk.map(|chunk| (chunk, (body, admission, shutdown))),
+                    _ = shutdown.changed() => None,
+                }
             },
         );
         Response::from_parts(parts, axum::body::Body::from_stream(source))
@@ -915,6 +927,13 @@ async fn handle_request(
 }
 
 pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
+    serve_with_desktop_lifetime(config, None).await
+}
+
+pub async fn serve_with_desktop_lifetime(
+    config: GatewayConfig,
+    desktop_shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> Result<(), GatewayError> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port))
         .await
         .map_err(|_| {
@@ -930,6 +949,13 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
         config.migration_lock_path()?,
         Arc::new(GatewayConfig::from_environment),
     )?;
+    if let Some(desktop_shutdown) = desktop_shutdown {
+        let lifetime = lifecycle.clone();
+        tokio::spawn(async move {
+            let _ = desktop_shutdown.await;
+            lifetime.begin_shutdown().await;
+        });
+    }
     let resource = config
         .application_root
         .join("runtime/resource/kynxa-resource-service.exe");
@@ -940,9 +966,14 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
             503,
         ));
     }
-    crate::resources::gateway::install(
-        crate::resources::gateway::ResourceService::start(&resource).await?,
-    );
+    let resource = tokio::select! {
+        service = crate::resources::gateway::ResourceService::start(&resource) => service?,
+        _ = lifecycle.wait_for_shutdown() => {
+            lifecycle.shutdown().await;
+            return Ok(());
+        }
+    };
+    crate::resources::gateway::install(resource);
     // The embedding owner initializes its native DLL on demand; cloud readiness does not load ORT.
     // 嵌入模型所有者按需初始化原生 DLL；云端聊天就绪不等待 ORT 装载。
     crate::retrieval::gateway_embedding::install_runtime(tokio::runtime::Handle::current());
@@ -961,15 +992,27 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
         }
     });
     let shutdown = lifecycle.clone();
-    axum::serve(listener, router_with_lifecycle(lifecycle))
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            // Settle the owned startup admission before draining its retrieval workers.
-            // 先结算本次启动准入，再清退它创建的检索作业，避免退出后才启动。
-            let _ = indexing_startup.await;
-            shutdown.shutdown().await;
-        })
-        .await?;
+    let cleanup = tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => shutdown.begin_shutdown().await,
+            _ = shutdown.wait_for_shutdown() => {},
+        }
+        let runtime = shutdown.current().await;
+        runtime.interrupt_for_shutdown().await;
+        // Cancel optional startup before joining it, then drain every writer independently of desktop exit.
+        // 先取消可选启动再等待其退场；正式写入由网关排空，不依赖桌面继续存活。
+        let config = runtime.config.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::retrieval::gateway::stop_background(&config)).await;
+        let _ = indexing_startup.await;
+        shutdown.shutdown().await;
+    });
+    let observation = lifecycle.clone();
+    let served = axum::serve(listener, router_with_lifecycle(lifecycle.clone()))
+        .with_graceful_shutdown(async move { observation.wait_for_shutdown().await; })
+        .await;
+    lifecycle.begin_shutdown().await;
+    cleanup.await.map_err(|_| GatewayError::new("GATEWAY_SHUTDOWN_FAILED", "网关退出结算未完成。", 500))?;
+    served?;
     Ok(())
 }
 

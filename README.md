@@ -1,4 +1,4 @@
-# KYNXA 1.8
+# KYNXA 1.8.1
 
 <p align="center">
   English | <a href="./README.zh.md">中文</a>
@@ -6,9 +6,9 @@
 
 **KYNXA** is a local-first personal agent application for Windows. It brings cloud and local models, durable tasks, document retrieval, tools, and a file/browser/terminal workspace into one desktop application.
 
-**Current release: `1.8` · Package version: `1.8.0` · Windows x64**
+**Current release: `1.8.1` · Package version: `1.8.1` · Windows x64**
 
-Version 1.8 improves task boundaries, reply delivery, and recovery. A requested plan ends with the plan; future implementation and permissions do not trigger more work. Completed replies reach the desktop normally even when the underlying task remains unfinished, and application exit saves progress without a draft-confirmation detour. Queuing, explicit steering, pause/resume, successful operation receipts, and existing retrieval and cache capabilities remain in place. See the [1.8 release notes](docs/releases/1.8.md), [package release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.0), and [documentation index](docs/README.md). The [1.7 notes](docs/releases/1.7.md) retain the first stable release's history.
+Version 1.8.1 reduces unnecessary verification for ordinary deliverables, fixes closing settings during loading, and improves local-model context planning, process reuse, and tray exit. Current requirements, real results, and necessary checks guide completion. Queuing, explicit steering, pause/resume, context, successful operation receipts, and existing retrieval and cache capabilities remain in place. See the [1.8.1 release notes](docs/releases/1.8.1.md), [package release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.1), and [documentation index](docs/README.md). The [1.7 notes](docs/releases/1.7.md) retain the first stable release's history.
 
 **Release/source note:** Use the matching release tag when building a published package from source; a different branch or revision may contain different implementation changes.
 
@@ -16,7 +16,7 @@ Validation uses focused Rust, HTTP/SSE, and Windows UI checks. These checks cove
 
 Standalone tests, fixtures, and evaluation scripts are kept locally and excluded from current Git revisions. A fresh clone supports production builds and the source architecture check; full test commands require the locally retained test files. See the [validation guide](.agents/skills/kynxa-development/references/validation.md).
 
-## Capabilities in the 1.8 package
+## Capabilities in the 1.8.1 package
 
 | Area | Current capabilities |
 | --- | --- |
@@ -42,16 +42,16 @@ The full runtime includes the multilingual **E5 embedding model** for retrieval,
 
 ## Install and store your data
 
-The [1.8 release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.0) provides these Windows x64 downloads:
+The [1.8.1 release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.1) provides these Windows x64 downloads:
 
 | Download | Use |
 | --- | --- |
-| [Installer ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.0/KYNXA-1.8.0-windows-x64-setup.zip) | Extract the archive, then run the included EXE to install the application and its full base runtime payload. |
-| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.0/KYNXA-1.8.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
+| [EXE installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.1/KYNXA-1.8.1-windows-x64-setup.exe) | Run directly to install the application and its full base runtime payload. |
+| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.1/KYNXA-1.8.1-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
 
 The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
 
-Version 1.8 distributes only the installer ZIP and runtime resource ZIP. Standalone EXEs, online installers, checksum sidecars, and maintenance manifests are not separate public assets. The installer EXE is inside the installer ZIP; maintenance tools remain available in the source.
+Version 1.8.1 provides the EXE installer directly and a separate runtime resource ZIP. Online installers, checksum sidecars, and maintenance manifests are not additional public assets; maintenance tools remain available in the source.
 
 **End users of a complete installer do not need development SDKs, Rust, Node, Python, or manual PATH configuration.** Cloud model credentials and third-party services that require accounts remain user-configured. The current installer build is not production-code-signed, and its generated EXE has not undergone an installation run; see [installer packaging](apps/desktop/Build/Installer/README.md).
 
@@ -75,7 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-des
 
 `-ResourcePackRoot <ZIP path>` imports an available full runtime resource pack. Offline source builds also need the appropriate SDKs and Cargo/NuGet caches; a runtime resource ZIP does not replace them. Existing prepared assets are reused. See the [build guide](apps/desktop/Build/README.md) for profiles, download sources, and offline options.
 
-The EXE inside the installer ZIP, installation options, and upgrade behavior are described in the [packaging guide](apps/desktop/Build/Installer/README.md).
+The EXE installer, installation options, and upgrade behavior are described in the [packaging guide](apps/desktop/Build/Installer/README.md).
 
 ## Architecture
 
@@ -112,11 +112,11 @@ Original conversation events, stable IDs, tool receipts, and source versions rem
 | `docs/` | Maintained Markdown guides, architecture, release notes, and team instructions. |
 | `tests/` | Targeted desktop, storage, protocol, packaging, and interaction checks. |
 
-The source repository keeps maintained documentation, code, manifests, and preparation scripts. This release distributes the installer ZIP and runtime resource ZIP as Release assets. Generated verification artifacts are kept outside source control; historical design archives are not required for building or installing the current application.
+The source repository keeps maintained documentation, code, manifests, and preparation scripts. This release distributes the EXE installer and runtime resource ZIP as Release assets. Generated verification artifacts are kept outside source control; historical design archives are not required for building or installing the current application.
 
 Useful entry points:
 
-* [Documentation index](docs/README.md) and [1.8 release notes](docs/releases/1.8.md)
+* [Documentation index](docs/README.md) and [1.8.1 release notes](docs/releases/1.8.1.md)
 * [Core guide](apps/agent-core/README.md) and [native architecture](docs/architecture/native-gateway.md)
 * [Memory and conversations](docs/architecture/chat-work-memory.md)
 * [Document parsing](docs/architecture/document-ingestion.md) and [retrieval](docs/architecture/retrieval.md)

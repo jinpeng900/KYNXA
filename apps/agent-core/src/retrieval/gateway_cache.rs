@@ -780,6 +780,57 @@ mod tests {
     }
 
     #[test]
+    fn shared_query_retains_only_its_ready_device_entry_after_compute() {
+        let cache = FlightCache::new();
+        cache.capacity(4 * 1024 * 1024);
+        let generation = cache.generation();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (entered, started) = std::sync::mpsc::channel();
+        let (finish, release) = std::sync::mpsc::channel();
+        let owner_cache = cache.clone();
+        let publisher = cache.clone();
+        let owner_calls = calls.clone();
+        let owner = std::thread::spawn(move || {
+            owner_cache.compute(
+                "query-flight".into(), 8, Arc::new(AtomicBool::new(false)), None, false,
+                move |_| {
+                    owner_calls.fetch_add(1, Ordering::SeqCst);
+                    entered.send(()).unwrap();
+                    release.recv_timeout(Duration::from_secs(2)).unwrap();
+                    publisher.insert_generation("ready:cpu".into(), Arc::new(37usize), 8, generation);
+                    Ok(Some((37usize, 8)))
+                },
+            )
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let waiter_cache = cache.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_cache.compute(
+                "query-flight".into(), 8, Arc::new(AtomicBool::new(false)), None, false,
+                |_| panic!("an active query must be shared even without retaining its flight key"),
+            )
+        });
+        let until = Instant::now() + Duration::from_secs(2);
+        while cache.stats()["coalesced"] != 1 && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        assert_eq!(cache.stats()["coalesced"], 1);
+        finish.send(()).unwrap();
+        for thread in [owner, waiter] {
+            match thread.join().unwrap().unwrap() {
+                Lookup::Value { value: Some(value), .. } => assert_eq!(*value, 37),
+                _ => panic!("both query observers must receive the original computed value"),
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.stats()["entries"], 1);
+        assert_eq!(cache.stats()["inFlight"], 0);
+        assert_eq!(cache.stats()["pendingBytes"], 0);
+        assert!(cache.get("query-flight").is_none());
+        assert_eq!(*cache.get("ready:cpu").unwrap(), 37);
+    }
+
+    #[test]
     fn cancelling_one_observer_does_not_poison_another_and_failures_are_not_retained() {
         let cache = FlightCache::new();
         cache.capacity(4 * 1024 * 1024);

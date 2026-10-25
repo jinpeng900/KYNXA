@@ -4,6 +4,17 @@
 use super::*;
 
 impl LoopState {
+    /// Close published phases before reporting a pre-dispatch failure; keep their text and identities intact.
+    /// 派发前失败也须结束已发布分段，保留原文与身份，不能留下“正在生成”挡住后续结果。
+    pub(in crate::orchestration::gateway_loop) async fn interrupt_open_segments(&mut self, run: &RequestRun) {
+        for segment in &mut self.delivery.segments {
+            if segment["status"] == "streaming" {
+                segment["status"] = json!("interrupted");
+                run.emit(json!({"type":"assistant_segment","segment":segment,"toolStreamProtocol":3})).await;
+            }
+        }
+    }
+
     /// Publish the terminal phase without rewriting a closed segment's body or identity.
     /// 发布最终阶段，不改已关闭分段的正文或身份，保证终态与实际事件一致。
     pub(in crate::orchestration::gateway_loop) async fn publish_final_segment(&mut self, run: &RequestRun) {
@@ -147,7 +158,9 @@ impl Execution {
         let response = match result {
             Ok(response) => response,
             Err(error) => {
-                if !reviewing && (dispatched || !partial.0.is_empty() || !partial.1.is_empty()) {
+                if !reviewing && (dispatched || !partial.0.is_empty() || !partial.1.is_empty()
+                    || self.prepared.state.delivery.segments.iter().any(|item|
+                        item["id"] == segment && item["status"] == "streaming")) {
                     self.prepared.state.append(&partial.0, &partial.1, round, &segment);
                     if let Some(last) = self.prepared.state.delivery.segments.iter_mut().find(|item| item["id"] == segment)
                     {

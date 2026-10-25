@@ -42,6 +42,7 @@ internal sealed class MainWindowTrayService : IDisposable
         if (_icon == 0) _icon = LoadIcon(0, (nint)32512);
         _isSubclassAttached = _icon != 0 && SetWindowSubclass(_windowHandle, _windowProcedure, SubclassId, 0);
         window.Closed += WindowClosed;
+        EnsureTrayIcon();
     }
 
     public void Restore()
@@ -58,8 +59,10 @@ internal sealed class MainWindowTrayService : IDisposable
     {
         if (_isDisposed || _sessionEnding || _exitRequested) return;
         _exitRequested = true;
-        // Explicit exit also closes a hidden window without bringing it back to the foreground.
-        // 明确退出时直接关闭隐藏窗口，不再重新弹到前台；共享网关保持独立。
+        // Remove visible entry points immediately; the shell only waits for background shutdown acceptance.
+        // 立即移除窗口和托盘入口；界面只等待后台接受退出，不等待任务保存结束。
+        _window.AppWindow.Hide();
+        RemoveTrayIcon();
         SendMessage(_windowHandle, CloseMessage, 0, 0);
     }
 
@@ -157,17 +160,20 @@ internal sealed class MainWindowTrayService : IDisposable
 
     private void WindowClosed(object sender, WindowEventArgs args) => Dispose();
 
+    private void RemoveTrayIcon()
+    {
+        if (!_isIconRegistered) return;
+        var data = CreateIconData();
+        ShellNotifyIcon(2, ref data);
+        _isIconRegistered = false;
+    }
+
     public void Dispose()
     {
         if (_isDisposed) return;
         _isDisposed = true;
         _window.Closed -= WindowClosed;
-        if (_isIconRegistered)
-        {
-            var data = CreateIconData();
-            ShellNotifyIcon(2, ref data);
-            _isIconRegistered = false;
-        }
+        RemoveTrayIcon();
         if (_isSubclassAttached)
         {
             RemoveWindowSubclass(_windowHandle, _windowProcedure, SubclassId);

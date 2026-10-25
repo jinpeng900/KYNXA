@@ -97,6 +97,9 @@ impl CompletionEvidenceSet {
 /// 仅把明确目标关联到原生回执身份，无法确定的依赖继续参与核验。
 pub(super) fn validation_scope(requirements: &[String], records: &[Value]) -> ValidationScope {
     let records = current(records);
+    // Check intent comes from current requirements, never from model-written evidence labels.
+    // 检查意图来自当前正式要求，不能由模型填写的证据标签增删。
+    let requires_code_validation = task::requires_code_validation(&requirements.join("，"));
     let known_targets = records.iter().flat_map(|record| record["targets"].as_array().into_iter().flatten())
         .filter(|target| target["current"] == true && target["kind"] == "file")
         .filter_map(|target| Some(ValidationTarget {
@@ -125,9 +128,10 @@ pub(super) fn validation_scope(requirements: &[String], records: &[Value]) -> Va
             }
             found
         });
-        ValidationRequirement { key:format!("{:x}", Sha256::digest(requirement.as_bytes())), targets_known, targets }
+        ValidationRequirement { key:format!("{:x}", Sha256::digest(requirement.as_bytes())),
+            requires_code_validation:task::requires_code_validation(requirement), targets_known, targets }
     }).collect();
-    ValidationScope { requirements, known_targets }
+    ValidationScope { requirements, known_targets, requires_code_validation }
 }
 
 fn is_digest(value: &str) -> bool {
@@ -165,6 +169,8 @@ fn actual_targets(body: &Value) -> Vec<Value> {
                 .into_iter().filter_map(move |field| value.get(field)))
                 .find(|value| !value.is_null() && *value != "").cloned()
                 .or_else(|| owner.get("bindingRevision").filter(|value| !value.is_null()).map(|revision| json!({"bindingRevision":revision})))
+                .or_else(|| [source, owner].into_iter().find_map(|value|
+                    value["version"].as_str().filter(|hash| is_digest(hash)).map(|hash| json!(hash))))
                 .unwrap_or(Value::Null);
             let start = owner["offset"].as_u64().or(owner["startOffset"].as_u64());
             let end = owner["nextOffset"].as_u64().or(owner["endOffset"].as_u64());
@@ -207,6 +213,7 @@ pub(super) fn from_receipt(call: &Value, receipt: &Value) -> Value {
         | "web.search" | "knowledge.search" | "browser.read" | "browser.snapshot") {
         kinds.push(EvidenceKind::ObservedContent);
     } else if matches!(name, "filesystem.stat" | "process.list" | "computer.read" | "computer.windows")
+        || name == "artifact.open" && body["previewAvailable"] == true
         || name.rsplit('.').next().is_some_and(|method| matches!(method,
             "get_scene_info" | "get_object_info" | "list_scene_items" | "get_world_state_snapshot")) {
         kinds.push(EvidenceKind::ObservedState);
@@ -603,6 +610,100 @@ mod tests {
             "beforeVersion":snapshot,"afterVersion":snapshot,
             "validationScope":{"cwd":"C:/work","acceptanceScope":scope.checkpoint()},
         })).unwrap();
+    }
+
+    fn artifact_delivery(path: &str) -> (RunProgress, Vec<Value>) {
+        let mut progress = RunProgress::default();
+        let output = json!({"path":path,"sha256":"a".repeat(64),"bytes":100});
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"write-output","name":"filesystem.write"},
+            "result":{"status":"completed"},"canonicalResult":output})).unwrap();
+        let records = vec![receipt("filesystem.write", "write-output", output),
+            receipt("artifact.open", "open-output", json!({"path":path,"version":"a".repeat(64),
+                "previewAvailable":true,"previewStatus":"registered","rendered":false}))];
+        (progress, records)
+    }
+
+    #[test]
+    fn ordinary_artifact_delivery_does_not_invent_terminal_validation() {
+        for (path, request) in [("C:/work/page.html", "你写一个贪吃蛇网页版程序，并展示在右侧"),
+            ("C:/work/example.py", "create example.py and open it in the workspace")] {
+            let (mut progress, records) = artifact_delivery(path);
+            let requirements = vec![request.to_owned()];
+            let review = CompletionEvidenceSet::from_records(progress.verification(),
+                vec![json!("write-output"),json!("open-output")], records).with_current_requirements(&progress, &requirements);
+            assert_eq!(progress.verification()["pendingValidation"], true);
+            assert_eq!(review.verification["pendingValidation"], false);
+            assert_eq!(review.records[1]["current"], true);
+            assert_eq!(review.records[1]["targets"][0]["version"], "a".repeat(64));
+            let reply = json!({"state":"complete","source":"model-task-state","met":[
+                {"requirementId":"requirement-1","item":"created and opened","evidence":["write-output","open-output"]}]});
+            let decision = task::TaskState::default().decide_typed(&review.decision_input(&requirements, task::TaskDecisionInput {
+                is_review:true, evidence_required:true, requires_verification:true, reply:reply.clone(), ..Default::default()
+            }));
+            assert!(matches!(decision, task::TaskDecision::Final { .. }));
+            assert_eq!(progress.complete_for_scope(&json!({"modelTaskState":reply,"acceptanceReviewed":true,
+                "requiresVerification":true,"brokerDecision":"final"}), &review.validation_scope(&requirements))["completionState"], "completed");
+            assert_eq!(progress.verification()["mutationRevision"], 1);
+        }
+    }
+
+    #[test]
+    fn artifact_delivery_preserves_explicit_failed_unknown_and_changed_checks() {
+        let (mut progress, records) = artifact_delivery("C:/work/example.js");
+        for requirement in ["fix the bug in example.js", "create example.js and run tests"] {
+            assert_eq!(progress.verification_for_scope(&validation_scope(&[requirement.to_owned()], &records))["pendingValidation"], true);
+        }
+        let requirements = vec!["create example.js and open it".to_owned()];
+        let scope = validation_scope(&requirements, &records);
+        scoped_check(&mut progress, "failed-required-check", 1, &code_snapshot("C:/work/example.js", &"a".repeat(64)), &scope);
+        assert_eq!(progress.verification_for_scope(&scope)["state"], "checks-failed");
+        let (mut uncertain, _) = artifact_delivery("C:/work/example.js");
+        uncertain.apply("progress.observeOutcome", &json!({"call":{"id":"unknown-write","name":"filesystem.write"},
+            "result":{"status":"unknown","isError":true},"canonicalResult":{"path":"C:/work/example.js"}})).unwrap();
+        assert_eq!(uncertain.verification_for_scope(&scope)["pendingValidation"], true);
+        let (mut changed, _) = artifact_delivery("C:/work/example.js");
+        changed.apply("progress.finalVersion", &json!({"snapshot":code_snapshot("C:/work/example.js", &"a".repeat(64))})).unwrap();
+        changed.apply("progress.finalVersion", &json!({"snapshot":code_snapshot("C:/work/example.js", &"b".repeat(64))})).unwrap();
+        assert_eq!(changed.verification_for_scope(&scope)["pendingValidation"], true);
+        let mut old_scope = scope.checkpoint();
+        old_scope["scope"].as_object_mut().unwrap().remove("requiresCodeValidation");
+        let old_scope: ValidationScope = serde_json::from_value(old_scope["scope"].clone()).unwrap();
+        let (legacy, _) = artifact_delivery("C:/work/example.js");
+        assert_eq!(legacy.verification_for_scope(&old_scope)["pendingValidation"], false);
+    }
+
+    #[test]
+    fn test_material_and_declined_execution_do_not_create_code_check_debt() {
+        for goal in ["写测试方案", "给出测试用例", "解释测试", "不需要执行测试", "不用测试",
+            "Write test cases for example.js", "Create a testing plan", "Explain testing", "Do not run tests",
+            "先给修复方案", "Just explain the bug fix", "修复 example.js，不用测试", "修复 example.js，不要运行测试",
+            "修复 example.js，不运行测试", "Fix example.js, do not run tests"] {
+            assert!(!task::requires_code_validation(goal), "{goal}");
+        }
+        for goal in ["修复 example.js 并运行测试", "测试 example.js", "Fix example.js and run tests",
+            "Run the regression tests", "test example.js", "修复 example.js，不用全量测试，跑相关单测",
+            "修复 example.js，不要截图", "修复 example.js，先不提交"] {
+            assert!(task::requires_code_validation(goal), "{goal}");
+        }
+        let (progress, records) = artifact_delivery("C:/work/example.js");
+        let declined = validation_scope(&["修复 example.js".into(), "不用测试".into()], &records);
+        assert_eq!(progress.verification_for_scope(&declined)["pendingValidation"], false);
+    }
+
+    #[test]
+    fn withdrawn_explicit_check_preserves_failed_history_without_blocking_remaining_output() {
+        let (mut progress, records) = artifact_delivery("C:/work/example.js");
+        let requirements = vec!["create example.js".to_owned(), "test example.js".to_owned()];
+        let original_scope = validation_scope(&requirements, &records);
+        scoped_check(&mut progress, "failed-test", 1, &code_snapshot("C:/work/example.js", &"a".repeat(64)), &original_scope);
+        let current_scope = validation_scope(&requirements[..1], &records);
+        let current = progress.verification_for_scope(&current_scope);
+        assert_eq!(current["pendingValidation"], false);
+        assert_eq!(current["requiredChecks"][0]["scopeResolution"], "outside-current-requirements");
+        assert_eq!(current["receipts"][0]["passed"], false);
+        assert_eq!(progress.verification()["state"], "checks-failed");
+        let still_required = validation_scope(&["fix example.js".to_owned()], &records);
+        assert_eq!(progress.verification_for_scope(&still_required)["pendingValidation"], true);
     }
 
     #[test]

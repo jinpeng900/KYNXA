@@ -167,6 +167,11 @@ pub(crate) async fn request_model(
     cache_policy: Option<Value>,
     is_retry: bool,
 ) -> ModelRequestOutcome {
+    // Local preparation and dispatch must reserve the same negotiated window, including summaries and children.
+    // 本地准备与实际派发使用同一协商窗口，摘要和子任务同样适用；不改持久模型配置。
+    if protocol::protocol(connection) == "ollama" {
+        body["options"]["num_ctx"] = json!(context_window_tokens);
+    }
     let cache_policy = Some(cache_policy.unwrap_or_else(|| {
         let scope = json!([runtime.config.data_root.to_string_lossy(), ctx.project_id, run.conversation_id]).to_string();
         protocol::apply_summary_prompt_cache(connection, model_name, &mut body, &scope)

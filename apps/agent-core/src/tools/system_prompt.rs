@@ -263,9 +263,9 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
     // Presentation is a model choice on the existing identity, never a separate classifier request or new task.
     // 展示由当前模型在已有身份上选择，不新增分类请求；插话仍是同一任务的补充。
     lines.push(if compact {
-        "Use task.describe for substantive multi-step work: concise title, displayInTaskList=true; simple lookups and brief chat need no task bookkeeping. Amend this same task; token and duration accounting is automatic."
+        "Use task.describe with displayInTaskList=true only for important actual work clearly requested by the user. Ordinary answers, chat, simple lookups and incidental suggestions are not task-list items. Amend this same identity; recovery and usage accounting are automatic."
     } else {
-        "For substantive multi-step or long work, use task.describe to name this task and choose displayInTaskList=true; simple lookups and brief chat need no task bookkeeping. Reconsider visibility if scope changes. Amend this same task; token and duration accounting is automatic."
+        "Use task.describe to name this same task and choose displayInTaskList=true only for important actual work clearly requested by the user. Ordinary questions, explanations, chat, simple lookups and incidental suggestions do not become task-list items merely because tools, time or retries were used. Reconsider visibility when the user's scope changes; internal recovery and usage accounting remain automatic."
     }.into());
     lines.push("Deliver the content or artifact requested for this turn. Do not narrate tool discovery/loading unless needed for a decision.".into());
     // Workspace affordances are software knowledge even when their full tools are loaded later.
@@ -440,7 +440,7 @@ fn compact_local_prompt(args: &Value, maximum: f64) -> Value {
         "document.read: Office/PDF/OCR; document.create: Office/PDF; check requested facts. skill.run: verified JS, private Node sandbox; policy/integrity/cancellation, no downloads/host fallback. artifact.open: useful summaries/reports or requested outputs; direct Office preview, PDF on failure. No formula recalculation. No fixed tab count; reuse paths.".to_owned(),
         "image.read: local pixels, not artifact.open. Launch/save: receipts. Visual requests: reuse pixels. Captures stay background/temporary. image.retain(resultId,reason): key/requested evidence; never displays it. Stop overrides checks.".to_owned(),
         COMPACT_LOOKUP_GUIDANCE.to_owned(),
-        "Waits aren't completion; verify unknown effects, preserve success. task.describe: substantive work.".to_owned(),
+        "Waits aren't completion; verify unknown effects, preserve success. task.describe display=true: only important actual work clearly requested, never chat or incidental suggestions.".to_owned(),
         "Memory: project facts stay scoped; global: durable facts/preferences. Explicit remember sets scope; inferred drafts need confirmation.".to_owned(),
     ];
     let mut dynamic = vec![format!("Permission mode: {} (runtime enforced); full: no per-call approval. Protect app data/secrets; read/stat before mutations. Work folder: {}.", string(&context["permissionMode"]), string(&context["workspaceRoot"]))];

@@ -27,7 +27,15 @@ fn schedule_indexing_with(
             // 复用迁移准入：旧根目录的启动须先结算，维护才能清退该目录的作业。
             let (runtime, _admission) = lifecycle.admit(false).await?;
             let config = runtime.config.clone();
-            tokio::task::spawn_blocking(move || initialize(config))
+            let cancellation = lifecycle.shutdown_signal();
+            tokio::task::spawn_blocking(move || {
+                if *cancellation.borrow() { return Ok(()); }
+                let result = initialize(config.clone());
+                if *cancellation.borrow() {
+                    crate::retrieval::gateway::stop_background(&config);
+                }
+                result
+            })
                 .await
                 .map_err(|_| {
                     GatewayError::new("INDEX_START_FAILED", "后台资料服务未启动。", 503)
@@ -49,6 +57,20 @@ mod tests {
     use crate::{gateway, orchestration::gateway_runtime::GatewayRuntime};
     use serde_json::Value;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn shutdown_does_not_restart_optional_indexing() {
+        let root = std::env::temp_dir().join(format!("kynxa-index-exit-{}", crate::gateway_contract::new_id()));
+        let config = GatewayConfig {
+            data_root: root.join("Data"), data_home: root.join("Data/Models"),
+            extension_root: root.join("Extensions"), application_root: root.join("App"), port: 0,
+            toolhost_exe: root.join("unused-toolhost.exe"), vector_extension: root.join("unused-vec.dll"),
+            inference_library: root.join("unused-ort.dll"),
+        };
+        let lifecycle = StorageLifecycle::fixed(GatewayRuntime::new(config));
+        lifecycle.begin_shutdown().await;
+        schedule_indexing_with(lifecycle, |_| panic!("indexing must not start after exit acceptance")).await.unwrap();
+    }
 
     #[tokio::test]
     async fn indexing_startup_allows_health_and_settles_before_storage_migration() {

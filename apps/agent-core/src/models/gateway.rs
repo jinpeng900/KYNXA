@@ -1004,7 +1004,7 @@ fn observe_provider_usage(target: &std::sync::Mutex<Value>, usage: &Value) {
 
 async fn execute_request(
     connection: &Value,
-    body: Value,
+    mut body: Value,
     cancellation: &mut watch::Receiver<bool>,
     events: Option<mpsc::Sender<Value>>,
     catalog: &[Value],
@@ -1053,7 +1053,7 @@ async fn execute_request(
     {
         gateway_protocol::validate_measured_request(
             connection,
-            &body,
+            &mut body,
             measured.input_tokens,
             measured.context_window_tokens,
         )?;

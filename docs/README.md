@@ -1,6 +1,6 @@
-# KYNXA 1.8 正式版文档
+# KYNXA 1.8.1 正式版文档
 
-当前版本为 Windows x64 **1.8**，安装发行版本为 **1.8.0**。版本变化与本轮定向验证见 [1.8 更新说明](releases/1.8.md)，安装入口及两份 ZIP 附件见 [1.8 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.0)。功能与架构以所用版本和下面的维护文档为准；带日期的测试和迁移记录保留各自当时的环境、版本和结果。
+当前版本为 Windows x64 **1.8.1**，安装发行版本为 **1.8.1**。版本变化与定向验证见 [1.8.1 更新说明](releases/1.8.1.md)，EXE 安装包及运行资源包见 [1.8.1 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.1)。功能与架构以所用版本和下面的维护文档为准；带日期的测试和迁移记录保留各自当时的环境、版本和结果。
 
 1.7 首个正式版的产品定位、分发文件和验证边界保留在 [1.7 更新说明](releases/1.7.md)。该版和 [1.5.3 更新说明](releases/1.5.3.md#验证范围与边界)中的构建、恢复、资源配额和打包结果属于历史记录，不改记为本版成绩。
 
@@ -9,8 +9,8 @@
 | 内容 | 入口 |
 | --- | --- |
 | 项目介绍、快速开始 | [项目 README](../README.md) |
-| 本版变化与验证范围 | [1.8 更新说明](releases/1.8.md) |
-| 历史版本 | [1.7.1 更新说明](releases/1.7.1.md)、[1.7 首个正式版](releases/1.7.md)、[1.5 系列总览](releases/1.5.md)、[1.5.3 更新说明](releases/1.5.3.md) |
+| 本版变化与验证范围 | [1.8.1 更新说明](releases/1.8.1.md) |
+| 历史版本 | [1.8 更新说明](releases/1.8.md)、[1.7.1 更新说明](releases/1.7.1.md)、[1.7 首个正式版](releases/1.7.md)、[1.5 系列总览](releases/1.5.md)、[1.5.3 更新说明](releases/1.5.3.md) |
 | 源码环境、增量构建与启动 | [桌面构建说明](../apps/desktop/Build/README.md) |
 | EXE 安装器、目录与发布载荷 | [安装器说明](../apps/desktop/Build/Installer/README.md) |
 | 完整离线安装、原站／GitHub／国内源与断点恢复 | [离线安装与多来源下载](architecture/offline-installer.md) |

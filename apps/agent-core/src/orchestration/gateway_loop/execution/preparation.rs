@@ -166,20 +166,6 @@ impl Execution {
             && (!self.prepared.hints.is_empty() || self.prepared.state.transcript.rounds.last().is_some_and(|turn| {
                 turn["calls"].as_array().is_some_and(|calls| !calls.is_empty())
             }));
-        let mut output_args = json!({"contextWindowTokens":self.prepared.context_window,"requiredInputTokens":0,
-            "phase":if tool_phase {"tool"} else {"answer"}});
-        if let Some(limit) = self.prepared.max_output {
-            output_args["providerMaxOutputTokens"] = json!(limit);
-        }
-        if let Some(limit) = self.rounds.provider_input_limit {
-            output_args["providerMaxInputTokens"] = json!(limit);
-        }
-        let output = native(crate::models::output::calculate(
-            "context.outputBudget",
-            &output_args,
-        ))?;
-        let input_budget = output["inputBudgetTokens"].as_u64().unwrap_or(4096)
-            .min(self.rounds.projected_input_limit.unwrap_or(u64::MAX));
         let mut mandatory_messages = self.prepared.state.context.history
             .iter()
             .enumerate()
@@ -204,6 +190,24 @@ impl Execution {
         while trim_optional_tool(&mut essential_tools) {}
         let essential_schema_tokens = crate::models::protocol::estimate_tokens(
             &json!(model_tool_declarations(&self.prepared.protocol_name, &essential_tools)).to_string());
+        // Reserve immutable input before output; a small window must not compact an already fitting goal.
+        // 先保留不可缩减的输入，再分配输出，避免小窗口把本来放得下的目标判为无法压缩。
+        let required_input_tokens = crate::models::protocol::tool_message_tokens(
+            &mandatory_messages, &self.prepared.system).saturating_add(essential_schema_tokens);
+        let mut output_args = json!({"contextWindowTokens":self.prepared.context_window,
+            "requiredInputTokens":required_input_tokens,"phase":if tool_phase {"tool"} else {"answer"}});
+        if let Some(limit) = self.prepared.max_output {
+            output_args["providerMaxOutputTokens"] = json!(limit);
+        }
+        if let Some(limit) = self.rounds.provider_input_limit {
+            output_args["providerMaxInputTokens"] = json!(limit);
+        }
+        let output = native(crate::models::output::calculate(
+            "context.outputBudget",
+            &output_args,
+        ))?;
+        let input_budget = output["inputBudgetTokens"].as_u64().unwrap_or(4096)
+            .min(self.rounds.projected_input_limit.unwrap_or(u64::MAX));
         let remaining_work_budget = input_budget
             .saturating_sub(crate::models::protocol::tool_message_tokens(&mandatory_messages, &self.prepared.system))
             .saturating_sub(essential_schema_tokens)
@@ -349,7 +353,7 @@ impl Execution {
     }
 
     pub(super) async fn compact_request(&mut self, round: u64, request: RequestPreparation) -> Result<PhaseOutcome<PreparedRound>, GatewayError> {
-        let RequestPreparation { output, input_budget, schemas, mut declared_tools,
+        let RequestPreparation { mut output, mut input_budget, schemas, mut declared_tools,
             declarations_disabled, tools_closed, document_progress_notice, loaded_tool_notice,
             delivery_notice, strategy_notice, review_notice } = request;
         let permission = self.input["permissionMode"].as_str().unwrap_or("smart");
@@ -456,11 +460,38 @@ impl Execution {
         let budget_exceeded = compact.budget_exceeded;
         apply_compacted_context(&mut self.prepared.state, &mut self.prepared.system, compact, &live_notices);
         self.prepared.state.refresh_runtime_snapshot(&runtime_authority(&self.prepared.ctx, permission, &self.prepared.live_memory.block), self.prepared.runtime_role, protocol::protocol(&self.prepared.connection) == "anthropic-messages");
+        // Restored controls include framing absent from the early estimate; fit the complete request before dropping tools.
+        // 恢复后的控制提示包含早期估算未计入的包装；先按完整请求重新分配输出，再考虑裁剪工具。
+        let projected_input_tokens = crate::models::protocol::tool_message_tokens(
+            &self.prepared.state.context.history, &self.prepared.system)
+            .saturating_add(crate::models::protocol::estimate_tokens(&json!(schemas).to_string()));
+        if budget_exceeded || projected_input_tokens > input_budget {
+            let tool_phase = !declarations_disabled
+                && !self.prepared.state.delivery.segments.last().is_some_and(|segment| segment["isAnswerContinuation"] == true)
+                && (!self.prepared.hints.is_empty() || self.prepared.state.transcript.rounds.last().is_some_and(|turn|
+                    turn["calls"].as_array().is_some_and(|calls| !calls.is_empty())));
+            let mut output_args = json!({"contextWindowTokens":self.prepared.context_window,
+                "requiredInputTokens":projected_input_tokens,"phase":if tool_phase {"tool"} else {"answer"}});
+            if let Some(limit) = self.prepared.max_output {
+                output_args["providerMaxOutputTokens"] = json!(limit);
+            }
+            if let Some(limit) = self.rounds.provider_input_limit {
+                output_args["providerMaxInputTokens"] = json!(limit);
+            }
+            if let Ok(reallocated) = crate::models::output::calculate("context.outputBudget", &output_args) {
+                let available_input = reallocated["inputBudgetTokens"].as_u64().unwrap_or(0)
+                    .min(self.rounds.projected_input_limit.unwrap_or(u64::MAX));
+                if projected_input_tokens <= available_input {
+                    output = reallocated;
+                    input_budget = available_input;
+                }
+            }
+        }
         let summarized_work_changed = publish_compacted_work_summary(
             &mut self.prepared.state.documents, &self.prepared.state.context.history_sources,
             self.run.journal.as_deref(),
         ).await?;
-        if budget_exceeded {
+        if projected_input_tokens > input_budget {
             // Keep verified context and trim optional schemas; avoid executor reload or repeated work.
             // 保留已核验上下文，先裁可选声明，避免重载执行器或重复操作。
             if !declarations_disabled && trim_optional_tool(&mut declared_tools) {

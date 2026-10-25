@@ -138,7 +138,7 @@ impl ChildModelSession {
     }
 
     async fn prepare_request(&mut self, round: &mut ModelRound<'_>) -> Result<PreparedRequest> {
-        let ModelRound {runtime, run, journal, ctx, state, prompt, tools, acceptance_query,
+        let ModelRound {runtime, run, journal, child, ctx, state, prompt, tools, acceptance_query,
             requires_readback, requires_visual, repairs, limits, ..} = round;
         let ChildPrompt {system, cache_scope, cache_stable_system, live_memory, ..} = prompt;
         let ChildTools {catalog, effects, ..} = tools;
@@ -187,6 +187,35 @@ impl ChildModelSession {
                 2
             }
         });
+        // Preserve the goal and latest instruction, not the whole compressible history, before reserving output.
+        // 分配输出前保留目标及最新指令，旧历史仍可正常压缩，不能整段当作不可缩减输入。
+        let mut mandatory_messages = vec![json!({"role":"user","content":child.goal})];
+        if let Some(message) = state.history.iter().rev().find(|message| message["role"] == "user")
+            && message != &mandatory_messages[0]
+        {
+            mandatory_messages.push(message.clone());
+        }
+        let review_notice = state.review_pending.then(|| {
+            let review = ChildCompletionReview::new(state, &acceptance_query);
+            review_instruction(state, &review, requires_readback, requires_visual)
+        });
+        let review_tokens = review_notice.as_ref().filter(|notice|
+            state.history.last().is_none_or(|message| message["content"].as_str() != Some(notice.as_str())))
+            .map_or(0, |notice| {
+                let message = json!({"role":"user","content":notice});
+                let tokens = crate::models::protocol::tool_message_tokens(std::slice::from_ref(&message), "");
+                mandatory_messages.push(message);
+                tokens
+            });
+        let essential_schemas = gateway_model_request::model_tool_declarations(
+            protocol::protocol(connection), &declared_catalog[..declared_catalog.len().min(2)]);
+        self.allocation["requiredInputTokens"] = json!(crate::models::protocol::tool_message_tokens(
+            &mandatory_messages, system).saturating_add(crate::models::protocol::estimate_tokens(&json!(essential_schemas).to_string())));
+        let allocated = crate::models::output::calculate("context.outputBudget", &self.allocation)
+            .map_err(|code| failure(&code, "Child model budget is invalid. / 子模型预算无效。"))?;
+        self.input_budget = allocated["inputBudgetTokens"].as_u64().unwrap_or(4096)
+            .min(self.projected_input_limit.unwrap_or(u64::MAX));
+        self.output_budget = allocated["maxOutputTokens"].as_u64().unwrap_or(4096);
         while declared_catalog.len() > 2
             && crate::models::protocol::estimate_tokens(
                 &json!(gateway_model_request::model_tool_declarations(
@@ -225,7 +254,7 @@ impl ChildModelSession {
             &system,
             state,
             &declared_catalog,
-            self.input_budget,
+            self.input_budget.saturating_sub(review_tokens),
             &self.allocation,
             repairs > 0,
         )
@@ -233,9 +262,7 @@ impl ChildModelSession {
         if state.compactions > previous_compactions {
             let _ = effects.apply("effects.protect", &json!({"includeCurrent":true}));
         }
-        if state.review_pending {
-            let review = ChildCompletionReview::new(state, &acceptance_query);
-            let notice = review_instruction(state, &review, requires_readback, requires_visual);
+        if let Some(notice) = review_notice {
             if state.history.last().is_none_or(|message| message["content"] != notice) {
                 state.history.push(json!({"role":"user","content":notice}));
             }

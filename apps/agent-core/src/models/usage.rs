@@ -45,6 +45,19 @@ fn cache_component(usage: &Value, name: &str) -> Option<u64> {
     }
 }
 
+/// Aliases describe one counter; conflicting or invalid reports cannot choose the cheaper value.
+/// 别名表示同一计数；回执冲突或数值无效时保持未知，不能按字段顺序挑值。
+fn consistent_cache_count(values: &[&Value]) -> Option<u64> {
+    let mut observed = None;
+    for value in values {
+        if value.is_null() { continue; }
+        let count = value.as_u64()?;
+        if observed.is_some_and(|previous| previous != count) { return None; }
+        observed = Some(count);
+    }
+    observed
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CacheBreakdown {
     pub(crate) read_tokens: Option<u64>,
@@ -58,27 +71,31 @@ pub(crate) fn cache_breakdown(protocol: &str, usage: &Value) -> CacheBreakdown {
     let read = if protocol == "anthropic-messages" {
         usage["cache_read_input_tokens"].as_u64()
     } else {
-        usage["prompt_tokens_details"]["cached_tokens"].as_u64()
-            .or_else(|| usage["input_tokens_details"]["cached_tokens"].as_u64())
-            .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
+        consistent_cache_count(&[&usage["prompt_tokens_details"]["cached_tokens"],
+            &usage["input_tokens_details"]["cached_tokens"], &usage["prompt_cache_hit_tokens"]])
     };
     let creation = if protocol == "anthropic-messages" {
         usage["cache_creation_input_tokens"].as_u64()
     } else {
-        usage["input_tokens_details"]["cache_write_tokens"].as_u64()
-            .or_else(|| usage["prompt_tokens_details"]["cache_write_tokens"].as_u64())
+        consistent_cache_count(&[&usage["input_tokens_details"]["cache_write_tokens"],
+            &usage["prompt_tokens_details"]["cache_write_tokens"]])
     };
     let input = token_counts(protocol, usage).input_tokens;
+    let misses = usage["prompt_cache_miss_tokens"].as_u64();
+    if protocol != "anthropic-messages" && input.zip(read).zip(misses)
+        .is_some_and(|((input, read), misses)| read.checked_add(misses) != Some(input)) {
+        return CacheBreakdown::default();
+    }
     let read = read.filter(|read| input.is_none_or(|input| *read <= input));
     let creation = creation.filter(|creation| input.is_none_or(|input| *creation <= input)
         && input.zip(read).is_none_or(|(input, read)| read.checked_add(*creation).is_some_and(|sum| sum <= input)));
     let uncached = if protocol == "anthropic-messages" {
         usage["input_tokens"].as_u64()
-    } else if let Some(misses) = usage["prompt_cache_miss_tokens"].as_u64() {
+    } else if let Some(misses) = misses {
         // Misses include cache creation; split a reported write subset without counting those tokens twice.
         // 未命中量包含缓存创建；仅在写入子集已知时扣除，避免同一输入 token 被重复结算。
-        input.filter(|input| misses <= *input && read.is_none_or(|read| read.checked_add(misses) == Some(*input)))
-            .and_then(|_| match creation { Some(creation) => misses.checked_sub(creation), None => Some(misses) })
+        if input.is_some_and(|input| misses > input) { None }
+        else { match creation { Some(creation) => misses.checked_sub(creation), None => Some(misses) } }
     } else {
         input.and_then(|input| input.checked_sub(read?).and_then(|remaining| remaining.checked_sub(creation?)))
     };
@@ -137,6 +154,54 @@ mod tests {
         assert_eq!(cache_breakdown("anthropic-messages", &json!({"input_tokens":10,
             "cache_read_input_tokens":70,"cache_creation_input_tokens":20})),
             CacheBreakdown { read_tokens:Some(70), creation_tokens:Some(20), uncached_input_tokens:Some(10) });
+    }
+
+    #[test]
+    fn conflicting_cache_aliases_remain_unknown_without_changing_total_usage() {
+        let mut usage = json!({"prompt_tokens":100,"completion_tokens":5,
+            "prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20,
+            "prompt_tokens_details":{"cached_tokens":80}});
+        assert_eq!(cache_breakdown("openai-completions", &usage).read_tokens, Some(80));
+        for cached in [json!(0), json!(-1)] {
+            usage["prompt_tokens_details"]["cached_tokens"] = cached;
+            let cache = cache_breakdown("openai-completions", &usage);
+            assert_eq!(cache.read_tokens, None);
+            assert_eq!(cache.uncached_input_tokens, Some(20));
+            assert_eq!(token_counts("openai-completions", &usage),
+                TokenCounts { input_tokens:Some(100), output_tokens:Some(5) });
+        }
+        let cache = cache_breakdown("openai-responses", &json!({"input_tokens":100,
+            "input_tokens_details":{"cached_tokens":60,"cache_write_tokens":20},
+            "prompt_tokens_details":{"cache_write_tokens":30}}));
+        assert_eq!(cache.read_tokens, Some(60));
+        assert_eq!(cache.creation_tokens, None);
+        assert_eq!(cache.uncached_input_tokens, None);
+    }
+
+    #[test]
+    fn partial_cache_misses_survive_missing_totals_without_inventing_input() {
+        for misses in [0, 20] {
+            let usage = json!({"prompt_cache_miss_tokens":misses});
+            assert_eq!(cache_breakdown("openai-completions", &usage), CacheBreakdown {
+                read_tokens:None, creation_tokens:None, uncached_input_tokens:Some(misses),
+            });
+            assert_eq!(token_counts("openai-completions", &usage).input_tokens, None);
+        }
+        assert_eq!(cache_breakdown("openai-completions", &json!({
+            "prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20})),
+            CacheBreakdown { read_tokens:Some(80), creation_tokens:None, uncached_input_tokens:Some(20) });
+        assert_eq!(cache_breakdown("openai-completions", &json!({
+            "prompt_cache_hit_tokens":u64::MAX,"prompt_cache_miss_tokens":1})), CacheBreakdown::default());
+    }
+
+    #[test]
+    fn contradictory_cache_hit_and_miss_counts_do_not_certify_a_hit_rate() {
+        for misses in [10, 30, u64::MAX] {
+            let usage = json!({"prompt_tokens":100,"prompt_cache_hit_tokens":80,
+                "prompt_cache_miss_tokens":misses});
+            assert_eq!(cache_breakdown("openai-completions", &usage), CacheBreakdown::default());
+            assert_eq!(token_counts("openai-completions", &usage).input_tokens, Some(100));
+        }
     }
 
     #[test]

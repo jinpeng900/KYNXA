@@ -13,12 +13,16 @@ pub(in crate::orchestration) struct ValidationScope {
     pub(in crate::orchestration) requirements: Vec<ValidationRequirement>,
     #[serde(default)]
     pub(in crate::orchestration) known_targets: Vec<ValidationTarget>,
+    #[serde(default)]
+    pub(in crate::orchestration) requires_code_validation: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::orchestration) struct ValidationRequirement {
     pub(in crate::orchestration) key: String,
+    #[serde(default)]
+    pub(in crate::orchestration) requires_code_validation: bool,
     pub(in crate::orchestration) targets_known: bool,
     pub(in crate::orchestration) targets: Vec<ValidationTarget>,
 }
@@ -56,6 +60,15 @@ impl ValidationScope {
     pub(super) fn excludes(&self, receipt: &Value) -> bool {
         if !self.complete() { return false; }
         let Some(mut original) = Self::read_checkpoint(&receipt["acceptanceScope"]) else { return false; };
+        // A formally removed check requirement does not survive as an implicit debt on the remaining output.
+        // 正式撤销的检查要求不能转成剩余产物的隐式欠账，原失败回执仍保留。
+        let original_checks = original.requirements.iter().filter(|requirement| requirement.requires_code_validation)
+            .collect::<Vec<_>>();
+        if original.requires_code_validation && !self.requires_code_validation && !original_checks.is_empty()
+            && original_checks.iter().all(|removed| !self.requirements.iter().any(|current| current.key == removed.key))
+        {
+            return true;
+        }
         // Later real receipts may resolve a still-active target; withdrawn unknown goals stay conservative.
         // 后续真实回执可补齐仍有效目标；已撤销却无归属依据的旧目标不能据此忽略。
         for requirement in &mut original.requirements {

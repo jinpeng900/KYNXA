@@ -2638,7 +2638,7 @@
     },
     {
       "name": "task.describe",
-      "description": "Name this existing task and choose whether it belongs in the task list. Use a concise meaningful title for substantive multi-step work; brief chat can stay hidden. Changes only current-task presentation, preserves usage and task identity, and never starts another task.",
+      "description": "Name this existing task and choose whether it belongs in the task list. Set displayInTaskList=true only for important actual work clearly requested by the user, with a concise meaningful title. Ordinary questions, explanations, chat, simple lookups and incidental suggestions stay hidden; time, retries or interruption do not make them task-list items. Changes presentation only; preserves the same task identity, recovery and usage, and never starts another task.",
       "inputSchema": {
         "type": "object",
         "properties": {

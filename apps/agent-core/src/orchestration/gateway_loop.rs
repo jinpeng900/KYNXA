@@ -1948,6 +1948,25 @@ mod preparation_tests {
         let saved = rounds.clone();
         restore_completion_evidence(&root, &chat, &request, &mut rounds).await;
         assert_eq!(rounds, saved);
+        let preview_call = json!({"id":"opened-before-upgrade","name":"artifact.open"});
+        let preview = json!({"path":"C:/fixture/result.txt","version":"a".repeat(64),"previewAvailable":true});
+        let preview_ref = data::save_tool_result(&root, &chat, &request, &preview_call, &preview, None).unwrap();
+        let mut old_proof = super::super::completion_evidence::from_receipt(&preview_call,
+            &json!({"status":"completed","content":preview}));
+        old_proof["targets"][0]["version"] = Value::Null;
+        old_proof["kinds"] = json!(["execution"]);
+        old_proof["mutationSequence"] = json!(1);
+        old_proof["current"] = json!(false);
+        rounds[0]["observations"].as_array_mut().unwrap().push(json!({"id":preview_call["id"],
+            "name":preview_call["name"],"status":"completed","ref":preview_ref,
+            "verifiedSuccess":true,"completionProof":old_proof}));
+        restore_completion_evidence(&root, &chat, &request, &mut rounds).await;
+        let upgraded = rounds[0]["observations"].as_array().unwrap().last().unwrap();
+        assert_eq!(upgraded["completionProof"]["targets"][0]["version"], "a".repeat(64));
+        assert!(upgraded["completionProof"]["kinds"].as_array().unwrap().contains(&json!("observed-state")));
+        assert_eq!(upgraded["completionProof"]["mutationSequence"], 1);
+        assert_eq!(upgraded["completionProof"]["current"], false);
+        assert_eq!(upgraded["ref"], preview_ref);
         std::fs::remove_dir_all(root).unwrap();
     }
 

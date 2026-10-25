@@ -3,6 +3,34 @@
 
 use super::*;
 
+/// Report settled facts when delivery fails; a saved file does not certify every requirement.
+/// 收尾异常时说明已落地事实，文件保存不等于全部要求均已满足。
+fn stopped_reply_notice(error: &GatewayError, review: &super::super::completion_evidence::CompletionEvidenceSet) -> String {
+    let current = review.records.iter().filter(|record| record["current"] == true
+        && record["observationCurrent"] == true).collect::<Vec<_>>();
+    let has_output = current.iter().any(|record| record["kinds"].as_array().into_iter().flatten()
+        .any(|kind| kind == "committed-output"));
+    let has_preview = current.iter().any(|record| record["tool"] == "artifact.open"
+        && record["kinds"].as_array().into_iter().flatten()
+            .any(|kind| kind == "observed-state"));
+    let result = match (has_output, has_preview) {
+        (true, true) => "文件已保存，文件预览也已打开。",
+        (true, false) => "生成的文件已保存。",
+        (false, true) => "文件预览已打开。",
+        (false, false) => "",
+    };
+    let reason = if error.code == "TASK_CONTINUATION_NO_PROGRESS" {
+        if review.verification["state"] == "checks-failed" {
+            "仍有检查未通过，尚未完成全部要求；已有结果和进度已保留。"
+        } else if review.verification["pendingValidation"] == true {
+            "必要检查尚未完成，已有结果和进度已保留。"
+        } else {
+            error.message.as_str()
+        }
+    } else { error.message.as_str() };
+    format!("{result}{reason}")
+}
+
 pub(super) struct FinalDelivery<'a> {
     pub runtime: &'a Arc<GatewayRuntime>,
     pub run: &'a Arc<RequestRun>,
@@ -40,6 +68,7 @@ impl FinalDelivery<'_> {
         let continuing = stopped.as_ref().is_some_and(|error| internal_recovery_required(&error.code))
             && !*cancellation.borrow() && run.journal.is_some();
         if let Some(error) = stopped.clone().filter(|_| !continuing) {
+            state.interrupt_open_segments(run).await;
             let round = state.delivery.segments.last()
                 .and_then(|segment| segment["round"].as_u64())
                 .unwrap_or(0).saturating_add(1).min(MAX_MESSAGE_ROUNDS);
@@ -53,11 +82,8 @@ impl FinalDelivery<'_> {
                 if let Some(checkpoint) = state.completion.review_checkpoint.as_object_mut() {
                     checkpoint.remove("pendingDelivery");
                 }
-                let notice = format!(
-                    "{}任务未完成：{} 已有进度和成功回执已保存；中间内容不表示原任务已完成。",
-                    if state.content().is_empty() { "" } else { "\n\n" },
-                    error.message
-                );
+                let notice = format!("{}{}", if state.content().is_empty() { "" } else { "\n\n" },
+                    stopped_reply_notice(&error, &completion_review(&state)));
                 let id = new_id();
                 state.begin_segment(round, &id);
                 state.append(&notice, "", round, &id);
@@ -187,5 +213,30 @@ impl FinalDelivery<'_> {
         Ok(
             json!({"type":if continuing{"recovering"}else if reply_interrupted{"interrupted"}else{"completed"},"replyMessageId":state.assistant["Id"],"content":state.assistant["Content"],"reasoning":state.assistant["Reasoning"],"assistantSegments":state.delivery.segments,"toolStreamProtocol":3,"durationMs":state.assistant["DurationMs"],"taskCompletion":completion,"error":stopped.as_ref().filter(|_|reply_interrupted && !continuing).map(|error|&error.message),"code":stopped.as_ref().map(|error|&error.code)}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestration::completion_evidence::CompletionEvidenceSet;
+
+    #[test]
+    fn stopped_reply_reports_current_outputs_without_certifying_completion() {
+        let error = GatewayError::new("TASK_CONTINUATION_NO_PROGRESS", "后续处理未能继续推进，已有结果和进度已保留。", 409);
+        let mut review = CompletionEvidenceSet { verification:json!({}), valid_references:vec![], records:vec![
+            json!({"current":true,"observationCurrent":true,"kinds":["execution","committed-output"]}),
+            json!({"current":true,"observationCurrent":true,"tool":"artifact.open","kinds":["execution","observed-state"]}),
+        ] };
+        let notice = stopped_reply_notice(&error, &review);
+        assert!(notice.starts_with("文件已保存，文件预览也已打开。"));
+        assert!(!notice.contains("No new result") && !notice.contains("任务已完成") && !notice.contains("中间内容"));
+        review.verification = json!({"state":"checks-failed","pendingValidation":true});
+        assert!(stopped_reply_notice(&error, &review).contains("检查未通过"));
+        review.records.iter_mut().for_each(|record| record["current"] = json!(false));
+        assert!(!stopped_reply_notice(&error, &review).contains("文件已保存"));
+        assert!(!stopped_reply_notice(&error, &review).contains("预览已打开"));
+        review.records = vec![json!({"current":true,"tool":"artifact.open","kinds":["execution"]})];
+        assert!(!stopped_reply_notice(&error, &review).contains("预览已打开"));
     }
 }

@@ -48,7 +48,25 @@ public sealed partial class RetrievalSettingsWindow : Window
         Closed += WindowClosed;
     }
 
-    public bool HasPendingChanges => _busy;
+    public bool HasUnsavedChanges
+    {
+        get
+        {
+            if (_global is null || _rendering || _closed) return false;
+            bool inherits = _projectId is not null && _inherit.IsChecked == true;
+            if (_project is { } project && inherits != (project.Overrides is { Local: null, Web: null })) return true;
+            if (inherits) return false;
+            var local = _project?.Effective.Local ?? _global.Local;
+            var web = _project?.Effective.Web ?? _global.Web;
+            return (Value(_localMode, local.Enabled ? "true" : "false") == "true") != local.Enabled
+                || Value(_semanticMode, local.Semantic) != local.Semantic
+                || Value(_webMode, web.Mode) != web.Mode || Value(_webProvider, web.ProviderId) != web.ProviderId
+                || Value(_webDepth, web.Depth) != web.Depth || Value(_webLanguage, web.Language) != web.Language;
+        }
+    }
+    // Reads may be cancelled on close; active operations still guard storage migration.
+    // 关闭可取消读取；进行中的操作仍保护存储迁移，不能冒充未保存编辑。
+    public bool HasPendingChanges => _busy || HasUnsavedChanges;
     public Guid? ProjectId => _projectId;
     public bool IsEmbedded => _settingsOwner is not null;
 
@@ -92,7 +110,7 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private void WindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (_busy && !_allowClose) args.Cancel = true;
+        if (HasUnsavedChanges && !_allowClose) args.Cancel = true;
     }
 
     private void WindowClosed(object sender, WindowEventArgs args) => ReleaseResources();

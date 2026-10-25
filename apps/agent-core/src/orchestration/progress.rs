@@ -992,7 +992,15 @@ impl RunProgress {
         let scope_covered = scope.is_some() && checks.iter().any(|check| check["active"] == true && check["resolution"] == "passed");
         let withdrawn_latest = scope.is_some_and(|scope| self.validation_receipts.last().is_some_and(|receipt|
             scope.excludes(receipt) && receipt["codeVersionCoverage"]["after"]["signature"] == self.latest_code_version["signature"]));
-        let needs_check = self.pending_code_mutation() && !scope_covered && !withdrawn_latest;
+        let observed_version_changed = scope.is_some_and(|scope| self.latest_code_version["files"].as_array()
+            .into_iter().flatten().any(|file| scope.known_targets.iter().any(|target|
+                file["pathId"] == target.path_id && file["sha256"].as_str().is_some_and(|hash|
+                    !hash.eq_ignore_ascii_case(&target.sha256)))));
+        // Mutation bookkeeping does not add a test requirement to an ordinary deliverable.
+        // 修改记录不能替普通制作任务增加测试要求；真实失败、未知结果及版本冲突仍须处理。
+        let code_check_required = scope.is_none_or(|scope| scope.requires_code_validation)
+            || !self.uncertain_mutations.is_empty() || observed_version_changed;
+        let needs_check = self.pending_code_mutation() && code_check_required && !scope_covered && !withdrawn_latest;
         let pending = needs_check || !unresolved.is_empty();
         let state = if failed {
             "checks-failed"

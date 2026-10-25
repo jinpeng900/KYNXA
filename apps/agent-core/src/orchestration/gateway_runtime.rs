@@ -877,6 +877,7 @@ impl GatewayRuntime {
         });
     }
     pub async fn prepare_models(self: &Arc<Self>, selection: Value) -> Result<Value, GatewayError> {
+        self.check_admission()?;
         let status = self
             .model_preparation
             .schedule(
@@ -917,6 +918,7 @@ impl GatewayRuntime {
         original_message_raw: Option<String>,
         background: bool,
     ) -> Result<Arc<RequestRun>, GatewayError> {
+        self.check_admission()?;
         let conversation = checked_id(&input["conversationId"], "conversationId")?;
         let attachments = input.get("attachmentIds").filter(|value| !value.is_null());
         if let Some(attachments) = attachments {
@@ -1059,7 +1061,7 @@ impl GatewayRuntime {
         // Acceptance and an early window-exit pause share this request gate; no model starts between them.
         // 接受与窗口退出暂停共用请求锁；正式接受后先保存暂停，再考虑模型派发。
         let pending_pause = self.pending_pauses.lock().await.remove(&request_id);
-        if pending_pause.is_some() {
+        if pending_pause.is_some() || *self.background_cancellation.borrow() {
             self.pause_accepted_task(task).await?;
             return Err(GatewayError::new("TASK_CONTROLLED", "任务已暂停，输入和进度已保存。", 409));
         }
@@ -1743,8 +1745,30 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    pub async fn shutdown(&self) {
+    pub(crate) fn close_admission(&self) {
         self.background_cancellation.send_replace(true);
+        if let Ok(runs) = self.task_runs.lock() {
+            for run in runs.values().filter_map(Weak::upgrade) {
+                if !run.finished.load(Ordering::Acquire) {
+                    run.suspending.store(true, Ordering::Release);
+                    run.cancel();
+                }
+            }
+        }
+    }
+
+    fn check_admission(&self) -> Result<(), GatewayError> {
+        if *self.background_cancellation.borrow() {
+            return Err(GatewayError::new("GATEWAY_SHUTTING_DOWN", "软件正在退出，已有任务与回执正在保存。", 503));
+        }
+        Ok(())
+    }
+
+    /// Request cancellation without dropping workers that still own execution receipts.
+    /// 请求取消，但不丢弃仍持有执行回执的 Worker。
+    pub(crate) async fn interrupt_for_shutdown(&self) {
+        self.close_admission();
+        self.tasks.shutdown().await;
         let runs: Vec<_> = self.runs.lock().await.values().cloned().collect();
         for run in runs {
             if !run.finished.load(Ordering::Acquire) {
@@ -1765,10 +1789,28 @@ impl GatewayRuntime {
                 run.cancel();
             }
         }
-        self.tasks.shutdown().await;
+    }
+
+    pub async fn shutdown(&self) {
+        self.interrupt_for_shutdown().await;
+        while self.execution_tasks.load(Ordering::Acquire) != 0 {
+            self.interrupt_for_shutdown().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if let Err(error) = self.tasks.quiesce().await {
+            eprintln!("{}", json!({"code":error.code,"gatewayShutdown":"task-drain"}));
+        }
+        let journals = self.task_journals.lock().ok().map(|journals| {
+            journals.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
+        }).unwrap_or_default();
+        for journal in journals {
+            if let Err(error) = journal.drain_background().await {
+                eprintln!("{}", json!({"code":error.code,"gatewayShutdown":"journal-drain"}));
+            }
+        }
         self.model_preparation.shutdown().await;
         let _ = crate::models::gateway_local_models::shutdown(&self.config.data_home).await;
-        crate::models::gateway_local_engine::shutdown().await;
+        crate::models::gateway_local_engine::shutdown_for(&self.config.data_home).await;
         let (_owner, cancellation) = watch::channel(false);
         let context = GatewayToolContext {
             data_home: self.config.data_root.clone(),
@@ -1789,10 +1831,16 @@ impl GatewayRuntime {
         crate::tools::gateway::shutdown(&context).await;
         let config = self.config.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::retrieval::gateway::stop_background(&config)
+            crate::retrieval::gateway::drain_background(&config)
         })
         .await;
         let _ = tokio::task::spawn_blocking(crate::models::gateway_inference::shutdown_idle).await;
+        let root = self.config.data_root.clone();
+        match tokio::task::spawn_blocking(move || crate::storage::sqlite_connections::drain_root(&root)).await {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => eprintln!("{}", json!({"code":error.code(),"gatewayShutdown":"database-drain"})),
+            Err(error) => eprintln!("{}", json!({"gatewayShutdown":"database-drain","error":error.to_string()})),
+        }
         if let Some(service) = crate::resources::gateway::global() {
             service.close().await;
         }

@@ -139,8 +139,11 @@ fn version(
     available_tools: &[String],
     runtime_origin: Option<&Value>,
 ) -> Option<Version> {
-    // Include private transcripts and exact tool order; IDs alone cannot identify mutable saved messages.
-    // 私有转录与原工具顺序一并绑定；消息 ID 本身不能代表可变的已保存内容。
+    // Tool availability is a set in the projection; canonicalize only its cache key, not request declarations.
+    // 投影按集合判断工具可用性；仅规范缓存键，不改请求声明、原始消息或私有转录。
+    let mut available_tools = available_tools.iter().collect::<Vec<_>>();
+    available_tools.sort_unstable();
+    available_tools.dedup();
     let mut writer = VersionWriter(Sha256::new());
     serde_json::to_writer(&mut writer, &(protocol, formal_history, available_tools, runtime_origin)).ok()?;
     Some(writer.0.finalize().into())
@@ -214,6 +217,31 @@ mod tests {
             assert!(warm.messages.iter().any(|message| message.to_string().contains("original successful receipt")));
             assert_eq!(history, original);
         }
+    }
+
+    #[test]
+    fn history_projection_cache_keys_tool_availability_as_set_without_reordering_inputs() {
+        let history = history();
+        let tools = vec!["filesystem.read".into(), "filesystem.stat".into()];
+        let reordered = vec!["filesystem.stat".into(), "filesystem.read".into(), "filesystem.read".into()];
+        let original_tools = tools.clone();
+        let original_reordered = reordered.clone();
+        let original_history = history.clone();
+        for protocol in ["openai-completions", "anthropic-messages", "openai-responses"] {
+            let cache = ProjectionCache::new(MAX_BYTES, MAX_ENTRIES);
+            let builds = Cell::new(0);
+            let cold = load(&cache, &history, protocol, &tools, None, &builds);
+            let warm = load(&cache, &history, protocol, &reordered, None, &builds);
+            assert_eq!(builds.get(), 1, "Tool availability order and duplicates must not rebuild: {protocol}");
+            assert!(cold.messages.iter().any(|message| !super::super::call_ids(message).is_empty()));
+            assert_eq!(serde_json::to_value(&cold).unwrap(), serde_json::to_value(&warm).unwrap());
+            let revoked = load(&cache, &history, protocol, &["filesystem.stat".into()], None, &builds);
+            assert_eq!(builds.get(), 2, "Removing availability must still invalidate: {protocol}");
+            assert!(revoked.messages.iter().all(|message| super::super::call_ids(message).is_empty()));
+        }
+        assert_eq!(tools, original_tools);
+        assert_eq!(reordered, original_reordered);
+        assert_eq!(history, original_history);
     }
 
     #[test]

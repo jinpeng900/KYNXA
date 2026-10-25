@@ -38,6 +38,7 @@ pub(crate) fn resolve_work_scope(message: &str, previous: &Value) -> Value {
     let plan = PLAN.get_or_init(|| Regex::new(concat!(
         r"(?ix)(?:先|只|仅)(?:要|需要|给我|给|出|提供|制定|整理|设计|讨论|说说|说|讲讲|讲|说明|介绍|总结|一个|一份|一下|具体|详细|\s){0,18}",
         r"(?:方案|计划|思路|设计要求|怎么做|如何做|要做什么|会做什么)",
+        r"|(?:先|只|仅)(?:给我|给|提供|制定|整理|讨论|说说|讲讲)[^，,；;。！？!?\r\n]{0,48}(?:方案|计划|思路)",
         r"|先(?:说说|讲讲|说明).{0,16}(?:要做什么|会做什么|怎么做|如何做|方案|计划)",
         r"|\b(?:plan\s+first|first\s+(?:explain|describe|outline)\s+(?:what|the\s+plan)|(?:only|just)\s+(?:give|provide|discuss|outline)\s+(?:a\s+|the\s+)?plan)\b"
     )).expect("static planning scope expression")).is_match(&text);
@@ -302,8 +303,6 @@ pub(crate) fn requires_execution_verification(goal: &str) -> bool {
 
 fn positive_request_text(goal: &str) -> String {
     static EXPLANATION: OnceLock<Regex> = OnceLock::new();
-    static NEGATED_ACTION: OnceLock<Regex> = OnceLock::new();
-    static CLAUSES: OnceLock<Regex> = OnceLock::new();
     static EXPLANATORY_ACTION: OnceLock<Regex> = OnceLock::new();
     let explanation=EXPLANATION.get_or_init(|| Regex::new(concat!(
         r"(?ix)^\s*(?:请|能否|可以|please\s+)?(?:解释|说明|教我|告诉我(?:如何|怎么)|介绍|explain\b|describe\b|teach\s+me\b|how\s+(?:do|can|to)\b)"
@@ -312,16 +311,58 @@ fn positive_request_text(goal: &str) -> String {
         r"(?ix)(?:并且?|同时|然后|and\s+(?:then\s+|also\s+)?)(?:请|帮我|为我|please\s+)?",
         r"(?:打开|启动|运行|执行|安装|下载|上传|搜索|抓取|读取|保存|导出|提交|修改|修复|创建|生成|制作|测试|删除|open\b|launch\b|run\b|execute\b|install\b|download\b|upload\b|search\b|read\b|save\b|export\b|modify\b|fix\b|create\b|build\b|test\b|delete\b)"
     )).expect("static explanatory additional action expression"));
-    let negative=NEGATED_ACTION.get_or_init(||Regex::new(concat!(
-        r"(?ix)^\s*(?:(?:请|先|也|并且|并|同时|而且|这次|这轮|本轮|当前|please|and|also)\s*)*(?:(?:不要|不再|无需|不用|不需要|不准|不允许|不必|禁止|别)",
-        r"(?:再|继续|去|额外|实际|自动|重新|主动|帮我|任何|进行)*\s*",
+    request_clauses(goal).filter(|clause|!negated_execution_clause(clause)
+        && (!explanation.is_match(clause) || additional_action.is_match(clause))).collect::<Vec<_>>().join("\n")
+}
+
+fn request_clauses(goal: &str) -> impl Iterator<Item = &str> {
+    static CLAUSES: OnceLock<Regex> = OnceLock::new();
+    CLAUSES.get_or_init(||Regex::new(r"(?i)[，,；;。！？!?\n\r]+|(?:但是|但请|而是|\bbut\b|\binstead\b)")
+        .expect("static request clause expression")).split(goal)
+}
+
+fn negated_execution_clause(clause: &str) -> bool {
+    static NEGATED_ACTION: OnceLock<Regex> = OnceLock::new();
+    NEGATED_ACTION.get_or_init(||Regex::new(concat!(
+        r"(?ix)^\s*(?:(?:请|先|也|并且|并|同时|而且|这次|这轮|本轮|当前|please|and|also)\s*)*(?:(?:不要|不再|无需|不用|不需要|不准|不允许|不必|禁止|别|不)",
+        r"(?:再|继续|去|额外|实际|自动|重新|主动|帮我|任何|进行|全量|完整)*\s*",
         r"(?:打开|启动|运行|执行|安装|卸载|下载|上传|抓取|爬取|搜索|检索|浏览|访问|回读|读取|读写|读|扫描|渲染|建模|截图|截屏|预览|写入|写|保存|导出|提交|推送|修改|修复|重构|编译|测试|检查|验证|调用|删除|删|创建|生成|制作|更新)",
         r"|(?:don't|do\s+not|never|without|no\s+need\s+to)\s+(?:actually\s+|continue\s+|further\s+|automatically\s+)*",
         r"(?:open|launch|run|execute|install|uninstall|download|upload|fetch|scrape|browse|render|inspect|compile|deploy|commit|push|read|write|save|export|edit|modify|delete|create|build|verify|test|search|call|use|take|capture|preview)\b)"
-    )).expect("static negated execution task expression"));
-    let clauses=CLAUSES.get_or_init(||Regex::new(r"(?i)[，,；;。！？!?\n\r]+|(?:但是|但请|而是|\bbut\b|\binstead\b)").expect("static request clause expression"));
-    clauses.split(goal).filter(|clause|!negative.is_match(clause)
-        && (!explanation.is_match(clause) || additional_action.is_match(clause))).collect::<Vec<_>>().join("\n")
+    )).expect("static negated execution task expression")).is_match(clause)
+}
+
+/// Code repair and explicit checks require execution validation; ordinary artifact creation does not invent a test suite.
+/// 修复代码及明确检查需要执行验证；普通制作产物不能凭空增加一套测试要求。
+pub(super) fn requires_code_validation(goal: &str) -> bool {
+    if response_only_scope(&resolve_work_scope(goal, &Value::Null)) { return false; }
+    static REPAIR: OnceLock<Regex> = OnceLock::new();
+    static CHECK: OnceLock<Regex> = OnceLock::new();
+    static CHECK_SUBJECT: OnceLock<Regex> = OnceLock::new();
+    static DIRECT_TEST: OnceLock<Regex> = OnceLock::new();
+    static TEST_MATERIAL: OnceLock<Regex> = OnceLock::new();
+    let instructions = instruction_text(goal);
+    let positive = positive_request_text(&instructions);
+    let repair = REPAIR.get_or_init(|| Regex::new(
+        r"(?ix)修复|修\s*bug|调试|重构|排查.{0,12}(?:故障|错误|异常)|\b(?:fix|debug|refactor)\b"
+    ).expect("static code repair expression")).is_match(&positive);
+    let execution = CHECK.get_or_init(|| Regex::new(concat!(
+        r"(?ix)编译|构建(?:项目|工程|代码)|验证.{0,12}(?:代码|功能|逻辑)",
+        r"|(?:运行|执行|跑)\s*(?:全部|相关|单元|集成|回归|自动化)?\s*(?:测试|单测|检查)",
+        r"|\bcompile\b|\b(?:run|execute)\s+(?:the\s+|all\s+|unit\s+|integration\s+|regression\s+)*(?:tests?|checks?)\b",
+        r"|\bbuild\s+(?:the\s+)?(?:project|solution|codebase)\b"
+    )).expect("static required code validation expression")).is_match(&positive);
+    let direct_test = DIRECT_TEST.get_or_init(|| Regex::new(
+        r"(?im)^\s*(?:(?:请|并且|并|再|然后|同时)\s*)*(?:测试|test\b)"
+    ).expect("static direct check expression")).is_match(&positive);
+    let test_material = TEST_MATERIAL.get_or_init(|| Regex::new(
+        r"(?i)测试(?:用例|案例|方案|计划|报告|代码|脚本)|\btest(?:ing)?\s+(?:cases?|plan|report|code|script)\b"
+    ).expect("static test material expression")).is_match(&positive);
+    let declined = request_clauses(&instructions).any(|clause| negated_execution_clause(clause)
+        && CHECK_SUBJECT.get_or_init(|| Regex::new(
+            r"(?i)测试|单测|验证|检查|编译|\b(?:tests?|checks?|compile)\b"
+        ).expect("static check subject expression")).is_match(clause));
+    execution || direct_test && !test_material || repair && !declined
 }
 
 /// Launching an application needs a successful receipt; its name is not a visual-quality request.
@@ -1885,6 +1926,19 @@ mod work_scope_contract_tests {
         assert!(!scope_allows_call(&scope, "computer.launch", false));
         assert!(scope_allows_mutation(&resolve_work_scope("修复后先不提交", &Value::Null)));
         assert!(scope_allows_mutation(&resolve_work_scope("解释文本里的“先说说你要做什么”是什么意思", &Value::Null)));
+    }
+
+    #[test]
+    fn planning_a_repair_does_not_authorize_it_but_explicit_followup_execution_does() {
+        for request in ["先给修复方案", "只给我测试方案", "先给出重构计划"] {
+            let scope = resolve_work_scope(request, &json!({"stage":"execute"}));
+            assert_eq!(scope["stage"], "plan", "{request}");
+            assert!(!requires_code_validation(request), "{request}");
+            assert!(!scope_allows_mutation(&scope), "{request}");
+        }
+        for request in ["先给修复方案，然后直接修复", "先给出方案并执行", "先给修复方案.md"] {
+            assert!(scope_allows_mutation(&resolve_work_scope(request, &Value::Null)), "{request}");
+        }
     }
 
     #[test]

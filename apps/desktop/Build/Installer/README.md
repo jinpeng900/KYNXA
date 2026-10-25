@@ -1,14 +1,14 @@
 # KYNXA EXE 安装器
 
-当前 Windows x64 安装发行版本为 **1.8.0**，发行入口为 [1.8 GitHub Release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.0)，本批验证状态见 [1.8 更新说明](../../../../docs/releases/1.8.md)。**1.7** 保留为首个正式版的历史版本。源码工程与安装包使用对应版本；更新安装文件需要维护者重新生成载荷，并以匹配的发布标签记录源码。
+当前 Windows x64 安装发行版本为 **1.8.1**，发行入口为 [1.8.1 GitHub Release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.1)，本批验证状态见 [1.8.1 更新说明](../../../../docs/releases/1.8.1.md)。**1.7** 保留为首个正式版的历史版本。源码工程与安装包使用对应版本；更新安装文件需要维护者重新生成载荷，并以匹配的发布标签记录源码。
 
-**历史验证：** 1.5.3 的 Debug Full 构建、启动和 17 项打包守卫成绩记录在 [1.5.3 更新说明](../../../../docs/releases/1.5.3.md)，不作为当前 1.8 的验收成绩。该历史版本的安装 EXE 只构建，未执行安装测试；编译成功或应用启动不能代替安装验收。
+**历史验证：** 1.5.3 的 Debug Full 构建、启动和 17 项打包守卫成绩记录在 [1.5.3 更新说明](../../../../docs/releases/1.5.3.md)，不作为当前 1.8.1 的验收成绩。该历史版本的安装 EXE 只构建，未执行安装测试；编译成功或应用启动不能代替安装验收。
 
 基础资源直接随完整 EXE 提供，基础安装无需联网。可选模型下载由后台自动选择原站、国内镜像及已配置的 GitHub 资产来源，失败时自动切换并保留断点；安装界面不要求用户选择站点。来源清单保存在实际模型目录中，升级保留已有自定义映射和下载断点，完整机制见[离线安装与多来源下载](../../../../docs/architecture/offline-installer.md)。
 
-普通用户下载 `KYNXA-1.8.0-windows-x64-setup.zip`，解压后运行其中的 `KYNXA-1.8.0-windows-x64-setup.exe`。本版公开附件仅安装包 ZIP 和资源 ZIP，不单独分发安装 EXE、在线入口、校验旁文件或维护清单。
+普通用户直接下载并运行 `KYNXA-1.8.1-windows-x64-setup.exe`，无需解压安装包。本版公开附件仅 EXE 安装包和运行资源 ZIP，不额外分发在线入口、校验旁文件或维护清单。
 
-同版本压缩分发文件名为 `KYNXA-1.8.0-windows-x64-setup.zip` 与 `KYNXA-1.8.0-windows-x64-resources.zip`，分别用于安装器压缩分发和源码构建的运行资源准备。资源包保留 E5、Office 解析与转换、Chromium、私有 Node／MCP 及原生运行依赖；检索使用 E5 加词法 RRF 和轻量排序，不再携带 BGE。各文件大小与 SHA-256 以实际产物和对应清单为准，生成清单不代表已经上传；维护清单与校验旁文件不额外上传到 Release。
+同版本分发文件名为 `KYNXA-1.8.1-windows-x64-setup.exe` 与 `KYNXA-1.8.1-windows-x64-resources.zip`，分别用于安装软件和准备源码构建的运行资源。资源包保留 E5、Office 解析与转换、Chromium、私有 Node／MCP 及原生运行依赖；检索使用 E5 加词法 RRF 和轻量排序，不再携带 BGE。各文件大小与 SHA-256 以实际产物和对应清单为准，生成清单不代表已经上传；维护清单与校验旁文件不额外上传到 Release。
 
 `KYNXA.iss` 由发布入口使用 Inno Setup 6.4 或更新版本编译，只接收经过整理的 Windows x64 Release 暂存目录。安装器本身不依赖用户已有的 Node、Rust、.NET SDK、Python、Git 或编译工具。
 
@@ -20,11 +20,11 @@
 |---|---|
 | `PayloadRoot` | 必填，已准备好的 Release 软件载荷 |
 | `PackageOutputDir` | 输出目录，默认项目内 `artifacts/installer/output`，可传入独立分发目录 |
-| `PackageVersion` | 安装发行版本，生成当前包时使用 `1.8.0` |
+| `PackageVersion` | 安装发行版本，生成当前包时使用 `1.8.1` |
 | `LauncherFile` | 相对软件根目录的启动器，默认 `KYNXA.Desktop.exe` |
 | `IconFile`、`BrandImageFile` | 可选，安装器图标和项目 PNG 标识 |
 
-生成文件名为 `KYNXA-<版本>-windows-x64-setup.exe`，使用 ZIP 压缩缩短完整资源的打包和解压等待。发布入口只生成文件，不自动执行安装器。
+生成文件名为 `KYNXA-<版本>-windows-x64-setup.exe`；载荷压缩在 EXE 内完成，不另套安装 ZIP。发布入口只生成文件，不自动执行安装器。
 
 普通用户直接使用 Release 安装文件。下面的源码构建命令仅供已经准备开发环境的开发者使用，在仓库根目录运行：
 
@@ -32,11 +32,11 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Build -Configuration Release
 ```
 
-该命令编译源码，不生成安装器。维护者在发行工作区使用 `apps/desktop/Build/build-installer.ps1` 等打包工具整理载荷。源码、Markdown 开发文档和固定依赖清单保存在 Git 中；本版通过 Release 分发安装包 ZIP 与运行资源 ZIP，安装 EXE 位于安装包 ZIP 内。历史设计归档不参与当前安装流程。
+该命令编译源码，不生成安装器。维护者在发行工作区使用 `apps/desktop/Build/build-installer.ps1` 等打包工具整理载荷。源码、Markdown 开发文档和固定依赖清单保存在 Git 中；本版通过 Release 分发 EXE 安装包与运行资源 ZIP。历史设计归档不参与当前安装流程。
 
 构建输出同时提供 `installer-release.json`、`Get-KynxaInstaller.ps1` 与共用 `RuntimeDownloads.psm1`，供安装包本身的多来源续传。下载脚本默认只准备文件，显式指定 `-Install` 才启动 EXE；直接运行已经下载完整的 EXE 不需要这些脚本。清单将未上传的 GitHub 地址标为 `pending`，不会当成已经存在的下载源。
 
-在线入口工具保留供维护者使用，本版不分发在线入口。维护者另行提供完整 EXE 下载源并更新清单的可用来源后，可运行 `apps/desktop/Build/build-online-installer.ps1 -OutputDirectory <已有分发目录>` 生成在线 EXE。该入口复用完整包的清单，仅编译 `KYNXA.Online.iss` 与 `Start-KynxaOnline.ps1` 等小型下载载荷，不重编应用或完整包；不能把本版安装包 ZIP 当作其完整 EXE 来源。
+在线入口工具保留供维护者使用，本版不分发在线入口。维护者提供完整 EXE 下载源并更新清单的可用来源后，可运行 `apps/desktop/Build/build-online-installer.ps1 -OutputDirectory <已有分发目录>` 生成在线 EXE。该入口复用完整包的清单，仅编译 `KYNXA.Online.iss` 与 `Start-KynxaOnline.ps1` 等小型下载载荷，不重编应用或完整包。
 
 `-ModelDownloadSourcesPath` 用于选择随产品分发的模型来源模板；`-DownloadSourcesPath` 用于构建机下载来源及发布资产配置。`installerAssets.<资产ID>.sources` 可追加原站或镜像 URL，`installerReleaseSources` 可声明安装包实际分发地址，均不改变固定版本、大小和 SHA-256。
 

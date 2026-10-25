@@ -138,20 +138,9 @@ impl TaskHub {
             .iter()
             .map(|task| {
                 let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
-                value["displayInTaskList"] = json!(task.display_in_task_list.unwrap_or_else(|| {
-                    task.usage.output_tokens >= 8192
-                        || task.usage.tool_duration_ms > 0
-                            && (task.usage.model_requests >= 3
-                                || task.usage.compactions > 0
-                                || task.usage.tool_duration_ms >= 30_000)
-                        || matches!(
-                            task.state,
-                            TaskState::Paused
-                                | TaskState::WaitingChildren
-                                | TaskState::WaitingApproval
-                                | TaskState::WaitingVerification
-                        )
-                }));
+                // Durable reply bookkeeping is not a visible user task, regardless of time or retries.
+                // 回复恢复记录不等于用户待办，耗时、重试及暂停都不能自行升级为可见任务。
+                value["displayInTaskList"] = json!(task.display_in_task_list == Some(true));
                 value
             })
             .collect();
