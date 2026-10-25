@@ -25,6 +25,19 @@ KYNXA is a personal agent assistant for Windows, bringing chat, files, tools, an
 Run the EXE directly. The resource ZIP is for preparing a source build, not a standalone application.
 A complete installation does not require development SDKs or manual PATH configuration. Cloud providers and external services may require your own account or credentials.
 
+## Build from source
+
+Use Windows x64 with Git, .NET 10 SDK (10.0.100 or a later 10.0 SDK), Rust 1.88+ with the MSVC toolchain, and Visual Studio C++ build tools with the Windows SDK.
+
+```powershell
+git clone https://github.com/jinpeng900/KYNXA.git
+cd KYNXA
+git checkout v1.8.1
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Run -Configuration Debug -Profile Full
+```
+
+Use `-Action Build` to build without launching. Existing caches are reused; offline builds also require prepared SDKs and Cargo/NuGet dependencies, plus a compatible resource pack supplied with `-Offline -ResourcePackRoot "path\resources.zip"`.
+
 ## License
 
 [Apache License 2.0](LICENSE). Bundled third-party components retain their original licenses and notices.
