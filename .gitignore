@@ -72,8 +72,8 @@ node_modules/
 # Local design archives and generated design documents stay outside the source repository.
 # 本机设计归档和生成的设计文档保留本地，不进入源码仓库。
 /docs/design/
-# Private documentation and retired automation instructions stay off the public repository.
-# 本地详细说明与已撤下的自动化说明不进入公开仓库。
+# Private local documentation and machine-specific files stay outside the repository.
+# 本地详细文档和本机专用文件不进入仓库。
 AGENTS.md
 /.agents/
 /docs/architecture/
