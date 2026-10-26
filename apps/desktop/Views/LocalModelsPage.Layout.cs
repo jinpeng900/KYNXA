@@ -149,6 +149,7 @@ public sealed partial class LocalModelsPage
         _models.ItemsSource = _visibleRows;
         _models.FontFamily = UIFont;
         _models.Margin = new Thickness(14, 0, 14, 16);
+        _models.Padding = (Thickness)Application.Current.Resources["KynxaScrollContentInset"];
         _models.ItemTemplate = (DataTemplate)XamlReader.Load(ModelTemplate);
         AutomationProperties.SetAutomationId(_models, "LocalModelsList");
         ScrollViewer.SetHorizontalScrollBarVisibility(_models, ScrollBarVisibility.Disabled);

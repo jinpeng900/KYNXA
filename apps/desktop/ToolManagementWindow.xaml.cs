@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Net;
 using System.Text.Json;
 using KYNXA.Contracts;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -29,6 +30,7 @@ public sealed partial class ToolManagementWindow : Window
     private int _serverSourceIndex;
     private string? _editingServerId;
     private bool _busy, _updating, _closed, _allowClose, _serverDirty, _directoriesDirty, _dialogOpen;
+    private bool _operationBlocksClose;
     private string? _noticeKey;
     private string _noticeDetails = string.Empty;
     private ServerEditorState? _savedEditor;
@@ -54,6 +56,8 @@ public sealed partial class ToolManagementWindow : Window
     public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null, Window? settingsOwner = null)
     {
         InitializeComponent();
+        foreach (var list in new[] { AgentServerList, AgentToolList, AgentDirectoryList, AgentSkillList })
+            PickerMenu.ConfigureListPresentation(list);
         _settingsOwner = settingsOwner;
         if (settingsOwner is null) AppearanceService.TrackWindow(this);
         _api = api ?? new AgentApiClient();
@@ -81,7 +85,43 @@ public sealed partial class ToolManagementWindow : Window
     // Active operations still guard storage and scope changes; loading is not an unsaved edit.
     // 进行中的操作仍保护存储与范围切换；加载不等于未保存的编辑。
     public bool HasPendingChanges => _busy || HasUnsavedChanges;
+    public bool BlocksSettingsClose => _busy && _operationBlocksClose || _dialogOpen;
+    public event EventHandler? PendingStateChanged;
+    public IReadOnlyList<string> UnsavedChangeLabels
+    {
+        get
+        {
+            var labels = new List<string>();
+            if (_serverDirty) labels.Add(UiText.Get("MCP 服务配置"));
+            if (_directoriesDirty) labels.Add(UiText.Get("用户技能目录"));
+            if (_toolDirty) labels.Add(UiText.Get("MCP 工具开关"));
+            if (_skillDirty) labels.Add(UiText.Get("技能启用状态"));
+            return labels;
+        }
+    }
     public bool IsEmbedded => _settingsOwner is not null;
+
+    /// <summary>
+    /// Reveals the first pending editor without changing its draft or executing a gateway action.
+    /// 定位首个未保存的编辑区，保留草稿，也不执行网关操作。
+    /// </summary>
+    public void RevealUnsavedChanges()
+    {
+        if (_closed || _dialogOpen) return;
+        ShowSection(skills: !_serverDirty && !_toolDirty);
+        if (_serverDirty) AgentServerEditor.StartBringIntoView();
+        else if (_toolDirty)
+        {
+            AgentServerAdvanced.IsExpanded = true;
+            AgentToolList.StartBringIntoView();
+        }
+        else if (_directoriesDirty)
+        {
+            AgentSkillDirectoriesExpander.IsExpanded = true;
+            AgentSkillDirectoriesExpander.StartBringIntoView();
+        }
+        else if (_skillDirty) AgentSkillEditor.StartBringIntoView();
+    }
 
     /// <summary>
     /// Hosts the actual tool editors in settings without opening a second visible window.
@@ -226,6 +266,7 @@ public sealed partial class ToolManagementWindow : Window
         AgentBrowserModeBox.SelectedIndex = browserModeIndex;
         _updating = wasUpdating;
         RefreshBrowserFields();
+        PendingStateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void Notice(string key, InfoBarSeverity severity = InfoBarSeverity.Warning, Exception? error = null)
@@ -237,8 +278,12 @@ public sealed partial class ToolManagementWindow : Window
         AgentStatusBar.IsOpen = true;
     }
 
-    private void SetBusy(bool value)
+    private void SetBusy(bool value, bool? blocksClose = null)
     {
+        // Read-only loading can be canceled by closing settings; refreshes of an active operation retain its close policy.
+        // 只读加载可随设置关闭而取消；刷新进行中操作的界面状态时，保留原有关闭策略。
+        if (!value) _operationBlocksClose = false;
+        else if (!_busy || blocksClose.HasValue) _operationBlocksClose = blocksClose ?? true;
         _busy = value;
         AgentLoadingRing.IsActive = value;
         AgentLoadingRing.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
@@ -274,6 +319,7 @@ public sealed partial class ToolManagementWindow : Window
         AgentPendingLabel.Visibility = value || _serverDirty || _directoriesDirty || _toolDirty || _skillDirty
             ? Visibility.Visible : Visibility.Collapsed;
         UiLocalization.Bind(AgentPendingLabel, TextBlock.TextProperty, value ? "正在处理，请稍候。" : "还有未保存的修改");
+        PendingStateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void RefreshServerSaveAvailability()
@@ -302,7 +348,7 @@ public sealed partial class ToolManagementWindow : Window
     private async Task LoadAsync()
     {
         if (_busy || _closed) return;
-        SetBusy(true);
+        SetBusy(true, blocksClose: false);
         try
         {
             var configTask = _api.GetConfigAsync(_lifetime.Token);
@@ -606,14 +652,49 @@ public sealed partial class ToolManagementWindow : Window
         else RenderSkillDiagnostics();
     }
 
+    private void PresetName_Loaded(object sender, RoutedEventArgs e) => BindPresetName((TextBlock)sender);
+
+    private void PresetName_DataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args) => BindPresetName((TextBlock)sender);
+
+    private static void BindPresetName(TextBlock label)
+    {
+        // Recycled preset templates must drop the previous localization binding before displaying another catalog item.
+        // 预设模板复用时先清除旧本地化绑定，避免语言切换将上一项文字写到当前目录项。
+        label.ClearValue(TextBlock.TextProperty);
+        if (label.DataContext is not McpPreset preset) return;
+        string? key = UiText.DefaultToolNameKey(preset.Id, preset.Name);
+        if (key is null) label.Text = preset.Name;
+        else UiLocalization.Bind(label, TextBlock.TextProperty, key);
+    }
+
     private void Preset_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_api is null) return;
         if (AgentPresetBox.SelectedItem is McpPreset preset)
-            AgentPresetDescriptionLabel.Text = preset.Description + "\n" + preset.SourceUrl + "\n" + UiText.Get("添加后默认停用；启用后才会连接。");
+            AgentPresetDescriptionLabel.Text = UiText.CatalogDescription(preset.Description) + "\n" + preset.SourceUrl + "\n" + UiText.Get("添加后默认停用；启用后才会连接。");
         else AgentPresetDescriptionLabel.Text = _catalog.ReusedCapabilities.Length == 0 ? "" :
-            UiText.Get("已有能力可直接复用：") + " " + string.Join(" · ", _catalog.ReusedCapabilities);
+            UiText.Get("已有能力可直接复用：") + " " + string.Join(" · ", _catalog.ReusedCapabilities.Select(ReusedCapabilityLabel));
         SetBusy(_busy);
+    }
+
+    private static string ReusedCapabilityLabel(string capability)
+    {
+        // Localize catalog labels for display while retaining unknown capability identifiers unchanged.
+        // 目录能力只转换显示文案；未知能力标识保留原文，不改写后端协议值。
+        string? key = capability switch
+        {
+            "filesystem" => "文件系统",
+            "chat-memory" => "聊天记忆",
+            "work-memory" => "工作记忆",
+            "tool-results" => "工具结果",
+            "sandbox-terminal" => "沙箱终端",
+            "host-terminal" => "本机终端",
+            "desktop-control" => "桌面控制",
+            "native-browser" => "内置浏览器",
+            "public-web-fetch" => "公开网页读取",
+            _ => null
+        };
+        return key is null ? capability : UiText.Get(key);
     }
 
     private async void AddPreset_Click(object sender, RoutedEventArgs e)
@@ -898,7 +979,7 @@ public sealed partial class ToolManagementWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (_closed || folder is null || _directories.Contains(folder.Path, StringComparer.OrdinalIgnoreCase)) return;
         _directories.Add(folder.Path);
-        _directoriesDirty = true;
+        RefreshDirectoriesDirty();
         SetBusy(_busy);
     }
 
@@ -912,8 +993,15 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (AgentDirectoryList.SelectedItem is not string directory) return;
         _directories.Remove(directory);
-        _directoriesDirty = true;
+        RefreshDirectoriesDirty();
         SetBusy(_busy);
+    }
+
+    private void RefreshDirectoriesDirty()
+    {
+        // Discovery resolves name conflicts in configured-directory order, so preserve order while comparing the saved baseline.
+        // 技能发现按配置目录顺序处理同名冲突；比较已保存基线时保留顺序，并消除恢复原列表后的误判。
+        _directoriesDirty = !_directories.SequenceEqual(_config?.SkillDirectories ?? [], StringComparer.OrdinalIgnoreCase);
     }
 
     private async void SaveDirectories_Click(object sender, RoutedEventArgs e)
@@ -1092,6 +1180,7 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (_closed || _dialogOpen || AgentRoot.XamlRoot is null) return false;
         _dialogOpen = true;
+        PendingStateChanged?.Invoke(this, EventArgs.Empty);
         var dialog = new ContentDialog { XamlRoot = (_settingsOwner?.Content as FrameworkElement)?.XamlRoot ?? AgentRoot.XamlRoot,
             DefaultButton = ContentDialogButton.None,
             PrimaryButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"],
@@ -1101,11 +1190,12 @@ public sealed partial class ToolManagementWindow : Window
         UiLocalization.Bind(dialog, ContentDialog.PrimaryButtonTextProperty, action);
         UiLocalization.Bind(dialog, ContentDialog.CloseButtonTextProperty, "取消");
         try { return await DialogPresentation.ShowAsync(dialog) == ContentDialogResult.Primary; }
-        finally { _dialogOpen = false; }
+        finally { _dialogOpen = false; PendingStateChanged?.Invoke(this, EventArgs.Empty); }
     }
 
     private async void Window_Closing(AppWindow sender, AppWindowClosingEventArgs e)
     {
+        if (!_allowClose && BlocksSettingsClose) { e.Cancel = true; return; }
         if (_allowClose || !HasUnsavedChanges) return;
         e.Cancel = true;
         if (await ConfirmDiscardAsync() && !_closed) { _allowClose = true; Close(); }
@@ -1121,6 +1211,7 @@ public sealed partial class ToolManagementWindow : Window
         _oauthLogin?.Dispose();
         _lifetime.Cancel();
         _preview?.Cancel();
+        PendingStateChanged = null;
         UiText.LanguageChanged -= Language_Changed;
         AppWindow.Closing -= Window_Closing;
         Closed -= Window_Closed;

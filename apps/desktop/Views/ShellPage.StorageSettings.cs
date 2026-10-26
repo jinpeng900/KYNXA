@@ -104,6 +104,9 @@ public sealed partial class ShellPage
             "ExtensionStorageDirectoryPath", "ExtensionStorageDirectoryChooseButton");
         var progress = new ProgressRing { IsActive = false, Width = 24, Height = 24, Visibility = Visibility.Collapsed };
         var status = new InfoBar { IsOpen = false, IsClosable = false };
+        var closeNotice = new InfoBar { IsOpen = false, IsClosable = true, Severity = InfoBarSeverity.Informational };
+        AutomationProperties.SetAutomationId(closeNotice, "SettingsCloseWaitNotice");
+        AutomationProperties.SetLiveSetting(closeNotice, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         AutomationProperties.SetLiveSetting(status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         var storageControls = new StorageSettingsControls(window, row, extensionRow, languagePicker, progress, status);
         var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
@@ -172,6 +175,7 @@ public sealed partial class ShellPage
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var feedback = new StackPanel { Spacing = 6, Margin = new Thickness(16, 0, 16, 10) };
         feedback.Children.Add(progress);
+        feedback.Children.Add(closeNotice);
         feedback.Children.Add(status);
         Grid.SetRow(feedback, 2);
         root.Children.Add(feedback);
@@ -221,31 +225,91 @@ public sealed partial class ShellPage
         void PreventClose(Microsoft.UI.Windowing.AppWindow window, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
         { if (StoragePaths.IsMigrating) e.Cancel = true; }
         bool ownerClosing = false;
+        bool closeApproved = false, closeDialogOpen = false;
+        ContentDialog? pendingCloseDialog = null;
+        void ShowPendingEditor(SettingsCloseEntry entry)
+        {
+            workspace.SelectPage(entry.Category);
+            entry.Reveal();
+        }
+        var viewOperation = new Button { Style = (Style)Application.Current.Resources["KynxaInfoBarActionButtonStyle"] };
+        UiLocalization.Bind(viewOperation, ContentControl.ContentProperty, "查看操作");
+        viewOperation.Click += (_, _) =>
+        {
+            if (SettingsCloseEntries().FirstOrDefault(entry => entry.BlocksClose) is { } entry) ShowPendingEditor(entry);
+        };
+        closeNotice.ActionButton = viewOperation;
+        void RefreshCloseNotice()
+        {
+            if (!closeNotice.IsOpen || storageControls.IsClosed) return;
+            var blocked = SettingsCloseEntries().Where(entry => entry.BlocksClose).ToArray();
+            if (blocked.Length == 0) { closeNotice.IsOpen = false; return; }
+            closeNotice.Title = UiText.Get("操作尚未完成");
+            closeNotice.Message = string.Format(UiText.Get("{0}仍有操作正在进行，完成后可关闭设置。"),
+                string.Join(UiText.Language == "en" ? ", " : "、", blocked.Select(entry => UiText.Get(entry.LabelKey))));
+        }
+        _refreshSettingsCloseNotice = RefreshCloseNotice;
         App.Window.AppWindow.Closing += PreventClose;
-        window.AppWindow.Closing += (sender, e) =>
+        window.AppWindow.Closing += async (sender, e) =>
         {
             PreventClose(sender, e);
-            if (ownerClosing || e.Cancel) return;
-            // Loading is disposable view work, not an unsaved user edit.
-            // 加载可随窗口取消，不属于用户尚未保存的编辑。
-            string? pending = _memoryManagementWindow is { HasUnsavedChanges: true } ? "memory"
-                : _toolManagementWindow is { HasUnsavedChanges: true } ? "tools"
-                : _retrievalSettingsWindow is { HasUnsavedChanges: true } ? "retrieval" : null;
-            if (pending is null) return;
+            if (ownerClosing || closeApproved || e.Cancel) return;
+            // Loading is disposable view work; only real edits and writes guard closing.
+            // 加载可随窗口取消；只有实际编辑与写入操作需要关闭保护。
+            var pending = SettingsCloseEntries();
+            if (pending.Any(entry => entry.BlocksClose))
+            {
+                e.Cancel = true;
+                closeNotice.IsOpen = true;
+                RefreshCloseNotice();
+                return;
+            }
+            var dirty = pending.Where(entry => entry.Changes.Count > 0).ToArray();
+            if (dirty.Length == 0) return;
             e.Cancel = true;
-            workspace.SelectPage(pending);
-            Message(UiText.Get(pending == "retrieval" ? "正在处理，请稍候。" :
-                "请先保存或放弃当前编辑，再关闭设置。"), InfoBarSeverity.Warning);
+            if (closeDialogOpen) return;
+            closeDialogOpen = true;
+            try
+            {
+                pendingCloseDialog = CreateSettingsCloseDialog(root, dirty);
+                var result = await DialogPresentation.ShowAsync(pendingCloseDialog);
+                pendingCloseDialog = null;
+                if (_storageSettingsWindow != window || storageControls.IsClosed || ownerClosing) return;
+                if (result != ContentDialogResult.Primary)
+                {
+                    if (SettingsCloseEntries().FirstOrDefault(entry => entry.Changes.Count > 0) is { } entry)
+                        ShowPendingEditor(entry);
+                    return;
+                }
+                // Check again after the asynchronous dialog; a newly started write or migration must finish first.
+                // 异步对话框结束后再次检查，避免中断其间开始的写入或迁移。
+                if (StoragePaths.IsMigrating || SettingsCloseEntries().Any(entry => entry.BlocksClose))
+                {
+                    closeNotice.IsOpen = true;
+                    RefreshCloseNotice();
+                    return;
+                }
+                closeApproved = true;
+                window.Close();
+            }
+            catch (Exception error) when (error is System.Runtime.InteropServices.COMException or InvalidOperationException)
+            {
+                if (!storageControls.IsClosed) Message(UiText.Get("暂时无法显示确认窗口，请关闭其他弹窗后重试。"), InfoBarSeverity.Warning);
+            }
+            finally { pendingCloseDialog = null; closeDialogOpen = false; }
         };
         void CloseSettings(object sender, WindowEventArgs e) { ownerClosing = true; window.Close(); }
         App.Window.Closed += CloseSettings;
-        void UpdateSettingsTitle(object? sender, EventArgs e) => window.Title = UiText.Get("KYNXA · 设置");
+        void UpdateSettingsTitle(object? sender, EventArgs e)
+        { window.Title = UiText.Get("KYNXA · 设置"); RefreshCloseNotice(); }
         UiText.LanguageChanged += UpdateSettingsTitle;
         window.Closed += (_, _) =>
         {
             App.Window.AppWindow.Closing -= PreventClose;
             App.Window.Closed -= CloseSettings;
             UiText.LanguageChanged -= UpdateSettingsTitle;
+            _refreshSettingsCloseNotice = null;
+            pendingCloseDialog?.Hide();
             appearanceSection.Dispose();
             _memoryManagementWindow?.DisposeEmbedded();
             _memoryManagementWindow = null;

@@ -12,7 +12,14 @@ namespace KYNXA_Desktop.Controls;
 /// </summary>
 internal static class PickerMenu
 {
+    public const int VisibleRows = 4;
+    private const double ViewportInset = 16;
+    private const double PresenterChrome = 14;
+
     public static double Dimension(string key) => (double)Application.Current.Resources[key];
+
+    public static double AvailableContentHeight(double viewportHeight) =>
+        Math.Max(0, viewportHeight - ViewportInset * 2 - PresenterChrome);
 
     public static Flyout Create(FlyoutPlacementMode placement, string style = "KynxaFlyoutPresenterStyle") => new()
     {
@@ -23,11 +30,11 @@ internal static class PickerMenu
     {
         // Match this popup's content plus its existing padding and border; leave shared menu styles unchanged.
         // 匹配当前菜单的内容宽度及既有内边距、边框，不改变共用菜单样式。
-        double presenterWidth = Math.Min(requestedWidth + 14, Math.Max(0, viewportWidth - 32));
+        double presenterWidth = Math.Min(requestedWidth + PresenterChrome, Math.Max(0, viewportWidth - ViewportInset * 2));
         var presenterStyle = new Style(typeof(FlyoutPresenter)) { BasedOn = flyout.FlyoutPresenterStyle };
         presenterStyle.Setters.Add(new Setter(FrameworkElement.WidthProperty, presenterWidth));
         flyout.FlyoutPresenterStyle = presenterStyle;
-        return Math.Max(0, presenterWidth - 14);
+        return Math.Max(0, presenterWidth - PresenterChrome);
     }
 
     public static ListView CreateList(string id, string name, string style = "KynxaModelListItemStyle",
@@ -38,6 +45,49 @@ internal static class PickerMenu
             IsItemClickEnabled = true, SelectionMode = selection, MinHeight = 0, Padding = new Thickness(0),
             ItemContainerStyle = (Style)Application.Current.Resources[style]
         };
+        ConfigureListPresentation(list);
+        AutomationProperties.SetAutomationId(list, id);
+        AutomationProperties.SetName(list, name);
+        return list;
+    }
+
+    public static double MeasureListHeight(ListView list, double contentWidth, FrameworkElement empty)
+    {
+        var availableSize = new Windows.Foundation.Size(Math.Max(0, contentWidth), double.PositiveInfinity);
+        if (list.Items.Count == 0)
+        {
+            empty.Measure(availableSize);
+            return Math.Max(64, empty.DesiredSize.Height);
+        }
+
+        // Measure only the four visible rows, including their native template, padding and margin.
+        // 只测量最多四条可见行，计入原生模板、内边距和外边距，不展开整个列表的虚拟化内容。
+        double height = list.Padding.Top + list.Padding.Bottom + list.BorderThickness.Top + list.BorderThickness.Bottom;
+        var rowSize = new Windows.Foundation.Size(Math.Max(0, contentWidth - list.Padding.Left - list.Padding.Right
+            - list.BorderThickness.Left - list.BorderThickness.Right), double.PositiveInfinity);
+        for (int index = 0; index < Math.Min(VisibleRows, list.Items.Count); index++)
+        {
+            // Activate the template's data bindings before measuring an otherwise detached row.
+            // 先为模板内容设置数据上下文，避免离树行按空文字和默认可见状态低估高度。
+            object item = list.Items[index];
+            object content = list.ItemTemplate?.LoadContent() ?? item;
+            if (content is FrameworkElement element) element.DataContext = item;
+            var row = new ListViewItem
+            {
+                Content = content, DataContext = item, Style = list.ItemContainerStyle,
+                RequestedTheme = list.ActualTheme
+            };
+            row.ApplyTemplate();
+            row.Measure(rowSize);
+            height += row.DesiredSize.Height;
+        }
+        return height;
+    }
+
+    // Menus and management lists share native row states without replacing selection or virtualization.
+    // 选择菜单与管理列表共用原生行状态，保留各自的选择行为和虚拟化。
+    public static void ConfigureListPresentation(ListView list)
+    {
         list.Resources["ListViewItemSelectionIndicatorVisualEnabled"] = false;
         // The SDK presenter reads its radius and state colors from the owning list, not the row's CornerRadius.
         // SDK 呈现器从所属列表读取圆角和状态色，不使用行控件本身的 CornerRadius。
@@ -58,9 +108,6 @@ internal static class PickerMenu
         ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollMode(list, ScrollMode.Enabled);
         ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Auto);
-        AutomationProperties.SetAutomationId(list, id);
-        AutomationProperties.SetName(list, name);
-        return list;
     }
 
     public static Grid WithFixedFooter(FrameworkElement body, FrameworkElement footer, double? height = null)

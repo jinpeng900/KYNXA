@@ -30,6 +30,7 @@ public static partial class UiText
             || MemoryTranslations.TryGetValue(chinese, out translated)
             || AgentTranslations.TryGetValue(chinese, out translated)
             || TaskTranslations.TryGetValue(chinese, out translated)
+            || ToolCatalogTranslations.TryGetValue(chinese, out translated)
                 ? translated : chinese;
     }
 }

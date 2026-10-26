@@ -10,11 +10,11 @@ public sealed class LayoutState
     public double SidebarWidth { get; set; } = ShellLayoutMetrics.SidebarDefault;
     public bool SidebarCollapsed { get; set; }
     public bool WorkRecentExpanded { get; set; }
-    // Zero uses the natural navigation height; a dragged divider saves a proportion.
-    // 零表示使用自然导航高度；用户拖动分隔线后保存比例。
+    public bool WorkTasksExpanded { get; set; } = true;
+    public bool ChatHistoryExpanded { get; set; } = true;
+    // Retain legacy divider values for old layout files; automatic list sizing ignores them.
+    // 保留旧布局文件的分隔线数值以兼容读取；列表自动伸缩不再使用这些比例。
     public double WorkNavigationRatio { get; set; }
-    // Relative to the recent/project content budget; zero keeps natural list heights.
-    // 比例相对于最近与项目的内容可用高度；零表示保留列表自然高度。
     public double WorkRecentRatio { get; set; }
     public List<Guid> RecentWorkChatIds { get; set; } = [];
     public double TopWorkspaceHeight { get; set; } = ShellLayoutMetrics.TopDefault;

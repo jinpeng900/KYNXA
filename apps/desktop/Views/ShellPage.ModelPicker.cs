@@ -30,7 +30,6 @@ public sealed partial class ShellPage
         public Visibility ModelIdVisibility => string.Equals(Name, ModelId, StringComparison.Ordinal)
             ? Visibility.Collapsed : Visibility.Visible;
         public Visibility CurrentVisibility => IsCurrent ? Visibility.Visible : Visibility.Collapsed;
-        public double RowHeight => ModelIdVisibility == Visibility.Visible ? 72 : 54;
     }
 
     private void InitializeModelPicker()
@@ -281,6 +280,7 @@ public sealed partial class ShellPage
         // 列表行只是展示投影；选择和保存仍使用原始稳定模型身份。
         var choices = _availableModels.Select(choice => new ModelPickerRow(choice,
             choice.ProviderId == _selectedModel?.ProviderId && choice.ModelId == _selectedModel?.ModelId)).ToArray();
+        Grid? menuContent = null;
         void FilterModels()
         {
             string query = search.Text.Trim();
@@ -297,6 +297,18 @@ public sealed partial class ShellPage
                 emptyKey = _modelCatalogErrorKey is null ? "尚无已配置模型，请先添加连接。" : "模型列表暂时无法读取。";
             UiLocalization.Bind(empty, TextBlock.TextProperty, emptyKey);
             empty.Visibility = filtered.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (menuContent is not null && XamlRoot is { } root)
+            {
+                var measureSize = new Windows.Foundation.Size(menuContent.Width, double.PositiveInfinity);
+                search.Measure(measureSize);
+                footer.Measure(measureSize);
+                errorPanel?.Measure(measureSize);
+                double preferredHeight = search.DesiredSize.Height + footer.DesiredSize.Height + 9
+                    + (errorPanel?.DesiredSize.Height ?? 0) + PickerMenu.MeasureListHeight(models, menuContent.Width, empty);
+                // Filtering resizes the list to at most four complete rows; the footer keeps its own space.
+                // 筛选后按最多四条完整结果调整列表高度，底部操作始终单独保留空间。
+                menuContent.Height = Math.Min(Math.Max(0, root.Size.Height - 32), preferredHeight);
+            }
         }
         search.TextChanged += (_, _) => FilterModels();
         bool isSearchComposing = false, suppressSearchEnter = false;
@@ -331,20 +343,10 @@ public sealed partial class ShellPage
                 args.Handled = true;
             }
         };
-        FilterModels();
         double menuWidth = PickerMenu.SetContentWidth(menu, 340, XamlRoot.Size.Width);
-        var measureSize = new Windows.Foundation.Size(menuWidth, double.PositiveInfinity);
-        search.Measure(measureSize);
-        footer.Measure(measureSize);
-        errorPanel?.Measure(measureSize);
-        double rowsHeight = choices.Length == 0 ? 64 : choices.Sum(row => row.RowHeight);
-        double preferredHeight = search.DesiredSize.Height + footer.DesiredSize.Height + 9
-            + (errorPanel?.DesiredSize.Height ?? 0) + rowsHeight;
-        // Size once from the initial catalog. Filtering keeps the footer and popup anchor steady.
-        // 仅根据首次打开的列表确定高度；筛选时保持底部操作和弹出位置稳定。
-        double menuHeight = Math.Min(Math.Min(400, Math.Max(120, XamlRoot.Size.Height - 32)), preferredHeight);
-        var menuContent = PickerMenu.WithFixedFooter(body, footer, menuHeight);
+        menuContent = PickerMenu.WithFixedFooter(body, footer, 0);
         menuContent.Width = menuWidth;
+        FilterModels();
         menu.Content = menuContent;
         menu.Opened += (_, _) =>
         {

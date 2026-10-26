@@ -32,10 +32,11 @@ public sealed partial class ShellPage
         var draft = _projectCreation = new ProjectCreationDraft();
         Guid? originalChat = ActiveChatId, originalProject = _selectedWorkProjectId;
         bool originalMode = ViewModel.IsChatMode;
+        var root = XamlRoot;
         var flyout = PickerMenu.Create(FlyoutPlacementMode.BottomEdgeAlignedLeft);
         var content = new StackPanel { Spacing = 12 };
         content.Width = PickerMenu.SetContentWidth(flyout, 420, XamlRoot.Size.Width);
-        var name = new TextBox { Name = "ProjectCreationName", PlaceholderText = UiText.Get("项目名称"),
+        var name = new SubmitTextBox { Name = "ProjectCreationName", PlaceholderText = UiText.Get("项目名称"),
             MaxLength = 80, MinWidth = 0, CornerRadius = new CornerRadius(8) };
         var neutral = AppearanceService.GetBrush("KynxaSecondaryTextBrush");
         AutomationProperties.SetAutomationId(name, "ProjectCreationName");
@@ -55,14 +56,23 @@ public sealed partial class ShellPage
         content.Children.Add(name);
         content.Children.Add(new TextBlock { Text = UiText.Get("源文件夹（可选，可添加多个）"), FontSize = 12, Foreground = neutral });
         var folders = new StackPanel { Spacing = 5 };
-        content.Children.Add(new ScrollViewer { Content = folders, MaxHeight = Math.Min(240, XamlRoot.Size.Height / 3),
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        AutomationProperties.SetAutomationId(folders, "ProjectCreationFolderRows");
+        var folderScroll = new ScrollViewer { Content = folders, Height = 0, Visibility = Visibility.Collapsed,
+            Style = (Style)Application.Current.Resources["KynxaFormScrollViewerStyle"] };
+        AutomationProperties.SetAutomationId(folderScroll, "ProjectCreationFolders");
+        content.Children.Add(folderScroll);
         var add = PickerMenu.Action(UiText.Get("添加文件夹"), "ProjectCreationAddFolder", "\uE8F4");
         var create = PickerMenu.Action(UiText.Get("创建"), "ProjectCreationCommit");
         var cancel = PickerMenu.Action(UiText.Get("取消"), "ProjectCreationCancel");
         cancel.Click += (_, _) => flyout.Hide();
-        var footer = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
-        footer.Children.Add(cancel); footer.Children.Add(create);
+        var footer = new Grid { ColumnSpacing = 12 };
+        footer.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        footer.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        footer.Children.Add(new TextBlock { Text = UiText.Get("Enter 创建 · Esc 取消"), FontSize = 11,
+            Foreground = neutral, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        actions.Children.Add(cancel); actions.Children.Add(create);
+        Grid.SetColumn(actions, 1); footer.Children.Add(actions);
         content.Children.Add(add); content.Children.Add(footer); flyout.Content = content;
         bool Current() => !_projectViewClosed && !_chatClosing && !_savingOnClose && ReferenceEquals(_projectCreation, draft) &&
             ActiveChatId == originalChat && _selectedWorkProjectId == originalProject && ViewModel.IsChatMode == originalMode;
@@ -71,12 +81,62 @@ public sealed partial class ShellPage
             if (ReferenceEquals(_projectCreation, draft)) _projectCreation = null;
             draft.Completion.TrySetResult(null);
         }
+        Task HideForOperationAsync()
+        {
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Closed(object? sender, object args)
+            {
+                flyout.Closed -= Closed;
+                closed.TrySetResult();
+            }
+            // Keep operation flags until Closed; a fast failure must not reopen while the old dismissal can cancel it.
+            // 保留操作状态直到 Closed；快速失败时不能在旧关闭回调仍可取消草稿的阶段重新打开。
+            flyout.Closed += Closed;
+            flyout.Hide();
+            return closed.Task;
+        }
+        void UpdateFolderListHeight()
+        {
+            if (folders.Children.Count == 0)
+            {
+                folderScroll.Visibility = Visibility.Collapsed;
+                folderScroll.Height = 0;
+                return;
+            }
+            folderScroll.Visibility = Visibility.Visible;
+            var fixedChildren = content.Children.OfType<FrameworkElement>()
+                .Where(child => child != folderScroll && child.Visibility == Visibility.Visible).ToArray();
+            var measureSize = new Windows.Foundation.Size(content.Width, double.PositiveInfinity);
+            foreach (var child in fixedChildren) child.Measure(measureSize);
+            double fixedHeight = fixedChildren.Sum(child => child.DesiredSize.Height) + content.Spacing * fixedChildren.Length;
+            double budget = Math.Max(0, PickerMenu.AvailableContentHeight(root.Size.Height) - fixedHeight);
+            double chrome = folderScroll.Padding.Top + folderScroll.Padding.Bottom +
+                folderScroll.BorderThickness.Top + folderScroll.BorderThickness.Bottom;
+            double rowWidth = Math.Max(0, content.Width - folderScroll.Padding.Left - folderScroll.Padding.Right -
+                folderScroll.BorderThickness.Left - folderScroll.BorderThickness.Right);
+            double height = chrome;
+            int visible = 0;
+            // Size only the visible prefix; native scrolling retains every other folder and its actions.
+            // 只按完整可见的前几项限高；其他文件夹及其操作继续保留在原生滚动区内。
+            foreach (var row in folders.Children.OfType<Grid>().Take(PickerMenu.VisibleRows))
+            {
+                foreach (var control in row.Children.OfType<Control>()) control.ApplyTemplate();
+                row.Measure(new Windows.Foundation.Size(rowWidth, double.PositiveInfinity));
+                double nextHeight = height + (visible > 0 ? folders.Spacing : 0) + row.DesiredSize.Height;
+                if (visible > 0 && nextHeight > budget) break;
+                height = nextHeight;
+                visible++;
+            }
+            folderScroll.Height = height;
+        }
+        void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => UpdateFolderListHeight();
         void RenderFolders()
         {
             folders.Children.Clear();
             foreach (var mount in draft.Mounts)
             {
                 var row = new Grid { ColumnSpacing = 6, Padding = new Thickness(3) };
+                AutomationProperties.SetAutomationId(row, $"ProjectCreationFolder_{mount.Id:N}");
                 row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
                 row.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
                 row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
@@ -110,6 +170,7 @@ public sealed partial class ShellPage
                 row.Children.Add(selected); Grid.SetColumn(label, 1); row.Children.Add(label);
                 Grid.SetColumn(remove, 2); row.Children.Add(remove); folders.Children.Add(row);
             }
+            UpdateFolderListHeight();
         }
         void AddFolder(StorageFolder folder)
         {
@@ -124,12 +185,14 @@ public sealed partial class ShellPage
             RenderFolders();
         }
         if (initialFolder is not null) AddFolder(initialFolder);
+        else UpdateFolderListHeight();
         add.Click += async (_, _) =>
         {
             if (!Current() || draft.Picking) return;
             // The native picker temporarily hides this light-dismiss popup; that transition must retain its draft.
             // 原生目录选择器临时隐藏轻弹层；失焦关闭不代表用户丢弃名称和已选目录。
-            draft.Picking = true; flyout.Hide();
+            draft.Picking = true;
+            Task closing = HideForOperationAsync();
             try
             {
                 var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
@@ -142,14 +205,16 @@ public sealed partial class ShellPage
             { if (Current()) ShowActionFeedback(error.Message); }
             finally
             {
+                await closing;
                 draft.Picking = false;
                 if (Current()) flyout.ShowAt(AddProjectButton); else Cancel();
             }
         };
-        create.Click += async (_, _) =>
+        async Task CommitAsync()
         {
-            if (!Current() || draft.Committing || _projectActionPending) return;
-            draft.Committing = true; flyout.Hide();
+            if (!Current() || draft.Picking || draft.Committing || _projectActionPending) return;
+            draft.Committing = true;
+            Task closing = HideForOperationAsync();
             ProjectState? created = null;
             await RunProjectActionAsync(async () =>
             {
@@ -170,6 +235,7 @@ public sealed partial class ShellPage
                     _projects.Remove(project); RenderProjects(); ShowActionFeedback(error.Message);
                 }
             });
+            await closing;
             if (created is null)
             {
                 draft.Committing = false;
@@ -178,9 +244,20 @@ public sealed partial class ShellPage
             }
             if (ReferenceEquals(_projectCreation, draft)) _projectCreation = null;
             draft.Completion.TrySetResult(created);
+        }
+        create.Click += async (_, _) => await CommitAsync();
+        name.SubmitRequested += async (_, _) => await CommitAsync();
+        flyout.Closed += (_, _) =>
+        {
+            root.Changed -= RootChanged;
+            if (!draft.Picking && !draft.Committing) Cancel();
         };
-        flyout.Closed += (_, _) => { if (!draft.Picking && !draft.Committing) Cancel(); };
-        flyout.Opened += (_, _) => name.Focus(FocusState.Programmatic);
+        flyout.Opened += (_, _) =>
+        {
+            root.Changed += RootChanged;
+            UpdateFolderListHeight();
+            name.Focus(FocusState.Programmatic);
+        };
         flyout.ShowAt(AddProjectButton);
         return draft.Completion.Task;
     }

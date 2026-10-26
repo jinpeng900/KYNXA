@@ -20,7 +20,6 @@ public sealed partial class ShellPage
     public ObservableCollection<ProjectTreeEntry> ProjectEntries { get; } = [];
 
     private ProjectChatState? _activeProjectChat;
-    private Func<Task>? _undoSidebarChange;
     private bool _projectsReady;
     private bool _projectActionPending;
     private bool _projectViewClosed;
@@ -103,6 +102,7 @@ public sealed partial class ShellPage
     private void StartNewProjectChat(ProjectState project)
     {
         if (project.IsArchived || project.IsFolderlessWorkspace || !_projects.Contains(project)) return;
+        CloseSidebarSearch("tasks");
         CaptureProjectDraft();
         DiscardEmptyProjectChats();
         string title = UiText.Get("新聊天");
@@ -161,11 +161,15 @@ public sealed partial class ShellPage
             CaptureProjectDraft();
             project.IsArchived = true;
             await _projectStore.SaveAsync(_projects);
-            _undoSidebarChange = async () =>
+            Guid projectId = project.Id;
+            Func<Task> undo = async () =>
             {
-                project.IsArchived = false;
-                await SaveProjectsAndRenderAsync();
-                RevealProject(project);
+                var current = _projects.FirstOrDefault(candidate => candidate.Id == projectId && candidate.IsArchived)
+                    ?? throw ProjectUndoUnavailable();
+                current.IsArchived = false;
+                try { await SaveProjectsAndRenderAsync(); }
+                catch { current.IsArchived = true; RenderProjects(); throw; }
+                RevealProject(current);
             };
             if (project.Chats.Contains(_activeProjectChat!))
             {
@@ -184,8 +188,7 @@ public sealed partial class ShellPage
                 UpdateWorkspacePickerVisibility();
             }
             RenderProjects();
-            ProjectNotice.Message = string.Format(UiText.Get("已归档“{0}”"), project.Name);
-            ProjectNotice.IsOpen = true;
+            ShowProjectNotice(string.Format(UiText.Get("已归档“{0}”"), project.Name), undo);
         });
         return menu;
     }
@@ -219,10 +222,16 @@ public sealed partial class ShellPage
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null || !IsAvailableProject(project)) return;
-        string? previous = project.FolderPath;
-        var previousMounts = project.Mounts.ToList();
-        Guid? previousDefault = project.DefaultMountId;
+        await ApplyProjectFolderAsync(project, folder);
+    }
+
+    private async Task ApplyProjectFolderAsync(ProjectState project, StorageFolder folder)
+    {
+        if (!IsAvailableProject(project)) return;
+        var previous = CaptureProjectFolderBinding(project);
         var original = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId);
+        if (original is not null && SameFolderPath(original.Path, folder.Path) && original.Name == folder.DisplayName &&
+            SameFolderPath(project.FolderPath, original.Path)) return;
         var replacement = original is null ? new ProjectMountState(Guid.NewGuid(), folder.DisplayName, folder.Path)
             : original with { Name = folder.DisplayName, Path = folder.Path, BindingRevision = original.BindingRevision + 1 };
         project.Mounts.RemoveAll(mount => mount.Id == replacement.Id);
@@ -230,24 +239,22 @@ public sealed partial class ShellPage
         project.DefaultMountId = replacement.Id;
         project.FolderPath = replacement.Path;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { project.FolderPath = previous; project.Mounts = previousMounts; project.DefaultMountId = previousDefault; throw; }
-        ProjectNotice.Message = string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path);
-        ProjectNotice.IsOpen = true;
+        catch { ApplyProjectFolderBinding(project, previous); throw; }
+        ShowProjectFolderNotice(project, previous,
+            string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path));
     }
 
     private async Task UnmountProjectFolderAsync(ProjectState project)
     {
         if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(project.FolderPath)) return;
-        string? previous = project.FolderPath;
-        var previousMounts = project.Mounts.ToList();
-        Guid? previousDefault = project.DefaultMountId;
+        var previous = CaptureProjectFolderBinding(project);
         project.Mounts.RemoveAll(mount => mount.Id == project.DefaultMountId);
         project.DefaultMountId = project.Mounts.FirstOrDefault()?.Id;
         project.FolderPath = project.Mounts.FirstOrDefault()?.Path;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { project.FolderPath = previous; project.Mounts = previousMounts; project.DefaultMountId = previousDefault; throw; }
-        ProjectNotice.Message = string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name);
-        ProjectNotice.IsOpen = true;
+        catch { ApplyProjectFolderBinding(project, previous); throw; }
+        ShowProjectFolderNotice(project, previous,
+            string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name));
     }
 
     private async Task RunMountedWorkspaceActionAsync(MountedWorkspaceRequest request, Func<ProjectState, Task> action)
@@ -305,13 +312,6 @@ public sealed partial class ShellPage
         return project;
     }
 
-    private async void UndoSidebarChange_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
-    {
-        if (_undoSidebarChange is { } undo) await undo();
-        ProjectNotice.IsOpen = false;
-        _undoSidebarChange = null;
-    });
-
     private async Task SaveProjectsAndRenderAsync()
     {
         CaptureProjectDraft();
@@ -322,6 +322,7 @@ public sealed partial class ShellPage
 
     private void ShowProjects()
     {
+        CloseSidebarSearch("projects");
         ProjectTree.Visibility = Visibility.Visible;
         ProjectsChevron.Glyph = "\uE70D";
         UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
@@ -379,13 +380,17 @@ public sealed partial class ShellPage
     {
         if (!_projectsReady || _projectActionPending || _savingOnClose || _chatClosing) return;
         _projectActionPending = true;
+        UpdateProjectNoticeAction();
         UpdateSendButtonState();
         try { await action(); }
         catch (Exception error)
         {
             if (_savingOnClose || _projectViewClosed) return;
-            _undoSidebarChange = null;
-            ProjectNotice.IsOpen = false;
+            if (!_projectNoticeUndoPending)
+            {
+                _undoSidebarChange = null;
+                ProjectNotice.IsOpen = false;
+            }
             // Roll back visible metadata to the last successfully saved catalog.
             // 将可见元数据回退到最近一次成功保存的正式目录。
             try
@@ -393,11 +398,13 @@ public sealed partial class ShellPage
                 var catalog = await _projectStore.LoadMetadataAsync();
                 if (_savingOnClose || _projectViewClosed) return;
                 PreservePendingPresentations(catalog);
+                if (_projectNoticeUndoPending) PreserveUndoConversationProjections(catalog);
+                else _activeProjectChat = _activeStandaloneChat = null;
                 _projects = catalog.Projects;
                 _standaloneChats = catalog.Chats;
-                _activeProjectChat = _activeStandaloneChat = null;
                 RenderProjects();
                 RebuildStandaloneRows();
+                if (_projectNoticeUndoPending) UpdateConversationTitle();
                 UpdateConversationPresentation();
             }
             catch (Exception) { /* Preserve the current display if the catalog itself is unavailable. 中文：正式目录本身不可用时，保留当前展示。 */ }
@@ -406,6 +413,7 @@ public sealed partial class ShellPage
         finally
         {
             _projectActionPending = false;
+            UpdateProjectNoticeAction();
             if (!_savingOnClose && !_projectViewClosed) UpdateSendButtonState();
         }
     }

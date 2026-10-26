@@ -27,8 +27,8 @@ public sealed record AppearancePalette(
     public string Error { get; init; } = "#A13C30";
     public string Warning { get; init; } = "#806000";
     public string ReplySurface { get; init; } = "#F7F7F7";
-    public string ControlHover { get; init; } = "#F3F4F5";
-    public string ControlPressed { get; init; } = "#E9EBEE";
+    public string ControlHover { get; init; } = "#E9EBEF";
+    public string ControlPressed { get; init; } = "#DEE1E7";
     public string Disabled { get; init; } = "#E2E4E8";
     public string DisabledText { get; init; } = "#6B7280";
     public string CodeKeyword { get; init; } = "#8250DF";

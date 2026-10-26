@@ -6,6 +6,7 @@ public static partial class UiText
     {
         ["KYNXA 模型管理"] = "KYNXA Model Management",
         ["模型管理"] = "Models",
+        ["已导入"] = "Imported",
         ["我的连接"] = "My connections",
         ["配置后即可在聊天中选择"] = "Set up a connection to use it in chats",
         ["还没有模型连接"] = "No model connections yet",

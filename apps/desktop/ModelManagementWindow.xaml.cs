@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -51,6 +52,7 @@ public sealed partial class ModelManagementWindow : Window
         {
             _closed = true;
             UiText.LanguageChanged -= UiText_LanguageChanged;
+            AppearanceService.Changed -= Appearance_Changed;
             AppWindow.Closing -= ModelWindow_Closing;
             if (_windowXamlRoot is not null) _windowXamlRoot.Changed -= WindowXamlRoot_Changed;
             _discardDialog?.Hide();
@@ -61,6 +63,7 @@ public sealed partial class ModelManagementWindow : Window
         PresetBox.ItemsSource = ModelPresets.All;
         ApplyPreset(ModelPresets.All[0]);
         UiText.LanguageChanged += UiText_LanguageChanged;
+        AppearanceService.Changed += Appearance_Changed;
         RefreshLanguage();
         _ = InitializeAsync();
     }
@@ -80,6 +83,15 @@ public sealed partial class ModelManagementWindow : Window
         if (_closed) return;
         if (DispatcherQueue.HasThreadAccess) RefreshLanguage();
         else DispatcherQueue.TryEnqueue(RefreshLanguage);
+    }
+
+    private void Appearance_Changed(object? sender, EventArgs e)
+    {
+        if (_closed) return;
+        // Recolor retained provider buttons without rebuilding the list or replacing unsaved form values.
+        // 只更新现有连接按钮的状态色，不重建列表，也不替换未保存的表单内容。
+        if (DispatcherQueue.HasThreadAccess) UpdateProviderLabels();
+        else DispatcherQueue.TryEnqueue(() => { if (!_closed) UpdateProviderLabels(); });
     }
 
     private void RefreshLanguage()
@@ -181,10 +193,7 @@ public sealed partial class ModelManagementWindow : Window
             var button = new Button
             {
                 Content = content, HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(12, 11, 12, 11),
-                Background = _editing?.ProviderId == provider.ProviderId
-                    ? AppearanceService.GetBrush("KynxaSelectionBrush")
-                    : new SolidColorBrush(Microsoft.UI.Colors.Transparent)
+                HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(12, 11, 12, 11)
             };
             ToolTipService.SetToolTip(button, provider.DisplayName);
             _providerLabels.Add((provider, count, button));
@@ -205,6 +214,7 @@ public sealed partial class ModelManagementWindow : Window
             : string.Format(UiText.Get("{0} 个已保存连接"), _providers.Length);
         foreach (var (provider, count, button) in _providerLabels)
         {
+            SelectionButtonPresentation.Apply(button, _editing?.ProviderId == provider.ProviderId);
             count.Text = string.Format(UiText.Get("{0} 个模型"), provider.Models.Length);
             AutomationProperties.SetName(button,
                 string.Format(UiText.Get("{0}，{1} 个模型"), provider.DisplayName, provider.Models.Length));

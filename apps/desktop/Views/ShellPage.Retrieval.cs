@@ -31,6 +31,7 @@ public sealed partial class ShellPage
     {
         var project = _settingsRetrievalProject;
         var controller = new RetrievalSettingsWindow(project?.Id, project?.Name, project?.FolderPath, settingsOwner: owner);
+        controller.PendingStateChanged += SettingsPendingStateChanged;
         _retrievalSettingsWindow = controller;
         return controller.AttachToSettings(owner);
     }

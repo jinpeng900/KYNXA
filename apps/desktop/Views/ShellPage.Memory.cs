@@ -52,6 +52,7 @@ public sealed partial class ShellPage
         var initial = active is { CanPersist: true } ? targets.FirstOrDefault(target => target.Scope == MemoryScopes.Chat && target.Id == active.Id)
             : targets.FirstOrDefault(target => target.Scope == MemoryScopes.Project && target.Id == _selectedWorkProjectId);
         var controller = new MemoryManagementWindow(targets, initial, settingsOwner: owner);
+        controller.PendingStateChanged += SettingsPendingStateChanged;
         _memoryManagementWindow = controller;
         return controller.AttachToSettings(owner);
     }

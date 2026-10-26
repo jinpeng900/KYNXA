@@ -25,6 +25,7 @@ public sealed partial class SegmentedSelector : UserControl, IDisposable
     private readonly Grid _items = new();
     private readonly Border _surface = new() { CornerRadius = new CornerRadius(12), Padding = new Thickness(3) };
     private readonly List<(Option Option, SegmentButton Button, TextBlock Label)> _options = [];
+    private readonly SolidColorBrush _transparentBrush = new(Microsoft.UI.Colors.Transparent);
     private readonly UISettings _systemSettings = new();
     private ShapeVisual? _capsule;
     private CompositionColorBrush? _capsuleFill;
@@ -119,7 +120,8 @@ public sealed partial class SegmentedSelector : UserControl, IDisposable
                 bool selected = entry.Option.Key == _selectedKey;
                 entry.Button.IsChecked = selected;
                 entry.Button.IsTabStop = selected;
-                entry.Button.Opacity = selected ? 1 : 0.74;
+                entry.Button.Opacity = 1;
+                RefreshPointerBrushes(entry.Button, selected);
             }
         }
         finally { _refreshing = false; }
@@ -212,12 +214,23 @@ public sealed partial class SegmentedSelector : UserControl, IDisposable
         _surface.Background = AppearanceService.GetBrush("KynxaSettingsCardBrush");
         foreach (var entry in _options)
         {
+            RefreshPointerBrushes(entry.Button, entry.Option.Key == _selectedKey);
             entry.Button.Foreground = AppearanceService.GetBrush("KynxaTextBrush");
             entry.Label.Foreground = entry.Button.Foreground;
             entry.Button.FocusVisualPrimaryBrush = AppearanceService.GetBrush("KynxaSecondaryTextBrush");
         }
         if (_capsuleFill is not null) _capsuleFill.Color = AppearanceService.GetBrush("KynxaSelectionBrush").Color;
         if (_capsuleStroke is not null) _capsuleStroke.Color = AppearanceService.GetBrush("KynxaDividerBrush").Color;
+    }
+
+    private void RefreshPointerBrushes(SegmentButton button, bool selected)
+    {
+        // The compositor owns selection; the selected radio's pointer surface must stay transparent above its capsule.
+        // 选中底色由合成器绘制；已选单选项的指针表面须保持透明，避免遮住下方胶囊。
+        SelectionButtonPresentation.UpdateStateBrush(button, "KynxaControlHoverBrush",
+            selected ? _transparentBrush : AppearanceService.GetBrush("KynxaControlHoverBrush"));
+        SelectionButtonPresentation.UpdateStateBrush(button, "KynxaControlPressedBrush",
+            selected ? _transparentBrush : AppearanceService.GetBrush("KynxaControlPressedBrush"));
     }
 
     private void LanguageChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(() =>

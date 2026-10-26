@@ -45,6 +45,7 @@ public sealed partial class ShellPage
     {
         _settingsToolsConversationId = CurrentSettingsToolsConversationId();
         var controller = new ToolManagementWindow(conversationId: _settingsToolsConversationId, settingsOwner: owner);
+        controller.PendingStateChanged += SettingsPendingStateChanged;
         _toolManagementWindow = controller;
         var view = controller.AttachToSettings(owner);
         controller.ShowSection(_settingsToolsSkills);

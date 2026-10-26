@@ -27,6 +27,7 @@ public sealed partial class RetrievalSettingsWindow : Window
     private RetrievalStatus? _status;
     private string? _noticeMessageKey;
     private bool _closed, _busy, _rendering, _loaded, _polling, _statusPolling, _statusObservationFailed, _allowClose;
+    private bool _blocksSettingsClose;
     private Window? _settingsOwner;
 
     public RetrievalSettingsWindow(Guid? projectId = null, string? projectName = null, string? mountedPath = null,
@@ -67,8 +68,36 @@ public sealed partial class RetrievalSettingsWindow : Window
     // Reads may be cancelled on close; active operations still guard storage migration.
     // 关闭可取消读取；进行中的操作仍保护存储迁移，不能冒充未保存编辑。
     public bool HasPendingChanges => _busy || HasUnsavedChanges;
+    public bool BlocksSettingsClose => _busy && _blocksSettingsClose;
+    public IReadOnlyList<string> UnsavedChangeLabels
+    {
+        get
+        {
+            if (!HasUnsavedChanges || _global is null) return [];
+            var changes = new List<string>();
+            bool inherits = _projectId is not null && _inherit.IsChecked == true;
+            if (_project is { } project && inherits != (project.Overrides is { Local: null, Web: null }))
+                changes.Add(UiText.Get("使用全局检索设置"));
+            if (inherits) return changes;
+            var local = _project?.Effective.Local ?? _global.Local;
+            var web = _project?.Effective.Web ?? _global.Web;
+            if ((Value(_localMode, local.Enabled ? "true" : "false") == "true") != local.Enabled)
+                changes.Add(UiText.Get("本地检索"));
+            if (Value(_semanticMode, local.Semantic) != local.Semantic) changes.Add(UiText.Get("语义检索"));
+            if (Value(_webMode, web.Mode) != web.Mode) changes.Add(UiText.Get("网页搜索"));
+            if (Value(_webProvider, web.ProviderId) != web.ProviderId) changes.Add(UiText.Get("搜索服务"));
+            if (Value(_webDepth, web.Depth) != web.Depth) changes.Add(UiText.Get("搜索深度"));
+            if (Value(_webLanguage, web.Language) != web.Language) changes.Add(UiText.Get("搜索语言"));
+            return changes;
+        }
+    }
+    public event EventHandler? PendingStateChanged;
     public Guid? ProjectId => _projectId;
     public bool IsEmbedded => _settingsOwner is not null;
+
+    // Auto-save normally leaves no draft; reveal pending options if a close decision keeps them.
+    // 自动保存通常不留下草稿；关闭确认选择继续编辑时，定位尚未保存的检索选项。
+    public void RevealUnsavedChanges() => _localMode.Focus(FocusState.Programmatic);
 
     /// <summary>
     /// Reuses retrieval controls and polling in the settings content area, owned by the visible window.
@@ -110,7 +139,7 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private void WindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (HasUnsavedChanges && !_allowClose) args.Cancel = true;
+        if ((BlocksSettingsClose || HasUnsavedChanges) && !_allowClose) args.Cancel = true;
     }
 
     private void WindowClosed(object sender, WindowEventArgs args) => ReleaseResources();
@@ -119,6 +148,7 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_closed) return;
         _closed = true;
+        PendingStateChanged = null;
         StopStatusObservation();
         _lifetime.Cancel();
         UiText.LanguageChanged -= LanguageChanged;
@@ -140,6 +170,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         if (currentJob is { } job) ShowJob(job);
         if (_notice.IsOpen && _noticeMessageKey is { } messageKey)
             _notice.Message = UiText.Get(messageKey);
+        PendingStateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void RefreshPickerSelections()
@@ -150,6 +181,10 @@ public sealed partial class RetrievalSettingsWindow : Window
         _rendering = true;
         try
         {
+            // Refresh the full provider label before updating WinUI's closed selection cache.
+            // 先刷新包含状态的完整服务文案，再更新 WinUI 收起状态的选中文本缓存。
+            foreach (var item in _webProvider.Items.OfType<ComboBoxItem>())
+                if (item.DataContext is RetrievalProvider provider) item.Content = SearchProviderLabel(provider);
             foreach (var picker in new[] { _localMode, _semanticMode, _webMode, _webProvider, _webDepth, _webLanguage })
             {
                 if (picker.SelectedItem is not { } selected) continue;
@@ -194,7 +229,7 @@ public sealed partial class RetrievalSettingsWindow : Window
             {
                 while (_webProvider.Items.Count > 1) _webProvider.Items.RemoveAt(1);
                 foreach (var provider in providers.Providers.Where(provider => provider.Id != "auto"))
-                    _webProvider.Items.Add(new ComboBoxItem { Tag = provider.Id, Content = SearchProviderLabel(provider) });
+                    _webProvider.Items.Add(CreateWebProviderItem(provider));
             }
             // Keep unavailable selected providers visible; do not silently replace the user's selection.
             // 保留当前不可用服务的选中项；不静默替换用户选择。
@@ -211,8 +246,15 @@ public sealed partial class RetrievalSettingsWindow : Window
         finally { _rendering = false; }
     }
 
+    private static ComboBoxItem CreateWebProviderItem(RetrievalProvider provider) =>
+        new() { Tag = provider.Id, DataContext = provider, Content = SearchProviderLabel(provider) };
+
     private static string SearchProviderLabel(RetrievalProvider provider)
     {
+        // Localize default display names and status only; configured names and stable IDs stay intact.
+        // 仅翻译默认显示名称与状态；用户配置的名称和稳定 ID 保留原值。
+        string? labelKey = UiText.DefaultToolNameKey(provider.Id, provider.Name);
+        string name = labelKey is null ? provider.Name : UiText.Get(labelKey);
         string? status = provider.State switch
         {
             "cooldown" => "稍后重试",
@@ -221,7 +263,7 @@ public sealed partial class RetrievalSettingsWindow : Window
             "disconnected" => "未连接",
             _ => provider.CredentialState switch { "configured" => "凭据已配置", "unavailable" => "凭据未就绪", _ => null }
         };
-        return status is null ? provider.Name : $"{provider.Name} · {UiText.Get(status)}";
+        return status is null ? name : $"{name} · {UiText.Get(status)}";
     }
 
     private static void Select(ComboBox picker, string value)
@@ -499,20 +541,29 @@ public sealed partial class RetrievalSettingsWindow : Window
         finally { _polling = false; }
     }
 
-    private async Task RunOperationAsync(Func<Task> operation)
+    private async Task RunOperationAsync(Func<Task> operation, bool blocksClose = true)
     {
         if (_busy || _closed || StoragePaths.IsMigrating) return;
         _busy = true;
+        // Loading and refreshes are cancellable reads; mutations and their native confirmations must finish before close.
+        // 加载与刷新可随关闭取消；写入操作及其原生确认则应先完成再关闭。
+        _blocksSettingsClose = blocksClose;
         _notice.IsOpen = false;
         _noticeMessageKey = null;
         _settingsHost.IsEnabled = false;
+        PendingStateChanged?.Invoke(this, EventArgs.Empty);
         try { await operation(); }
         catch (OperationCanceledException) when (_closed) { }
         catch (Exception error) { if (!_closed) ShowError(error.Message); }
         finally
         {
             _busy = false;
-            if (!_closed) _settingsHost.IsEnabled = true;
+            _blocksSettingsClose = false;
+            if (!_closed)
+            {
+                _settingsHost.IsEnabled = true;
+                PendingStateChanged?.Invoke(this, EventArgs.Empty);
+            }
         }
     }
 

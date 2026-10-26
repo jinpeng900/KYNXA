@@ -71,7 +71,7 @@ public sealed class ToolResultDialog : IDisposable
         _actions.Children.Add(_media);
         content.Children.Add(_actions); content.Children.Add(_copyNotice); content.Children.Add(_resources);
         _contentScroll = new ScrollViewer { Name = "ToolResultContentScroll", Content = content,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            Style = (Style)Application.Current.Resources["KynxaFormScrollViewerStyle"] };
         _contentScroll.SizeChanged += ContentSizeChanged;
         Dialog = new ContentDialog { XamlRoot = root, Content = _contentScroll,
             DefaultButton = ContentDialogButton.None, CloseButtonStyle = _more.Style };

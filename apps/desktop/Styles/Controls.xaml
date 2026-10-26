@@ -5,6 +5,21 @@
     -->
     <FontFamily x:Key="KynxaUIFont">Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, Microsoft YaHei</FontFamily>
     <FontFamily x:Key="ContentControlThemeFontFamily">Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, Microsoft YaHei</FontFamily>
+    <!-- Informational notices share the owner surface; severity icons and warning/error/success tints stay native.
+         信息提示沿用所属界面底色；各级图标及警告、错误、成功色调保留原生语义。
+    -->
+    <StaticResource x:Key="InfoBarInformationalSeverityBackgroundBrush" ResourceKey="KynxaSurfaceBrush" />
+    <StaticResource x:Key="InfoBarTitleForeground" ResourceKey="KynxaTextBrush" />
+    <StaticResource x:Key="InfoBarMessageForeground" ResourceKey="KynxaTextBrush" />
+    <Style x:Key="KynxaFormScrollViewerStyle" TargetType="ScrollViewer" BasedOn="{StaticResource DefaultScrollViewerStyle}">
+        <Setter Property="Padding" Value="{StaticResource KynxaFormScrollPadding}" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
+        <Setter Property="HorizontalScrollMode" Value="Disabled" />
+        <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+        <Setter Property="VerticalScrollMode" Value="Enabled" />
+        <Setter Property="ZoomMode" Value="Disabled" />
+    </Style>
     <!-- Popups have their own visual roots; shared defaults also cover dynamically created controls.
          弹出层拥有独立可视根；共享默认样式同时覆盖动态创建的文字与控件。
          Explicit code, math and icon fonts keep their local values; sizes and weights retain their hierarchy.
@@ -76,6 +91,10 @@
     </Style>
     <Style x:Key="KynxaMenuPresenterStyle" TargetType="MenuFlyoutPresenter" BasedOn="{StaticResource DefaultMenuFlyoutPresenterStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="Background" Value="{StaticResource KynxaSurfaceBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaTextBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource KynxaDividerBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
         <Setter Property="Padding" Value="6" />
     </Style>
@@ -140,9 +159,14 @@
     <Style TargetType="ToolTip">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
-    <Style TargetType="InfoBar">
+    <Style x:Key="KynxaInfoBarStyle" TargetType="InfoBar">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
+        <Setter Property="BorderBrush" Value="{StaticResource KynxaDividerBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaTextBrush}" />
     </Style>
+    <Style TargetType="InfoBar" BasedOn="{StaticResource KynxaInfoBarStyle}" />
     <Style x:Key="KynxaQuietButtonStyle" TargetType="Button">
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
@@ -151,6 +175,20 @@
         <Setter Property="FontWeight" Value="Normal" />
         <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style x:Key="KynxaInfoBarActionButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+        <Setter Property="MinWidth" Value="64" />
+        <Setter Property="MinHeight" Value="{StaticResource KynxaPickerHeight}" />
+        <Setter Property="Padding" Value="12,4" />
+        <Setter Property="Background" Value="{StaticResource KynxaSelectionBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaAccentTextBrush}" />
+    </Style>
+    <Style x:Key="KynxaSidebarHeaderButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+        <Setter Property="Height" Value="{StaticResource KynxaPickerHeight}" />
+        <Setter Property="MinWidth" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     </Style>
     <Style x:Key="KynxaIconButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
         <Setter Property="Width" Value="{StaticResource KynxaIconButtonSize}" />
@@ -188,8 +226,8 @@
         <Setter Property="UseSystemFocusVisuals" Value="True" />
         <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource KynxaFocusBrush}" />
         <Setter Property="FocusVisualSecondaryBrush" Value="Transparent" />
-        <!-- Navigation shares the mode selection's live palette brush instead of global neutral button feedback.
-             导航入口复用模式选中块的实时配色画刷，不再使用全局按钮的中性灰反馈。
+        <!-- Unselected navigation uses the same theme-aware neutral feedback as menus; selection keeps its own tint.
+             未选中导航与菜单共用随主题切换的中性反馈；选中状态保留自己的配色底色。
         -->
         <Setter Property="Template">
             <Setter.Value>
@@ -210,12 +248,12 @@
                                 <VisualState x:Name="Normal" />
                                 <VisualState x:Name="PointerOver">
                                     <VisualState.Setters>
-                                        <Setter Target="NavigationPresenter.Background" Value="{StaticResource KynxaSelectionBrush}" />
+                                        <Setter Target="NavigationPresenter.Background" Value="{StaticResource KynxaControlHoverBrush}" />
                                     </VisualState.Setters>
                                 </VisualState>
                                 <VisualState x:Name="Pressed">
                                     <VisualState.Setters>
-                                        <Setter Target="NavigationPresenter.Background" Value="{StaticResource KynxaSelectionBrush}" />
+                                        <Setter Target="NavigationPresenter.Background" Value="{StaticResource KynxaControlPressedBrush}" />
                                     </VisualState.Setters>
                                 </VisualState>
                                 <VisualState x:Name="Disabled">
@@ -356,12 +394,12 @@
                             FocusBorderBrush="{ThemeResource ListViewItemFocusBorderBrush}"
                             FocusSecondaryBorderBrush="{ThemeResource ListViewItemFocusSecondaryBorderBrush}"
                             PlaceholderBackground="{ThemeResource ListViewItemPlaceholderBackground}"
-                            PointerOverBackground="{StaticResource KynxaSelectionBrush}"
+                            PointerOverBackground="{StaticResource KynxaControlHoverBrush}"
                             PointerOverForeground="{ThemeResource ListViewItemForegroundPointerOver}"
                             SelectedBackground="{StaticResource KynxaSelectionBrush}"
                             SelectedForeground="{ThemeResource ListViewItemForegroundSelected}"
                             SelectedPointerOverBackground="{StaticResource KynxaSelectionBrush}"
-                            PressedBackground="{StaticResource KynxaSelectionBrush}"
+                            PressedBackground="{StaticResource KynxaControlPressedBrush}"
                             SelectedPressedBackground="{StaticResource KynxaSelectionBrush}"
                             DisabledOpacity="{ThemeResource ListViewItemDisabledThemeOpacity}"
                             DragOpacity="{ThemeResource ListViewItemDragThemeOpacity}"
@@ -466,6 +504,19 @@
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="VerticalContentAlignment" Value="Stretch" />
+    </Style>
+    <!-- Management selectors retain native keyboard/focus behavior and leave the overlay scrollbar outside the row surface.
+         管理页选择列表保留原生键盘与焦点行为，并在行背景外为叠加滚动条留白。 -->
+    <Style x:Key="KynxaSelectionListItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
+        <Setter Property="MinHeight" Value="34" />
+        <Setter Property="Padding" Value="12,0,12,0" />
+        <Setter Property="Margin" Value="{StaticResource KynxaPopupListItemMargin}" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
     </Style>
     <Style x:Key="KynxaModelListItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
         <Setter Property="Height" Value="{StaticResource KynxaPickerHeight}" />

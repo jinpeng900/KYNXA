@@ -42,6 +42,7 @@ public sealed partial class ShellPage
         if (!_projectViewClosed && !_renderingProjects && args.Node.Content is ProjectTreeEntry { Chat: null } entry
             && IsCurrentProjectNode(entry, args.Node))
             _collapsedByUser.Add(entry.Project.Id);
+        QueueWorkSidebarLayout();
     }
 
     private void ProjectTree_Expanding(TreeView sender, TreeViewExpandingEventArgs args)
@@ -49,6 +50,7 @@ public sealed partial class ShellPage
         if (!_projectViewClosed && !_renderingProjects && args.Node.Content is ProjectTreeEntry { Chat: null } entry
             && IsCurrentProjectNode(entry, args.Node))
             _collapsedByUser.Remove(entry.Project.Id);
+        QueueWorkSidebarLayout();
     }
 
     private bool IsCurrentProjectNode(ProjectTreeEntry entry, TreeViewNode node) =>

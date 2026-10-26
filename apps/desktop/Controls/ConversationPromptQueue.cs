@@ -37,7 +37,8 @@ public sealed class ConversationPromptQueue : UserControl
         Resources["TextControlBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
         Content = new ScrollViewer
         {
-            Content = _items, MaxHeight = 170, Padding = new Thickness(0, 0, 0, 4),
+            Content = _items, MaxHeight = 170,
+            Style = (Style)Application.Current.Resources["KynxaFormScrollViewerStyle"],
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             HorizontalScrollMode = ScrollMode.Disabled, ZoomMode = ZoomMode.Disabled

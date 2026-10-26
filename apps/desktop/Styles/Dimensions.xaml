@@ -31,6 +31,11 @@
     -->
     <Thickness x:Key="KynxaComboBoxItemMargin">0</Thickness>
     <x:Double x:Key="KynxaComboBoxScrollbarGutter">12</x:Double>
+    <!-- Reserve a stable lane for native overlay scrollbars in forms and card lists.
+         表单与卡片列表为原生叠加滚动条预留固定空间，滚动条出现时不挤压或遮盖内容。
+    -->
+    <Thickness x:Key="KynxaFormScrollPadding">0,0,16,12</Thickness>
+    <Thickness x:Key="KynxaScrollContentInset">0,0,16,0</Thickness>
     <Thickness x:Key="KynxaPopupListItemMargin">0,0,16,0</Thickness>
     <CornerRadius x:Key="KynxaComposerRadius">24</CornerRadius>
 </ResourceDictionary>

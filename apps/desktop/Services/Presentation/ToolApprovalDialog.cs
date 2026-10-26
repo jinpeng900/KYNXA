@@ -16,7 +16,7 @@ public static class ToolApprovalDialog
     {
         var content = CreateOperationContent(tool);
         var scroll = new ScrollViewer { Name = "ToolApprovalContentScroll", Content = content,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            Style = (Style)Application.Current.Resources["KynxaFormScrollViewerStyle"] };
         void UpdateHeight() => scroll.MaxHeight = Math.Clamp(root.Size.Height - 200, 80, 460);
         void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => UpdateHeight();
         var dialog = new ContentDialog { XamlRoot = root, Content = scroll,

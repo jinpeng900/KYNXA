@@ -124,7 +124,7 @@ public sealed partial class RetrievalSettingsWindow
                 return;
             }
             _loaded = true;
-            await RunOperationAsync(LoadAsync);
+            await RunOperationAsync(LoadAsync, blocksClose: false);
         };
         root.Unloaded += (_, _) => StopStatusObservation();
         foreach (var picker in new[] { _localMode, _semanticMode, _webMode, _webProvider, _webDepth, _webLanguage })
@@ -139,7 +139,7 @@ public sealed partial class RetrievalSettingsWindow
         {
             if (_job is { } job) ShowJob(await _api.CancelIndexJobAsync(job.JobId, _lifetime.Token));
         });
-        refresh.Click += async (_, _) => await RunOperationAsync(LoadAsync);
+        refresh.Click += async (_, _) => await RunOperationAsync(LoadAsync, blocksClose: false);
         _jobTimer.Tick += async (_, _) => await PollJobAsync();
         _statusTimer.Tick += async (_, _) => await PollStatusAsync();
         _settingsHost.IsEnabled = false;
