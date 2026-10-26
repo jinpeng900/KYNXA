@@ -15,7 +15,8 @@ public sealed partial class ShellPage
     private Guid? _selectedWorkProjectId;
     private Guid? _workChatToReveal;
     private bool _workTaskHeaderHovered;
-    private readonly WorkSidebarLayout _workSidebarLayout = new();
+    private bool _workSidebarLayoutQueued;
+    private XamlRoot? _workSidebarViewport;
     public ObservableCollection<ProjectTreeEntry> WorkRecentEntries { get; } = [];
     public ObservableCollection<ProjectTreeEntry> WorkTaskEntries { get; } = [];
 
@@ -55,12 +56,12 @@ public sealed partial class ShellPage
         WorkTaskProjectLabel.Visibility = project is null ? Visibility.Collapsed : Visibility.Visible;
         WorkTaskAddChatButton.Visibility = project is null ? Visibility.Collapsed : Visibility.Visible;
         WorkTaskAddChatButton.IsEnabled = project is not null;
+        WorkTaskSearchButton.IsEnabled = project is not null;
         UpdateWorkTaskLanguage();
         UpdateWorkTaskHeaderActions();
-        WorkRecentCount.Text = WorkRecentEntries.Count.ToString();
-        WorkRecentCount.Visibility = WorkRecentEntries.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateWorkTaskVisibility();
+        RefreshSidebarSearches();
         UpdateWorkRecentVisibility();
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
         UpdateWorkspacePickerVisibility();
         if (_workChatToReveal is Guid chatId)
         {
@@ -129,75 +130,154 @@ public sealed partial class ShellPage
         WorkRecentHistory.Visibility = _layout.WorkRecentExpanded ? Visibility.Visible : Visibility.Collapsed;
         WorkRecentChevron.Glyph = _layout.WorkRecentExpanded ? "\uE70D" : "\uE76C";
         AutomationProperties.SetName(WorkRecentToggle, _layout.WorkRecentExpanded ? UiText.Get("收起最近的工作聊天") : UiText.Get("展开最近的工作聊天"));
+        RefreshSidebarSearches("recent");
         UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+    }
+
+    private void WorkTaskToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _layout.WorkTasksExpanded = !_layout.WorkTasksExpanded;
+        UpdateWorkTaskVisibility();
+        RefreshSidebarSearches("tasks");
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        SaveLayout();
+    }
+
+    private void UpdateWorkTaskVisibility()
+    {
+        WorkTaskHistory.Visibility = _layout.WorkTasksExpanded ? Visibility.Visible : Visibility.Collapsed;
+        WorkTaskChevron.Glyph = _layout.WorkTasksExpanded ? "\uE70D" : "\uE76C";
     }
 
     private void UpdateWorkSidebarHeights(double available)
     {
-        var geometry = WorkSidebarLayout.Calculate(available, _layout.WorkRecentExpanded,
-            ProjectTree.Visibility == Visibility.Visible, _layout.WorkNavigationRatio, _layout.WorkRecentRatio);
-        if (geometry is null) return;
-        WorkNavigationGrip.Visibility = geometry.NavigationGripHeight > 0 ? Visibility.Visible : Visibility.Collapsed;
-        WorkNavigationGripRow.Height = new GridLength(geometry.NavigationGripHeight);
-        WorkRecentGrip.Visibility = geometry.RecentGripHeight > 0 ? Visibility.Visible : Visibility.Collapsed;
-        WorkRecentGripRow.Height = new GridLength(geometry.RecentGripHeight);
-        WorkNavigationRow.Height = SidebarGridLength(geometry.NavigationRow);
-        WorkRecentRow.Height = SidebarGridLength(geometry.RecentRow);
-        WorkProjectsRow.Height = SidebarGridLength(geometry.ProjectsRow);
-        WorkRecentHistory.MaxHeight = geometry.RecentMaximumHeight;
-        ProjectTree.MaxHeight = geometry.ProjectsMaximumHeight;
+        if (WorkTaskHistory is null || XamlRoot is null || SidebarPane.ActualHeight <= 0) return;
+        if (ViewModel.IsChatMode)
+        {
+            UpdateChatSidebarHeight();
+            return;
+        }
+        // Read arranged viewport boundaries; summing nominal row heights loses layout-rounding pixels.
+        // 读取排版后的真实视口边界；累加名义行高会漏掉布局取整占用的像素。
+        double scale = XamlRoot.RasterizationScale;
+        double FloorToPixel(double height) => Math.Floor(Math.Max(0, height) * scale) / scale;
+        available = SidebarAvailableHeight(WorkSidebarViewport);
+        double rowHeight = (double)Application.Current.Resources["KynxaSidebarRowHeight"];
+        int projectRows = VisibleProjectRows(VisibleProjectEntries);
+        bool projectsExpanded = ProjectTree.Visibility == Visibility.Visible;
+        WorkRecentDivider.Visibility = _layout.WorkRecentExpanded && VisibleWorkRecentEntries.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        WorkProjectsDivider.Visibility = projectsExpanded && projectRows > 0 ? Visibility.Visible : Visibility.Collapsed;
+        double dividerHeight = (WorkRecentDivider.Visibility == Visibility.Visible ? WorkRecentDivider.Height : 0)
+            + (WorkProjectsDivider.Visibility == Visibility.Visible ? WorkProjectsDivider.Height : 0);
+        double emptyHeight = SidebarHintHeight(WorkRecentSearchEmpty) + SidebarHintHeight(ProjectSearchEmpty)
+            + SidebarHintHeight(WorkTaskSearchEmpty);
+        int nonemptySections = (_layout.WorkRecentExpanded && VisibleWorkRecentEntries.Count > 0 ? 1 : 0)
+            + (projectsExpanded && projectRows > 0 ? 1 : 0) + (_layout.WorkTasksExpanded && VisibleWorkTaskEntries.Count > 0 ? 1 : 0);
+        double minimumContentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + dividerHeight + nonemptySections * rowHeight;
+        bool outerScroll = available < minimumContentHeight;
+        // Very short windows scroll the section shell so each inner list can still show a readable whole row.
+        // 极矮窗口滚动分区外壳，让每个内层列表仍能展示可读的完整一行。
+        _workSidebarListBudget = Math.Max(available, minimumContentHeight) - ShellLayoutMetrics.WorkSidebarHeaderHeight - emptyHeight - dividerHeight;
+        var geometry = WorkSidebarLayout.Calculate(Math.Max(available, minimumContentHeight) - emptyHeight - dividerHeight, _layout.WorkRecentExpanded,
+            projectsExpanded, _layout.WorkTasksExpanded, VisibleWorkRecentEntries.Count, projectRows, VisibleWorkTaskEntries.Count, rowHeight,
+            _layout.WorkRecentHeightRatio, _layout.WorkProjectsHeightRatio, _layout.WorkTasksHeightRatio)
+            ?? new WorkSidebarLayoutResult(0, 0, 0);
+        WorkSidebarViewport.Height = available;
+        WorkSidebarViewport.MaxHeight = available;
+        WorkRecentHistory.Height = FloorToPixel(geometry.RecentHeight);
+        ProjectTree.Height = FloorToPixel(geometry.ProjectsHeight);
+        WorkTaskHistory.Height = FloorToPixel(geometry.TasksHeight);
+        double contentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + dividerHeight + WorkRecentHistory.Height + ProjectTree.Height + WorkTaskHistory.Height;
+        WorkSidebarContent.Height = contentHeight;
+        WorkSidebarContent.MaxHeight = contentHeight;
+        WorkSidebarContent.Margin = outerScroll ? new Thickness(0, 0, 12, 0) : new Thickness(0);
     }
 
-    private static GridLength SidebarGridLength(WorkSidebarRowHeight height) => height.Sizing switch
+    private double SidebarAvailableHeight(FrameworkElement viewport)
     {
-        WorkSidebarRowSizing.Pixels => new GridLength(height.Value),
-        WorkSidebarRowSizing.Star => new GridLength(height.Value, GridUnitType.Star),
-        _ => GridLength.Auto
-    };
-
-    private void WorkNavigationGrip_DragStarted(object? sender, EventArgs e) =>
-        _workSidebarLayout.BeginNavigationDrag(WorkNavigationRow.ActualHeight, _layout);
-
-    private void WorkNavigationGrip_DragDelta(object? sender, Controls.ResizeDeltaEventArgs e)
-    {
-        double available = WorkSidebarContent.ActualHeight;
-        if (_workSidebarLayout.ResizeNavigation(_layout, available, _layout.WorkRecentExpanded,
-            ProjectTree.Visibility == Visibility.Visible, e.Delta)) UpdateWorkSidebarHeights(available);
+        double top = viewport.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point()).Y;
+        double footerTop = SidebarFooter.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point()).Y;
+        double footerHeight = SidebarFooter.ActualHeight > 0 ? SidebarFooter.ActualHeight : SidebarPane.RowDefinitions[4].Height.Value;
+        double bottom = Math.Min(footerTop, XamlRoot.Size.Height - footerHeight) - RecentArea.Margin.Bottom;
+        double scale = XamlRoot.RasterizationScale;
+        return Math.Floor(Math.Max(0, bottom - top) * scale) / scale;
     }
 
-    private void WorkNavigationGrip_CancelRequested(object? sender, EventArgs e)
+    private void UpdateChatSidebarHeight()
     {
-        _workSidebarLayout.CancelNavigationDrag(_layout);
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        double available = SidebarAvailableHeight(ChatSidebarContent);
+        double headerHeight = ChatSidebarContent.RowDefinitions[0].Height.Value + SidebarHintHeight(ChatSearchEmpty);
+        double rowHeight = (double)Application.Current.Resources["KynxaSidebarRowHeight"];
+        // Limit only complete visible rows; every saved conversation stays in the native scrolling list.
+        // 仅限制完整可见行数；全部已保存聊天仍保留在原生滚动列表中。
+        int fittingRows = (int)Math.Min(ShellLayoutMetrics.ChatSidebarVisibleRows,
+            Math.Floor(Math.Max(0, available - headerHeight) / rowHeight));
+        int visibleRows = _layout.ChatHistoryExpanded ? Math.Min(VisibleChatEntries.Count, fittingRows) : 0;
+        ChatHistoryList.Height = visibleRows * rowHeight;
+        ChatSidebarContent.Height = Math.Min(available, headerHeight + ChatHistoryList.Height);
+        ChatSidebarContent.MaxHeight = available;
     }
 
-    private void WorkNavigationGrip_ResetRequested(object? sender, EventArgs e)
+    private static double SidebarHintHeight(FrameworkElement hint) =>
+        hint.Visibility == Visibility.Visible ? hint.Height : 0;
+
+    private void ChatHistoryToggle_Click(object sender, RoutedEventArgs args)
     {
-        _workSidebarLayout.ResetNavigation(_layout);
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        _layout.ChatHistoryExpanded = !_layout.ChatHistoryExpanded;
+        UpdateChatHistoryVisibility();
+        RefreshSidebarSearches("chat");
+        QueueWorkSidebarLayout();
         SaveLayout();
     }
 
-    private void WorkRecentGrip_DragStarted(object? sender, EventArgs e) =>
-        _workSidebarLayout.BeginRecentDrag(WorkRecentRow.ActualHeight, WorkNavigationRow.ActualHeight, _layout);
-
-    private void WorkRecentGrip_DragDelta(object? sender, Controls.ResizeDeltaEventArgs e)
+    private void UpdateChatHistoryVisibility()
     {
-        if (_workSidebarLayout.ResizeRecent(_layout, WorkSidebarContent.ActualHeight, e.Delta))
-            UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        ChatHistoryList.Visibility = _layout.ChatHistoryExpanded ? Visibility.Visible : Visibility.Collapsed;
+        ChatHistoryChevron.Glyph = _layout.ChatHistoryExpanded ? "\uE70D" : "\uE76C";
     }
 
-    private void WorkRecentGrip_CancelRequested(object? sender, EventArgs e)
+    private void ChatSidebarContent_SizeChanged(object sender, SizeChangedEventArgs args) => QueueWorkSidebarLayout();
+
+    private void AttachWorkSidebarViewport()
     {
-        _workSidebarLayout.CancelRecentDrag(_layout);
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        if (ReferenceEquals(_workSidebarViewport, XamlRoot)) return;
+        DetachWorkSidebarViewport();
+        _workSidebarViewport = XamlRoot;
+        if (_workSidebarViewport is not null) _workSidebarViewport.Changed += WorkSidebarViewport_Changed;
     }
 
-    private void WorkRecentGrip_ResetRequested(object? sender, EventArgs e)
+    private void DetachWorkSidebarViewport()
     {
-        _workSidebarLayout.ResetRecent(_layout);
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
-        SaveLayout();
+        if (_workSidebarViewport is not null) _workSidebarViewport.Changed -= WorkSidebarViewport_Changed;
+        _workSidebarViewport = null;
+    }
+
+    private void WorkSidebarViewport_Changed(XamlRoot sender, XamlRootChangedEventArgs args) => QueueWorkSidebarLayout();
+
+    private void SidebarPane_SizeChanged(object sender, SizeChangedEventArgs args) => QueueWorkSidebarLayout();
+
+    private static int VisibleProjectRows(IEnumerable<ProjectTreeEntry> entries)
+    {
+        int count = 0;
+        foreach (var entry in entries)
+        {
+            count++;
+            if (entry.IsExpanded) count += VisibleProjectRows(entry.Children);
+        }
+        return count;
+    }
+
+    private void QueueWorkSidebarLayout()
+    {
+        if (_workSidebarLayoutQueued || _projectViewClosed || _renderingProjects) return;
+        // Expansion binding settles after the native event; coalesce it without rebuilding rows.
+        // 展开状态绑定在原生事件后完成；合并重排请求，不重建列表行。
+        _workSidebarLayoutQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            _workSidebarLayoutQueued = false;
+            if (!_projectViewClosed && IsLoaded) UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        });
     }
 
     private void RecordWorkChatActivity(ProjectChatState chat)

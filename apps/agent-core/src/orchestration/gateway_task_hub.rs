@@ -230,7 +230,7 @@ impl TaskHub {
         for operation in self.repository().await?.operations(&task.task_id)? {
             if let Some(mount) = operation.intent.input_reference.as_ref().and_then(|reference|reference.get("mountBinding")).filter(|mount|mount.is_object()) {
                 if !relation["mounts"].as_array().into_iter().flatten().any(|current|crate::storage::workspace_mounts::same_mount(mount,current)) {
-                    return Err(GatewayError::new("TASK_SCOPE_CHANGED", "任务使用的挂载已移除或改变；进度和回执已保留，请恢复原挂载后继续。", 409));
+                    return Err(GatewayError::new("TASK_SCOPE_CHANGED", "原任务使用的目录授权已变化；进度和成功回执已保留，请按当前工作目录处理剩余工作。", 409));
                 }
             }
         }

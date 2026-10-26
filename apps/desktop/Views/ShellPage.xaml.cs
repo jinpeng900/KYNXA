@@ -38,8 +38,15 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        // Bind immutable chat rows at runtime; XAML metadata must not generate setters for their init-only properties.
+        // 不可变聊天行在运行时接入列表，避免 XAML 元数据为 init-only 属性生成写入器。
+        ChatHistoryList.ItemsSource = VisibleChatEntries;
         InitializePresentationActions();
-        Unloaded += (_, _) => DetachLanguageUpdates();
+        Unloaded += (_, _) =>
+        {
+            DetachLanguageUpdates();
+            DetachWorkSidebarViewport();
+        };
         ConversationMessages.RetryRequested += Transcript_RetryRequested;
         ConversationMessages.ToolResultRequested += ToolResultRequested;
         ConversationMessages.HistoryRequested += Transcript_HistoryRequested;
@@ -76,6 +83,8 @@ public sealed partial class ShellPage : Page
         AttachLanguageUpdates();
         MessageTimePresentation.ConfigureCache(StoragePaths.DesktopDirectory);
         _layout = _layoutStateService.Load();
+        AttachWorkSidebarViewport();
+        UpdateChatHistoryVisibility();
         AppearanceService.ApplyPreferences(_layout.AppearancePaletteId, _layout.AppearanceMode, _layout.ChatFontSize, _layout.AppearanceAccent);
         UpdateWorkRecentVisibility();
         ConversationMessages.Preload();
@@ -363,8 +372,10 @@ public sealed partial class ShellPage : Page
         ChatModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Medium : Microsoft.UI.Text.FontWeights.Normal;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(WorkModeButton, chat ? UiText.Get("未选中") : UiText.Get("已选中"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(ChatModeButton, chat ? UiText.Get("已选中") : UiText.Get("未选中"));
-        WorkSidebarContent.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
+        WorkSidebarViewport.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
         ChatSidebarContent.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
+        UpdateChatHistoryVisibility();
+        QueueWorkSidebarLayout();
         ChatAmbientLayer.Visibility = Visibility.Visible;
         MainContentHost.Visibility = Visibility.Visible;
         if (changed)
@@ -430,14 +441,15 @@ public sealed partial class ShellPage : Page
         bool visible = ProjectTree.Visibility == Visibility.Visible;
         ProjectTree.Visibility = visible ? Visibility.Collapsed : Visibility.Visible;
         ProjectsChevron.Glyph = visible ? "\uE76C" : "\uE70D";
+        RefreshSidebarSearches("projects");
         UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
     }
 
     private void WorkSidebarContent_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (WorkRecentHistory is null || ProjectTree is null) return;
-        // The task list gets all remaining height, above the fixed sidebar footer.
-        // 任务列表占用固定侧栏页脚上方的全部剩余高度。
+        // Recalculate only geometry; dragged heights and list identities survive a resize.
+        // 仅重算布局；窗口缩放保留拖动高度及原列表对象。
         UpdateWorkSidebarHeights(e.NewSize.Height);
     }
 

@@ -33,11 +33,6 @@
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                 <Setter Property="FontSize" Value="13" />
             </Style>
-            <Style TargetType="ListViewItem">
-                <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-                <Setter Property="FontSize" Value="13" />
-                <Setter Property="MinHeight" Value="34" />
-            </Style>
             <Style TargetType="Expander">
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                 <Setter Property="FontSize" Value="13" />
@@ -89,7 +84,13 @@
                                 <ComboBoxItem Tag="official" services:UiLocalization.Content="官方工具" />
                                 <ComboBoxItem Tag="user" services:UiLocalization.Content="用户工具" />
                             </controls:ScrollSafeComboBox>
-                            <controls:ScrollSafeComboBox x:Name="AgentPresetBox" Grid.Column="1" HorizontalAlignment="Stretch" DisplayMemberPath="Name" services:UiLocalization.PlaceholderText="选择 MCP 预设" SelectionChanged="Preset_SelectionChanged" />
+                            <controls:ScrollSafeComboBox x:Name="AgentPresetBox" Grid.Column="1" HorizontalAlignment="Stretch" services:UiLocalization.PlaceholderText="选择 MCP 预设" SelectionChanged="Preset_SelectionChanged">
+                                <controls:ScrollSafeComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Loaded="PresetName_Loaded" DataContextChanged="PresetName_DataContextChanged" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                    </DataTemplate>
+                                </controls:ScrollSafeComboBox.ItemTemplate>
+                            </controls:ScrollSafeComboBox>
                             <Button x:Name="AgentAddPresetButton" Grid.Column="2" services:UiLocalization.Content="添加预设" Click="AddPreset_Click" />
                             <Button x:Name="AgentNewServerButton" Grid.Column="3" services:UiLocalization.Content="新增服务" Click="NewServer_Click" />
                         </Grid>
@@ -97,7 +98,7 @@
                             <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                             <TextBox x:Name="AgentServerSearchBox" services:UiLocalization.PlaceholderText="搜索服务名称或 ID" services:UiLocalization.AutomationName="搜索服务名称或 ID" TextChanged="ServerSearch_TextChanged" />
                             <TextBlock x:Name="AgentServerFilteredHint" Grid.Row="1" services:UiLocalization.Text="当前编辑项已被筛选隐藏，草稿仍保留。" Foreground="{StaticResource KynxaSecondaryTextBrush}" FontSize="12" Visibility="Collapsed" />
-                        <ListView x:Name="AgentServerList" Grid.Row="2" SelectionChanged="Server_SelectionChanged" ContainerContentChanging="ServerList_ContainerContentChanging">
+                        <ListView x:Name="AgentServerList" Grid.Row="2" ItemContainerStyle="{StaticResource KynxaSelectionListItemStyle}" SelectionChanged="Server_SelectionChanged" ContainerContentChanging="ServerList_ContainerContentChanging">
                             <ListView.ItemTemplate><DataTemplate><StackPanel Spacing="2" Margin="0,6">
                                 <TextBlock Text="{Binding Name}" ToolTipService.ToolTip="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                                 <TextBlock x:Name="AgentServerListSourceLabel" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="NoWrap" />
@@ -108,7 +109,7 @@
                                 <Button x:Name="AgentClearServerFiltersButton" services:UiLocalization.Content="清除筛选" Click="ClearServerFilters_Click" HorizontalAlignment="Left" Visibility="Collapsed" />
                             </StackPanel>
                         </Grid>
-                        <ScrollViewer x:Name="AgentServerEditor" Grid.Row="1" Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer x:Name="AgentServerEditor" Grid.Row="1" Grid.Column="1" Style="{StaticResource KynxaFormScrollViewerStyle}">
                             <StackPanel x:Name="AgentServerEditorBody" Spacing="10">
                                 <TextBlock x:Name="AgentServerSourceLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                                 <TextBox x:Name="AgentServerNameBox" services:UiLocalization.Header="名称" services:UiLocalization.PlaceholderText="例如：文件工具" TextChanging="Server_TextChanging" TextChanged="Server_TextChanged" />
@@ -163,7 +164,7 @@
                                     <Grid RowSpacing="10">
                                         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                         <Button x:Name="AgentConnectButton" services:UiLocalization.Content="连接并刷新 MCP" Click="Connect_Click" HorizontalAlignment="Left" />
-                                        <ListView x:Name="AgentToolList" Grid.Row="1" MaxHeight="160" SelectionChanged="Tool_SelectionChanged">
+                                        <ListView x:Name="AgentToolList" Grid.Row="1" MaxHeight="160" ItemContainerStyle="{StaticResource KynxaSelectionListItemStyle}" SelectionChanged="Tool_SelectionChanged">
                                             <ListView.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" /></DataTemplate></ListView.ItemTemplate>
                                         </ListView>
                                         <StackPanel Grid.Row="2" Spacing="10">
@@ -196,7 +197,7 @@
                         <Button x:Name="AgentImportSkillButton" services:UiLocalization.Content="导入技能包" Click="ImportSkill_Click" HorizontalAlignment="Left" />
                         <Expander x:Name="AgentSkillDirectoriesExpander" Grid.Row="1" Grid.ColumnSpan="2" services:UiLocalization.Header="用户技能目录">
                             <StackPanel Spacing="8">
-                                <ListView x:Name="AgentDirectoryList" MaxHeight="85" SelectionChanged="Directory_SelectionChanged">
+                                <ListView x:Name="AgentDirectoryList" MaxHeight="85" ItemContainerStyle="{StaticResource KynxaSelectionListItemStyle}" SelectionChanged="Directory_SelectionChanged">
                                     <ListView.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" ToolTipService.ToolTip="{Binding}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" /></DataTemplate></ListView.ItemTemplate>
                                 </ListView>
                                 <StackPanel x:Name="AgentDirectoryActions" Orientation="Horizontal" Spacing="8">
@@ -210,7 +211,7 @@
                             <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                             <TextBox x:Name="AgentSkillSearchBox" services:UiLocalization.PlaceholderText="搜索技能名称或 ID" services:UiLocalization.AutomationName="搜索技能名称或 ID" TextChanged="SkillSearch_TextChanged" />
                             <TextBlock x:Name="AgentSkillFilteredHint" Grid.Row="1" services:UiLocalization.Text="当前编辑项已被筛选隐藏，草稿仍保留。" Foreground="{StaticResource KynxaSecondaryTextBrush}" FontSize="12" Visibility="Collapsed" />
-                        <ListView x:Name="AgentSkillList" Grid.Row="2" SelectionChanged="Skill_SelectionChanged" ContainerContentChanging="SkillList_ContainerContentChanging">
+                        <ListView x:Name="AgentSkillList" Grid.Row="2" ItemContainerStyle="{StaticResource KynxaSelectionListItemStyle}" SelectionChanged="Skill_SelectionChanged" ContainerContentChanging="SkillList_ContainerContentChanging">
                             <ListView.ItemTemplate><DataTemplate><StackPanel Spacing="2" Margin="0,6">
                                 <TextBlock Text="{Binding Name}" ToolTipService.ToolTip="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                                 <TextBlock x:Name="AgentSkillListSourceLabel" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="NoWrap" />
@@ -221,7 +222,7 @@
                                 <Button x:Name="AgentClearSkillSearchButton" services:UiLocalization.Content="清除搜索" Click="ClearSkillSearch_Click" HorizontalAlignment="Left" Visibility="Collapsed" />
                             </StackPanel>
                         </Grid>
-                        <ScrollViewer x:Name="AgentSkillEditor" Grid.Row="2" Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer x:Name="AgentSkillEditor" Grid.Row="2" Grid.Column="1" Style="{StaticResource KynxaFormScrollViewerStyle}">
                             <StackPanel x:Name="AgentSkillEditorBody" Spacing="10">
                                 <TextBlock x:Name="AgentSkillNameLabel" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                 <TextBlock x:Name="AgentSkillSourceTypeLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" />

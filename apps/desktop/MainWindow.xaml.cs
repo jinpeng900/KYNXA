@@ -27,6 +27,8 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
+        Title = AppCaptionText.Text = Services.AppIdentity.DisplayName;
+
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
 

@@ -175,9 +175,7 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         foreach (var category in _categories)
         {
             bool selected = category.Key == SelectedKey;
-            category.Button.Background = selected ? AppearanceService.GetBrush("KynxaSelectionBrush")
-                : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            category.Button.Foreground = AppearanceService.GetBrush("KynxaTextBrush");
+            SelectionButtonPresentation.Apply(category.Button, selected);
             category.Button.FocusVisualPrimaryBrush = AppearanceService.GetBrush("KynxaSecondaryTextBrush");
             AutomationProperties.SetItemStatus(category.Button, UiText.Get(selected ? "已选中" : "未选中"));
         }

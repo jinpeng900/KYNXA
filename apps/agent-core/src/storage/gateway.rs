@@ -814,6 +814,9 @@ pub fn handle_raw(
                 next[field] = value.clone();
             }
         }
+        for project in next["Projects"].as_array().into_iter().flatten() {
+            super::workspace_mounts::validate_submission(project)?;
+        }
         let submitted = locations(&next);
         super::message_attachments::validate_catalog_submission(root, document, &submitted)?;
         let requests = catalog::apply(
@@ -2863,6 +2866,9 @@ pub fn handle(
                 if let Some(value) = body.get(field) {
                     next[field] = value.clone();
                 }
+            }
+            for project in next["Projects"].as_array().into_iter().flatten() {
+                super::workspace_mounts::validate_submission(project)?;
             }
             let submitted = locations(&next);
             super::message_attachments::validate_catalog_submission(root, document, &submitted)?;

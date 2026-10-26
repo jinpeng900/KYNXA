@@ -19,14 +19,13 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
     public string Title => _title;
     public override string ToString() => Title;
     public string ContextTitle => Chat is null || Project.IsFolderlessWorkspace ? Title : $"{Project.Name} / {Title}";
-    public string? MountedFolderTooltip => _mountedFolder is null ? null : Project.Mounts.Count > 0
-        ? string.Join("\n", Project.Mounts.Select(mount => $"{mount.Name}: {mount.Path}")) : _mountedFolder;
+    public string? MountedFolderTooltip => _mountedFolder;
     public string MountedFolderName
     {
         get
         {
             if (_mountedFolder is null) return "";
-            if (Project.Mounts.Count > 0) return string.Join(" · ", Project.Mounts.Select(mount => mount.Name));
+            if (Services.ProjectMountPresentation.WorkspaceMount(Project) is { } mount) return mount.Name;
             string name = Path.GetFileName(Path.TrimEndingDirectorySeparator(_mountedFolder));
             return name.Length == 0 ? _mountedFolder : name;
         }

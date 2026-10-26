@@ -133,7 +133,7 @@ internal sealed class MainWindowTrayService : IDisposable
         Flags = 0x0001 | 0x0002 | 0x0004 | 0x0080,
         CallbackMessage = TrayCallbackMessage,
         Icon = _icon,
-        Tip = "KYNXA",
+        Tip = AppIdentity.DisplayName,
         Info = string.Empty,
         InfoTitle = string.Empty
     };
@@ -144,9 +144,9 @@ internal sealed class MainWindowTrayService : IDisposable
         if (menu == 0) { Restore(); return; }
         try
         {
-            AppendMenu(menu, 0, OpenMenuId, UiText.Get("打开 KYNXA"));
+            AppendMenu(menu, 0, OpenMenuId, UiText.Get("打开 KYNXA").Replace("KYNXA", AppIdentity.DisplayName, StringComparison.Ordinal));
             AppendMenu(menu, 0x0800, 0, null);
-            AppendMenu(menu, 0, ExitMenuId, UiText.Get("退出 KYNXA"));
+            AppendMenu(menu, 0, ExitMenuId, UiText.Get("退出 KYNXA").Replace("KYNXA", AppIdentity.DisplayName, StringComparison.Ordinal));
             SetMenuDefaultItem(menu, OpenMenuId, false);
             GetCursorPos(out var point);
             SetForegroundWindow(_windowHandle);

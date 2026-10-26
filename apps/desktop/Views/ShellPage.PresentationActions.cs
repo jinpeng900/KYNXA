@@ -8,7 +8,6 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
@@ -20,11 +19,9 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private DispatcherTimer? _actionFeedbackTimer;
-    private Flyout? _historySearchFlyout;
     private bool _presentationDialogOpen;
     private bool _isCompactLayout;
     private bool _temporarySidebarOpen;
-    private sealed record HistorySearchRow(Guid Id, Guid? ProjectId, string Title, string Scope);
 
     private void InitializePresentationActions()
     {
@@ -66,7 +63,6 @@ public sealed partial class ShellPage
         ConversationMessages.FindTextStateChanged += Transcript_FindTextStateChanged;
         Unloaded += (_, _) =>
         {
-            _historySearchFlyout?.Hide();
             ClearActionFeedback();
         };
     }
@@ -114,7 +110,7 @@ public sealed partial class ShellPage
         CompactSidebarButton.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
         CollapseSidebarButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         SidebarGrip.Visibility = _isCompactLayout || !expanded ? Visibility.Collapsed : Visibility.Visible;
-        HistorySearchButton.Visibility = ModelStatusButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+        ModelStatusButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         SidebarFooter.Margin = expanded ? new Thickness(14, 0, 10, 0) : new Thickness(8, 0, 8, 0);
     }
 
@@ -152,7 +148,7 @@ public sealed partial class ShellPage
 
     private bool HasPresentationModal()
     {
-        if (_presentationDialogOpen || _projectCreation is not null) return true;
+        if (_presentationDialogOpen) return true;
         if (XamlRoot is null) return false;
         // Respect any dialog on this XamlRoot, including existing approvals and settings.
         // 尊重此 XamlRoot 上的所有弹窗，包括既有审批和设置。
@@ -269,106 +265,7 @@ public sealed partial class ShellPage
         await ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 查找会话正文，Ctrl+Shift+K 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。查找框内 Enter／↓ 下一处、Shift+Enter／↑ 上一处；F3／Shift+F3 在任意区域切换，Esc 关闭。生成期间点击停止可取消当前回复。");
     }
 
-    private void HistorySearch_Click(object sender, RoutedEventArgs e) => ShowHistorySearch((FrameworkElement)sender);
-
-    private void ShowHistorySearch(FrameworkElement anchor)
-    {
-        if (!_projectsReady || _chatClosing || XamlRoot is null || HasPresentationModal()) return;
-        _historySearchFlyout?.Hide();
-        var flyout = PickerMenu.Create(FlyoutPlacementMode.RightEdgeAlignedTop);
-        _historySearchFlyout = flyout;
-        var rows = _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned)
-            .Select(chat => new HistorySearchRow(chat.Id, null, chat.Title, UiText.Get("聊天")))
-            .Concat(_projects.Where(project => !project.IsArchived).SelectMany(project => project.Chats
-                .Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned)
-                .Select(chat => new HistorySearchRow(chat.Id, project.Id, chat.Title, project.Name)))).ToArray();
-        var search = new TextBox { PlaceholderText = UiText.Get("搜索会话标题或项目"), Margin = new Thickness(4, 4, 4, 8) };
-        AutomationProperties.SetName(search, UiText.Get("搜索会话"));
-        AutomationProperties.SetAutomationId(search, "HistorySearchBox");
-        var results = PickerMenu.CreateList("HistorySearchResults", UiText.Get("搜索结果"));
-        // History rows have title and scope lines; the shared single-line picker height would clip the scope.
-        // 会话结果包含标题和归属两行；共用单行选择器的固定高度会截断归属信息。
-        var rowStyle = new Style(typeof(ListViewItem))
-        {
-            BasedOn = (Style)Application.Current.Resources["KynxaModelListItemStyle"]
-        };
-        rowStyle.Setters.Add(new Setter(FrameworkElement.HeightProperty, double.NaN));
-        rowStyle.Setters.Add(new Setter(FrameworkElement.MinHeightProperty, 54d));
-        rowStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 4, 16, 4)));
-        results.ItemContainerStyle = rowStyle;
-        results.ItemTemplate = (DataTemplate)XamlReader.Load("""
-            <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
-                <StackPanel Spacing="3" Padding="0,5">
-                    <TextBlock Text="{Binding Title}" ToolTipService.ToolTip="{Binding Title}" FontSize="13" TextTrimming="CharacterEllipsis" />
-                    <TextBlock Text="{Binding Scope}" ToolTipService.ToolTip="{Binding Scope}" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextTrimming="CharacterEllipsis" />
-                </StackPanel>
-            </DataTemplate>
-            """);
-        var empty = new TextBlock { Margin = new Thickness(10, 12, 10, 0), TextWrapping = TextWrapping.Wrap, FontSize = 13 };
-        void Filter()
-        {
-            string query = search.Text.Trim();
-            var matches = rows.Where(row => row.Title.Contains(query, StringComparison.OrdinalIgnoreCase)
-                || row.Scope.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
-            results.ItemsSource = matches;
-            results.SelectedItem = matches.FirstOrDefault(row => row.Id == ActiveChatId) ?? matches.FirstOrDefault();
-            empty.Text = UiText.Get(rows.Length == 0 ? "还没有会话，发送第一条消息后可在这里查找。" : "没有匹配的会话，请换个关键词。");
-            empty.Visibility = matches.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-        void Select(HistorySearchRow row)
-        {
-            if (_chatClosing || _projectActionPending || _sendingPrompt) return;
-            // Revalidate stable identities against live data; search never rewrites the catalog.
-            // 对照当前数据重新核验稳定身份；搜索从不改写目录。
-            if (row.ProjectId is Guid projectId && _projects.FirstOrDefault(p => p.Id == projectId && !p.IsArchived) is { } project
-                && project.Chats.FirstOrDefault(chat => chat.Id == row.Id && !chat.IsArchived) is { } workChat)
-                SelectProjectChat(project, workChat);
-            else if (row.ProjectId is null && _standaloneChats.Any(chat => chat.Id == row.Id && !chat.IsArchived))
-            {
-                SetPrimaryMode(true);
-                SelectStandaloneChat(new RecentConversation(row.Title, string.Empty) { Id = row.Id });
-                RebuildStandaloneRows();
-            }
-            else return;
-            flyout.Hide();
-            _temporarySidebarOpen = false;
-            ApplyLayout();
-        }
-        search.TextChanged += (_, _) => Filter();
-        results.ItemClick += (_, args) => { if (args.ClickedItem is HistorySearchRow row) Select(row); };
-        bool composing = false, suppressEnter = false;
-        search.TextCompositionStarted += (_, _) => composing = true;
-        search.TextCompositionEnded += (_, _) => { composing = false; suppressEnter = true; };
-        search.KeyUp += (_, _) => { if (!composing) suppressEnter = false; };
-        search.KeyDown += (_, args) =>
-        {
-            if (args.Key == VirtualKey.Down && results.Items.Count > 0) { results.Focus(FocusState.Keyboard); args.Handled = true; }
-            else if (args.Key == VirtualKey.Enter && !composing && !suppressEnter && results.SelectedItem is HistorySearchRow row)
-            { Select(row); args.Handled = true; }
-        };
-        results.KeyDown += (_, args) =>
-        {
-            if (args.Key == VirtualKey.Enter && results.SelectedItem is HistorySearchRow row) { Select(row); args.Handled = true; }
-        };
-        var body = new Grid();
-        body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        body.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        body.Children.Add(search);
-        Grid.SetRow(results, 1); Grid.SetRow(empty, 1);
-        body.Children.Add(results); body.Children.Add(empty);
-        body.Width = PickerMenu.SetContentWidth(flyout, 380, XamlRoot.Size.Width);
-        search.Measure(new Windows.Foundation.Size(body.Width, double.PositiveInfinity));
-        // Size the first result set once; typing does not move or shrink the open search popup.
-        // 仅按首次结果数量确定高度；输入筛选条件不会移动或缩小已打开的搜索菜单。
-        double initialResultsHeight = rows.Length == 0 ? 64 : rows.Length * 54d;
-        body.Height = Math.Min(Math.Min(420, Math.Max(120, XamlRoot.Size.Height - 64)),
-            search.DesiredSize.Height + initialResultsHeight);
-        Filter();
-        flyout.Content = body;
-        flyout.Opened += (_, _) => search.Focus(FocusState.Programmatic);
-        flyout.Closed += (_, _) => { if (ReferenceEquals(_historySearchFlyout, flyout)) _historySearchFlyout = null; };
-        flyout.ShowAt(anchor);
-    }
+    private void ShowHistorySearch(FrameworkElement _) => OpenSidebarSearch(ViewModel.IsChatMode ? "chat" : "recent");
 
     private string CurrentConversationMarkdown()
     {

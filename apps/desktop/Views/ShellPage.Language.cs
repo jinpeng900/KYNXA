@@ -36,7 +36,6 @@ public sealed partial class ShellPage
         AutomationProperties.SetHelpText(ChatModeButton, UiText.Get(chat ? "已选中" : "未选中"));
         PromptTextBox.PlaceholderText = UiText.Get(chat ? "向 KYNXA 提问任何问题..." : "描述你想完成的工作...");
         UpdateModelPickerLabel();
-        _historySearchFlyout?.Hide();
         ClearActionFeedback();
         UpdatePermissionPickerLabel();
         UpdateSendButtonState();

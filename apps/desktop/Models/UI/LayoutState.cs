@@ -10,12 +10,13 @@ public sealed class LayoutState
     public double SidebarWidth { get; set; } = ShellLayoutMetrics.SidebarDefault;
     public bool SidebarCollapsed { get; set; }
     public bool WorkRecentExpanded { get; set; }
-    // Zero uses the natural navigation height; a dragged divider saves a proportion.
-    // 零表示使用自然导航高度；用户拖动分隔线后保存比例。
-    public double WorkNavigationRatio { get; set; }
-    // Relative to the recent/project content budget; zero keeps natural list heights.
-    // 比例相对于最近与项目的内容可用高度；零表示保留列表自然高度。
-    public double WorkRecentRatio { get; set; }
+    public bool WorkTasksExpanded { get; set; } = true;
+    public bool ChatHistoryExpanded { get; set; } = true;
+    // Zero uses four visible rows; a drag saves a share of the available list space.
+    // 零表示默认四行；拖动后记录占可用列表空间的比例。
+    public double WorkRecentHeightRatio { get; set; }
+    public double WorkProjectsHeightRatio { get; set; }
+    public double WorkTasksHeightRatio { get; set; }
     public List<Guid> RecentWorkChatIds { get; set; } = [];
     public double TopWorkspaceHeight { get; set; } = ShellLayoutMetrics.TopDefault;
     public bool PreviewVisible { get; set; } = true;

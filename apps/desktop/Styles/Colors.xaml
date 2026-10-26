@@ -19,8 +19,8 @@
     <Color x:Key="KynxaComposerActionColor">#F5F5F5</Color>
     <Color x:Key="KynxaAmbientWaveColor">#F2F1EF</Color>
     <Color x:Key="KynxaAmbientWaveSoftColor">#FAF9F8</Color>
-    <Color x:Key="KynxaControlHoverColor">#08000000</Color>
-    <Color x:Key="KynxaControlPressedColor">#0D000000</Color>
+    <Color x:Key="KynxaControlHoverColor">#E9EBEF</Color>
+    <Color x:Key="KynxaControlPressedColor">#DEE1E7</Color>
 
     <SolidColorBrush x:Key="KynxaTitleBarBrush" Color="{StaticResource KynxaTitleBarColor}" />
     <SolidColorBrush x:Key="KynxaAccentBrush" Color="#4568B2" />

@@ -8,7 +8,8 @@ param(
     [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
     [string]$ResourcePackRoot = $env:KYNXA_RESOURCE_PACK_ROOT,
     [string]$NuGetSource,
-    [string]$NuGetConfigPath
+    [string]$NuGetConfigPath,
+    [string]$NativeRuntimeRoot
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -34,7 +35,9 @@ try {
     $state = Read-KynxaBuildState $statePath
     $desktopProject = Join-Path $repositoryRoot 'apps/desktop/KYNXA.Desktop.csproj'
     $toolHostProject = Join-Path $repositoryRoot 'apps/tool-host/KYNXA.ToolHost.csproj'
-    $runtimeRoot = Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64'
+    # Use one selected resource root for preparation, reuse checks and the desktop build.
+    # 资源准备、复用检查与桌面构建使用同一选定根目录，避免再次生成另一份长路径缓存。
+    $runtimeRoot = if ($NativeRuntimeRoot) { [IO.Path]::GetFullPath([IO.Path]::Combine($NativeRuntimeRoot, '.')) } else { Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64' }
     $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
     $inputDirectories = @('apps/desktop','apps/shared','apps/tool-host','apps/agent-core/src','apps/resource-service/src','apps/official-tools','tools/development')
     $inputFiles = @('global.json','Directory.Build.props','Directory.Build.targets','NuGet.Config','apps/agent-core/Cargo.toml','apps/agent-core/Cargo.lock','apps/resource-service/Cargo.toml','apps/resource-service/Cargo.lock')
@@ -47,7 +50,7 @@ try {
         if ($archives.Count -eq 1) { $ResourcePackRoot = $archives[0] }
     }
     foreach ($path in @($DownloadSourcesPath,$NuGetConfigPath,$ResourcePackRoot)) { if ($path) { $inputFiles += $path } }
-    $options = @($Configuration,$Profile,'win-x64',$DownloadSourcesPath,$ResourcePackRoot,$NuGetSource,$NuGetConfigPath)
+    $options = @($Configuration,$Profile,'win-x64',$DownloadSourcesPath,$ResourcePackRoot,$NuGetSource,$NuGetConfigPath,$runtimeRoot)
     $outputFiles = @('KYNXA.Desktop.exe','KYNXA.Desktop.dll','KYNXA.Desktop.deps.json','KYNXA.Desktop.runtimeconfig.json','resources.pri','AppxManifest.xml','runtime/agent/kynxa-gateway.exe')
     $signature = Get-KynxaBuildSignature $repositoryRoot $inputDirectories $inputFiles $options
     if ($state.ContainsKey('repositoryRoot') -and $state.repositoryRoot -ne $repositoryRoot -and $state.ContainsKey('build')) {
@@ -130,7 +133,7 @@ try {
     $environment = Invoke-KynxaBuildStage 2 '检查并复用工具链，缺少 Rust 时自动补齐' toolchain $state $statePath {
         Initialize-KynxaDevelopmentEnvironment -RepositoryRoot $repositoryRoot -InstallRust -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
     }
-    $prepareArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'prepare-native-runtime.ps1'),'-AssetsOnly','-Profile',$Profile)
+    $prepareArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'prepare-native-runtime.ps1'),'-AssetsOnly','-Profile',$Profile,'-BundleRoot',$runtimeRoot)
     if ($Offline) { $prepareArguments += '-Offline' }
     if ($VerifyResources) { $prepareArguments += '-VerifyResources' }
     if ($DownloadSourcesPath) { $prepareArguments += @('-DownloadSourcesPath',$DownloadSourcesPath) }
@@ -169,7 +172,7 @@ try {
         $state.restore = @{ signature = $restoreSignature; sdk = $environment.DotNet.SdkVersion }
     } | Out-Null
     if ($Action -eq 'Setup') { Write-Host '[步骤 5/6] 环境、资源与依赖已就绪，Setup 不编译项目。'; return }
-    $arguments = @('build',$desktopProject,'--configuration',$Configuration,'--no-restore','-p:Platform=x64',"-p:KynxaRuntimeProfile=$Profile",'-p:KynxaDependenciesPrepared=true')
+    $arguments = @('build',$desktopProject,'--configuration',$Configuration,'--no-restore','-p:Platform=x64',"-p:KynxaRuntimeProfile=$Profile",'-p:KynxaDependenciesPrepared=true',"-p:KynxaNativeRuntimeRoot=$runtimeRoot")
     if ($Action -eq 'Rebuild') { $arguments += @('-t:Rebuild','-p:KynxaRebuildNative=true') }
     if ($Action -eq 'Publish') { $arguments[0] = 'publish' }
     if ($Offline) { $arguments += '-p:KynxaOffline=true' }

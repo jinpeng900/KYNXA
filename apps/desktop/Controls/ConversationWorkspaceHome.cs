@@ -1,5 +1,4 @@
 using KYNXA_Desktop.Services;
-using KYNXA_Desktop.Models.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -19,14 +18,13 @@ public sealed class ConversationWorkspaceHome : Grid
         CornerRadius = new CornerRadius(9), Padding = new Thickness(10, 5, 10, 5), MinWidth = 0 };
     private readonly TextBlock _directory = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap,
         TextAlignment = TextAlignment.Center, MaxWidth = 420 };
-    private readonly ComboBox _roots = new() { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0,
-        DisplayMemberPath = nameof(ProjectMountState.Name), Visibility = Visibility.Collapsed };
     private readonly StackPanel _files = new() { Spacing = 2 };
     private readonly ScrollViewer _fileScroll;
     private readonly StackPanel _homeContent;
+    private readonly ScrollViewer _folderEditorHost = new() { Visibility = Visibility.Collapsed,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    private WorkspaceFolderEditor? _folderEditor;
     private readonly Grid _filePane = new() { Visibility = Visibility.Collapsed, RowSpacing = 10, Margin = new Thickness(14) };
-    private readonly ComboBox _browseRoots = new() { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0,
-        DisplayMemberPath = nameof(ProjectMountState.Name), CornerRadius = new CornerRadius(8) };
     private readonly SegmentedSelector _fileKinds = new([
         new("files", "文件", "\uE8B7"), new("attachments", "已保存附件", "\uE723")]);
     private readonly SegmentedSelector _attachmentScopes = new([new("chat", "本聊天"), new("work", "本工作")]);
@@ -39,14 +37,10 @@ public sealed class ConversationWorkspaceHome : Grid
     private bool _updatingBrowser, _hasProject;
     private SavedAttachmentPage? _attachmentPage;
     private readonly TextBlock _fileNotice = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap };
-    private bool _updatingRoots;
-    private Guid? _selectedMountId;
     private WorkspaceDirectoryListing? _listing;
     private string? _listingRoot;
-    public event EventHandler<Guid>? MountRequested;
     public event EventHandler<string?>? DirectoryRequested;
     public event EventHandler<string>? WorkspaceFileRequested;
-    public Guid? SelectedMountId => _selectedMountId;
     public event EventHandler<string>? WebsiteRequested;
     public event EventHandler? ChangesRequested;
     public event EventHandler? TerminalRequested;
@@ -58,6 +52,7 @@ public sealed class ConversationWorkspaceHome : Grid
     public event EventHandler<SavedAttachmentEntry>? SavedAttachmentRequested;
     public Func<string, CancellationToken, Task<WorkspaceDirectoryListing>>? DirectoryLoader { get; set; }
     public bool IsFileBrowserVisible => _filePane.Visibility == Visibility.Visible;
+    public bool IsFolderEditorVisible => _folderEditor is not null;
     public bool IsShowingAttachments => IsFileBrowserVisible && _fileKinds.SelectedKey == "attachments";
     public bool UsesProjectAttachments => _hasProject && _attachmentScopes.SelectedKey == "work";
     private readonly Button _changes, _terminal, _file;
@@ -74,22 +69,6 @@ public sealed class ConversationWorkspaceHome : Grid
         _labels[title] = "工作区";
         content.Children.Add(title);
         content.Children.Add(_directory);
-        content.Children.Add(_roots);
-        _roots.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
-        _roots.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        _roots.CornerRadius = new CornerRadius(8);
-        _roots.Background = Brush("KynxaReplySurfaceBrush");
-        _roots.Foreground = Brush("KynxaTextBrush");
-        _roots.BorderBrush = Brush("KynxaDividerBrush");
-        _roots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _roots.Resources["ComboBoxSelectionIndicatorBrush"] = Brush("KynxaSecondaryTextBrush");
-        AutomationProperties.SetAutomationId(_roots, "WorkspaceMountSelector");
-        AutomationProperties.SetName(_roots, UiText.Get("工作文件夹"));
-        _roots.SelectionChanged += (_, _) =>
-        {
-            if (_updatingRoots || _roots.SelectedItem is not ProjectMountState mount || _selectedMountId == mount.Id) return;
-            _selectedMountId = mount.Id; MountRequested?.Invoke(this, mount.Id);
-        };
         var addressRow = new Grid { ColumnSpacing = 5 };
         addressRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         addressRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
@@ -115,6 +94,7 @@ public sealed class ConversationWorkspaceHome : Grid
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Children.Add(content);
         CreateFilePane();
+        Children.Add(_folderEditorHost);
         _directory.Foreground = Brush("KynxaSecondaryTextBrush");
         _address.Foreground = Brush("KynxaTextBrush");
         _address.Background = Brush("KynxaReplySurfaceBrush");
@@ -146,6 +126,26 @@ public sealed class ConversationWorkspaceHome : Grid
         _address.IsEnabled = hasConversation;
     }
 
+    public void ShowFolderEditor(WorkspaceFolderEditor editor)
+    {
+        CancelFolderEditor();
+        HideFiles();
+        _folderEditor = editor;
+        _folderEditorHost.Content = editor;
+        _folderEditorHost.Visibility = Visibility.Visible;
+        _homeContent.Visibility = Visibility.Collapsed;
+        editor.Closed += (_, _) =>
+        {
+            if (!ReferenceEquals(_folderEditor, editor)) return;
+            _folderEditor = null;
+            _folderEditorHost.Content = null; _folderEditorHost.Visibility = Visibility.Collapsed;
+            _homeContent.Visibility = Visibility.Visible;
+        };
+    }
+
+    public void CancelFolderEditor() => _folderEditor?.Cancel();
+    public void ShowFolderEditorError(string message) => _folderEditor?.ShowError(message);
+
     private void CreateFilePane()
     {
         for (int index = 0; index < 5; index++) _filePane.RowDefinitions.Add(new()
@@ -169,27 +169,12 @@ public sealed class ConversationWorkspaceHome : Grid
         toolbar.Children.Add(refresh); Grid.SetColumn(refresh, 2);
         _filePane.Children.Add(toolbar);
         _filePane.Children.Add(_fileKinds); Grid.SetRow(_fileKinds, 1);
-        _filePane.Children.Add(_browseRoots); Grid.SetRow(_browseRoots, 2);
         _filePane.Children.Add(_attachmentScopes); Grid.SetRow(_attachmentScopes, 2);
         _filePane.Children.Add(_fileScroll); Grid.SetRow(_fileScroll, 3);
         _filePane.Children.Add(_pages); Grid.SetRow(_pages, 4);
-        _browseRoots.Background = Brush("KynxaReplySurfaceBrush");
-        _browseRoots.Foreground = Brush("KynxaTextBrush");
-        _browseRoots.BorderBrush = Brush("KynxaDividerBrush");
-        _browseRoots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _browseRoots.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
-        _browseRoots.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        _browseRoots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _browseRoots.Resources["ComboBoxSelectionIndicatorBrush"] = Brush("KynxaSecondaryTextBrush");
         AutomationProperties.SetAutomationId(_filePane, "WorkspaceFileBrowser");
         AutomationProperties.SetAutomationId(back, "WorkspaceFileBrowserBack");
         AutomationProperties.SetAutomationId(refresh, "WorkspaceFileBrowserRefresh");
-        AutomationProperties.SetAutomationId(_browseRoots, "WorkspaceBrowserMountSelector");
-        _browseRoots.SelectionChanged += (_, _) =>
-        {
-            if (_updatingRoots || _browseRoots.SelectedItem is not ProjectMountState mount || _selectedMountId == mount.Id) return;
-            _selectedMountId = mount.Id; MountRequested?.Invoke(this, mount.Id);
-        };
         _fileKinds.SelectionChanged += (_, key) =>
         {
             if (_updatingBrowser) return;
@@ -215,7 +200,6 @@ public sealed class ConversationWorkspaceHome : Grid
         try { _fileKinds.SelectedKey = kind; }
         finally { _updatingBrowser = false; }
         _homeContent.Visibility = Visibility.Collapsed; _filePane.Visibility = Visibility.Visible;
-        _browseRoots.Visibility = kind == "files" && _browseRoots.Items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         _attachmentScopes.Visibility = kind == "attachments" && _hasProject ? Visibility.Visible : Visibility.Collapsed;
         _pages.Children.Clear();
     }
@@ -225,23 +209,6 @@ public sealed class ConversationWorkspaceHome : Grid
         ++_browserGeneration;
         _browserReads.Cancel(); _browserReads.Dispose(); _browserReads = new();
         _directoryCache.Clear();
-    }
-
-    public void ShowMounts(IReadOnlyList<ProjectMountState> mounts, Guid? selectedMountId)
-    {
-        _updatingRoots = true;
-        try
-        {
-            bool changed = _roots.ItemsSource is not IReadOnlyList<ProjectMountState> previous || !previous.SequenceEqual(mounts);
-            if (changed) _roots.ItemsSource = mounts.ToArray();
-            if (changed) _browseRoots.ItemsSource = _roots.ItemsSource;
-            _selectedMountId = selectedMountId;
-            _roots.SelectedItem = ((IEnumerable<ProjectMountState>?)_roots.ItemsSource)?.FirstOrDefault(mount => mount.Id == selectedMountId);
-            _browseRoots.SelectedItem = _roots.SelectedItem;
-            _roots.Visibility = mounts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-            _browseRoots.Visibility = !IsShowingAttachments && mounts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-        finally { _updatingRoots = false; }
     }
 
     public void ShowFilesLoading()
@@ -256,7 +223,8 @@ public sealed class ConversationWorkspaceHome : Grid
     {
         ResetDirectoryReads(); _expandedDirectories.Clear(); DirectoryLoader = null;
         _listing = null; _attachmentPage = null; _files.Children.Clear();
-        _filePane.Visibility = Visibility.Collapsed; _homeContent.Visibility = Visibility.Visible;
+        _filePane.Visibility = Visibility.Collapsed;
+        _homeContent.Visibility = IsFolderEditorVisible ? Visibility.Collapsed : Visibility.Visible;
     }
 
     public void ShowFilesError(string message)

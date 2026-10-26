@@ -228,13 +228,16 @@ public sealed partial class ShellPage
             if (ownerClosing || e.Cancel) return;
             // Loading is disposable view work, not an unsaved user edit.
             // 加载可随窗口取消，不属于用户尚未保存的编辑。
-            string? pending = _memoryManagementWindow is { HasUnsavedChanges: true } ? "memory"
+            string? writing = _memoryManagementWindow is { BlocksSettingsClose: true } ? "memory"
+                : _toolManagementWindow is { BlocksSettingsClose: true } ? "tools"
+                : _retrievalSettingsWindow is { BlocksSettingsClose: true } ? "retrieval" : null;
+            string? pending = writing ?? (_memoryManagementWindow is { HasUnsavedChanges: true } ? "memory"
                 : _toolManagementWindow is { HasUnsavedChanges: true } ? "tools"
-                : _retrievalSettingsWindow is { HasUnsavedChanges: true } ? "retrieval" : null;
+                : _retrievalSettingsWindow is { HasUnsavedChanges: true } ? "retrieval" : null);
             if (pending is null) return;
             e.Cancel = true;
             workspace.SelectPage(pending);
-            Message(UiText.Get(pending == "retrieval" ? "正在处理，请稍候。" :
+            Message(UiText.Get(writing is not null ? "正在处理，请稍候。" :
                 "请先保存或放弃当前编辑，再关闭设置。"), InfoBarSeverity.Warning);
         };
         void CloseSettings(object sender, WindowEventArgs e) { ownerClosing = true; window.Close(); }

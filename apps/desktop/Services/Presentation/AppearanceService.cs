@@ -240,7 +240,7 @@ public static class AppearanceService
             string background = palette.IsHighContrast ? palette.Accent
                 : state == "PointerOver" ? palette.ControlHover : palette.ControlPressed;
             string foreground = palette.IsHighContrast ? palette.OnAccent : palette.Text;
-            foreach (string control in new[] { "ComboBoxItem", "MenuFlyoutItem", "MenuFlyoutSubItem" })
+            foreach (string control in new[] { "ComboBoxItem", "MenuFlyoutItem", "MenuFlyoutSubItem", "ToggleMenuFlyoutItem" })
             {
                 SetBrush(control + "Background" + state, background);
                 SetBrush(control + "Foreground" + state, foreground);
@@ -271,8 +271,10 @@ public static class AppearanceService
                 Selection = customAccent is null ? preset.Selection : Blend(preset.Main, accent, 0.22),
                 Muted = EnsureContrast("#6B7280", soft, lighten: false),
                 ReplySurface = preset.Sidebar,
-                ControlHover = Blend(preset.Main, preset.Text, 0.045),
-                ControlPressed = Blend(preset.Main, preset.Text, 0.08)
+                // Neutral interaction fills stay equally visible across every light palette and popup surface.
+                // 中性交互底色在各套浅色配色和弹出层上保持一致的可见程度。
+                ControlHover = "#E9EBEF",
+                ControlPressed = "#DEE1E7"
             };
         }
 
@@ -296,8 +298,8 @@ public static class AppearanceService
             Success = EnsureContrast("#82C8A0", textBackground, lighten: true),
             Error = EnsureContrast("#F2A59D", textBackground, lighten: true),
             Warning = EnsureContrast("#EAC574", textBackground, lighten: true),
-            ReplySurface = sidebar, ControlHover = "#202020",
-            ControlPressed = "#292929", Disabled = "#303030", DisabledText = "#A0A0A0",
+            ReplySurface = sidebar, ControlHover = "#242424",
+            ControlPressed = "#2D2D2D", Disabled = "#303030", DisabledText = "#A0A0A0",
             CodeKeyword = "#C6A2F5", CodeString = "#9EC8F2", CodeComment = "#A0BB8A",
             CodeNumber = "#8FBDF8", CodeType = "#88C6A2", CodeFunction = "#E0B090"
         };

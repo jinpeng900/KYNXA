@@ -58,13 +58,17 @@ public sealed partial class ShellPage
             await MessageTimePresentation.RestoreAsync(chat.Id, chat.Messages.ToArray());
             if (!await MessageTimePresentation.RemoveConversationAsync(chat.Id))
                 ShowActionFeedback(UiText.Get("回复时间未能保存到本机缓存，聊天内容不受影响。"));
-            _undoSidebarChange = async () =>
+            Guid? projectId = project?.Id;
+            ShowProjectNotice(string.Format(UiText.Get("已删除“{0}”"), chat.Title), async () =>
             {
-                chats.Insert(Math.Min(index, chats.Count), chat);
-                await SaveChatChangesAsync(project);
+                var currentProject = UndoChatProject(projectId);
+                var currentChats = currentProject?.Chats ?? _standaloneChats;
+                if (currentChats.Any(candidate => candidate.Id == chat.Id)) throw ProjectUndoUnavailable();
+                currentChats.Insert(Math.Min(index, currentChats.Count), chat);
+                try { await SaveChatChangesAsync(currentProject); }
+                catch { currentChats.Remove(chat); RefreshUndoChatRows(currentProject); throw; }
                 await RestoreDeletedChatTimesAsync(chat);
-            };
-            ShowChatNotice(string.Format(UiText.Get("已删除“{0}”"), chat.Title));
+            });
         });
         Item(UiText.Get("重命名"), "\uE70F", async () =>
         {
@@ -83,12 +87,16 @@ public sealed partial class ShellPage
             ClearActiveChat(chat);
             chat.IsArchived = true;
             await SaveChatChangesAsync(project);
-            _undoSidebarChange = async () =>
+            Guid? projectId = project?.Id;
+            ShowProjectNotice(string.Format(UiText.Get("已归档“{0}”"), chat.Title), async () =>
             {
-                chat.IsArchived = false;
-                await SaveChatChangesAsync(project);
-            };
-            ShowChatNotice(string.Format(UiText.Get("已归档“{0}”"), chat.Title));
+                var currentProject = UndoChatProject(projectId);
+                var current = (currentProject?.Chats ?? _standaloneChats).FirstOrDefault(candidate => candidate.Id == chat.Id && candidate.IsArchived)
+                    ?? throw ProjectUndoUnavailable();
+                current.IsArchived = false;
+                try { await SaveChatChangesAsync(currentProject); }
+                catch { current.IsArchived = true; RefreshUndoChatRows(currentProject); throw; }
+            });
         });
         return menu;
     }
@@ -129,12 +137,6 @@ public sealed partial class ShellPage
         if (clearComposer) PromptTextBox.Text = ViewModel.Prompt = string.Empty;
         UpdateConversationTitle();
         UpdateConversationPresentation();
-    }
-
-    private void ShowChatNotice(string message)
-    {
-        ProjectNotice.Message = message;
-        ProjectNotice.IsOpen = true;
     }
 
     private async Task<string?> AskChatNameAsync(string value)

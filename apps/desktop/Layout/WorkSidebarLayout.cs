@@ -1,118 +1,104 @@
-using KYNXA_Desktop.Models.UI;
-
 namespace KYNXA_Desktop.Layout;
 
-public enum WorkSidebarRowSizing
-{
-    Auto,
-    Pixels,
-    Star
-}
-
-public readonly record struct WorkSidebarRowHeight(WorkSidebarRowSizing Sizing, double Value = 0);
-
-public sealed record WorkSidebarLayoutResult(
-    WorkSidebarRowHeight NavigationRow,
-    WorkSidebarRowHeight RecentRow,
-    WorkSidebarRowHeight ProjectsRow,
-    double NavigationGripHeight,
-    double RecentGripHeight,
-    double RecentMaximumHeight,
-    double ProjectsMaximumHeight);
+public sealed record WorkSidebarLayoutResult(double RecentHeight, double ProjectsHeight, double TasksHeight);
 
 /// <summary>
-/// Allocates work sidebar space and owns divider drag snapshots without view or storage dependencies.
-/// 计算工作侧栏空间并保存分隔线拖动快照，不依赖视图或存储。
+/// Starts with four rows per list, then fits remembered or dragged heights to the viewport.
+/// 列表默认四行，拖动及保存的高度按当前视口分配。
 /// </summary>
-public sealed class WorkSidebarLayout
+public static class WorkSidebarLayout
 {
-    private const double NavigationHeaderHeight = 72;
-    private const double DividerHeight = 8;
-    private const double MinimumDragDelta = 0.5;
-    private NavigationDrag _navigationDrag;
-    private RecentDrag _recentDrag;
-
-    private readonly record struct NavigationDrag(double Height, double Ratio);
-    private readonly record struct RecentDrag(double Height, double NavigationHeight, double Ratio, double NavigationRatio);
-
-    public static WorkSidebarLayoutResult? Calculate(double availableHeight, bool recentExpanded, bool projectsExpanded,
-        double navigationRatio, double recentRatio)
+    public static WorkSidebarLayoutResult? Calculate(double availableHeight, bool recentExpanded,
+        bool projectsExpanded, bool tasksExpanded, int recentCount, int projectVisibleCount, int taskCount,
+        double rowHeight = 40, double recentRatio = 0, double projectsRatio = 0, double tasksRatio = 0)
     {
-        // An unmeasured or detached view must retain its last applied geometry.
-        // 未测量或已脱离视觉树的视图保留上次应用的几何尺寸。
+        // A detached view retains its last geometry.
+        // 脱离视觉树的视图保留上次几何尺寸。
         if (!double.IsFinite(availableHeight) || availableHeight <= 0) return null;
-        bool bothExpanded = recentExpanded && projectsExpanded;
-        bool anyExpanded = recentExpanded || projectsExpanded;
-        var automatic = new WorkSidebarRowHeight(WorkSidebarRowSizing.Auto);
-        var remaining = new WorkSidebarRowHeight(WorkSidebarRowSizing.Star, 1);
-        var projectsRow = projectsExpanded ? remaining : automatic;
-        if (!anyExpanded)
-            return new(automatic, automatic, projectsRow, 0, 0, 0, 0);
-
-        var (minimum, maximum) = ShellLayoutMetrics.GetWorkNavigationHeightRange(availableHeight, bothExpanded);
-        bool resized = double.IsFinite(navigationRatio) && navigationRatio > 0;
-        double navigationHeight = resized
-            // A naturally short boundary saved by the inner grip must not jump down.
-            // 内部分隔线保存的较短自然边界不能突然向下跳动。
-            ? Math.Clamp(availableHeight * navigationRatio, Math.Min(minimum, NavigationHeaderHeight + (bothExpanded ? DividerHeight : 0)), maximum)
-            : Math.Clamp(availableHeight * 0.5, minimum, maximum);
-        var navigationRow = resized ? new WorkSidebarRowHeight(WorkSidebarRowSizing.Pixels, navigationHeight) : automatic;
-        double navigationBudget = Math.Max(0, navigationHeight - NavigationHeaderHeight - (bothExpanded ? DividerHeight : 0));
-        var (recentMinimum, recentMaximum) = ShellLayoutMetrics.GetWorkRecentHeightRange(navigationBudget);
-        bool recentResized = bothExpanded && double.IsFinite(recentRatio) && recentRatio > 0;
-        double recentHeight = bothExpanded
-            ? Math.Clamp(navigationBudget * (recentResized ? recentRatio : 0.5), recentMinimum, recentMaximum)
-            : navigationBudget;
-        WorkSidebarRowHeight recentRow;
-        if (recentResized) recentRow = new(WorkSidebarRowSizing.Pixels, recentHeight);
-        else if (recentExpanded && !projectsExpanded && resized) recentRow = remaining;
-        else recentRow = automatic;
-        double projectsMaximum;
-        if (resized) projectsMaximum = double.PositiveInfinity;
-        else if (bothExpanded) projectsMaximum = navigationBudget - recentHeight;
-        else projectsMaximum = navigationBudget;
-        return new(navigationRow, recentRow, projectsRow, DividerHeight, bothExpanded ? DividerHeight : 0,
-            recentHeight, projectsMaximum);
+        if (!double.IsFinite(rowHeight) || rowHeight <= 0) rowHeight = 40;
+        double budget = Math.Max(0, availableHeight - ShellLayoutMetrics.WorkSidebarHeaderHeight);
+        double Desired(int count, bool expanded, double ratio)
+        {
+            if (!expanded || count <= 0) return 0;
+            double maximum = count * rowHeight;
+            double desired = double.IsFinite(ratio) && ratio > 0 ? Math.Min(ratio, 1) * budget
+                : Math.Min(count, ShellLayoutMetrics.WorkSidebarVisibleRows) * rowHeight;
+            return Math.Clamp(desired, Math.Min(rowHeight, maximum), maximum);
+        }
+        double[] desired = [Desired(recentCount, recentExpanded, recentRatio),
+            Desired(projectVisibleCount, projectsExpanded, projectsRatio), Desired(taskCount, tasksExpanded, tasksRatio)];
+        return Result(Fit(desired, budget, rowHeight));
     }
 
-    public void BeginNavigationDrag(double actualHeight, LayoutState preferences) =>
-        _navigationDrag = new(actualHeight, preferences.WorkNavigationRatio);
-
-    public bool ResizeNavigation(LayoutState preferences, double availableHeight, bool recentExpanded, bool projectsExpanded,
-        double delta)
+    public static WorkSidebarLayoutResult Resize(WorkSidebarLayoutResult current, int boundary, double delta,
+        double contentBudget, WorkSidebarLayoutResult maximum, double rowHeight = 40)
     {
-        if (availableHeight <= 0 || Math.Abs(delta) < MinimumDragDelta) return false;
-        var (minimum, maximum) = ShellLayoutMetrics.GetWorkNavigationHeightRange(availableHeight,
-            recentExpanded && projectsExpanded);
-        preferences.WorkNavigationRatio = Math.Clamp(_navigationDrag.Height + delta, minimum, maximum) / availableHeight;
-        return true;
+        if (boundary is not (0 or 1)) throw new ArgumentOutOfRangeException(nameof(boundary));
+        if (!double.IsFinite(rowHeight) || rowHeight <= 0) rowHeight = 40;
+        double budget = double.IsFinite(contentBudget) ? Math.Max(0, contentBudget) : 0;
+        double[] limits = [maximum.RecentHeight, maximum.ProjectsHeight, maximum.TasksHeight];
+        double[] heights = [current.RecentHeight, current.ProjectsHeight, current.TasksHeight];
+        for (int index = 0; index < heights.Length; index++)
+        {
+            limits[index] = double.IsFinite(limits[index]) ? Math.Clamp(limits[index], 0, budget) : 0;
+            double height = double.IsFinite(heights[index]) ? heights[index] : 0;
+            heights[index] = Math.Clamp(height, Math.Min(rowHeight, limits[index]), limits[index]);
+        }
+        heights = Fit(heights, budget, rowHeight);
+        if (!double.IsFinite(delta)) return Result(heights);
+        int upper = boundary, lower = boundary + 1;
+        while (lower < limits.Length && limits[lower] == 0) lower++;
+        bool hasLower = lower < limits.Length;
+        double upperMinimum = Math.Min(rowHeight, limits[upper]);
+        double lowerMinimum = hasLower ? Math.Min(rowHeight, limits[lower]) : 0;
+        if (delta > 0)
+        {
+            // Use free space before shortening the next list.
+            // 先使用底部空白，再压缩相邻列表。
+            double spare = Math.Max(0, budget - heights.Sum());
+            double growth = Math.Min(delta, Math.Max(0, limits[upper] - heights[upper]));
+            growth = Math.Min(growth, spare + (hasLower ? Math.Max(0, heights[lower] - lowerMinimum) : 0));
+            heights[upper] += growth;
+            if (hasLower) heights[lower] -= Math.Max(0, growth - spare);
+        }
+        else
+        {
+            double shrink = Math.Min(-delta, Math.Max(0, heights[upper] - upperMinimum));
+            heights[upper] -= shrink;
+            if (hasLower) heights[lower] += Math.Min(shrink, Math.Max(0, limits[lower] - heights[lower]));
+        }
+        return Result(heights);
     }
 
-    public void CancelNavigationDrag(LayoutState preferences) => preferences.WorkNavigationRatio = _navigationDrag.Ratio;
-
-    public void ResetNavigation(LayoutState preferences) => preferences.WorkNavigationRatio = 0;
-
-    public void BeginRecentDrag(double actualHeight, double navigationHeight, LayoutState preferences) =>
-        _recentDrag = new(actualHeight, navigationHeight, preferences.WorkRecentRatio, preferences.WorkNavigationRatio);
-
-    public bool ResizeRecent(LayoutState preferences, double availableHeight, double delta)
+    private static double[] Fit(double[] desired, double budget, double rowHeight)
     {
-        double budget = Math.Max(0, _recentDrag.NavigationHeight - NavigationHeaderHeight - DividerHeight);
-        if (budget <= 0 || availableHeight <= 0 || Math.Abs(delta) < MinimumDragDelta) return false;
-        // Freeze an automatic outer boundary only when dragged; keep an existing preference intact.
-        // 只有拖动时才固定自动外部边界；已有用户偏好保持不变。
-        if (!double.IsFinite(_recentDrag.NavigationRatio) || _recentDrag.NavigationRatio <= 0)
-            preferences.WorkNavigationRatio = _recentDrag.NavigationHeight / availableHeight;
-        var (minimum, maximum) = ShellLayoutMetrics.GetWorkRecentHeightRange(budget);
-        preferences.WorkRecentRatio = Math.Clamp(_recentDrag.Height + delta, minimum, maximum) / budget;
-        return true;
+        if (desired.Sum() <= budget) return desired;
+        double[] allocated = desired.Select(height => Math.Min(height, rowHeight)).ToArray();
+        double minimum = allocated.Sum();
+        if (minimum > budget)
+            return allocated.Select(height => minimum > 0 ? height * budget / minimum : 0).ToArray();
+        budget -= minimum;
+        // Keep one row per active list, then satisfy short lists before sharing the remainder.
+        // 各展开列表先保留一行，再满足短列表并分配剩余空间。
+        var pending = Enumerable.Range(0, desired.Length).Where(index => desired[index] > allocated[index]).ToList();
+        while (pending.Count > 0)
+        {
+            double share = budget / pending.Count;
+            var fitting = pending.Where(index => desired[index] - allocated[index] <= share).ToArray();
+            if (fitting.Length == 0)
+            {
+                foreach (int index in pending) allocated[index] += share;
+                break;
+            }
+            foreach (int index in fitting)
+            {
+                budget = Math.Max(0, budget - (desired[index] - allocated[index]));
+                allocated[index] = desired[index];
+                pending.Remove(index);
+            }
+        }
+        return allocated;
     }
 
-    public void CancelRecentDrag(LayoutState preferences)
-    {
-        preferences.WorkRecentRatio = _recentDrag.Ratio;
-        preferences.WorkNavigationRatio = _recentDrag.NavigationRatio;
-    }
-
-    public void ResetRecent(LayoutState preferences) => preferences.WorkRecentRatio = 0;
+    private static WorkSidebarLayoutResult Result(double[] heights) => new(heights[0], heights[1], heights[2]);
 }

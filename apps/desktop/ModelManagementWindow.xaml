@@ -58,7 +58,7 @@
                     <TextBlock x:Name="ConnectionCount" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                 </StackPanel>
                 <Grid x:Name="SavedConnectionsList" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,18,0,12">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel x:Name="ProviderList" Spacing="4" /></ScrollViewer>
+                    <ScrollViewer x:Name="ProviderScroll" Style="{StaticResource KynxaFormScrollViewerStyle}"><StackPanel x:Name="ProviderList" Spacing="4" /></ScrollViewer>
                     <StackPanel x:Name="EmptyConnections" Margin="8,12" Spacing="8" IsHitTestVisible="False">
                         <FontIcon Glyph="&#xE774;" FontSize="24" Foreground="{StaticResource KynxaSecondaryTextBrush}" HorizontalAlignment="Left" />
                         <TextBlock services:UiLocalization.Text="还没有模型连接" TextWrapping="Wrap" />
@@ -93,8 +93,8 @@
                     </Grid>
                     <TextBlock services:UiLocalization.Text="连接你常用的模型，让 KYNXA 帮你完成工作。" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
                 </StackPanel>
-                <ScrollViewer x:Name="EditorScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel x:Name="EditorForm" Spacing="18" Margin="0,0,12,8">
+                <ScrollViewer x:Name="EditorScroll" Grid.Row="1" Style="{StaticResource KynxaFormScrollViewerStyle}">
+                    <StackPanel x:Name="EditorForm" Spacing="18">
                         <Border Background="{StaticResource KynxaSidebarBrush}" CornerRadius="12" Padding="16">
                             <StackPanel Spacing="10">
                                 <TextBlock services:UiLocalization.Text="服务商" FontWeight="SemiBold" />
@@ -160,7 +160,7 @@
                                 <TextBlock x:Name="ModelCount" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                             </Grid>
                             <TextBox x:Name="ModelSearchBox" services:UiLocalization.PlaceholderText="搜索模型名称或 ID" TextChanged="ModelSearchBox_TextChanged" services:UiLocalization.AutomationName="搜索模型" />
-                            <ScrollViewer MaxHeight="256" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ScrollViewer x:Name="ModelOptionsScroll" MaxHeight="256" Style="{StaticResource KynxaFormScrollViewerStyle}">
                                 <StackPanel x:Name="ModelOptions" Spacing="4" />
                             </ScrollViewer>
                             <TextBlock x:Name="EmptyModelsHint" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
@@ -182,15 +182,29 @@
                         </Expander>
                     </StackPanel>
                 </ScrollViewer>
-                <Border Grid.Row="2" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0">
+                <Border Grid.Row="2" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="{StaticResource KynxaScrollContentInset}">
                     <StackPanel Spacing="10">
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <ProgressRing x:Name="BusyIndicator" Width="18" Height="18" IsActive="False" HorizontalAlignment="Left" />
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Button x:Name="DeleteConnectionButton" services:UiLocalization.Content="删除连接"
+                                        Foreground="{StaticResource KynxaErrorBrush}" Visibility="Collapsed"
+                                        AutomationProperties.AutomationId="ModelConnectionDelete" Click="DeleteConnectionButton_Click" />
+                                <ProgressRing x:Name="BusyIndicator" Width="18" Height="18" IsActive="False" />
+                            </StackPanel>
                             <Button x:Name="ProbeButton" Grid.Column="1" services:UiLocalization.Content="获取模型 / 测试" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="TestConnectionButton_Click" />
                             <Button x:Name="SaveButton" Grid.Column="2" services:UiLocalization.Content="保存连接" Background="{StaticResource KynxaSendBrush}" Foreground="{StaticResource KynxaOnAccentBrush}" Click="SaveConnectionButton_Click" />
                         </Grid>
-                        <TextBlock x:Name="StatusText" FontSize="12" MaxHeight="52" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" AutomationProperties.LiveSetting="Polite" />
+                        <Grid x:Name="StatusRow" ColumnSpacing="4">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock x:Name="StatusText" FontSize="12" MaxLines="1" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                                       Foreground="{StaticResource KynxaSecondaryTextBrush}" AutomationProperties.LiveSetting="Polite" />
+                            <Button x:Name="DismissStatusButton" Grid.Column="1" Content="×" FontSize="13"
+                                    Foreground="{StaticResource KynxaErrorBrush}" Background="Transparent" BorderThickness="0"
+                                    MinWidth="20" MinHeight="20" Padding="2" CornerRadius="4" Visibility="Collapsed"
+                                    services:UiLocalization.AutomationName="关闭提示" Click="DismissStatusButton_Click" />
+                        </Grid>
                     </StackPanel>
                 </Border>
             </Grid>

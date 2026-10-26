@@ -121,6 +121,7 @@ public sealed partial class InlineToolApprovalCard : UserControl
         _contentScroll = new ScrollViewer
         {
             Name = "InlineToolApprovalContentScroll", Content = body, MaxHeight = 160,
+            Style = (Style)Application.Current.Resources["KynxaFormScrollViewerStyle"],
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollMode = ScrollMode.Enabled,
             HorizontalContentAlignment = HorizontalAlignment.Stretch

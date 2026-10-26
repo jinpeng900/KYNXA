@@ -567,6 +567,17 @@ pub async fn handle_models(
                 .await
                 .map(|provider| (200, json!({"provider":provider}))),
         ),
+        ("DELETE", path) if path.starts_with("/api/models/connections/") => Some(
+            async {
+                let provider_id = path.strip_prefix("/api/models/connections/").unwrap();
+                if !regex::Regex::new("^[a-z][a-z0-9-]{1,39}$").unwrap().is_match(provider_id) {
+                    return Err(ModelError::new("INVALID_MODEL_CONNECTION", "模型连接标识无效。", 400));
+                }
+                store.remove(provider_id).await?;
+                Ok((200, json!({"deleted":true,"providerId":provider_id})))
+            }
+            .await,
+        ),
         ("POST", "/api/models/test") => Some(
             async {
                 let mut connection = validate_connection(body, false)?;
@@ -681,6 +692,36 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn delete_connection_removes_only_its_credentials_and_is_idempotent() {
+        let root = std::env::temp_dir().join(format!("kynxa-model-delete-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = ModelConfigStore::new(&root);
+        for (id, key) in [("delete-fixture", "synthetic-deleted-key"), ("keep-fixture", "synthetic-retained-key")] {
+            store.save(json!({"providerId":id,"displayName":id,"baseUrl":"https://api.example.invalid/v1",
+                "protocol":"openai-completions","models":["fixture-model"],"apiKey":key})).await.unwrap();
+        }
+        let endpoint = "/api/models/connections/delete-fixture";
+        for _ in 0..2 {
+            let (status, receipt) = handle_models("DELETE", endpoint, Value::Null, &root).await.unwrap().unwrap();
+            assert_eq!(status, 200);
+            assert_eq!(receipt, json!({"deleted":true,"providerId":"delete-fixture"}));
+        }
+        assert!(store.connection_for("delete-fixture").await.unwrap().is_none());
+        assert_eq!(store.connection_for("keep-fixture").await.unwrap().unwrap()["apiKey"], "synthetic-retained-key");
+        let (_, public) = handle_models("GET", "/api/models", Value::Null, &root).await.unwrap().unwrap();
+        assert_eq!(public["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(public["providers"][0]["providerId"], "keep-fixture");
+        assert!(public["providers"][0].get("apiKey").is_none());
+        assert!(!public.to_string().contains("synthetic-"));
+        assert!(!std::fs::read_to_string(root.join("connections.json")).unwrap().contains("synthetic-deleted-key"));
+        let previous = std::fs::read(root.join("connections.json")).unwrap();
+        assert_eq!(handle_models("DELETE", "/api/models/connections/keep-fixture/extra", Value::Null, &root)
+            .await.unwrap().unwrap_err().code, "INVALID_MODEL_CONNECTION");
+        assert_eq!(std::fs::read(root.join("connections.json")).unwrap(), previous);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn temporary_config_roundtrip_never_returns_api_keys_in_public_list() {
         let root =

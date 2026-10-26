@@ -9,7 +9,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Windows.Storage;
-using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop.Views;
 
@@ -20,7 +19,6 @@ public sealed partial class ShellPage
     public ObservableCollection<ProjectTreeEntry> ProjectEntries { get; } = [];
 
     private ProjectChatState? _activeProjectChat;
-    private Func<Task>? _undoSidebarChange;
     private bool _projectsReady;
     private bool _projectActionPending;
     private bool _projectViewClosed;
@@ -103,6 +101,7 @@ public sealed partial class ShellPage
     private void StartNewProjectChat(ProjectState project)
     {
         if (project.IsArchived || project.IsFolderlessWorkspace || !_projects.Contains(project)) return;
+        CloseSidebarSearch("tasks");
         CaptureProjectDraft();
         DiscardEmptyProjectChats();
         string title = UiText.Get("新聊天");
@@ -131,8 +130,9 @@ public sealed partial class ShellPage
             await SaveProjectsAndRenderAsync();
         });
         Item(UiText.Get("在文件资源管理器中打开"), "\uE8B7", () => OpenProjectFolderAsync(project));
-        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? UiText.Get("关联工作文件夹") : UiText.Get("重新关联文件夹"), "\uE8F4", () => ChangeProjectFolderAsync(project));
-        if (!string.IsNullOrWhiteSpace(project.FolderPath))
+        bool hasFolder = !string.IsNullOrWhiteSpace(ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath);
+        Item(hasFolder ? UiText.Get("重新关联文件夹") : UiText.Get("关联工作文件夹"), "\uE8F4", () => ChangeProjectFolderAsync(project));
+        if (hasFolder)
             Item(UiText.Get("取消关联文件夹"), "\uE8F4", () => UnmountProjectFolderAsync(project));
         Item(UiText.Get("检索设置"), "\uE721", () =>
         {
@@ -161,11 +161,15 @@ public sealed partial class ShellPage
             CaptureProjectDraft();
             project.IsArchived = true;
             await _projectStore.SaveAsync(_projects);
-            _undoSidebarChange = async () =>
+            Guid projectId = project.Id;
+            Func<Task> undo = async () =>
             {
-                project.IsArchived = false;
-                await SaveProjectsAndRenderAsync();
-                RevealProject(project);
+                var current = _projects.FirstOrDefault(candidate => candidate.Id == projectId && candidate.IsArchived)
+                    ?? throw ProjectUndoUnavailable();
+                current.IsArchived = false;
+                try { await SaveProjectsAndRenderAsync(); }
+                catch { current.IsArchived = true; RenderProjects(); throw; }
+                RevealProject(current);
             };
             if (project.Chats.Contains(_activeProjectChat!))
             {
@@ -184,8 +188,7 @@ public sealed partial class ShellPage
                 UpdateWorkspacePickerVisibility();
             }
             RenderProjects();
-            ProjectNotice.Message = string.Format(UiText.Get("已归档“{0}”"), project.Name);
-            ProjectNotice.IsOpen = true;
+            ShowProjectNotice(string.Format(UiText.Get("已归档“{0}”"), project.Name), undo);
         });
         return menu;
     }
@@ -195,7 +198,7 @@ public sealed partial class ShellPage
     private async Task OpenProjectFolderAsync(ProjectState project)
     {
         if (!IsAvailableProject(project)) return;
-        string? path = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId)?.Path ?? project.FolderPath;
+        string? path = ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath;
         if (string.IsNullOrWhiteSpace(path))
         {
             // A blank project keeps its managed runtime directory without turning it into an external mount.
@@ -211,43 +214,61 @@ public sealed partial class ShellPage
         if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException(UiText.Get("无法打开文件资源管理器。"));
     }
 
-    private async Task ChangeProjectFolderAsync(ProjectState project)
+    private Task ChangeProjectFolderAsync(ProjectState project)
     {
-        if (!IsAvailableProject(project)) return;
-        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is null || !IsAvailableProject(project)) return;
-        string? previous = project.FolderPath;
-        var previousMounts = project.Mounts.ToList();
-        Guid? previousDefault = project.DefaultMountId;
-        var original = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId);
-        var replacement = original is null ? new ProjectMountState(Guid.NewGuid(), folder.DisplayName, folder.Path)
-            : original with { Name = folder.DisplayName, Path = folder.Path, BindingRevision = original.BindingRevision + 1 };
-        project.Mounts.RemoveAll(mount => mount.Id == replacement.Id);
-        project.Mounts.Add(replacement);
+        if (!IsAvailableProject(project)) return Task.CompletedTask;
+        Guid? originalChat = ActiveChatId, originalProject = _selectedWorkProjectId;
+        bool originalMode = ViewModel.IsChatMode;
+        var editor = new WorkspaceFolderEditor(UiText.Get("关联工作文件夹"), project.Name,
+            ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath, creating: false, async input =>
+            {
+                if (!IsAvailableProject(project) || ActiveChatId != originalChat || _selectedWorkProjectId != originalProject ||
+                    ViewModel.IsChatMode != originalMode) throw new OperationCanceledException();
+                await CommitFolderEditAsync(() => input.FolderPath is { } path
+                    ? ReplaceProjectFolderAsync(project, path) : UnmountProjectFolderAsync(project, showFailureEditor: false));
+            }, allowUnlink: !string.IsNullOrWhiteSpace(project.FolderPath));
+        ShowInlineFolderEditor(editor);
+        return Task.CompletedTask;
+    }
+
+    private async Task ReplaceProjectFolderAsync(ProjectState project, string path)
+    {
+        var previous = CaptureProjectFolderBinding(project);
+        var original = ProjectMountPresentation.WorkspaceMount(project);
+        bool unchanged = original is not null && string.Equals(Path.TrimEndingDirectorySeparator(original.Path),
+            path, StringComparison.OrdinalIgnoreCase);
+        var replacement = original is null ? new ProjectMountState(Guid.NewGuid(), FolderDisplayName(path), path)
+            : original with { Name = FolderDisplayName(path), Path = path, BindingRevision = original.BindingRevision + (unchanged ? 0UL : 1UL) };
+        project.Mounts = [replacement];
         project.DefaultMountId = replacement.Id;
         project.FolderPath = replacement.Path;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { project.FolderPath = previous; project.Mounts = previousMounts; project.DefaultMountId = previousDefault; throw; }
-        ProjectNotice.Message = string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path);
-        ProjectNotice.IsOpen = true;
+        catch { ApplyProjectFolderBinding(project, previous); throw; }
+        ShowProjectFolderNotice(project, previous,
+            string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, path));
     }
 
-    private async Task UnmountProjectFolderAsync(ProjectState project)
+    private Task UnmountProjectFolderAsync(ProjectState project) => UnmountProjectFolderAsync(project, showFailureEditor: true);
+
+    private async Task UnmountProjectFolderAsync(ProjectState project, bool showFailureEditor)
     {
-        if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(project.FolderPath)) return;
-        string? previous = project.FolderPath;
-        var previousMounts = project.Mounts.ToList();
-        Guid? previousDefault = project.DefaultMountId;
-        project.Mounts.RemoveAll(mount => mount.Id == project.DefaultMountId);
-        project.DefaultMountId = project.Mounts.FirstOrDefault()?.Id;
-        project.FolderPath = project.Mounts.FirstOrDefault()?.Path;
+        if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath)) return;
+        var previous = CaptureProjectFolderBinding(project);
+        project.Mounts = [];
+        project.DefaultMountId = null;
+        project.FolderPath = null;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { project.FolderPath = previous; project.Mounts = previousMounts; project.DefaultMountId = previousDefault; throw; }
-        ProjectNotice.Message = string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name);
-        ProjectNotice.IsOpen = true;
+        catch (Exception error)
+        {
+            ApplyProjectFolderBinding(project, previous);
+            if (!showFailureEditor) throw;
+            // Keep this chat and draft in place; retry errors belong to the same inline folder editor.
+            await ChangeProjectFolderAsync(project);
+            WorkspaceHome.ShowFolderEditorError(error.Message);
+            return;
+        }
+        ShowProjectFolderNotice(project, previous,
+            string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name));
     }
 
     private async Task RunMountedWorkspaceActionAsync(MountedWorkspaceRequest request, Func<ProjectState, Task> action)
@@ -286,31 +307,7 @@ public sealed partial class ShellPage
         RevealProject(project);
     }
 
-    private async Task<ProjectState?> PickProjectFolderAsync()
-    {
-        Guid? originalChat = ActiveChatId, originalProject = _selectedWorkProjectId;
-        bool originalMode = ViewModel.IsChatMode;
-        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-        StorageFolder? folder = await picker.PickSingleFolderAsync();
-        if (folder is null || _projectViewClosed || _chatClosing || _savingOnClose || ActiveChatId != originalChat ||
-            _selectedWorkProjectId != originalProject || ViewModel.IsChatMode != originalMode) return null;
-        var project = _projects.FirstOrDefault(candidate => candidate.Mounts.Any(mount =>
-            string.Equals(Path.TrimEndingDirectorySeparator(mount.Path), Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase)) ||
-            candidate.FolderPath is not null && string.Equals(Path.TrimEndingDirectorySeparator(candidate.FolderPath),
-                Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase));
-        if (project is null) return await ShowProjectCreationAsync(folder);
-        await RunProjectActionAsync(async () => { project.IsArchived = false; await SaveProjectsAndRenderAsync(); });
-        return project;
-    }
-
-    private async void UndoSidebarChange_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
-    {
-        if (_undoSidebarChange is { } undo) await undo();
-        ProjectNotice.IsOpen = false;
-        _undoSidebarChange = null;
-    });
+    private Task<ProjectState?> PickProjectFolderAsync() => ShowProjectCreationAsync(reuseFolderProject: true);
 
     private async Task SaveProjectsAndRenderAsync()
     {
@@ -322,6 +319,7 @@ public sealed partial class ShellPage
 
     private void ShowProjects()
     {
+        CloseSidebarSearch("projects");
         ProjectTree.Visibility = Visibility.Visible;
         ProjectsChevron.Glyph = "\uE70D";
         UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
@@ -379,13 +377,17 @@ public sealed partial class ShellPage
     {
         if (!_projectsReady || _projectActionPending || _savingOnClose || _chatClosing) return;
         _projectActionPending = true;
+        UpdateProjectNoticeAction();
         UpdateSendButtonState();
         try { await action(); }
         catch (Exception error)
         {
             if (_savingOnClose || _projectViewClosed) return;
-            _undoSidebarChange = null;
-            ProjectNotice.IsOpen = false;
+            if (!_projectNoticeUndoPending)
+            {
+                _undoSidebarChange = null;
+                ProjectNotice.IsOpen = false;
+            }
             // Roll back visible metadata to the last successfully saved catalog.
             // 将可见元数据回退到最近一次成功保存的正式目录。
             try
@@ -393,11 +395,13 @@ public sealed partial class ShellPage
                 var catalog = await _projectStore.LoadMetadataAsync();
                 if (_savingOnClose || _projectViewClosed) return;
                 PreservePendingPresentations(catalog);
+                if (_projectNoticeUndoPending) PreserveUndoConversationProjections(catalog);
+                else _activeProjectChat = _activeStandaloneChat = null;
                 _projects = catalog.Projects;
                 _standaloneChats = catalog.Chats;
-                _activeProjectChat = _activeStandaloneChat = null;
                 RenderProjects();
                 RebuildStandaloneRows();
+                if (_projectNoticeUndoPending) UpdateConversationTitle();
                 UpdateConversationPresentation();
             }
             catch (Exception) { /* Preserve the current display if the catalog itself is unavailable. 中文：正式目录本身不可用时，保留当前展示。 */ }
@@ -406,6 +410,7 @@ public sealed partial class ShellPage
         finally
         {
             _projectActionPending = false;
+            UpdateProjectNoticeAction();
             if (!_savingOnClose && !_projectViewClosed) UpdateSendButtonState();
         }
     }

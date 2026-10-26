@@ -6,7 +6,6 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private readonly Dictionary<Guid, Guid> _workspaceMountSelections = [];
     private Guid? _filesConversation;
     private Guid? _filesMount;
     private string? _filesBinding;
@@ -20,11 +19,11 @@ public sealed partial class ShellPage
     private void NotifyActiveRetrievalProject(ProjectState? project)
     {
         if (!_projectsReady || _chatClosing || _projectViewClosed) return;
-        string key = project is null ? "global" : $"{project.Id:D}/{project.FolderPath}/" +
-            string.Join(";", project.Mounts.Select(mount => $"{mount.Id:D}:{mount.BindingRevision}:{mount.Path}"));
+        var mount = ProjectMountPresentation.WorkspaceMount(project);
+        string key = project is null ? "global" : $"{project.Id:D}/{mount?.Id:D}/{mount?.BindingRevision}/{mount?.Path ?? project.FolderPath}";
         if (_retrievalActivationKey == key) return;
         _retrievalActivationKey = key;
-        _ = ActivateRetrievalProjectAsync(project is { Mounts.Count: > 0 } ? project.Id : null);
+        _ = ActivateRetrievalProjectAsync(mount is not null ? project!.Id : null);
     }
 
     private async Task ActivateRetrievalProjectAsync(Guid? projectId)
@@ -44,25 +43,10 @@ public sealed partial class ShellPage
     private ProjectState? CurrentWorkspaceProject() => ActiveChatId is Guid conversation ? FindChat(conversation).Project
         : WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
 
-    private ProjectMountState? CurrentWorkspaceMount()
-    {
-        var project = CurrentWorkspaceProject();
-        if (project is null) return null;
-        Guid? selected = _workspaceMountSelections.TryGetValue(project.Id, out Guid id) ? id : project.DefaultMountId;
-        return project.Mounts.FirstOrDefault(mount => mount.Id == selected) ?? project.Mounts.FirstOrDefault();
-    }
+    private ProjectMountState? CurrentWorkspaceMount() => ProjectMountPresentation.WorkspaceMount(CurrentWorkspaceProject());
 
     private string CurrentWorkspaceFilesBinding() => CurrentWorkspaceMount() is { } mount
         ? $"{mount.Id:D}/{mount.BindingRevision}/{mount.Path}" : CurrentWorkspaceDirectory() ?? string.Empty;
-
-    private void SelectWorkspaceMount(Guid mountId)
-    {
-        if (_chatClosing || CurrentWorkspaceProject() is not { } project || !project.Mounts.Any(mount => mount.Id == mountId)) return;
-        _workspaceMountSelections[project.Id] = mountId;
-        bool wasBrowsing = _filesConversation == ActiveChatId;
-        ApplyLayout();
-        if (wasBrowsing && !WorkspaceHome.IsShowingAttachments) _ = BrowseWorkspaceFilesAsync();
-    }
 
     private void CancelWorkspaceFileRead(bool forgetScope = false)
     {
@@ -154,21 +138,16 @@ public sealed partial class ShellPage
         ActiveMessages.FirstOrDefault(row => row.Message.Id == message)?.Message.Attachments.FirstOrDefault(item => item.Id == attachment)
         ?? ResourcesFor(conversation).Attachments.GetValueOrDefault($"{message:D}/{attachment:D}");
 
-    private ConversationWorkTab LabelWorkspaceMount(Guid conversation, ConversationWorkTab tab)
+    private ConversationWorkTab BindWorkspaceFile(Guid conversation, ConversationWorkTab tab)
     {
-        var project = FindChat(conversation).Project;
-        if (project is null || tab.Kind is not ("document" or "diagram") || string.IsNullOrWhiteSpace(tab.Target) ||
+        if (tab.MountId is not null || tab.Kind is not ("document" or "diagram") || string.IsNullOrWhiteSpace(tab.Target) ||
             !Path.IsPathFullyQualified(tab.Target)) return tab;
-        string path = Path.GetFullPath(tab.Target);
-        var candidates = tab.MountId is Guid selectedMount ? project.Mounts.Where(mount => mount.Id == selectedMount)
-            : project.Mounts.OrderByDescending(mount => mount.Path.Length);
-        var mount = candidates.FirstOrDefault(mount =>
-        {
-            string root = Path.TrimEndingDirectorySeparator(mount.Path);
-            return string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
-                path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-        });
+        var mount = ProjectMountPresentation.WorkspaceMount(FindChat(conversation).Project);
         if (mount is null) return tab;
-        return tab with { MountId = mount.Id, Title = project.Mounts.Count > 1 ? $"{Path.GetFileName(path)} · {mount.Name}" : tab.Title };
+        string path = Path.GetFullPath(tab.Target);
+        string root = Path.TrimEndingDirectorySeparator(mount.Path);
+        return string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? tab with { MountId = mount.Id } : tab;
     }
 }

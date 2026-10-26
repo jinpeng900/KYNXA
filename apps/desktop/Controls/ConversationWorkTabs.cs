@@ -159,12 +159,12 @@ public sealed class ConversationWorkTabs : Grid, IDisposable
             ApplyTabStyle(select); ApplyTabStyle(close);
             if (Application.Current.Resources.TryGetValue("KynxaSecondaryTextBrush", out var brush) && brush is Brush secondary)
             { title.Foreground = close.Foreground = secondary; }
-            row.Background = active && Application.Current.Resources.TryGetValue("KynxaReplySurfaceBrush", out var surface) && surface is Brush activeBackground
+            row.Background = active && Application.Current.Resources.TryGetValue("KynxaSelectionBrush", out var surface) && surface is Brush activeBackground
                 ? activeBackground : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             var restingBackground = row.Background;
             row.PointerEntered += (_, _) =>
             {
-                if (Application.Current.Resources.TryGetValue("KynxaSegmentIdleBrush", out var hover) && hover is Brush background)
+                if (!active && Application.Current.Resources.TryGetValue("KynxaControlHoverBrush", out var hover) && hover is Brush background)
                     row.Background = background;
             };
             row.PointerExited += (_, _) => row.Background = restingBackground;

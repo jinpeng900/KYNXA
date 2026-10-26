@@ -9,6 +9,7 @@ public partial class App : Application
 
     public App()
     {
+        Services.AppIdentity.Configure();
         ConfigurePersistentStorage();
         InitializeComponent();
         UnhandledException += (_, error) =>

@@ -57,6 +57,8 @@ public sealed partial class ModelManagementWindow
         string key = HasUnsavedChanges() ? "未保存的修改" : _editing is null ? "尚未保存" : "已保存";
         DraftStateText.Text = UiText.Get(key);
         DraftStateBadge.Visibility = _busy ? Visibility.Collapsed : Visibility.Visible;
+        DeleteConnectionButton.Visibility = _editing is not null ? Visibility.Visible : Visibility.Collapsed;
+        DeleteConnectionButton.IsEnabled = !_busy && _loaded && _editing is not null;
         ToolTipService.SetToolTip(EditorTitle, EditorTitle.Text);
     }
 

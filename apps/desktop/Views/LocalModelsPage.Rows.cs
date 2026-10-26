@@ -16,7 +16,7 @@ public sealed partial class LocalModelsPage
         public LocalModelInfo Model { get; private set; } = model;
         public string Id => Model.Id;
         public string Title => string.IsNullOrWhiteSpace(Model.Name) ? Model.Id : Model.Name;
-        public string Metadata => string.Join(" · ", new[] { Model.Family, ParameterText(Model.Parameters), Model.Quantization,
+        public string Metadata => string.Join(" · ", new[] { Model.Family == "Imported" ? UiText.Get("已导入") : Model.Family, ParameterText(Model.Parameters), Model.Quantization,
             FormatBytes(Model.DownloadBytes) }.Where(value => !string.IsNullOrWhiteSpace(value)));
         public string Requirements => string.Format(UiText.Get("建议内存 {0} GB · 显存 {1} GB"),
             Number(Model.RecommendedRamGb), Number(Model.RecommendedVramGb));

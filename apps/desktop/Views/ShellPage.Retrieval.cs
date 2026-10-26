@@ -30,7 +30,8 @@ public sealed partial class ShellPage
     private FrameworkElement BuildSettingsRetrievalPage(Window owner)
     {
         var project = _settingsRetrievalProject;
-        var controller = new RetrievalSettingsWindow(project?.Id, project?.Name, project?.FolderPath, settingsOwner: owner);
+        var controller = new RetrievalSettingsWindow(project?.Id, project?.Name,
+            ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project?.FolderPath, settingsOwner: owner);
         _retrievalSettingsWindow = controller;
         return controller.AttachToSettings(owner);
     }

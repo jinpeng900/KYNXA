@@ -108,6 +108,8 @@ public sealed partial class ShellPage
                 rows[index] = new RecentConversation(chat.Title, detail) { Id = chat.Id };
         }
         ChatHistoryList.SelectedItem = ViewModel.RecentConversations.FirstOrDefault(chat => chat.Id == _activeStandaloneChat?.Id);
+        RefreshSidebarSearches("chat");
+        QueueWorkSidebarLayout();
     }
 
     private void CaptureStandaloneDraft()
@@ -141,6 +143,7 @@ public sealed partial class ShellPage
 
     private void NewStandaloneChat_Click(object sender, RoutedEventArgs e)
     {
+        CloseSidebarSearch("chat");
         CaptureStandaloneDraft();
         DiscardEmptyStandaloneChats();
         var chat = new ProjectChatState { Title = UiText.Get("新聊天") };

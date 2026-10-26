@@ -10,7 +10,6 @@ public sealed partial class ShellPage
     private void OpenTranscriptSearch()
     {
         if (_promptCompositionActive || HasPresentationModal() || _chatClosing || !IsLoaded) return;
-        _historySearchFlyout?.Hide();
         // Finding text never opens a collapsed sidebar or changes the active conversation.
         // 正文查找不展开已收起的侧栏，也不改变当前会话。
         ConversationMessages.Visibility = Visibility.Visible;
@@ -39,6 +38,11 @@ public sealed partial class ShellPage
 
     private void TranscriptSearchClose_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (HandleFocusedSidebarSearchEscape() is bool searchHandled)
+        {
+            args.Handled = searchHandled;
+            return;
+        }
         // Dismiss the top native drawer first, including when focus is inside its embedded WebView.
         // 优先关闭最上层原生覆盖栏，嵌入 WebView 获得焦点时也可使用同一 Escape 入口。
         if (TryDismissCompactSidebar() || TryDismissCompactWorkPanel()) { args.Handled = true; return; }
@@ -52,7 +56,7 @@ public sealed partial class ShellPage
     private void OpenConversationSearch()
     {
         if (_promptCompositionActive || HasPresentationModal() || _chatClosing || !IsLoaded) return;
-        ShowHistorySearch(HistorySearchButton.Visibility == Visibility.Visible ? HistorySearchButton : CompactSidebarButton);
+        OpenSidebarSearch(ViewModel.IsChatMode ? "chat" : "recent");
     }
 
     private void Transcript_ConversationSearchRequested(object? sender, EventArgs e) => OpenConversationSearch();

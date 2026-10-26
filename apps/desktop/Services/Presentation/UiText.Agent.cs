@@ -4,6 +4,13 @@ public static partial class UiText
 {
     private static IReadOnlyDictionary<string, string> AgentTranslations { get; } = new Dictionary<string, string>
     {
+        ["文件系统"] = "File system",
+        ["工具结果"] = "Tool results",
+        ["沙箱终端"] = "Sandbox terminal",
+        ["本机终端"] = "Host terminal",
+        ["桌面控制"] = "Desktop control",
+        ["内置浏览器"] = "Built-in browser",
+        ["公开网页读取"] = "Public web fetch",
         ["登录个人账号"] = "Sign in",
         ["退出账号"] = "Sign out",
         ["已退出账号"] = "Signed out",
@@ -11,8 +18,19 @@ public static partial class UiText
         ["授权未完成，请重试。"] = "Authorization was not completed. Try again.",
         ["账号退出未确认，请重试。"] = "Sign-out was not confirmed. Try again.",
         ["创建项目"] = "Create project",
+        ["Enter 创建 · Esc 取消"] = "Enter to create · Esc to cancel",
         ["项目名称"] = "Project name",
-        ["源文件夹（可选，可添加多个）"] = "Source folders (optional, multiple allowed)",
+        ["工作文件夹（可选）"] = "Working folder (optional)",
+        ["输入文件夹的完整路径"] = "Enter the full folder path",
+        ["一次只能关联一个文件夹。"] = "Link one folder at a time.",
+        ["请输入一个文件夹的完整路径。"] = "Enter the full path to one folder.",
+        ["请输入文件夹的绝对路径。"] = "Enter an absolute folder path.",
+        ["文件夹不存在或无法访问，请检查路径。"] = "The folder is missing or inaccessible. Check the path.",
+        ["关闭提示"] = "Dismiss message",
+        ["调整最近和项目区域高度"] = "Resize recent and project sections",
+        ["调整项目和任务区域高度"] = "Resize project and task sections",
+        ["拖动调整区域高度，双击恢复默认四行"] = "Drag to resize; double-click to restore the default four rows",
+        ["请稍后重试。"] = "Try again shortly.",
         ["默认"] = "Default",
         ["移除"] = "Remove",
         ["新建项目"] = "New project",
@@ -340,7 +358,6 @@ public static partial class UiText
         ["等待核验"] = "Waiting for verification",
         ["等待子任务"] = "Waiting for child tasks",
         ["已暂停"] = "Paused",
-        ["已取消"] = "Cancelled",
         ["继续执行"] = "Resume task",
         ["已结束 · 有待办事项"] = "Ended · follow-ups remain",
         ["暂停并保存进度"] = "Pause and save progress",
@@ -440,4 +457,41 @@ public static partial class UiText
         ["所有工作和聊天共用的网站登录数据已清除。"] = "Shared website sign-in data has been cleared for all workspaces and chats.",
         ["网站登录数据清除未完成。"] = "Clearing website sign-in data did not complete."
     };
+
+    private static IReadOnlyDictionary<string, string> ToolCatalogTranslations { get; } = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["DBHub 只读"] = "DBHub Read-only",
+        ["Windows 截图"] = "Windows Screenshot",
+        ["微软官方浏览器自动化服务，使用独立的无头浏览器配置。"] = "Official Microsoft browser automation in an isolated headless profile.",
+        ["GitHub 官方托管服务，需要用户通过环境变量提供 Bearer 授权信息。"] = "Official hosted GitHub service. Requires a user-provided Bearer authorization environment variable.",
+        ["MCP 官方参考服务，支持分页读取公开网页，返回文本或 Markdown。"] = "Official MCP reference server for fetching public webpages as text or Markdown with paging.",
+        ["MCP 官方参考服务，用于查看仓库状态、差异和历史；修改类工具默认停用。"] = "Official MCP reference server for repository status, diffs and history; mutation tools start disabled.",
+        ["提供 Upstash 的软件库文档和代码示例。匿名使用有额度限制，可选配置 API 密钥。"] = "Upstash library documentation and code examples. Anonymous usage is limited; an API key is optional.",
+        ["Google 官方浏览器调试、性能和网络诊断服务，使用独立的无头浏览器配置。"] = "Official Google browser debugging, performance and network diagnostics in an isolated headless profile.",
+        ["官方托管的公开网页搜索服务。匿名使用有速率限制，无需账号密钥。"] = "Official hosted public web search. Anonymous usage is rate-limited and requires no account key.",
+        ["官方托管的公开网页搜索服务。匿名访问有速率限制，无需 API 密钥。"] = "Official hosted public web search. Anonymous access is rate-limited; no API key is required.",
+        ["Brave 官方搜索服务，支持网页、新闻、图片和本地地点搜索，需要 Brave Search API 密钥。"] = "Official Brave search for web, news, images and local places. Requires a Brave Search API key.",
+        ["Bytebase 数据库结构与只读 SQL 服务，支持 PostgreSQL、MySQL、SQL Server 和 SQLite，需要只读 TOML 配置及 DSN。"] = "Bytebase database schema and read-only SQL for PostgreSQL, MySQL, SQL Server and SQLite. Requires a read-only TOML configuration and DSN.",
+        ["微软官方转换工具，可将 PDF、Office 文档等格式转换为 Markdown。该 MCP 包为预览版本。"] = "Official Microsoft conversion of PDF, Office documents and other formats to Markdown. The MCP package is a preview release.",
+        ["社区 CursorTouch Windows-MCP 服务，仅开放 Screenshot 和 Snapshot 工具，需要 Windows 和 Python 3.14。"] = "Community CursorTouch Windows-MCP limited to Screenshot and Snapshot. Requires Windows and Python 3.14."
+    };
+
+    internal static string? DefaultToolNameKey(string id, string name) => (id, name) switch
+    {
+        ("exa" or "official-exa", "Exa Search") => "Exa 搜索",
+        ("parallel" or "official-parallel", "Parallel Search") => "Parallel 搜索",
+        ("brave-search" or "official-brave-search", "Brave Search") => "Brave 搜索",
+        ("deepseek-search", "DeepSeek Search") => "DeepSeek 搜索",
+        ("dbhub" or "official-dbhub", "DBHub Read-only") => "DBHub 只读",
+        ("windows-screenshot" or "official-windows-screenshot", "Windows Screenshot") => "Windows 截图",
+        _ => null
+    };
+
+    internal static string CatalogDescription(string description)
+    {
+        // Match complete built-in descriptions only; external or updated catalog text remains untouched.
+        // 仅匹配完整的内置说明；第三方或已更新的目录文案保留原文。
+        if (Language == "en") return description;
+        return ToolCatalogTranslations.FirstOrDefault(entry => entry.Value == description).Key ?? description;
+    }
 }

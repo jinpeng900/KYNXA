@@ -4,7 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:services="using:KYNXA_Desktop.Services"
     xmlns:controls="using:KYNXA_Desktop.Controls">
-    <Grid x:Name="MemoryRoot" Background="{StaticResource KynxaMainBrush}" Loaded="MemoryRoot_Loaded" SizeChanged="MemoryRoot_SizeChanged">
+    <Grid x:Name="MemoryRoot" Background="{StaticResource KynxaMainBrush}" Loaded="MemoryRoot_Loaded" SizeChanged="MemoryRoot_SizeChanged" PointerPressed="MemoryRoot_PointerPressed">
         <Grid.Resources>
             <Style TargetType="TextBlock">
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
@@ -85,7 +85,7 @@
                     <Button x:Name="NewMemoryButton" Grid.Column="2" Margin="6,0,0,0" AutomationProperties.AutomationId="NewMemoryButton" services:UiLocalization.Content="新增记忆" Click="New_Click" />
                 </Grid>
                 <Grid Grid.Row="3">
-                    <ListView x:Name="MemoryEntryList" AutomationProperties.AutomationId="MemoryEntryList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Entry_Click" ItemContainerStyle="{StaticResource MemoryListItemStyle}" ScrollViewer.VerticalScrollBarVisibility="Auto" HorizontalContentAlignment="Stretch">
+                    <ListView x:Name="MemoryEntryList" AutomationProperties.AutomationId="MemoryEntryList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Entry_Click" ItemContainerStyle="{StaticResource MemoryListItemStyle}" Padding="{StaticResource KynxaScrollContentInset}" ScrollViewer.VerticalScrollBarVisibility="Auto" HorizontalContentAlignment="Stretch">
                         <ListView.ItemTemplate>
                             <DataTemplate>
                                 <Border Background="{Binding Background}" CornerRadius="8" Padding="12" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1">
@@ -103,10 +103,10 @@
                     </StackPanel>
                 </Grid>
             </Grid>
-            <Grid x:Name="MemoryEditorPanel" Grid.Column="1" Grid.RowSpan="2" RowSpacing="16">
+            <Grid x:Name="MemoryEditorPanel" Grid.Column="1" Grid.RowSpan="2" RowSpacing="12">
                 <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel Spacing="12">
+                <ScrollViewer x:Name="MemoryEditorScroll" AutomationProperties.AutomationId="MemoryEditorScroll" Style="{StaticResource KynxaFormScrollViewerStyle}">
+                    <StackPanel x:Name="MemoryEditorForm" Spacing="12">
                         <TextBlock x:Name="MemoryEditorHeading" FontSize="18" FontWeight="SemiBold" />
                         <TextBlock x:Name="MemoryScopeLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
                         <TextBlock services:UiLocalization.Text="类型" />
@@ -115,7 +115,7 @@
                         <TextBlock services:UiLocalization.Text="内容" />
                         <TextBox x:Name="MemoryContentBox" AutomationProperties.AutomationId="MemoryContentBox" services:UiLocalization.AutomationName="记忆内容" services:UiLocalization.PlaceholderText="输入需要保留的记忆" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="160" MaxHeight="300" ScrollViewer.VerticalScrollBarVisibility="Auto" TextChanged="Content_TextChanged" />
                         <TextBlock x:Name="MemoryInputHint" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
-                        <Border Background="{StaticResource KynxaReplySurfaceBrush}" CornerRadius="8" Padding="12">
+                        <Border x:Name="MemorySourceCard" Background="{StaticResource KynxaSettingsCardBrush}" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" CornerRadius="12" Padding="14">
                             <StackPanel Spacing="8">
                                 <TextBlock x:Name="MemorySourceLabel" TextWrapping="Wrap" />
                                 <TextBlock x:Name="MemoryEntryStatusLabel" TextWrapping="Wrap" />
@@ -128,11 +128,13 @@
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
-                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                    <Button x:Name="DeleteMemoryButton" AutomationProperties.AutomationId="DeleteMemoryButton" services:UiLocalization.Content="删除" Click="Delete_Click" />
-                    <Button x:Name="SaveMemoryButton" AutomationProperties.AutomationId="SaveMemoryButton" services:UiLocalization.Content="保存" Click="Save_Click" />
-                    <Button x:Name="ConfirmMemoryButton" AutomationProperties.AutomationId="ConfirmMemoryButton" services:UiLocalization.Content="确认记忆" Click="Confirm_Click" Visibility="Collapsed" />
-                </StackPanel>
+                <Border x:Name="MemoryEditorFooter" Grid.Row="1" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="{StaticResource KynxaScrollContentInset}">
+                    <StackPanel x:Name="MemoryEditorActions" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                        <Button x:Name="DeleteMemoryButton" AutomationProperties.AutomationId="DeleteMemoryButton" services:UiLocalization.Content="删除" Click="Delete_Click" />
+                        <Button x:Name="SaveMemoryButton" AutomationProperties.AutomationId="SaveMemoryButton" services:UiLocalization.Content="保存" Click="Save_Click" />
+                        <Button x:Name="ConfirmMemoryButton" AutomationProperties.AutomationId="ConfirmMemoryButton" services:UiLocalization.Content="确认记忆" Click="Confirm_Click" Visibility="Collapsed" />
+                    </StackPanel>
+                </Border>
             </Grid>
         </Grid>
     </Grid>

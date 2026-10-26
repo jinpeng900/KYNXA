@@ -638,7 +638,7 @@
     {
       "name": "work.folder.list",
       "source": "builtin",
-      "description": "List this task's currently valid work folder mounts and stable mountId values. 工作目录列表、多文件夹、挂载目录。Read-only: does not scan files, rebuild indexes or call a model. Relative paths without mountId always use the task's default root; same-named files in different mounts remain distinct.",
+      "description": "Read this task's single linked work folder and its stable mountId. 查看当前工作关联的唯一文件夹。Returns zero or one binding; does not scan files, rebuild indexes or call a model. Relative paths use this folder. Linking another folder replaces the current folder only when requested; explicitly authorized external file operations still follow normal permission rules.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     },
     {

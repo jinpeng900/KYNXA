@@ -31,7 +31,8 @@
         <Button x:Name="SidebarScrim" Grid.ColumnSpan="3" Canvas.ZIndex="15" Visibility="Collapsed"
                 Style="{StaticResource ShellTransparentScrimStyle}"
                 Click="SidebarScrim_Click" services:UiLocalization.AutomationName="收起侧栏" />
-        <Grid x:Name="SidebarPane" Grid.Column="0" Canvas.ZIndex="20" Background="{StaticResource KynxaSidebarBrush}">
+        <Grid x:Name="SidebarPane" Grid.Column="0" Canvas.ZIndex="20" Background="{StaticResource KynxaSidebarBrush}"
+              SizeChanged="SidebarPane_SizeChanged">
             <Grid.RowDefinitions>
                 <RowDefinition Height="56" />
                 <RowDefinition Height="Auto" />
@@ -114,7 +115,7 @@
 
 
 
-            <Grid x:Name="RecentArea" Grid.Row="3" Margin="8,16,8,6">
+            <Grid x:Name="RecentArea" Grid.Row="3" Margin="8,8,8,6">
                 <Grid.Resources>
                     <Thickness x:Key="TreeViewItemPresenterMargin">0</Thickness>
                     <Thickness x:Key="TreeViewItemPresenterPadding">0,0,16,0</Thickness>
@@ -128,8 +129,8 @@
                          一层不透明背景同时覆盖展开箭头与内容，选中和悬停反馈不叠加。
                     -->
                     <Style x:Key="WorkProjectTreeItemStyle" TargetType="TreeViewItem">
-                        <Setter Property="Height" Value="40" />
-                        <Setter Property="MinHeight" Value="40" />
+                        <Setter Property="Height" Value="{StaticResource KynxaSidebarRowHeight}" />
+                        <Setter Property="MinHeight" Value="{StaticResource KynxaSidebarRowHeight}" />
                         <Setter Property="Padding" Value="0" />
                         <Setter Property="Margin" Value="{StaticResource KynxaSidebarItemMargin}" />
                         <Setter Property="Background" Value="Transparent" />
@@ -153,7 +154,10 @@
                                                     <VisualState.Setters><Setter Target="PointerRowBackground.Visibility" Value="Visible" /></VisualState.Setters>
                                                 </VisualState>
                                                 <VisualState x:Name="Pressed">
-                                                    <VisualState.Setters><Setter Target="PointerRowBackground.Visibility" Value="Visible" /></VisualState.Setters>
+                                                    <VisualState.Setters>
+                                                        <Setter Target="PointerRowBackground.Visibility" Value="Visible" />
+                                                        <Setter Target="PointerRowBackground.Background" Value="{StaticResource KynxaControlPressedBrush}" />
+                                                    </VisualState.Setters>
                                                 </VisualState>
                                                 <VisualState x:Name="Selected" />
                                                 <VisualState x:Name="PointerOverSelected">
@@ -166,7 +170,7 @@
                                                 <VisualState x:Name="SelectedDisabled" />
                                             </VisualStateGroup>
                                         </VisualStateManager.VisualStateGroups>
-                                        <Border x:Name="PointerRowBackground" Background="{StaticResource KynxaSelectionBrush}"
+                                        <Border x:Name="PointerRowBackground" Background="{StaticResource KynxaControlHoverBrush}"
                                                 Margin="{StaticResource KynxaSidebarSurfaceInset}"
                                                 CornerRadius="{TemplateBinding CornerRadius}" Visibility="Collapsed" IsHitTestVisible="False" />
                                         <Border x:Name="ActiveRowBackground" Background="{StaticResource KynxaSelectionBrush}"
@@ -210,7 +214,7 @@
                         <Setter Property="Padding" Value="0" />
                     </Style>
                     <DataTemplate x:Key="WorkChatRowTemplate" x:DataType="viewModels:ProjectTreeEntry">
-                        <Grid x:Name="WorkChatRowRoot" Height="40" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
+                        <Grid x:Name="WorkChatRowRoot" Height="{StaticResource KynxaSidebarRowHeight}" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
                               PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
                               GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
                             <Border x:Name="WorkChatActiveBackground" CornerRadius="{StaticResource KynxaControlRadius}"
@@ -239,55 +243,100 @@
                         </Grid>
                     </DataTemplate>
                 </Grid.Resources>
-                <Grid x:Name="WorkSidebarContent" SizeChanged="WorkSidebarContent_SizeChanged">
+                <ScrollViewer x:Name="WorkSidebarViewport" VerticalAlignment="Top" VerticalContentAlignment="Top"
+                              HorizontalContentAlignment="Stretch" Padding="0" BorderThickness="0"
+                              HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled"
+                              VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto" ZoomMode="Disabled"
+                              AutomationProperties.AutomationId="WorkSidebarViewport" services:UiLocalization.AutomationName="工作">
+                <Grid x:Name="WorkSidebarContent" SizeChanged="WorkSidebarContent_SizeChanged" VerticalAlignment="Top">
                     <Grid.RowDefinitions>
                         <RowDefinition x:Name="WorkNavigationRow" Height="Auto" />
-                        <RowDefinition x:Name="WorkNavigationGripRow" Height="8" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <Grid x:Name="WorkNavigationPanel">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="32" /><RowDefinition x:Name="WorkRecentRow" Height="Auto" />
-                            <RowDefinition x:Name="WorkRecentGripRow" Height="0" />
-                            <RowDefinition Height="40" /><RowDefinition x:Name="WorkProjectsRow" Height="*" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="40" /><RowDefinition x:Name="WorkProjectsRow" Height="Auto" />
                         </Grid.RowDefinitions>
-                    <Button x:Name="WorkRecentToggle" Height="32" Padding="8,4"
-                            Style="{StaticResource KynxaQuietButtonStyle}" Click="WorkRecentToggle_Click"
-                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
-                            AutomationProperties.Name="{services:UiText Key='展开最近的工作聊天'}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock services:UiLocalization.Text="最近" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                            <FontIcon x:Name="WorkRecentChevron" Glyph="&#xE76C;" FontSize="10" />
-                            <TextBlock x:Name="WorkRecentCount" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}"
-                                       VerticalAlignment="Center" Visibility="Collapsed" />
-                        </StackPanel>
-                    </Button>
-                    <ListView x:Name="WorkRecentHistory" Grid.Row="1" ItemsSource="{x:Bind WorkRecentEntries}" Visibility="Collapsed"
+                    <!-- Inline search replaces the title while leaving the leading collapse target accessible.
+                         标题内搜索替换文字区域，前侧折叠操作保留独立命中范围。 -->
+                    <Grid x:Name="WorkRecentHeader" Height="32" Background="Transparent">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /><ColumnDefinition Width="28" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
+                        <Button x:Name="WorkRecentToggle" Grid.ColumnSpan="2"
+                                Style="{StaticResource KynxaSidebarHeaderButtonStyle}" Click="WorkRecentToggle_Click"
+                                AutomationProperties.AutomationId="WorkRecentToggle"
+                                AutomationProperties.Name="{services:UiText Key='展开最近的工作聊天'}">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                <FontIcon x:Name="WorkRecentChevron" Glyph="&#xE76C;" FontSize="10" HorizontalAlignment="Center" />
+                                <StackPanel x:Name="WorkRecentTitleHost" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                    <TextBlock services:UiLocalization.Text="最近" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                    <TextBlock x:Name="WorkRecentCount" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}"
+                                               VerticalAlignment="Center" Visibility="Collapsed" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+                        <controls:SidebarSearchBox x:Name="WorkRecentSearchBox" AutomationProperties.AutomationId="WorkRecentSearchBox" Tag="recent" Grid.Column="1" Height="32" FontSize="13"
+                                 Style="{StaticResource KynxaPopupSearchBoxStyle}" Padding="8,4" MinWidth="0" Visibility="Collapsed"
+                                 services:UiLocalization.PlaceholderText="搜索工作任务" services:UiLocalization.AutomationName="请输入工作任务名称"
+                                 TextChanged="SidebarSearch_TextChanged" KeyDown="SidebarSearch_KeyDown" KeyUp="SidebarSearch_KeyUp"
+                                 TextCompositionStarted="SidebarSearch_CompositionStarted" TextCompositionEnded="SidebarSearch_CompositionEnded" />
+                        <Button x:Name="WorkRecentSearchButton" AutomationProperties.AutomationId="WorkRecentSearchButton" Grid.Column="2" Tag="recent" Click="SidebarSearch_Click"
+                                Style="{StaticResource KynxaProjectActionButtonStyle}" Width="28" Height="28"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                services:UiLocalization.AutomationName="搜索工作任务" services:UiLocalization.ToolTip="搜索工作任务">
+                            <FontIcon x:Name="WorkRecentSearchGlyph" Glyph="&#xE721;" FontSize="14" />
+                        </Button>
+                    </Grid>
+                    <ListView x:Name="WorkRecentHistory" KeyDown="SidebarSearchResults_KeyDown" Grid.Row="1" ItemsSource="{x:Bind VisibleWorkRecentEntries}" Visibility="Collapsed"
+                              Padding="0" BorderThickness="0" MinHeight="0" VerticalAlignment="Top"
                               SelectionMode="None" IsItemClickEnabled="True" ItemClick="WorkChatHistory_ItemClick"
                               ItemTemplate="{StaticResource WorkChatRowTemplate}"
                               ItemContainerStyle="{StaticResource WorkChatListItemStyle}"
                               ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                               ScrollViewer.VerticalScrollMode="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                               services:UiLocalization.AutomationName="所有工作中的最近聊天" />
-                    <controls:ResizeGrip x:Name="WorkRecentGrip" Grid.Row="2" Axis="Vertical" Margin="8,0,16,0"
-                                         Visibility="Collapsed" IndicatorBrush="{StaticResource KynxaDividerBrush}"
-                                         DragStarted="WorkRecentGrip_DragStarted" DragDelta="WorkRecentGrip_DragDelta"
-                                         DragCompleted="LayoutGrip_DragCompleted" CancelRequested="WorkRecentGrip_CancelRequested"
-                                         ResetRequested="WorkRecentGrip_ResetRequested"
-                                         services:UiLocalization.AutomationName="调整最近与项目区域高度"
-                                         services:UiLocalization.ToolTip="上下拖动调整区域，双击恢复默认" />
+                    <TextBlock x:Name="WorkRecentSearchEmpty" Grid.Row="1" Height="32" FontSize="13" Margin="8,0,16,0"
+                               Foreground="{StaticResource KynxaSecondaryTextBrush}" services:UiLocalization.Text="没有匹配结果"
+                               Visibility="Collapsed" TextTrimming="CharacterEllipsis" />
+                    <controls:ResizeGrip x:Name="WorkRecentDivider" Grid.Row="2" Axis="Vertical" Tag="0" Margin="8,0,12,0"
+                                         Visibility="Collapsed" AutomationProperties.AutomationId="WorkRecentDivider"
+                                         services:UiLocalization.AutomationName="调整最近和项目区域高度"
+                                         services:UiLocalization.ToolTip="拖动调整区域高度，双击恢复默认四行"
+                                         DragStarted="WorkSidebarDivider_DragStarted" DragDelta="WorkSidebarDivider_DragDelta"
+                                         DragCompleted="WorkSidebarDivider_DragCompleted" CancelRequested="WorkSidebarDivider_CancelRequested"
+                                         ResetRequested="WorkSidebarDivider_ResetRequested" />
                     <Grid x:Name="ProjectsHeader" Grid.Row="3" Margin="0,8,0,0" Height="32" Background="Transparent" PointerEntered="ProjectsHeader_PointerEntered"
                           PointerExited="ProjectsHeader_PointerExited" GotFocus="ProjectsHeader_GotFocus" LostFocus="ProjectsHeader_LostFocus">
-                        <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
-                        <Button x:Name="ProjectsToggle" Click="ProjectsToggle_Click" Style="{StaticResource KynxaQuietButtonStyle}" Background="Transparent"
-                                BorderThickness="0" Padding="8,4" HorizontalAlignment="Stretch"
-                                HorizontalContentAlignment="Left" services:UiLocalization.AutomationName="展开或收起项目">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <TextBlock services:UiLocalization.Text="项目" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                <FontIcon x:Name="ProjectsChevron" Glyph="&#xE70D;" FontSize="10" />
-                            </StackPanel>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /><ColumnDefinition Width="28" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
+                        <Button x:Name="ProjectsToggle" Grid.ColumnSpan="2" Click="ProjectsToggle_Click" Style="{StaticResource KynxaSidebarHeaderButtonStyle}"
+                                services:UiLocalization.AutomationName="展开或收起项目"
+                                AutomationProperties.AutomationId="ProjectsToggle">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                <FontIcon x:Name="ProjectsChevron" Glyph="&#xE70D;" FontSize="10" HorizontalAlignment="Center" />
+                                <StackPanel x:Name="ProjectTitleHost" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                    <TextBlock services:UiLocalization.Text="项目" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                    <TextBlock x:Name="WorkProjectCount" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}"
+                                               VerticalAlignment="Center" Visibility="Collapsed" />
+                                </StackPanel>
+                            </Grid>
                         </Button>
-                        <Button x:Name="AddProjectButton" Grid.Column="1" Style="{StaticResource KynxaProjectActionButtonStyle}"
+                        <controls:SidebarSearchBox x:Name="ProjectSearchBox" AutomationProperties.AutomationId="ProjectSearchBox" Tag="projects" Grid.Column="1" Height="32" FontSize="13"
+                                 Style="{StaticResource KynxaPopupSearchBoxStyle}" Padding="8,4" MinWidth="0" Visibility="Collapsed"
+                                 services:UiLocalization.PlaceholderText="搜索项目" services:UiLocalization.AutomationName="请输入项目名称"
+                                 TextChanged="SidebarSearch_TextChanged" KeyDown="SidebarSearch_KeyDown" KeyUp="SidebarSearch_KeyUp"
+                                 TextCompositionStarted="SidebarSearch_CompositionStarted" TextCompositionEnded="SidebarSearch_CompositionEnded" />
+                        <Button x:Name="ProjectSearchButton" AutomationProperties.AutomationId="ProjectSearchButton" Grid.Column="2" Tag="projects" Click="SidebarSearch_Click"
+                                Style="{StaticResource KynxaProjectActionButtonStyle}" Width="28" Height="28"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                services:UiLocalization.AutomationName="搜索项目" services:UiLocalization.ToolTip="搜索项目">
+                            <FontIcon x:Name="ProjectSearchGlyph" Glyph="&#xE721;" FontSize="14" />
+                        </Button>
+                        <Button x:Name="AddProjectButton" Grid.Column="3" Style="{StaticResource KynxaProjectActionButtonStyle}"
                                 Opacity="0" IsHitTestVisible="False"
                                 services:UiLocalization.AutomationName="添加项目" services:UiLocalization.ToolTip="添加项目">
                             <Button.OpacityTransition><ScalarTransition Duration="0:0:0.12" /></Button.OpacityTransition>
@@ -305,7 +354,8 @@
                             </Button.Flyout>
                         </Button>
                     </Grid>
-                    <TreeView x:Name="ProjectTree" Grid.Row="4" SelectionMode="None" ItemsSource="{x:Bind ProjectEntries}"
+                    <TreeView x:Name="ProjectTree" KeyDown="SidebarSearchResults_KeyDown" Grid.Row="4" SelectionMode="None" ItemsSource="{x:Bind VisibleProjectEntries}"
+                              Padding="0" BorderThickness="0" MinHeight="0" VerticalAlignment="Top"
                               ItemContainerStyle="{StaticResource WorkProjectTreeItemStyle}"
                               CanDragItems="False" CanReorderItems="False" ItemInvoked="ProjectTree_ItemInvoked"
                               Collapsed="ProjectTree_Collapsed" Expanding="ProjectTree_Expanding"
@@ -369,61 +419,117 @@
                             </DataTemplate>
                         </TreeView.ItemTemplate>
                     </TreeView>
+                    <TextBlock x:Name="ProjectSearchEmpty" Grid.Row="4" Height="32" FontSize="13" Margin="8,0,16,0"
+                               Foreground="{StaticResource KynxaSecondaryTextBrush}" services:UiLocalization.Text="没有匹配结果"
+                               Visibility="Collapsed" TextTrimming="CharacterEllipsis" />
                     </Grid>
-                    <controls:ResizeGrip x:Name="WorkNavigationGrip" Grid.Row="1" Axis="Vertical" Margin="8,0,16,0"
-                                         IndicatorBrush="{StaticResource KynxaDividerBrush}"
-                                         DragStarted="WorkNavigationGrip_DragStarted" DragDelta="WorkNavigationGrip_DragDelta"
-                                         DragCompleted="LayoutGrip_DragCompleted" CancelRequested="WorkNavigationGrip_CancelRequested"
-                                         ResetRequested="WorkNavigationGrip_ResetRequested"
-                                         services:UiLocalization.AutomationName="调整项目与任务区域高度"
-                                         services:UiLocalization.ToolTip="上下拖动调整区域，双击恢复默认" />
+                    <controls:ResizeGrip x:Name="WorkProjectsDivider" Grid.Row="1" Axis="Vertical" Tag="1" Margin="8,0,12,0"
+                                         Visibility="Collapsed" AutomationProperties.AutomationId="WorkProjectsDivider"
+                                         services:UiLocalization.AutomationName="调整项目和任务区域高度"
+                                         services:UiLocalization.ToolTip="拖动调整区域高度，双击恢复默认四行"
+                                         DragStarted="WorkSidebarDivider_DragStarted" DragDelta="WorkSidebarDivider_DragDelta"
+                                         DragCompleted="WorkSidebarDivider_DragCompleted" CancelRequested="WorkSidebarDivider_CancelRequested"
+                                         ResetRequested="WorkSidebarDivider_ResetRequested" />
                     <Grid x:Name="TasksSection" Grid.Row="2" Margin="0,4,0,0">
-                        <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                        <Grid x:Name="WorkTaskHeader" Margin="8,0,16,0" Background="Transparent"
+                        <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid x:Name="WorkTaskHeader" Background="Transparent"
                               PointerEntered="WorkTaskHeader_PointerEntered" PointerExited="WorkTaskHeader_PointerExited"
                               GotFocus="WorkTaskHeader_FocusChanged" LostFocus="WorkTaskHeader_FocusChanged">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock services:UiLocalization.Text="任务" VerticalAlignment="Center" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                            <TextBlock x:Name="WorkTaskProjectLabel" Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center"
-                                       Visibility="Collapsed" FontSize="12" TextTrimming="CharacterEllipsis"
-                                       Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                            <Button x:Name="WorkTaskAddChatButton" Grid.Column="2" Style="{StaticResource KynxaProjectActionButtonStyle}"
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /><ColumnDefinition Width="28" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
+                            <Button x:Name="WorkTaskToggle" Grid.ColumnSpan="2" Click="WorkTaskToggle_Click" Style="{StaticResource KynxaSidebarHeaderButtonStyle}"
+                                    services:UiLocalization.AutomationName="展开或收起任务" AutomationProperties.AutomationId="WorkTaskToggle">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                    <FontIcon x:Name="WorkTaskChevron" Glyph="&#xE70D;" FontSize="10" HorizontalAlignment="Center" />
+                                    <Grid x:Name="WorkTaskTitleHost" Grid.Column="1" ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                        <TextBlock services:UiLocalization.Text="任务" VerticalAlignment="Center" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                        <TextBlock x:Name="WorkTaskCount" Grid.Column="1" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}"
+                                                   VerticalAlignment="Center" Visibility="Collapsed" />
+                                        <TextBlock x:Name="WorkTaskProjectLabel" Grid.Column="2" VerticalAlignment="Center"
+                                                   Visibility="Collapsed" FontSize="12" TextTrimming="CharacterEllipsis"
+                                                   Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                    </Grid>
+                                </Grid>
+                            </Button>
+                            <controls:SidebarSearchBox x:Name="WorkTaskSearchBox" AutomationProperties.AutomationId="WorkTaskSearchBox" Tag="tasks" Grid.Column="1" Height="32" FontSize="13"
+                                     Style="{StaticResource KynxaPopupSearchBoxStyle}" Padding="8,4" MinWidth="0" Visibility="Collapsed"
+                                     services:UiLocalization.PlaceholderText="搜索当前任务" services:UiLocalization.AutomationName="请输入当前项目任务名称"
+                                     TextChanged="SidebarSearch_TextChanged" KeyDown="SidebarSearch_KeyDown" KeyUp="SidebarSearch_KeyUp"
+                                     TextCompositionStarted="SidebarSearch_CompositionStarted" TextCompositionEnded="SidebarSearch_CompositionEnded" />
+                            <Button x:Name="WorkTaskSearchButton" AutomationProperties.AutomationId="WorkTaskSearchButton" Grid.Column="2" Tag="tasks" Click="SidebarSearch_Click"
+                                    Style="{StaticResource KynxaProjectActionButtonStyle}" Width="28" Height="28"
+                                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                                    services:UiLocalization.AutomationName="搜索当前项目任务" services:UiLocalization.ToolTip="搜索当前项目任务">
+                                <FontIcon x:Name="WorkTaskSearchGlyph" Glyph="&#xE721;" FontSize="14" />
+                            </Button>
+                            <Button x:Name="WorkTaskAddChatButton" Grid.Column="3" Style="{StaticResource KynxaProjectActionButtonStyle}"
                                     VerticalAlignment="Center" Visibility="Collapsed" IsEnabled="False" Opacity="0" IsHitTestVisible="False"
                                     Click="WorkTaskAddChat_Click" AutomationProperties.Name="{services:UiText Key='在当前项目中添加聊天'}"
                                     services:UiLocalization.ToolTip="添加聊天">
                                 <controls:ThemeIcon Width="18" Height="18" IconKey="IconChatAdd" />
                             </Button>
                         </Grid>
-                        <ListView x:Name="WorkTaskHistory" Grid.Row="1" ItemsSource="{x:Bind WorkTaskEntries}"
+                        <ListView x:Name="WorkTaskHistory" KeyDown="SidebarSearchResults_KeyDown" Grid.Row="1" ItemsSource="{x:Bind VisibleWorkTaskEntries}"
+                                  Padding="0" BorderThickness="0" MinHeight="0" VerticalAlignment="Top"
                                   SelectionMode="None" IsItemClickEnabled="True" ItemClick="WorkChatHistory_ItemClick"
                                   ItemTemplate="{StaticResource WorkChatRowTemplate}"
                                   ItemContainerStyle="{StaticResource WorkChatListItemStyle}"
                                   ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                   ScrollViewer.VerticalScrollMode="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                                   AutomationProperties.Name="{services:UiText Key='当前项目的聊天'}" />
+                        <TextBlock x:Name="WorkTaskSearchEmpty" Grid.Row="1" Height="32" FontSize="13" Margin="8,0,16,0"
+                                   Foreground="{StaticResource KynxaSecondaryTextBrush}" services:UiLocalization.Text="没有匹配结果"
+                                   Visibility="Collapsed" TextTrimming="CharacterEllipsis" />
                     </Grid>
                 </Grid>
-                <Grid x:Name="ChatSidebarContent" Visibility="Collapsed">
-                    <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                </ScrollViewer>
+                <Grid x:Name="ChatSidebarContent" Visibility="Collapsed" VerticalAlignment="Top"
+                      SizeChanged="ChatSidebarContent_SizeChanged">
+                    <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                     <Grid x:Name="ChatHeader" PointerEntered="ChatHeader_PointerEntered" PointerExited="ChatHeader_PointerExited"
                           GotFocus="ChatHeader_GotFocus" LostFocus="ChatHeader_LostFocus" Background="Transparent">
-                        <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
-                        <TextBlock Margin="8,4" services:UiLocalization.Text="聊天" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                        <Button x:Name="NewChatButton" Grid.Column="1" Style="{StaticResource KynxaProjectActionButtonStyle}"
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /><ColumnDefinition Width="28" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
+                        <Button x:Name="ChatHistoryToggle" Grid.ColumnSpan="2" Click="ChatHistoryToggle_Click" Style="{StaticResource KynxaSidebarHeaderButtonStyle}"
+                                services:UiLocalization.AutomationName="展开或收起聊天" AutomationProperties.AutomationId="ChatHistoryToggle">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                <FontIcon x:Name="ChatHistoryChevron" Glyph="&#xE70D;" FontSize="10" HorizontalAlignment="Center" />
+                                <StackPanel x:Name="ChatTitleHost" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                    <TextBlock services:UiLocalization.Text="聊天" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                    <TextBlock x:Name="ChatHistoryCount" FontSize="12" VerticalAlignment="Center"
+                                               Foreground="{StaticResource KynxaSecondaryTextBrush}" Visibility="Collapsed" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+                        <controls:SidebarSearchBox x:Name="ChatSearchBox" AutomationProperties.AutomationId="ChatSearchBox" Tag="chat" Grid.Column="1" Height="32" FontSize="13"
+                                 Style="{StaticResource KynxaPopupSearchBoxStyle}" Padding="8,4" MinWidth="0" Visibility="Collapsed"
+                                 services:UiLocalization.PlaceholderText="搜索聊天" services:UiLocalization.AutomationName="请输入聊天名称"
+                                 TextChanged="SidebarSearch_TextChanged" KeyDown="SidebarSearch_KeyDown" KeyUp="SidebarSearch_KeyUp"
+                                 TextCompositionStarted="SidebarSearch_CompositionStarted" TextCompositionEnded="SidebarSearch_CompositionEnded" />
+                        <Button x:Name="ChatSearchButton" AutomationProperties.AutomationId="ChatSearchButton" Grid.Column="2" Tag="chat" Click="SidebarSearch_Click"
+                                Style="{StaticResource KynxaProjectActionButtonStyle}" Width="28" Height="28"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                services:UiLocalization.AutomationName="搜索聊天" services:UiLocalization.ToolTip="搜索聊天">
+                            <FontIcon x:Name="ChatSearchGlyph" Glyph="&#xE721;" FontSize="14" />
+                        </Button>
+                        <Button x:Name="NewChatButton" Grid.Column="3" Style="{StaticResource KynxaProjectActionButtonStyle}"
                                 Opacity="0" IsHitTestVisible="False" Click="NewStandaloneChat_Click"
                                 services:UiLocalization.AutomationName="新建聊天" services:UiLocalization.ToolTip="新建聊天">
                             <Button.OpacityTransition><ScalarTransition Duration="0:0:0.12" /></Button.OpacityTransition>
                             <controls:ThemeIcon Width="18" Height="18" IconKey="IconChatAdd" />
                         </Button>
                     </Grid>
-                    <ListView x:Name="ChatHistoryList" Grid.Row="1" ItemsSource="{x:Bind ViewModel.RecentConversations}"
+                    <ListView x:Name="ChatHistoryList" KeyDown="SidebarSearchResults_KeyDown" Grid.Row="1"
+                              Padding="0" BorderThickness="0" MinHeight="0" VerticalAlignment="Top"
                               ItemContainerStyle="{StaticResource KynxaSidebarListItemStyle}" SelectionMode="Single"
                               IsItemClickEnabled="True" ItemClick="ChatHistoryList_ItemClick"
                               ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                              ScrollViewer.VerticalScrollMode="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                               services:UiLocalization.AutomationName="聊天历史">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:RecentConversation">
-                                <Grid Height="40" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
+                                <Grid Height="{StaticResource KynxaSidebarRowHeight}" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
                                       PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
                                       GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
                                     <TextBlock x:Name="ProjectRowTitle" Text="{x:Bind Title}" FontFamily="{StaticResource KynxaUIFont}"
@@ -441,6 +547,9 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
+                    <TextBlock x:Name="ChatSearchEmpty" Grid.Row="1" Height="32" FontSize="13" Margin="8,0,16,0"
+                               Foreground="{StaticResource KynxaSecondaryTextBrush}" services:UiLocalization.Text="没有匹配结果"
+                               Visibility="Collapsed" TextTrimming="CharacterEllipsis" />
                 </Grid>
             </Grid>
 
@@ -448,11 +557,6 @@
             <Grid x:Name="SidebarFooter" Grid.Row="4" Margin="14,0,10,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
                 <Button Style="{StaticResource KynxaIconButtonStyle}" Click="StorageSettings_Click" services:UiLocalization.AutomationName="设置" services:UiLocalization.ToolTip="设置"><controls:ThemeIcon Width="20" Height="20" IconKey="IconSettings" /></Button>
-                <Button x:Name="HistorySearchButton" Grid.Column="1" HorizontalAlignment="Center"
-                        Style="{StaticResource KynxaIconButtonStyle}" Click="HistorySearch_Click"
-                        services:UiLocalization.AutomationName="搜索会话" services:UiLocalization.ToolTip="搜索会话 Ctrl+Shift+K">
-                    <FontIcon Glyph="&#xE721;" FontSize="17" />
-                </Button>
                 <Button x:Name="ModelStatusButton" Grid.Column="2" Style="{StaticResource KynxaIconButtonStyle}" Click="ModelStatusButton_Click">
                     <Grid>
                     <controls:ThemeIcon Width="20" Height="20" IconKey="IconDeviceStatus" />
@@ -488,13 +592,18 @@
                 </Grid.ColumnDefinitions>
 
                 <Grid x:Name="PrimaryContentSlot" SizeChanged="PrimaryContentSlot_SizeChanged">
-                    <InfoBar x:Name="ProjectNotice" IsOpen="False" IsClosable="True" Severity="Informational"
-                             HorizontalAlignment="Right" VerticalAlignment="Top" Margin="24,12" MaxWidth="420"
+                    <controls:CompactInfoBar x:Name="ProjectNotice" IsOpen="False" IsClosable="True" Severity="Informational"
+                             Style="{StaticResource KynxaInfoBarStyle}"
+                             HorizontalAlignment="Right" VerticalAlignment="Top" Margin="24,56,24,0" MaxWidth="420"
+                             Closed="ProjectNotice_Closed" AutomationProperties.AutomationId="ProjectNotice"
                              Canvas.ZIndex="10">
                         <InfoBar.ActionButton>
-                            <Button services:UiLocalization.Content="撤销" Click="UndoSidebarChange_Click" />
+                            <Button x:Name="ProjectNoticeUndoButton" Visibility="Collapsed" IsEnabled="False"
+                                    Style="{StaticResource KynxaInfoBarActionButtonStyle}"
+                                    services:UiLocalization.Content="撤销" services:UiLocalization.AutomationName="撤销"
+                                    AutomationProperties.AutomationId="ProjectNoticeUndoButton" Click="UndoSidebarChange_Click" />
                         </InfoBar.ActionButton>
-                    </InfoBar>
+                    </controls:CompactInfoBar>
                     <TextBlock x:Name="ConversationTitle" Margin="24,16" VerticalAlignment="Top"
                                FontSize="14" Foreground="{StaticResource KynxaSecondaryTextBrush}"
                                TextTrimming="CharacterEllipsis" Visibility="Collapsed" />
@@ -542,7 +651,9 @@
                         <controls:ComposerSurface x:Name="ComposerHost" Grid.Row="1" IsFooterVisible="True" services:UiLocalization.AutomationName="对话输入区">
                             <controls:ComposerSurface.Body>
                                 <Grid>
-                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
+                                    <!-- Size the action row from its controls and margin so the circular Send button is never clipped.
+                                         操作行按控件和留白的实际高度布局，避免圆形发送按钮被裁切。 -->
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <controls:ConversationAttachmentDrafts x:Name="ComposerAttachments" />
                                     <TextBox x:Name="PromptTextBox" Grid.Row="1" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
                                         <TextBox.Resources>

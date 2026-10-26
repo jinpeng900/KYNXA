@@ -37,13 +37,16 @@
        仅在构建机准备原生文件及固定 MCP 依赖；用户无需安装开发工具或系统 Node。 -->
   <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true'">
     <PropertyGroup>
-      <_KynxaNativeCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\native-desktop\win-x64'))</_KynxaNativeCacheDirectory>
+      <!-- A local short cache keeps pinned MCP paths readable by Windows PowerShell.
+           本机可选短缓存让 Windows PowerShell 能读取完整 MCP 路径，默认仍使用仓库缓存。 -->
+      <_KynxaNativeCacheDirectory Condition="'$(KynxaNativeRuntimeRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\native-desktop\win-x64'))</_KynxaNativeCacheDirectory>
+      <_KynxaNativeCacheDirectory Condition="'$(KynxaNativeRuntimeRoot)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaNativeRuntimeRoot)'))</_KynxaNativeCacheDirectory>
     </PropertyGroup>
     <!-- VS may send a BOM on redirected stdin; preparation scripts accept no pipeline input.
          VS 可能在重定向标准输入中发送 BOM；准备脚本不接收管道输入。 -->
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
           EnvironmentVariables="$(KynxaNativeBuildEnvironment)"
-          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot; $(_KynxaRuntimeOptions) &lt; NUL" />
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot; -BundleRoot &quot;$(_KynxaNativeCacheDirectory)&quot; $(_KynxaRuntimeOptions) &lt; NUL" />
     <ReadLinesFromFile File="$(_KynxaNativeCacheDirectory)\bundle-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaNativeRuntimeFiles" />
     </ReadLinesFromFile>

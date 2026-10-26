@@ -69,13 +69,17 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     public ObservableCollection<MemoryEntry> Entries { get; } = [];
     public ObservableCollection<MemoryEntry> VisibleEntries => Entries;
     public bool IsBusy { get; private set; }
+    public bool IsBlockingOperation { get; private set; }
     public bool IsLoaded { get; private set; }
     public long? ScopeRevision { get; private set; }
     public MemoryManagementStatus Status { get; private set; }
     public Exception? Error { get; private set; }
     public Exception? RefreshError { get; private set; }
     public bool IsNew => _editingId is null;
-    public bool HasChanges => _editorContent != _baselineContent || _editorKind != _baselineKind;
+    // Choosing a type for an empty new memory does not create a draft worth discarding.
+    // 空白新记忆只选择类型时无需提示放弃；已有条目的类型变化仍需保存。
+    public bool HasChanges => IsNew ? !string.IsNullOrWhiteSpace(_editorContent)
+        : _editorContent != _baselineContent || _editorKind != _baselineKind;
     public MemoryInputError InputError => MemoryInputValidation.Validate(_editorContent, _editorKind);
     public bool CanSave => !_disposed && !IsBusy && IsLoaded && !_createOutcomeUnknown && InputError == MemoryInputError.None &&
         (IsNew || (HasChanges && Entries.Any(entry => entry.Id == _editingId)));
@@ -149,7 +153,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (Target is not { } target || IsBusy) return;
-        var operation = StartOperation(cancellationToken);
+        var operation = StartOperation(cancellationToken, blocksClose: false);
         int editorGeneration = _editorGeneration;
         bool refreshUnchangedEditor = !HasChanges && _editingId is not null;
         try
@@ -358,11 +362,14 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         _editorGeneration++;
     }
 
-    private Operation StartOperation(CancellationToken cancellationToken)
+    private Operation StartOperation(CancellationToken cancellationToken, bool blocksClose = true)
     {
         var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _operationCancellation = source;
         IsBusy = true;
+        // Reads can be cancelled when the editor closes; writes retain the close guard until their receipt is handled.
+        // 关闭编辑器可取消只读请求；写入则保留关闭保护，直到处理完成回执。
+        IsBlockingOperation = blocksClose;
         return new(source, _operationGeneration);
     }
 
@@ -374,6 +381,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         {
             _operationCancellation = null;
             IsBusy = false;
+            IsBlockingOperation = false;
             NotifyAll();
         }
         operation.Source.Dispose();
@@ -386,6 +394,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         _operationCancellation = null;
         source?.Cancel();
         IsBusy = false;
+        IsBlockingOperation = false;
     }
 
     private void Notify([CallerMemberName] string? propertyName = null) => PropertyChanged?.Invoke(this, new(propertyName));

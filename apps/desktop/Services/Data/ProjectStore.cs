@@ -133,12 +133,16 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
 
     // Capture snapshots before the first await: UI collections can change during a request.
     // 首个 await 前捕获快照；请求执行时 UI 集合可能继续变化。
-    private List<ProjectState> SnapshotProjects(IReadOnlyList<ProjectState> projects) => projects.Select(project => new ProjectState
+    private List<ProjectState> SnapshotProjects(IReadOnlyList<ProjectState> projects) => projects.Select(project =>
         {
-            Id = project.Id, Name = project.Name, FolderPath = project.FolderPath,
-            Mounts = project.Mounts.ToList(), DefaultMountId = project.DefaultMountId,
-            IsPinned = project.IsPinned, IsArchived = project.IsArchived, IsFolderlessWorkspace = project.IsFolderlessWorkspace,
-            Chats = project.Chats.Where(chat => chat.CanPersist).Select(SnapshotChat).ToList()
+            var mount = ProjectMountPresentation.WorkspaceMount(project);
+            return new ProjectState
+            {
+                Id = project.Id, Name = project.Name, FolderPath = project.IsFolderlessWorkspace ? null : mount?.Path ?? project.FolderPath,
+                Mounts = mount is null ? [] : [mount], DefaultMountId = mount?.Id,
+                IsPinned = project.IsPinned, IsArchived = project.IsArchived, IsFolderlessWorkspace = project.IsFolderlessWorkspace,
+                Chats = project.Chats.Where(chat => chat.CanPersist).Select(SnapshotChat).ToList()
+            };
         }).ToList();
 
     public async Task SaveAsync(IReadOnlyList<ProjectState> projects)
@@ -229,7 +233,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
             }
             else catalog = await ReadAsync(response, cancellationToken);
             // Apply mount receipts only to unchanged submissions, preserving later local edits.
-            // 挂载回执只更新提交后未改的绑定，保留后续新增的根和默认目录修改。
+            // 目录回执只更新提交后未改的绑定，保留后续更换或取消关联的修改。
             var savedBindings = catalog.Projects.ToDictionary(project => project.Id);
             foreach (var project in projectReferences ?? _loadedProjects)
                 if (snapshotBindings.TryGetValue(project.Id, out var submitted) && JsonElement.DeepEquals(WorkBinding(project), submitted) &&
@@ -273,8 +277,15 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         return JsonSerializer.SerializeToElement(next, JsonOptions);
     }
 
-    private static JsonElement WorkBinding(ProjectState project) => JsonSerializer.SerializeToElement(new
-    { project.FolderPath, project.Mounts, project.DefaultMountId }, JsonOptions);
+    private static JsonElement WorkBinding(ProjectState project)
+    {
+        var mount = ProjectMountPresentation.WorkspaceMount(project);
+        return JsonSerializer.SerializeToElement(new
+        {
+            FolderPath = project.IsFolderlessWorkspace ? null : mount?.Path ?? project.FolderPath,
+            Mounts = mount is null ? new List<ProjectMountState>() : [mount], DefaultMountId = mount?.Id
+        }, JsonOptions);
+    }
 
     private static JsonElement CatalogMetadata(ConversationCatalog catalog, bool includeFolders = false)
     {

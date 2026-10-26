@@ -10,6 +10,8 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
 
@@ -60,6 +62,7 @@ public sealed partial class MemoryManagementWindow : Window
         _viewModel.PropertyChanged += ViewModel_Changed;
         _viewModel.VisibleEntries.CollectionChanged += Entries_Changed;
         UiText.LanguageChanged += Language_Changed;
+        AppearanceService.Changed += Appearance_Changed;
         AppWindow.Closing += Window_Closing;
         Closed += Window_Closed;
         Render();
@@ -69,7 +72,17 @@ public sealed partial class MemoryManagementWindow : Window
     // Active operations still guard storage and scope changes; loading is not an unsaved edit.
     // 进行中的操作仍保护存储与范围切换；加载不等于未保存的编辑。
     public bool HasPendingChanges => _viewModel.IsBusy || HasUnsavedChanges;
+    public bool BlocksSettingsClose => _viewModel.IsBlockingOperation || _dialogOpen;
+    public IReadOnlyList<string> UnsavedChangeLabels => HasUnsavedChanges ? [UiText.Get("记忆编辑")] : [];
+    public event EventHandler? PendingStateChanged;
     public bool IsEmbedded => _settingsOwner is not null;
+
+    public void RevealUnsavedChanges()
+    {
+        if (_closed || !HasUnsavedChanges) return;
+        MemoryContentBox.StartBringIntoView();
+        MemoryContentBox.Focus(FocusState.Programmatic);
+    }
 
     /// <summary>
     /// Reuses the existing editor inside the settings owner; switching categories keeps its draft and loaded state.
@@ -130,7 +143,31 @@ public sealed partial class MemoryManagementWindow : Window
         Grid.SetRowSpan(MemoryEditorPanel, narrow ? 1 : 2);
     }
 
-    private void ViewModel_Changed(object? sender, PropertyChangedEventArgs e) => QueueRender();
+    private void MemoryRoot_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_closed || _dialogOpen ||
+            (MemoryContentBox.FocusState == FocusState.Unfocused && MemorySearchBox.FocusState == FocusState.Unfocused) ||
+            !e.GetCurrentPoint(MemoryRoot).Properties.IsLeftButtonPressed) return;
+
+        for (DependencyObject? element = e.OriginalSource as DependencyObject;
+            element is not null && element != MemoryRoot; element = VisualTreeHelper.GetParent(element))
+        {
+            if (element is TextBox or PasswordBox or RichEditBox or ButtonBase or Selector or ScrollBar or Thumb ||
+                element is TextBlock { IsTextSelectionEnabled: true }) return;
+        }
+
+        // Blank space dismisses text input without handling the click or changing the draft.
+        // 点击空白处仅移出文本输入焦点，不吞掉点击，也不修改草稿。
+        MemoryEditorScroll.Focus(FocusState.Pointer);
+    }
+
+    private void ViewModel_Changed(object? sender, PropertyChangedEventArgs e)
+    {
+        QueueRender();
+        if (!_closed && e.PropertyName is null or "" or nameof(MemoryManagementViewModel.HasChanges)
+            or nameof(MemoryManagementViewModel.IsBusy) or nameof(MemoryManagementViewModel.IsBlockingOperation))
+            PendingStateChanged?.Invoke(this, EventArgs.Empty);
+    }
     private void Entries_Changed(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
         _rowsChanged = true;
@@ -141,6 +178,23 @@ public sealed partial class MemoryManagementWindow : Window
     {
         _rowsChanged = true;
         QueueRender();
+        if (!_closed) PendingStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void Appearance_Changed(object? sender, EventArgs e)
+    {
+        if (_closed) return;
+        // Theme changes update only retained scope buttons; the memory editor and its rows remain untouched.
+        // 主题变化只更新现有范围按钮，保留记忆编辑器和列表行的全部状态。
+        if (DispatcherQueue.HasThreadAccess) RefreshScopeButtons();
+        else DispatcherQueue.TryEnqueue(RefreshScopeButtons);
+    }
+
+    private void RefreshScopeButtons()
+    {
+        if (_closed) return;
+        foreach (var button in new[] { MemoryScopeChatButton, MemoryScopeProjectButton, MemoryScopeUserButton })
+            SelectionButtonPresentation.Apply(button, (string)button.Tag == _scope, AppearanceService.GetBrush("KynxaMainBrush"));
     }
 
     private void QueueRender()
@@ -160,8 +214,7 @@ public sealed partial class MemoryManagementWindow : Window
         try
         {
             Title = UiText.Get("KYNXA · 记忆管理");
-            foreach (var button in new[] { MemoryScopeChatButton, MemoryScopeProjectButton, MemoryScopeUserButton })
-                button.Background = (Brush)Application.Current.Resources[(string)button.Tag == _scope ? "KynxaSelectionBrush" : "KynxaMainBrush"];
+            RefreshScopeButtons();
             MemoryContextPicker.Visibility = _scope == MemoryScopes.User ? Visibility.Collapsed : Visibility.Visible;
             MemoryEditorHeading.Text = UiText.Get(_viewModel.IsNew ? "新增记忆" : "编辑记忆");
             MemoryScopeLabel.Text = _viewModel.Target?.DisplayName ?? UiText.Get(_scope == MemoryScopes.Chat ? "暂无已保存的聊天" : "暂无工作");
@@ -407,6 +460,7 @@ public sealed partial class MemoryManagementWindow : Window
     {
         if (_closed || _dialogOpen || MemoryRoot.XamlRoot is null) return false;
         _dialogOpen = true;
+        PendingStateChanged?.Invoke(this, EventArgs.Empty);
         var dialog = new ContentDialog
         {
             XamlRoot = (_settingsOwner?.Content as FrameworkElement)?.XamlRoot ?? MemoryRoot.XamlRoot,
@@ -420,11 +474,16 @@ public sealed partial class MemoryManagementWindow : Window
         UiLocalization.Bind(dialog, ContentDialog.PrimaryButtonTextProperty, action);
         UiLocalization.Bind(dialog, ContentDialog.CloseButtonTextProperty, "取消");
         try { return await DialogPresentation.ShowAsync(dialog) == ContentDialogResult.Primary; }
-        finally { _dialogOpen = false; }
+        finally
+        {
+            _dialogOpen = false;
+            if (!_closed) PendingStateChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private async void Window_Closing(AppWindow sender, AppWindowClosingEventArgs e)
     {
+        if (!_allowClose && BlocksSettingsClose) { e.Cancel = true; return; }
         if (_allowClose || !HasUnsavedChanges) return;
         e.Cancel = true;
         if (await ConfirmDiscardAsync() && !_closed)
@@ -440,6 +499,8 @@ public sealed partial class MemoryManagementWindow : Window
     {
         if (_closed) return;
         _closed = true;
+        PendingStateChanged = null;
+        AppearanceService.Changed -= Appearance_Changed;
         UiText.LanguageChanged -= Language_Changed;
         _viewModel.PropertyChanged -= ViewModel_Changed;
         _viewModel.VisibleEntries.CollectionChanged -= Entries_Changed;

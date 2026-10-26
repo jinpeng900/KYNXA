@@ -58,11 +58,12 @@ public sealed partial class LocalModelsPage
         header.Children.Add(back);
         header.Children.Add(Label(title, 16));
         page.Children.Add(header);
-        var scroll = new ScrollViewer { Content = content, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(4, 0, 4, 0) };
+        var scroll = new ScrollViewer { Content = content,
+            Style = (Style)Application.Current.Resources["KynxaFormScrollViewerStyle"] };
         Grid.SetRow(scroll, 1);
         page.Children.Add(scroll);
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = (Thickness)Application.Current.Resources["KynxaScrollContentInset"] };
         var cancel = ActionButton("取消", "LocalModelsInlineCancel");
         var apply = ActionButton(primary, "LocalModelsInlineApply");
         cancel.Click += (_, _) => CloseInlineEditor(accepted: false);

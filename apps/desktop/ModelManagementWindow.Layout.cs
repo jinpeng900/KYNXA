@@ -53,7 +53,6 @@ public sealed partial class ModelManagementWindow
             ProviderPanel.Padding = compact ? new Thickness(16, 10, 16, 10) : new Thickness(16, 20, 12, 18);
             EditorPanel.Padding = compact ? new Thickness(16, 14, 16, 14) : new Thickness(28, 22, 28, 18);
             EditorPanel.RowSpacing = compact ? 12 : 16;
-            EditorForm.Margin = compact ? new Thickness(0, 0, 0, 8) : new Thickness(0, 0, 12, 8);
             EditorTitle.FontSize = compact ? 20 : 22;
         }
         bool stackValues = ManagementLayout.ActualWidth < 620;

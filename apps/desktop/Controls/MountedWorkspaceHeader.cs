@@ -1,5 +1,4 @@
 using KYNXA_Desktop.Services;
-using KYNXA_Desktop.Models.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -66,14 +65,14 @@ public sealed class MountedWorkspaceHeader : Grid, IDisposable
         RefreshLanguage();
     }
 
-    public void ShowProject(Guid? projectId, string? folderPath, IReadOnlyList<ProjectMountState>? mounts = null)
+    public void ShowProject(Guid? projectId, string? folderPath, string? folderName = null)
     {
         if (_disposed) return;
         _current = projectId is { } id && id != Guid.Empty && !string.IsNullOrWhiteSpace(folderPath) && Path.IsPathFullyQualified(folderPath)
             ? new(id, folderPath) : null;
         if (_menuRequest != _current) _menu.Hide();
-        _name.Text = _current is null ? "" : mounts is { Count: > 0 } ? string.Join(" · ", mounts.Select(mount => mount.Name)) : FolderName(_current.FolderPath);
-        string? tooltip = mounts is { Count: > 0 } ? string.Join("\n", mounts.Select(mount => $"{mount.Name}: {mount.Path}")) : _current?.FolderPath;
+        _name.Text = _current is null ? "" : string.IsNullOrWhiteSpace(folderName) ? FolderName(_current.FolderPath) : folderName;
+        string? tooltip = _current?.FolderPath;
         ToolTipService.SetToolTip(_open, tooltip);
         ToolTipService.SetToolTip(this, tooltip);
         Visibility = HasMountedFolder ? Visibility.Visible : Visibility.Collapsed;

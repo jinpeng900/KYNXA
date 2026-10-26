@@ -8,10 +8,20 @@ namespace KYNXA_Desktop.Services;
 /// </summary>
 public static class ProjectMountPresentation
 {
+    public static ProjectMountState? WorkspaceMount(ProjectState? project)
+    {
+        if (project is null || project.IsFolderlessWorkspace) return null;
+        return project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId)
+            ?? project.Mounts.FirstOrDefault(mount => !string.IsNullOrWhiteSpace(project.FolderPath) &&
+                string.Equals(Path.TrimEndingDirectorySeparator(mount.Path), Path.TrimEndingDirectorySeparator(project.FolderPath),
+                    StringComparison.OrdinalIgnoreCase))
+            ?? project.Mounts.FirstOrDefault();
+    }
+
     public static string? UserFolder(ProjectState? project, string desktopDirectory)
     {
         if (project is null || project.IsArchived || project.IsFolderlessWorkspace) return null;
-        string? path = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId)?.Path ?? project.FolderPath;
+        string? path = WorkspaceMount(project)?.Path ?? project.FolderPath;
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return null;
         string folder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
         string managedParent = Path.Combine(desktopDirectory, "Projects");

@@ -28,6 +28,7 @@ public sealed partial class ShellPage
         WorkTabs.TabsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
         WorkTabs.TabInvoked += (_, tab) =>
         {
+            WorkspaceHome.CancelFolderEditor();
             if (!_chatClosing && ActiveChatId is Guid conversation && tab.Kind == "browser" && tab.Target is { } url)
                 DocumentPanel.ShowWebsite(conversation, url, tab.Title);
         };
@@ -36,9 +37,8 @@ public sealed partial class ShellPage
             if (closed.Tab.Kind == "terminal") WorkspaceTerminal.CloseSession(closed.ConversationId, closed.Tab.Key);
             else DocumentPanel.CloseTab(closed.ConversationId, closed.Tab);
         };
-        WorkTabs.HomeRequested += (_, _) => { ApplyLayout(); WorkspaceHome.FocusAddress(); };
+        WorkTabs.HomeRequested += (_, _) => { WorkspaceHome.CancelFolderEditor(); ApplyLayout(); WorkspaceHome.FocusAddress(); };
         WorkspaceHome.FileRequested += (_, _) => OpenWorkspaceFile();
-        WorkspaceHome.MountRequested += (_, mountId) => SelectWorkspaceMount(mountId);
         WorkspaceHome.DirectoryRequested += async (_, path) => await BrowseWorkspaceFilesAsync(path);
         WorkspaceHome.WorkspaceFileRequested += (_, path) =>
         {
@@ -163,7 +163,7 @@ public sealed partial class ShellPage
                 return discovered;
             });
             if (_chatClosing || tab is null) return;
-            tab = LabelWorkspaceMount(conversation, tab);
+            tab = BindWorkspaceFile(conversation, tab);
             StoreWorkspaceResource(resources, tab, order);
             if (tab.Kind == "browser" && liveReply) resources.ActivatedWebsites.Add(tab.Key);
             if (ActiveChatId == conversation)
@@ -210,7 +210,7 @@ public sealed partial class ShellPage
 
     private void AddWorkspaceTab(Guid conversation, ConversationWorkTab tab, bool select)
     {
-        tab = LabelWorkspaceMount(conversation, tab);
+        tab = BindWorkspaceFile(conversation, tab);
         var resources = ResourcesFor(conversation);
         StoreWorkspaceResource(resources, tab, ++_workspaceSequence);
         if (select && tab.Kind == "browser") resources.ActivatedWebsites.Add(tab.Key);
@@ -240,13 +240,14 @@ public sealed partial class ShellPage
 
     private void PresentSelectedWorkTab(bool sidebarVisible)
     {
+        bool editingFolder = WorkspaceHome.IsFolderEditorVisible;
         var selected = WorkTabs.SelectedTab;
         var screenshot = selected?.Kind == "screenshot"
             ? ScreenshotPanel.Items.FirstOrDefault(source => ScreenshotTabKey(source) == selected.Key) : null;
-        bool showScreenshot = sidebarVisible && screenshot is not null;
-        bool showDocument = sidebarVisible && ActiveChatId is not null && selected?.Target is not null &&
+        bool showScreenshot = sidebarVisible && !editingFolder && screenshot is not null;
+        bool showDocument = sidebarVisible && !editingFolder && ActiveChatId is not null && selected?.Target is not null &&
             selected.Kind is "document" or "diagram" or "browser" or "changes";
-        bool showTerminal = sidebarVisible && ActiveChatId is not null && selected?.Kind == "terminal";
+        bool showTerminal = sidebarVisible && !editingFolder && ActiveChatId is not null && selected?.Kind == "terminal";
 
         if (!showScreenshot) ScreenshotPanel.SetPreviewEnabled(false);
         if (!showDocument) DocumentPanel.SetPreviewEnabled(false);
@@ -286,7 +287,6 @@ public sealed partial class ShellPage
         DocumentPanel.Visibility = showDocument ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceTerminal.Visibility = showTerminal ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceHome.ShowDirectory(CurrentWorkspaceDirectory(), ActiveChatId is not null);
-        WorkspaceHome.ShowMounts(CurrentWorkspaceProject()?.Mounts ?? [], CurrentWorkspaceMount()?.Id);
         WorkspaceHome.ShowProjectScope(CurrentWorkspaceProject() is not null);
         if (_filesConversation != ActiveChatId || _filesBinding != CurrentWorkspaceFilesBinding())
         { CancelWorkspaceFileRead(forgetScope: true); WorkspaceHome.HideFiles(); }

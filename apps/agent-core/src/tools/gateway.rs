@@ -570,13 +570,16 @@ pub(crate) fn operation_mount_binding(ctx: &GatewayToolContext, arguments: &Valu
     Ok(mounts.iter().find(|mount|mount["id"] == ctx.config["defaultMountId"]).cloned().unwrap_or(Value::Null))
 }
 
-/// Freeze a resumed task's original mounts; catalog additions never silently enlarge its authority.
-/// 固定续接任务原有的挂载授权；目录列表新增不能悄悄扩大该任务的访问范围。
+/// Retain the task identity while limiting restored access to the current work folder.
+/// 保留任务原身份；恢复权限只与当前工作目录取交集，不重新放回已移除目录。
 pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot: &Value) -> Result<(), GatewayError> {
     if !snapshot.is_object() { return Ok(()); }
     if let Some(mounts) = snapshot["mounts"].as_array() {
+        let current = ctx.config["workspaceMounts"].as_array().cloned().unwrap_or_default();
+        let mounts = mounts.iter().filter(|old|current.iter().any(|live|
+            crate::storage::workspace_mounts::same_mount(old,live))).take(1).cloned().collect::<Vec<_>>();
+        ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
         ctx.config["workspaceMounts"] = json!(mounts);
-        ctx.config["defaultMountId"] = snapshot["defaultMountId"].clone();
         ctx.config["bindingSnapshot"] = snapshot.clone();
         ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
     } else if let Some(folder) = snapshot["folderPath"].as_str() {
@@ -584,11 +587,13 @@ pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot:
             .filter(|mount|mount["path"] == folder).cloned().collect::<Vec<_>>();
         ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
         ctx.config["workspaceMounts"] = json!(mounts);
-        ctx.authorized_roots = vec![PathBuf::from(folder)];
+        ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
     }
     if let Some(folder) = snapshot["folderPath"].as_str().filter(|folder|!folder.is_empty()) {
-        ctx.workdir = PathBuf::from(folder);
-        if !ctx.authorized_roots.contains(&ctx.workdir) { ctx.authorized_roots.push(ctx.workdir.clone()); }
+        let folder = PathBuf::from(folder);
+        if ctx.authorized_roots.iter().any(|root|super::local_files::within(root,&folder) && super::local_files::within(&folder,root)) {
+            ctx.workdir = folder;
+        }
     }
     Ok(())
 }
@@ -2329,52 +2334,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mounted_files_keep_default_identity_and_revoke_only_the_removed_root() {
+    async fn single_work_folder_rejects_extra_roots_and_preserves_explicit_external_access() {
         use crate::storage::{gateway as data, workspace_mounts};
         let (mut ctx, _sender) = test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
-        let second = root.join("第二个 folder");
+        let second = root.join("second folder");
         std::fs::create_dir_all(&second).unwrap();
         std::fs::write(ctx.workdir.join("same.txt"),"DEFAULT").unwrap();
         std::fs::write(second.join("same.txt"),"SECOND").unwrap();
         let project_id = uuid::Uuid::new_v4().to_string();
         let first_id = uuid::Uuid::new_v4().to_string();
         let second_id = uuid::Uuid::new_v4().to_string();
-        data::ensure_conversation(&ctx.data_home,&ctx.conversation_id,"Mount fixture").unwrap();
+        data::ensure_conversation(&ctx.data_home,&ctx.conversation_id,"Folder fixture").unwrap();
         let old = data::load_catalog(&ctx.data_home).unwrap();
-        let catalog = json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Mount fixture",
-            "Mounts":[{"Id":first_id,"Name":"Default","Path":ctx.workdir,"BindingRevision":1},{"Id":second_id,"Name":"Secondary","Path":second,"BindingRevision":1}],
-            "DefaultMountId":first_id,"Chats":[{"Id":ctx.conversation_id,"Title":"Mounts","Messages":[
-                {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Mount fixture","Status":"completed"}]}]}]});
+        let mut catalog = json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Folder fixture",
+            "Mounts":[{"Id":first_id,"Name":"Current","Path":ctx.workdir,"BindingRevision":1},{"Id":second_id,"Name":"Removed","Path":second,"BindingRevision":1}],
+            "DefaultMountId":first_id,"Chats":[{"Id":ctx.conversation_id,"Title":"Folder","Messages":[
+                {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Folder fixture","Status":"completed"}]}]}]});
+        assert_eq!(data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap_err().code(),"INVALID_WORKSPACE_MOUNTS");
+        assert_eq!(data::handle_raw("PUT","/api/conversations/catalog",&[],&catalog,&catalog.to_string(),&ctx.data_home).unwrap().unwrap_err().code(),"INVALID_WORKSPACE_MOUNTS");
+        assert_eq!(data::load_catalog(&ctx.data_home).unwrap()["Revision"],old["Revision"]);
+        catalog["Projects"][0]["Mounts"].as_array_mut().unwrap().truncate(1);
         data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap();
         let relation = data::relationship(&ctx.data_home,&ctx.conversation_id).unwrap();
         ctx.project_id = Some(project_id);
         ctx.permission_mode = "full".into();
         ctx.config["workspaceMounts"] = relation["mounts"].clone();
         ctx.config["defaultMountId"] = relation["defaultMountId"].clone();
-        ctx.config["bindingSnapshot"] = workspace_mounts::snapshot(&relation);
-        ctx.authorized_roots.push(second.clone());
-        let default_read = execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap();
-        let second_read = execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap();
-        assert_ne!(default_read["sha256"],second_read["sha256"]);
-        execute("filesystem.write",json!({"mountId":second_id,"path":"same.txt","content":"SECOND UPDATED","expectedHash":second_read["sha256"]}),&ctx).await.unwrap();
-        assert_eq!(std::fs::read_to_string(ctx.workdir.join("same.txt")).unwrap(),"DEFAULT");
-        assert_eq!(std::fs::read_to_string(second.join("same.txt")).unwrap(),"SECOND UPDATED");
-        let listing = workspace_files(&json!({"mountId":second_id,"path":"."}),&ctx).await.unwrap();
-        assert!(Path::new(listing["path"].as_str().unwrap()).is_absolute());
-        assert!(listing["entries"].as_array().unwrap().iter().any(|entry|entry["name"] == "same.txt"));
-        assert!(workspace_files(&json!({"mountId":second_id,"path":".."}),&ctx).await.is_err());
-        // Explicit external file access retains its original permission/reason contract.
-        // 明确指定的外部文件仍遵循原有权限与原因合同，不因多目录支持被全面禁止。
-        std::fs::write(root.join("external.txt"),"EXTERNAL").unwrap();
-        execute("filesystem.read",json!({"path":root.join("external.txt"),"reason":"Read the explicitly selected fixture file"}),&ctx).await.unwrap();
-        let mut next = data::load_catalog(&ctx.data_home).unwrap();
-        next["Projects"][0]["Mounts"].as_array_mut().unwrap().retain(|mount|mount["Id"] != second_id);
-        data::handle("PUT","/api/conversations/catalog",&[],&next,&ctx.data_home).unwrap().unwrap();
-        assert_eq!(execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
-        assert_eq!(execute("filesystem.read",json!({"path":second.join("same.txt"),"reason":"An old authorization is not a live mount"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
-        assert_eq!(execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap()["sha256"],default_read["sha256"]);
+        let mut snapshot = workspace_mounts::snapshot(&relation);
+        snapshot["mounts"].as_array_mut().unwrap().push(json!({"id":second_id,"name":"Old second root","path":second,"bindingRevision":1}));
+        restrict_workspace_context(&mut ctx,&snapshot).unwrap();
+        assert_eq!(ctx.config["workspaceMounts"].as_array().unwrap().len(),1);
+        assert!(!ctx.authorized_roots.contains(&second));
         assert_eq!(execute("work.folder.list",json!({}),&ctx).await.unwrap()["mounts"].as_array().unwrap().len(),1);
+        let default_read = execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap();
+        assert_eq!(default_read["content"],"DEFAULT");
+        assert_eq!(execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_UNAVAILABLE");
+        execute("filesystem.read",json!({"path":second.join("same.txt"),"reason":"Read the user-selected external file without associating another folder"}),&ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(second.join("same.txt")).unwrap(),"SECOND");
         assert!(root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(root).unwrap();
     }
