@@ -84,8 +84,8 @@ pub struct LeaseGpuObservation {
     pub state: &'static str,
 }
 
-// Use the native birth timestamp on Windows: sysinfo's second precision alone cannot fence rapid PID reuse.
-// Windows 使用原生出生时间；仅用 sysinfo 的秒级精度不能防止短时间内 PID 被复用。
+// Use native Windows birth times; second precision cannot detect rapid PID reuse.
+// 使用 Windows 原生创建时间，秒级精度不足以识别快速 PID 复用。
 #[cfg(windows)]
 fn process_birth_time_ms(process_id: u32, _fallback_seconds: u64) -> Option<u64> {
     use std::ffi::c_void;
@@ -321,8 +321,8 @@ impl HardwareSampler {
             _ => None,
         };
         if let Some(state) = state {
-            // Restored birth identities identify old work only; a new process with a recycled PID is never charged or killed.
-            // 恢复的出生时间仅用于识别旧工作；PID 被复用的新进程不登记、扣费或结束。
+            // Use restored birth identities for old work only; never charge or stop a reused PID.
+            // 恢复的创建时间只识别旧工作，不登记、扣费或结束复用 PID 的新进程。
             let executor = ExecutorSnapshot {process_id,start_time_ms,state,memory_bytes:None,peak_memory_bytes:None,
                 cpu_usage_percent:None,baseline_memory_bytes:None,gpu_memory_bytes:None,
                 baseline_gpu_memory_bytes:None,gpu_memory_reason:Some("GPU_PROCESS_IDENTITY_UNCONFIRMED")};
@@ -391,8 +391,8 @@ impl HardwareSampler {
         for executor in self.executors.values() {
             processes.entry(executor.process_id).or_insert(executor);
         }
-        // Worker threads share their owner's RSS; report each PID once, never sum duplicated thread leases.
-        // 工作线程共享拥有者 RSS，同一 PID 仅报告一次，不能把多个线程预约的 RSS 相加。
+        // Report shared worker RSS once per PID, not once per lease.
+        // 同一 PID 的工作线程共享 RSS，只报告一次，不按租约累加。
         json!({"processes":processes.values().collect::<Vec<_>>(),"completed":self.completed_executors,
             "gpuMemorySource":"nvml-process-memory-with-native-birth-identity","gpuMemoryExact":false,
             "registeredLeases":self.executors.len(),"sampleIntervalMs":1000})

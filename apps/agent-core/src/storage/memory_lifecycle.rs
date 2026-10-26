@@ -8,8 +8,8 @@ fn invalid(message: &str) -> ContractError {
     ContractError::new(message, "INVALID_MEMORY", 400)
 }
 
-/// Candidate authority is native; promises and the original quotation bytes remain in the adapter.
-/// 候选生命周期权威由原生服务拥有；Promise 和原话原始字节保留在适配器。
+/// Manage candidate lifecycle here; keep asynchronous work and quoted bytes with the caller.
+/// 本模块管理候选生命周期，异步工作及原话字节由调用方持有。
 #[derive(Default)]
 pub struct MemoryLifecycleState {
     settings: Value,

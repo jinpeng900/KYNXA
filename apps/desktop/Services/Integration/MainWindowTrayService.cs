@@ -13,7 +13,6 @@ internal sealed class MainWindowTrayService : IDisposable
     private const uint CloseMessage = 0x0010;
     private const uint QueryEndSessionMessage = 0x0011;
     private const uint EndSessionMessage = 0x0016;
-    private const uint ShowWindowMessage = 0x0018;
     private const uint NonClientDestroyMessage = 0x0082;
     private const uint TrayCallbackMessage = 0x8000 + 73;
     private const nuint SubclassId = 0x4B595452;
@@ -43,11 +42,12 @@ internal sealed class MainWindowTrayService : IDisposable
         if (_icon == 0) _icon = LoadIcon(0, (nint)32512);
         _isSubclassAttached = _icon != 0 && SetWindowSubclass(_windowHandle, _windowProcedure, SubclassId, 0);
         window.Closed += WindowClosed;
+        EnsureTrayIcon();
     }
 
     public void Restore()
     {
-        if (_isDisposed) return;
+        if (_isDisposed || _exitRequested) return;
         // Restore the existing shell, including its draft, streaming replies and workspace instances.
         // 恢复原有界面，保留草稿、流式回复及工作区实例，不重新创建窗口。
         ShowWindow(_windowHandle, IsIconic(_windowHandle) ? 9 : 5);
@@ -57,11 +57,12 @@ internal sealed class MainWindowTrayService : IDisposable
 
     public void RequestExit()
     {
-        if (_isDisposed || _sessionEnding) return;
-        if (!IsWindowVisible(_windowHandle)) Restore();
+        if (_isDisposed || _sessionEnding || _exitRequested) return;
         _exitRequested = true;
-        // Reuse the existing cancellable save/cleanup flow; never terminate the shared gateway.
-        // 复用现有可取消的保存与清理流程，不终止共享网关。
+        // Remove visible entry points immediately; the shell only waits for background shutdown acceptance.
+        // 立即移除窗口和托盘入口；界面只等待后台接受退出，不等待任务保存结束。
+        _window.AppWindow.Hide();
+        RemoveTrayIcon();
         SendMessage(_windowHandle, CloseMessage, 0, 0);
     }
 
@@ -71,7 +72,6 @@ internal sealed class MainWindowTrayService : IDisposable
         {
             if (message == QueryEndSessionMessage) _sessionEnding = true;
             else if (message == EndSessionMessage && wParam == 0) _sessionEnding = false;
-            else if (message == ShowWindowMessage && wParam != 0 && !_sessionEnding) _exitRequested = false;
             else if (message == CloseMessage && !_sessionEnding && !_exitRequested && EnsureTrayIcon())
             {
                 // Intercept before AppWindow.Closing: a tray close must not pause replies or save as an exit.
@@ -89,8 +89,8 @@ internal sealed class MainWindowTrayService : IDisposable
             else if (_taskbarCreatedMessage != 0 && message == _taskbarCreatedMessage && _isIconRegistered)
             {
                 _isIconRegistered = false;
-                // Explorer replaces its notification area after a restart; do not leave a hidden orphan window.
-                // 资源管理器重启后需重新注册通知图标，失败时恢复窗口，避免程序隐藏后无法找回。
+                // Re-register the tray icon after Explorer restarts; restore the window if it fails.
+                // 资源管理器重启后重新注册托盘图标，失败则显示窗口，避免无法找回。
                 if (!EnsureTrayIcon() && !IsWindowVisible(_windowHandle)) Restore();
             }
             else if (message == NonClientDestroyMessage) Dispose();
@@ -103,8 +103,8 @@ internal sealed class MainWindowTrayService : IDisposable
         }
 
         nint result = DefSubclassProc(window, message, wParam, lParam);
-        // A synchronous veto (for example storage migration) leaves the visible window usable and X tray-enabled.
-        // 数据迁移等同步拒绝退出后，窗口仍可操作，下一次点 X 仍应关闭到托盘。
+        // A native close veto must keep the ordinary close-to-tray route available.
+        // 原生关闭被拒绝时，普通关闭到托盘仍须可用。
         if (message == CloseMessage && _exitRequested && !_isDisposed && IsWindowVisible(window)) _exitRequested = false;
         return result;
     }
@@ -160,17 +160,20 @@ internal sealed class MainWindowTrayService : IDisposable
 
     private void WindowClosed(object sender, WindowEventArgs args) => Dispose();
 
+    private void RemoveTrayIcon()
+    {
+        if (!_isIconRegistered) return;
+        var data = CreateIconData();
+        ShellNotifyIcon(2, ref data);
+        _isIconRegistered = false;
+    }
+
     public void Dispose()
     {
         if (_isDisposed) return;
         _isDisposed = true;
         _window.Closed -= WindowClosed;
-        if (_isIconRegistered)
-        {
-            var data = CreateIconData();
-            ShellNotifyIcon(2, ref data);
-            _isIconRegistered = false;
-        }
+        RemoveTrayIcon();
         if (_isSubclassAttached)
         {
             RemoveWindowSubclass(_windowHandle, _windowProcedure, SubclassId);

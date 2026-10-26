@@ -15,8 +15,8 @@ public interface IMemoryApi
 }
 
 /// <summary>
-/// Gateway memory transport; no drafts, snapshots, or authoritative data are written by the desktop.
-/// 记忆 API 传输层；桌面不写入草稿快照或正式记忆数据。
+/// Gateway memory transport; the desktop does not persist memory data.
+/// 记忆 API 传输层；桌面不持久化草稿、快照或正式记忆。
 /// </summary>
 public sealed class MemoryApiClient : IMemoryApi, IDisposable
 {
@@ -25,11 +25,8 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
     private readonly Func<CancellationToken, Task> _ensureGatewayReady;
     private readonly bool _ownsHttpClient;
 
-    public MemoryApiClient() : this(new HttpClient
-    {
-        BaseAddress = ModelGatewayService.Address,
-        Timeout = TimeSpan.FromSeconds(30)
-    }, ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
+    public MemoryApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(30)),
+        ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
 
     public MemoryApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)
     {

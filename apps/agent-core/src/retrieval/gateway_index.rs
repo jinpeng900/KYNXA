@@ -24,8 +24,8 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// A source remains bound to its own mount; adding an unrelated mount does not revoke existing evidence.
-/// 来源只核验自身挂载；新增其他挂载不会使已有证据或向量整体失效，旧无mountId定位继续兼容。
+/// Validate each source's own mount; unrelated mounts preserve evidence and legacy locators.
+/// 仅核验来源自身挂载，其他挂载变更不撤销证据或旧定位。
 pub(crate) fn mounted_root(relation: &Value, locator: &Value) -> Result<String, ContractError> {
     let mounts = relation["mounts"].as_array();
     let found = mounts.into_iter().flatten().find(|mount| {
@@ -61,7 +61,8 @@ pub(crate) fn cached_work_sources(config: &GatewayConfig, scope: &str) -> Result
             let record = &registry["sources"][hash(source["sourceId"].as_str().unwrap_or(""))];
             if record["active"] != true || record["scopeKey"] != source["scopeKey"]
                 || record["contentHash"] != source["contentHash"] || record["sourceRevision"] != source["sourceRevision"] { continue; }
-            if source["parserVersion"] != super::gateway_structure::parser_version(source["locator"]["relativePath"].as_str().unwrap_or("")) { continue; }
+            if source["parserVersion"] != super::gateway_structure::parser_version(source["locator"]["relativePath"].as_str().unwrap_or(""))
+                || source["chunkerVersion"] != super::gateway_structure::CHUNKER_VERSION { continue; }
             source["fileMetadata"] = record["fileMetadata"].clone();
             source["scanLimitsSignature"] = record["scanLimitsSignature"].clone();
             source["cachedTextBytes"] = record["cachedTextBytes"].clone();
@@ -216,7 +217,7 @@ pub fn prepare_source(input: &Value, vectors: Option<&[Vec<f32>]>) -> Result<Val
         chunk["chunkerVersion"] = range
             .get("chunkerVersion")
             .cloned()
-            .unwrap_or(json!("structured-units-v1"));
+            .unwrap_or(json!(super::gateway_structure::CHUNKER_VERSION));
         chunk["tokenizerVersion"] = json!("han-bigram-code-tf-v2");
         chunk["structure"] = range["structure"].clone();
         chunk["structureJson"] = json!(range["structure"].to_string());
@@ -261,7 +262,7 @@ pub fn prepare_source(input: &Value, vectors: Option<&[Vec<f32>]>) -> Result<Val
         &json!({
             "version": "source-derivation-v1",
             "parserVersion": parser_version,
-            "chunkerVersion": "structure-lines-v1",
+            "chunkerVersion": super::gateway_structure::CHUNKER_VERSION,
             "embeddingInputVersion": "source-context-v1",
             "chunks": embedding
         })
@@ -281,7 +282,7 @@ pub fn prepare_source(input: &Value, vectors: Option<&[Vec<f32>]>) -> Result<Val
         &json!({
             "version": "source-derivation-v1",
             "parserVersion": parser_version,
-            "chunkerVersion": "structure-lines-v1",
+            "chunkerVersion": super::gateway_structure::CHUNKER_VERSION,
             "tokenizerVersion": "han-bigram-code-tf-v2",
             "embeddingInputVersion": "source-context-v1",
             "source": metadata,
@@ -292,7 +293,7 @@ pub fn prepare_source(input: &Value, vectors: Option<&[Vec<f32>]>) -> Result<Val
     ));
     source["embeddingInputSignature"] = json!(input_signature);
     source["parserVersion"] = json!(parser_version);
-    source["chunkerVersion"] = json!("structure-lines-v1");
+    source["chunkerVersion"] = json!(super::gateway_structure::CHUNKER_VERSION);
     source["tokenizerVersion"] = json!("han-bigram-code-tf-v2");
     source["embeddingInputVersion"] = json!("source-context-v1");
     let encodings: Vec<Value> = chunks
@@ -400,10 +401,11 @@ fn source_matches_hash(state: &Value, source: &Value, digest: &str) -> bool {
             == super::gateway_structure::parser_version(
                 source["locator"]["relativePath"].as_str().unwrap_or(""),
             )
+        && state["chunker_version"] == super::gateway_structure::CHUNKER_VERSION
         && state["embedding_input_version"] == "source-context-v1"
 }
-/// Complete vectors are reusable only with the same published source identity, revision and derivation inputs.
-/// 只有发布来源的身份、版本及派生输入一致，才复用完整向量；无正文的队列条目使用已核验内容哈希。
+/// Reuse vectors only for matching source identity, revision and derivation inputs.
+/// 来源身份、版本和派生输入均匹配时才复用向量。
 pub(crate) fn reuse_semantic(
     config: &GatewayConfig,
     source: &Value,
@@ -495,7 +497,9 @@ pub fn publish_semantic(
         json!({"receipt":receipt,"chunks":prepared["chunks"].as_array().unwrap().len(),"vectorChunks":batch.vectors.len(),"profileId":source["embeddingProfileId"],"spaceId":source["embeddingSpaceId"],"device":batch.device}),
     )
 }
-fn embedding_projection(source: &Value, chunk: &Value) -> Value {
+/// Use the same source projection for publication and native offline evaluation.
+/// 正式发布与原生离线评测共用同一来源投影，不复制或漂移嵌入输入格式。
+pub fn embedding_projection(source: &Value, chunk: &Value) -> Value {
     fn bounded(text: &str, count: usize) -> String {
         let units = text.encode_utf16().take(count).collect::<Vec<_>>();
         String::from_utf16_lossy(&units)
@@ -714,14 +718,14 @@ pub fn remove(
     })
 }
 
-/// The catalog deletion witness is rechecked under its lock, so an undo cannot be cleared by an old cleanup.
-/// 在正式目录锁内重核删除见证，避免旧清理误伤撤销恢复；仅清理聊天派生数据，Trash及共享原文保留。
+/// Recheck deletion under the catalog lock; preserve undo, Trash and shared originals.
+/// 目录锁内重核删除状态，保留撤销恢复、Trash 和共享原文。
 pub(crate) fn retire_deleted_chat(
     config: &GatewayConfig,
     deleted: &Value,
 ) -> Result<Value, ContractError> {
-    // Bootstrap admission can wait independently; never hold the formal catalog while waiting for it.
-    // 索引初始化准入可独立等待，不能在等待期间持有正式目录锁而堵住前台聊天。
+    // Release the catalog lock before waiting for index initialization admission.
+    // 等待索引初始化准入前释放目录锁。
     if storage::managed_files::inspect(&config.data_root, &database(config), false, true, u64::MAX)?
     {
         initialize(config)?;
@@ -805,10 +809,12 @@ pub(crate) fn retire_deleted_chat(
                 graphs.retain(|key, _| !keys.contains(key));
                 keys
             };
-            // Never hold the resident-map lock while acquiring LRU; queries acquire them in the other order.
-            // 获取LRU前释放驻留表锁，避免与查询的相反锁顺序形成死锁；活动查询的Arc仍持有真实资源额度。
+            // Release the resident-map lock before acquiring LRU to preserve query lock order.
+            // 取 LRU 锁前释放驻留表锁，遵守查询锁顺序。
             if let Some(lru) = LRU.get() {
-                lru.lock().unwrap().retain(|key| !retired.contains(key));
+                let mut lru = lru.lock().unwrap();
+                lru.shards.retain(|(key, _)| !retired.contains(key));
+                lru.workspaces.retain(|workspace| workspace.database != database(config) || workspace.scope != scope);
             }
         }
         let cache = storage::ann_cache::apply(
@@ -831,21 +837,81 @@ struct Graph {
     identity: String,
     generation: u64,
     count: usize,
-    // The index drops before its lease; active query clones retain both until real native use finishes.
-    // 图对象先析构再归还租约；活跃查询持有同一个图与额度，不能提前释放驻留账目。
+    // Drop the index before its lease; active queries retain both until use ends.
+    // 先释放图对象再归还租约，活动查询持续持有两者。
     _lease: crate::resources::gateway::ResourceLease,
 }
 static GRAPHS: OnceLock<Mutex<HashMap<String, Arc<Graph>>>> = OnceLock::new();
 static GRAPH_BUILDS: OnceLock<Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>> = OnceLock::new();
-static LRU: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GraphWorkspace {
+    database: PathBuf,
+    scope: String,
+}
+
+/// Drive workspace LRU by foreground demand and budget shards per workspace.
+/// 按前台需求维护工作区 LRU，每个工作区单独计分片额度。
+#[derive(Default)]
+struct GraphResidency {
+    workspaces: VecDeque<GraphWorkspace>,
+    shards: VecDeque<(String, GraphWorkspace)>,
+}
+
+impl GraphResidency {
+    fn demand(&mut self, workspace: GraphWorkspace) -> Vec<String> {
+        self.workspaces.retain(|entry| entry != &workspace);
+        self.workspaces.push_back(workspace);
+        while self.workspaces.len() > 4 { self.workspaces.pop_front(); }
+        let retired = self.shards.iter().filter(|(_, owner)| !self.workspaces.contains(owner))
+            .map(|(key, _)| key.clone()).collect();
+        self.shards.retain(|(_, owner)| self.workspaces.contains(owner));
+        retired
+    }
+
+    fn remember(&mut self, key: &str, workspace: GraphWorkspace, maximum_shards: usize) -> Option<Vec<String>> {
+        if !self.workspaces.contains(&workspace) { return None; }
+        self.shards.retain(|(entry, _)| entry != key);
+        self.shards.push_back((key.to_owned(), workspace.clone()));
+        let mut count = self.shards.iter().filter(|(_, owner)| owner == &workspace).count();
+        let mut retired = Vec::new();
+        while count > maximum_shards.clamp(1, 16) {
+            let position = self.shards.iter().position(|(_, owner)| owner == &workspace).unwrap();
+            retired.push(self.shards.remove(position).unwrap().0);
+            count -= 1;
+        }
+        Some(retired)
+    }
+}
+
+static LRU: OnceLock<Mutex<GraphResidency>> = OnceLock::new();
+
+fn request_graph_workspace(database: PathBuf, scope: &str) {
+    let mut lru = LRU.get_or_init(Default::default).lock().unwrap();
+    let retired = lru.demand(GraphWorkspace { database, scope: scope.to_owned() });
+    let mut graphs = GRAPHS.get_or_init(Default::default).lock().unwrap();
+    for key in retired { graphs.remove(&key); }
+}
+
+fn remember_graph(key: &str, graph: &Arc<Graph>, options: &Value) {
+    // Lock LRU before the map; eviction drops only the cache Arc, not active query leases.
+    // 先锁 LRU 再锁图表；淘汰只释放缓存 Arc，不释放活动查询租约。
+    let mut lru = LRU.get_or_init(Default::default).lock().unwrap();
+    let maximum = options["maxCachedShards"].as_u64().unwrap_or(4).clamp(1, 16) as usize;
+    let workspace = GraphWorkspace { database: graph.database.clone(), scope: graph.scope.clone() };
+    let Some(retired) = lru.remember(key, workspace, maximum) else { return; };
+    let mut graphs = GRAPHS.get_or_init(Default::default).lock().unwrap();
+    graphs.insert(key.to_owned(), graph.clone());
+    for key in retired { graphs.remove(&key); }
+}
 
 static ANN_BACKGROUND: OnceLock<Mutex<HashMap<PathBuf, super::ann_queue::AnnSession>>> =
     OnceLock::new();
 static ANN_PARTITIONS: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
 
 fn graph_identity(descriptor: &Value, identity: &Value, epoch: &Value, options: &Value) -> Value {
-    // Older keys did not record graph quality and cannot prove their construction parameters.
-    // 旧键未记录构图质量，不能证明所用参数；新图明确绑定参数后才跨重启复用。
+    // Reuse graphs across restarts only when keys include construction parameters.
+    // 图键包含构建参数后才跨重启复用，旧键无法证明参数。
     json!({"version":"rust-gateway-v2","databaseIdentity":identity,"epoch":epoch,"scopeKey":descriptor["scope_key"],"descriptor":descriptor,
         "buildParameters":{"metric":"cos","quantization":"f32","connectivity":options["connectivity"],"expansionAdd":options["expansionAdd"],"expansionSearch":options["expansionSearch"]}})
 }
@@ -871,8 +937,8 @@ pub(crate) fn ann_background_pending(config: &GatewayConfig) -> bool {
     background_operation(config, "shouldSchedule", json!({})).ok() == Some(json!(true))
 }
 
-/// One maintenance owner consumes the existing queue; request cancellation never owns the graph build.
-/// 由既有维护线程消费原有队列，图构建不继承首次查询的取消令牌；停机及迁移仍等待同一线程。
+/// Maintenance owns queued graph builds; shutdown/migration joins it, not request cancellation.
+/// 维护线程负责队列构图，停机或迁移等待该线程，不随单次查询取消。
 pub(crate) fn maintain_ann(config: &GatewayConfig, stop: &Arc<std::sync::atomic::AtomicBool>) -> Result<(), ContractError> {
     let job = background_operation(config, "start", json!({}))?;
     if job.is_null() { return Ok(()); }
@@ -931,7 +997,7 @@ fn prepare_ann_request(config: &GatewayConfig, request: &Value, stop: &Arc<std::
     validate_graph_source(config, descriptor, &request["databaseIdentity"], &request["epoch"])?;
     let parts = partitions(config, descriptor, options)?;
     if parts.len() as u64 > options["maxCachedShards"].as_u64().unwrap_or(4) {
-        return Err(gateway::error("当前常驻预算无法容纳完整图集合，继续使用词法检索。", "RETRIEVAL_ANN_RESOURCE_LIMIT", 503));
+        return Err(gateway::error("当前常驻预算无法容纳完整图集合，继续使用有界精确检索。", "RETRIEVAL_ANN_RESOURCE_LIMIT", 503));
     }
     let mut completed = 0;
     for part in &parts {
@@ -967,8 +1033,8 @@ fn enqueue_ann_descriptor(config: &GatewayConfig, descriptor: &Value, scopes: &V
     Ok(())
 }
 
-/// Queue after vector publication rather than making the first foreground search discover every cold graph.
-/// 向量发布后主动合并建图请求；首个前台搜索不再独自承担缺图发现，参数和原有后台准入保持不变。
+/// Queue graph builds after vector publication, using existing parameters and admission.
+/// 向量发布后合并构图请求，沿用参数及准入，减轻首次查询负担。
 pub(crate) fn prepare_scope_ann(config: &GatewayConfig, scope: &str, local: &Value) -> Result<u64, ContractError> {
     let options = storage::settings::apply("storage.settings.ann", &json!({"value":local["ann"]}))?;
     if options["mode"] != "auto" { return Ok(0); }
@@ -988,6 +1054,7 @@ pub(crate) fn prepare_scope_ann(config: &GatewayConfig, scope: &str, local: &Val
 }
 
 fn ann_auto(config: &GatewayConfig, descriptor: &Value, vector: &[f32], scopes: &Value, identity: &Value, epoch: &Value, options: &Value, limit: usize) -> Result<Vec<Value>, ContractError> {
+    request_graph_workspace(database(config), descriptor["scope_key"].as_str().unwrap_or(""));
     let effective = auto_options(descriptor, options);
     let options = &effective;
     let key = hash(&graph_identity(descriptor, identity, epoch, options).to_string());
@@ -1013,6 +1080,17 @@ fn graph_page_interrupted(started: std::time::Instant) -> bool {
     crate::service_cancellation::is_cancelled()
         || started.elapsed() >= std::time::Duration::from_secs(120)
 }
+fn admit_exact_descriptor(descriptor: &Value, remaining: &mut u64) -> bool {
+    let count = descriptor["count"].as_u64().unwrap_or(u64::MAX);
+    if count > *remaining { return false; }
+    *remaining -= count;
+    true
+}
+
+fn ann_readiness_error(code: &str) -> bool {
+    ["RETRIEVAL_ANN_BUILD_PENDING", "RETRIEVAL_ANN_QUEUE_FULL", "RETRIEVAL_ANN_RESOURCE_LIMIT",
+        "RESOURCE_RUNTIME_UNAVAILABLE"].contains(&code)
+}
 fn ann(
     config: &GatewayConfig,
     descriptor: &Value,
@@ -1025,6 +1103,9 @@ fn ann(
     allow_prepare: bool,
     background: bool,
 ) -> Result<Vec<Value>, ContractError> {
+    if !background {
+        request_graph_workspace(database(config), descriptor["scope_key"].as_str().unwrap_or(""));
+    }
     let descriptor_identity = graph_identity(descriptor, identity, epoch, options);
     let key = hash(&descriptor_identity.to_string());
     let generation = descriptor["generation"].as_u64().unwrap();
@@ -1142,8 +1223,8 @@ fn ann(
                     loop {
                         storage::sqlite_store::cancelled()?;
                         if background {
-                            // SQL pages retain a bounded deadline; native graph progress renews the next page's budget.
-                            // 每页SQL保留有限执行期限；原生建图取得进展后为下一页续期，不共享前台总等待时间。
+                            // Bound each SQL page; graph progress renews the next page's deadline.
+                            // SQL 每页有期限，构图取得进展后为下一页续期。
                             let page_started = std::time::Instant::now();
                             connection.progress_handler(1000, Some(move || graph_page_interrupted(page_started)))
                                 .map_err(storage::sqlite_store::failure)?;
@@ -1239,7 +1320,6 @@ fn ann(
                 count,
                 _lease: lease,
             });
-            cache.lock().unwrap().insert(key.clone(), graph.clone());
             graph
         }
     };
@@ -1253,22 +1333,13 @@ fn ann(
             409,
         ));
     }
+    // Publish cold graphs to disk; retain residency only for foreground-used workspaces.
+    // 冷图可后台写盘，仅前台使用过的工作区保留驻留。
+    remember_graph(&key, &graph, options);
     let matches = if limit > 0 {
         Some(graph.index.search(vector, limit)
             .map_err(|_| gateway::error("ANN 查询失败。", "RETRIEVAL_ANN_FAILED", 500))?)
     } else { None };
-    let mut lru = LRU.get_or_init(Default::default).lock().unwrap();
-    lru.retain(|entry| entry != &key);
-    lru.push_back(key);
-    let maximum = options["maxCachedShards"]
-        .as_u64()
-        .unwrap_or(4)
-        .clamp(1, 16) as usize;
-    while lru.len() > maximum {
-        if let Some(old) = lru.pop_front() {
-            cache.lock().unwrap().remove(&old);
-        }
-    }
     Ok(matches.map(|matches| matches.keys.iter().zip(matches.distances)
         .map(|(id, distance)| json!({"id":id,"distance":distance,"identity":descriptor})).collect()).unwrap_or_default())
 }
@@ -1278,17 +1349,34 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         "storage.retrieval.scopes",
         &json!({"value":input["scopeKeys"]}),
     )?;
-    // Optional candidate memory is admitted before entering the SQLite read snapshot.
-    // 可选候选缓存的内存准入在 SQLite 读快照之前完成，不阻塞聊天等待资源。
+    // Admit optional cache memory before opening the SQLite snapshot, without delaying chat.
+    // 进入 SQLite 快照前准入可选缓存内存，不阻塞聊天。
     let candidate_bytes = super::gateway_embedding::cache_memory_limit(
         "retrieval-candidates", super::cache_candidates::DEFAULT_BYTES, super::cache_candidates::reclaim,
     );
     let _candidate_cache_grant = if candidate_bytes > 0 {
         super::gateway_cache::memory_grant("retrieval-candidates")
     } else { None };
+    let passage_bytes = super::gateway_embedding::cache_memory_limit(
+        "source-passages", super::cache_passages::DEFAULT_BYTES, super::cache_passages::reclaim,
+    );
+    let _passage_cache_grant = if passage_bytes > 0 {
+        super::gateway_cache::memory_grant("source-passages")
+    } else { None };
     let query = input["query"].as_str().unwrap_or("");
     let expression=crate::retrieval::lexical::apply("retrieval.match-expression",&json!({"text":query,"normalizedText":query.nfkc().collect::<String>(),"domain":input["retrievalIntent"]["domain"]}))
         .map_err(|_|gateway::error("查询格式无效。","INVALID_RETRIEVAL_INPUT",400))?;
+    // Use FTS/vectors for language; literal scans only for explicit targets or untokenizable input.
+    // 自然语言走 FTS 与向量，仅显式目标或无法分词时回退字面扫描。
+    let has_explicit_target = ["path", "symbol"].iter().any(|field| {
+        input["retrievalIntent"][*field].as_str().is_some_and(|value| !value.trim().is_empty())
+    });
+    let literal_query = input["literalQuery"].as_str().unwrap_or_else(|| {
+        if has_explicit_target || expression.as_str().is_none_or(str::is_empty) { query } else { "" }
+    });
+    // Use stable database IDs for cached descriptors; recheck file identity, epochs and scope.
+    // 描述符缓存使用稳定数据库 ID，仍核验文件身份、版本和范围。
+    let descriptor_cache_id = format!("native-index:{}", hash(&database(config).to_string_lossy()));
     let options = storage::settings::apply(
         "storage.settings.ann",
         &json!({"value":input.get("ann").unwrap_or(&json!({}))}),
@@ -1302,12 +1390,13 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
     let request_id = gateway::new_id();
     let mut begin = arguments(
         config,
-        json!({"requestId":request_id,"query":query,"scopes":input["scopeKeys"],"expression":expression,"literalQuery":query,
+        json!({"requestId":request_id,"cacheId":descriptor_cache_id,"query":query,"scopes":input["scopeKeys"],"expression":expression,"literalQuery":literal_query,
         "metadataReady":input["metadataReady"],"partial":input["partial"],
-        "candidateLimit":input["channelCandidates"].as_u64().unwrap_or(64).clamp(1,160),"resultLimit":input["limit"].as_u64().unwrap_or(8).clamp(1,192),
+        "candidateLimit":input["channelCandidates"].as_u64().unwrap_or(64).clamp(1,160),"resultLimit":input["limit"].as_u64().unwrap_or(8).clamp(1,192).saturating_mul(4).min(192),
         "modelProvided":input.get("embeddingModelVersion").is_some(),"model":input["embeddingModelVersion"],
         "spaceProvided":input.get("embeddingSpaceId").is_some(),"space":input["embeddingSpaceId"],"domain":input["retrievalIntent"]["domain"],
         "symbol":input["retrievalIntent"]["symbol"],"pathFilter":input["retrievalIntent"]["path"],"directExact":options["mode"]=="exact",
+        "rrfK":input["rrfK"].as_u64().unwrap_or(60).clamp(20,100),"passageCacheAdmitted":_passage_cache_grant.is_some(),
         "exactScanLimit":options["exactScanLimit"],"extensionPath":config.vector_extension}),
     );
     if let Some(vector) = &vector {
@@ -1318,7 +1407,9 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
     let query_id = prepared["queryId"].clone();
     let result = (|| {
         let mut candidates = prepared["candidateIds"].clone();
-        let mut semantic = if prepared["vectorsReady"] == true {
+        let mut semantic_scan_limited = prepared["exactScanLimited"] == true;
+        let mut exact_remaining = options["exactScanLimit"].as_u64().unwrap_or(1000000);
+        let mut semantic = if prepared["vectorsReady"] == true && !semantic_scan_limited {
             Some("exact")
         } else {
             None
@@ -1339,7 +1430,15 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                                 &prepared["databaseIdentity"], &boot["epoch"], &options,
                                 begin["candidateLimit"].as_u64().unwrap() as usize) {
                                 Ok(rows) => { matches.extend(rows); semantic = Some("ann"); }
-                                Err(error) if ["RETRIEVAL_ANN_BUILD_PENDING", "RETRIEVAL_ANN_QUEUE_FULL", "RETRIEVAL_ANN_RESOURCE_LIMIT"].contains(&error.code()) => { ann_pending = true; }
+                                Err(error) if ann_readiness_error(error.code()) => {
+                                    ann_pending = true;
+                                    // Use bounded exact search when ANN is cold or resource-limited.
+                                    // ANN 未就绪或资源不足时，沿用有界精确检索。
+                                    if admit_exact_descriptor(descriptor, &mut exact_remaining) {
+                                        exact.push(descriptor.clone());
+                                        semantic = Some("exact");
+                                    } else { semantic_scan_limited = true; }
+                                }
                                 Err(error) => return Err(error),
                             }
                             continue;
@@ -1388,12 +1487,13 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                                     matches.extend(rows);
                                     semantic = Some("ann");
                                 }
+                                Err(error) if error.code() == "ABORT_ERR" => return Err(error),
                                 Err(error) => {
-                                    if shard["count"].as_u64().unwrap_or(u64::MAX)
-                                        <= options["exactScanLimit"].as_u64().unwrap_or(1000000)
-                                    {
+                                    if admit_exact_descriptor(&shard, &mut exact_remaining) {
                                         exact.push(shard);
                                         semantic = Some("exact");
+                                    } else if ann_readiness_error(error.code()) {
+                                        semantic_scan_limited = true;
                                     } else {
                                         return Err(error);
                                     }
@@ -1401,8 +1501,10 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                             }
                         }
                     } else {
-                        exact.push(descriptor.clone());
-                        semantic = Some("exact");
+                        if admit_exact_descriptor(descriptor, &mut exact_remaining) {
+                            exact.push(descriptor.clone());
+                            semantic = Some("exact");
+                        } else { semantic_scan_limited = true; }
                     }
                 }
                 let receipt = sqlite_search::apply(
@@ -1426,16 +1528,24 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                 json!({"queryId":query_id,"requestId":request_id,"collationOrder":candidates}),
             ),
         )?;
-        let items = finalized["rows"]
+        let mut items = finalized["rows"]
             .as_array()
             .unwrap()
             .iter()
             .map(public_chunk)
             .collect::<Result<Vec<_>, _>>()?;
+        let ranking = super::fusion::lightweight(&mut items, input);
+        for item in &mut items {
+            if item["mergedChunks"].is_array() {
+                item["sourceRef"] = json!(reference(item, None));
+            }
+        }
         let mut response = finalized["snapshot"].clone();
         response["items"] = json!(items);
+        response["ranking"] = ranking;
         response["strategy"] = finalized["strategy"].clone();
         response["semanticBackend"] = json!(semantic);
+        response["semanticScanLimited"] = json!(semantic_scan_limited);
         response["vectorAvailable"] = json!(config.vector_extension.is_file());
         if options["mode"] == "auto" {
             let mut background = background_operation(config, "status", json!({"now":chrono::Utc::now().timestamp_millis()}))?;
@@ -1458,9 +1568,15 @@ fn public_chunk(row: &Value) -> Result<Value, ContractError> {
     let source = json!({"sourceId":row["source_id"],"scopeKey":row["scope_key"],"contentHash":row["content_hash"],
         "sourceRevision":serde_json::from_str::<Value>(row["source_revision"].as_str().unwrap_or("null")).unwrap_or(Value::Null),"derivationSignature":row["derivation_signature"]});
     let chunk = json!({"chunkId":row["chunk_id"],"chunkHash":row["chunk_hash"]});
+    let locator = serde_json::from_str::<Value>(row["locator"].as_str().unwrap_or("{}"))
+        .unwrap_or(json!({}));
+    let exact_path = storage::retrieval::normalize_path(locator["relativePath"].as_str()
+        .or_else(||locator["path"].as_str()).unwrap_or(""));
+    // Keep native locator facts through projection so exact evidence does not trigger extra inference.
+    // 原生定位事实随投影保留，避免有效精确证据因字段丢失触发额外推理。
     Ok(
         json!({"sourceId":source["sourceId"],"scopeKey":source["scopeKey"],"sourceType":row["source_type"],"title":row["title"],
-        "locator":serde_json::from_str::<Value>(row["locator"].as_str().unwrap_or("{}")).unwrap_or(json!({})),"excerpt":row["text"],
+        "locator":locator,"exactPath":exact_path,"exactTargetMatch":row["exact_target_match"]==true,"excerpt":row["text"],
         "contentHash":source["contentHash"],"sourceRevision":source["sourceRevision"],"derivationSignature":row["derivation_signature"],"chunkId":row["chunk_id"],"chunkHash":row["chunk_hash"],
         "startOffset":row["start_offset"],"endOffset":row["end_offset"],"startLine":row["start_line"],"endLine":row["end_line"],"score":row["score"],"distance":row["distance"],"structure":serde_json::from_str::<Value>(row["structure_json"].as_str().unwrap_or("null")).unwrap_or(Value::Null),"sourceRef":reference(&source,Some(&chunk))}),
     )
@@ -1470,9 +1586,259 @@ pub fn status(config: &GatewayConfig) -> Result<Value, ContractError> {
     sqlite_queries::apply("storage.index.status", &arguments(config, json!({})))
 }
 
+#[cfg(test)]
+mod native_query_route_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn structural_merge_derivation_invalidates_only_old_chunker_reuse() {
+        let prepared = prepare_source(&json!({"sourceId":"grouped-fixture","scopeKey":"project:fixture",
+            "sourceType":"work-file","title":"Notes","locator":{"relativePath":"notes.md"},
+            "text":"# Section\n\nFirst paragraph.\n\nSecond paragraph.\n"}), None).unwrap();
+        let source = &prepared["source"];
+        assert_eq!(source["chunkerVersion"], super::super::gateway_structure::CHUNKER_VERSION);
+        assert_eq!(prepared["chunks"].as_array().unwrap().len(), 2);
+        let mut state = json!({"source_id":source["sourceId"],"scope_key":source["scopeKey"],
+            "source_type":source["sourceType"],"content_hash":source["contentHash"],
+            "source_revision":source["sourceRevision"].to_string(),"binding_revision":0,
+            "title":source["title"],"locator":source["locator"].to_string(),
+            "parser_version":source["parserVersion"],"chunker_version":source["chunkerVersion"],
+            "embedding_input_version":"source-context-v1"});
+        assert!(source_matches(&state, source));
+        state["chunker_version"] = json!("structure-lines-v1");
+        assert!(!source_matches(&state, source));
+        state["chunker_version"] = source["chunkerVersion"].clone();
+        assert!(source_matches(&state, source));
+    }
+
+    struct SearchFixture {
+        root: PathBuf,
+        config: GatewayConfig,
+    }
+
+    impl SearchFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("kynxa-native-query-route-{}", gateway::new_id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let config = GatewayConfig {
+                data_home: root.join("Models"), data_root: root.join("Data"),
+                extension_root: root.join("Extensions"), application_root: root.clone(), port: 0,
+                toolhost_exe: root.join("unused-toolhost.exe"), vector_extension: root.join("unused-vec0.dll"),
+                inference_library: root.join("unused-ort.dll"),
+            };
+            for directory in [&config.data_home, &config.data_root, &config.extension_root] {
+                std::fs::create_dir_all(directory).unwrap();
+            }
+            Self { root, config }
+        }
+
+        fn publish(&self, id: &str, text: &str) {
+            let source = json!({"sourceId":id,"scopeKey":"project:query-route","sourceType":"document",
+                "title":id,"locator":{},"sourceRevision":1,"text":text,
+                "embeddingProfileId":"fixture","embeddingModelVersion":"fixture-v1","embeddingSpaceId":"fixture-space"});
+            let prepared = prepare_source(&source, Some(&[vec![1.0, 0.1]])).unwrap();
+            assert_eq!(prepared["chunks"].as_array().unwrap().len(), 1);
+            publish_prepared(&self.config, &[prepared]).unwrap();
+        }
+
+        fn cache_id(&self) -> String {
+            format!("native-index:{}", hash(&database(&self.config).to_string_lossy()))
+        }
+
+        fn descriptor_status(&self) -> Value {
+            storage::sqlite_vector_reads::cache_operation("storage.index.vectorCacheStatus",
+                &json!({"cacheId":self.cache_id()})).unwrap()["descriptorCache"].clone()
+        }
+    }
+
+    impl Drop for SearchFixture {
+        fn drop(&mut self) {
+            stop_ann_background(&self.config);
+            let _ = storage::sqlite_vector_reads::cache_operation("storage.index.vectorCacheClose",
+                &json!({"cacheId":self.cache_id()}));
+            let _ = storage::sqlite_connections::close(&self.config.data_root, &database(&self.config));
+            if let Some(bootstraps) = BOOTSTRAPS.get() {
+                if let Ok(mut bootstraps) = bootstraps.lock() { bootstraps.remove(&database(&self.config)); }
+            }
+            if self.root.starts_with(std::env::temp_dir()) { let _ = std::fs::remove_dir_all(&self.root); }
+        }
+    }
+
+    #[test]
+    fn natural_queries_skip_literal_scan_and_explicit_targets_keep_compatibility() {
+        let fixture = SearchFixture::new();
+        fixture.publish("matching", "needle target ???");
+        fixture.publish("sentinel", "unique_sentinel_only_unrelated");
+        let scanned_sentinel = Arc::new(AtomicUsize::new(0));
+        {
+            let connection = storage::sqlite_connections::acquire(
+                &fixture.config.data_root, &database(&fixture.config), 120000).unwrap();
+            let observed = scanned_sentinel.clone();
+            // Instrument the real SQLite lower() while preserving its ASCII behavior; an unrelated row exposes a full literal scan.
+            // 在真实 SQLite 上保留 lower() 的 ASCII 语义并计数；无关行被执行可直接证明发生全库子串扫描。
+            connection.create_scalar_function("lower", 1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                move |context| {
+                    let value = context.get::<Option<String>>(0)?;
+                    if value.as_deref().is_some_and(|value| value.contains("unique_sentinel_only_unrelated")) {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(value.map(|value| value.to_ascii_lowercase()))
+                }).unwrap();
+        }
+        let query = json!({"query":"needle","scopeKeys":["project:query-route"]});
+        let result = search(&fixture.config, &query).unwrap();
+        assert_eq!(result["items"][0]["sourceId"], "matching");
+        assert_eq!(scanned_sentinel.load(Ordering::SeqCst), 0,
+            "An ordinary FTS query must not run lower() on an unrelated chunk.");
+        for target in [json!({"path":"target.rs"}), json!({"symbol":"TargetSymbol"})] {
+            scanned_sentinel.store(0, Ordering::SeqCst);
+            let mut exact = query.clone();
+            exact["retrievalIntent"] = target;
+            search(&fixture.config, &exact).unwrap();
+            assert!(scanned_sentinel.load(Ordering::SeqCst) > 0,
+                "Explicit path/symbol intent retains the compatible literal channel.");
+        }
+        let untokenizable = search(&fixture.config,
+            &json!({"query":"???","scopeKeys":["project:query-route"]})).unwrap();
+        assert_eq!(untokenizable["items"][0]["sourceId"], "matching");
+        assert_eq!(untokenizable["items"].as_array().unwrap().len(),1);
+        // Candidate reuse and connection pooling may skip the instrumented lower(); results prove the fallback.
+        // 候选复用及连接池可能跳过被计数的 lower()，以只有字面回退才能找到的结果验证行为。
+        let mut explicit_literal = query.clone();
+        explicit_literal["query"] = json!("unmatched_natural_query");
+        explicit_literal["literalQuery"] = json!("needle");
+        let explicit_result = search(&fixture.config, &explicit_literal).unwrap();
+        assert_eq!(explicit_result["items"][0]["sourceId"], "matching");
+        assert_eq!(explicit_result["items"].as_array().unwrap().len(),1);
+    }
+
+    #[test]
+    fn native_descriptor_cache_reuses_stable_owner_and_rechecks_addition_deletion_and_scopes() {
+        let fixture = SearchFixture::new();
+        fixture.publish("first", "needle first evidence");
+        fixture.publish("other", "unrelated evidence");
+        // A cold ANN plus a one-row exact allowance exercises descriptors without loading any external vector DLL or model.
+        // 冷 ANN 与一行精确预算只检查描述符，不加载外部向量 DLL 或模型；来源始终至少两行。
+        let query = json!({"query":"needle","scopeKeys":["project:query-route"],"queryVector":[1.0,0.1],
+            "embeddingProfileId":"fixture","embeddingModelVersion":"fixture-v1","embeddingSpaceId":"fixture-space",
+            "ann":{"mode":"auto","threshold":1,"exactScanLimit":1},"limit":16});
+        assert_eq!(search(&fixture.config, &query).unwrap()["items"].as_array().unwrap().len(), 1);
+        let cold = fixture.descriptor_status();
+        assert_eq!(cold["misses"], 1);
+        assert_eq!(cold["hits"], 0);
+        search(&fixture.config, &query).unwrap();
+        assert_eq!(fixture.descriptor_status()["hits"], 1);
+        fixture.publish("added", "needle added evidence");
+        assert_eq!(search(&fixture.config, &query).unwrap()["items"].as_array().unwrap().len(), 2);
+        assert_eq!(fixture.descriptor_status()["misses"], 2,
+            "A newly indexed source changes the scope generation and cannot reuse old descriptors.");
+        remove(&fixture.config, "added", &json!(["project:query-route"]), true).unwrap();
+        let removed = search(&fixture.config, &query).unwrap();
+        assert_eq!(removed["items"].as_array().unwrap().len(), 1);
+        assert!(removed["items"].as_array().unwrap().iter().all(|item| item["sourceId"] != "added"));
+        assert_eq!(fixture.descriptor_status()["misses"], 3);
+        let mut unauthorized = query.clone();
+        unauthorized["scopeKeys"] = json!(["project:unlinked"]);
+        assert!(search(&fixture.config, &unauthorized).unwrap()["items"].as_array().unwrap().is_empty());
+        assert_eq!(fixture.descriptor_status()["misses"], 4,
+            "An identical query vector must not reuse descriptors from an unauthorized scope.");
+        search(&fixture.config, &query).unwrap();
+        assert_eq!(fixture.descriptor_status()["hits"], 2);
+    }
+}
+
 #[cfg(all(test, windows))]
 mod ann_background_tests {
     use super::*;
+
+    fn workspace(database: &str, scope: &str) -> GraphWorkspace {
+        GraphWorkspace { database: PathBuf::from(database), scope: scope.to_owned() }
+    }
+
+    #[test]
+    fn graph_residency_keeps_four_workspaces_with_independent_shard_budgets() {
+        let mut state = GraphResidency::default();
+        for database in ["first.sqlite", "second.sqlite"] {
+            for scope in ["project:a", "project:b"] {
+                let owner = workspace(database, scope);
+                assert!(state.demand(owner.clone()).is_empty());
+                for shard in 0..8 {
+                    let key = format!("{database}:{scope}:{shard}");
+                    assert!(state.remember(&key, owner.clone(), 8).unwrap().is_empty());
+                }
+            }
+        }
+        assert_eq!(state.workspaces.len(), 4);
+        assert_eq!(state.shards.len(), 32, "Four workspaces are not a global four-graph limit.");
+        let evicted = state.demand(workspace("third.sqlite", "project:a"));
+        assert_eq!(evicted.len(), 8);
+        assert!(evicted.iter().all(|key| key.starts_with("first.sqlite:project:a:")),
+            "Equal scope names in different databases remain separate workspaces.");
+        assert_eq!(state.shards.len(), 24);
+    }
+
+    #[test]
+    fn graph_residency_evicts_only_the_cold_workspace_and_preserves_recent_access() {
+        let mut state = GraphResidency::default();
+        for index in 0..4 {
+            let owner = workspace("index.sqlite", &format!("project:{index}"));
+            state.demand(owner.clone());
+            state.remember(&format!("graph:{index}"), owner, 4).unwrap();
+        }
+        assert!(state.demand(workspace("index.sqlite", "project:0")).is_empty());
+        assert_eq!(state.demand(workspace("index.sqlite", "project:4")), vec!["graph:1"]);
+        assert!(state.shards.iter().any(|(key, _)| key == "graph:0"));
+    }
+
+    #[test]
+    fn graph_residency_background_publication_stays_lazy_and_shards_do_not_starve_other_workspaces() {
+        let mut state = GraphResidency::default();
+        let first = workspace("index.sqlite", "project:first");
+        let second = workspace("index.sqlite", "project:second");
+        assert!(state.remember("unrequested", first.clone(), 16).is_none());
+        assert!(state.workspaces.is_empty());
+        state.demand(first.clone());
+        state.demand(second.clone());
+        state.remember("other", second.clone(), 4).unwrap();
+        for index in 0..16 { state.remember(&format!("first:{index}"), first.clone(), 16).unwrap(); }
+        assert_eq!(state.shards.len(), 17);
+        assert_eq!(state.remember("first:new", first, 16).unwrap(), vec!["first:0"]);
+        assert!(state.shards.iter().any(|(key, owner)| key == "other" && owner == &second));
+    }
+
+    #[test]
+    fn auto_ann_shard_allowance_remains_adaptive_and_respects_explicit_limits() {
+        let defaults = json!({"adaptive":true,"maxCachedShards":4,"maxShardBytes":1049600,"connectivity":16});
+        assert_eq!(auto_options(&json!({"dimensions":2,"count":1}), &defaults)["maxCachedShards"], 4);
+        assert_eq!(auto_options(&json!({"dimensions":2,"count":8}), &defaults)["maxCachedShards"], 8);
+        assert_eq!(auto_options(&json!({"dimensions":2,"count":100}), &defaults)["maxCachedShards"], 16);
+        let mut explicit = defaults;
+        explicit["adaptive"] = json!(false);
+        explicit["maxCachedShards"] = json!(1);
+        assert_eq!(auto_options(&json!({"dimensions":2,"count":8}), &explicit)["maxCachedShards"], 1);
+    }
+
+    #[test]
+    fn exact_ann_fallback_shares_one_scan_allowance_across_descriptors() {
+        let mut remaining = 10;
+        assert!(admit_exact_descriptor(&json!({"count":6}), &mut remaining));
+        assert!(!admit_exact_descriptor(&json!({"count":5}), &mut remaining));
+        assert_eq!(remaining, 4, "A declined fallback does not consume the remaining allowance.");
+        assert!(admit_exact_descriptor(&json!({"count":4}), &mut remaining));
+        assert_eq!(remaining, 0);
+        assert!(!admit_exact_descriptor(&json!({}), &mut remaining));
+    }
+
+    #[test]
+    fn ann_not_ready_falls_back_without_hiding_cancellation_or_corruption() {
+        assert!(ann_readiness_error("RETRIEVAL_ANN_BUILD_PENDING"));
+        assert!(ann_readiness_error("RETRIEVAL_ANN_RESOURCE_LIMIT"));
+        assert!(ann_readiness_error("RESOURCE_RUNTIME_UNAVAILABLE"));
+        assert!(!ann_readiness_error("ABORT_ERR"));
+        assert!(!ann_readiness_error("CORRUPT_RETRIEVAL_INDEX"));
+    }
 
     #[test]
     fn graph_page_deadline_renews_without_removing_cancellation() {

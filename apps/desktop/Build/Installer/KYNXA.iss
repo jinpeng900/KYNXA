@@ -7,7 +7,7 @@
   #define PackageOutputDir "..\..\..\..\artifacts\installer\output"
 #endif
 #ifndef PackageVersion
-  #define PackageVersion "1.65.0"
+  #define PackageVersion "1.8.1"
 #endif
 #ifndef LauncherFile
   #define LauncherFile "KYNXA.Desktop.exe"
@@ -87,14 +87,30 @@ zhcn.RunEntryExec=启动 KYNXA
 zhcn.ConfirmUninstall=是否卸载 KYNXA？聊天、模型、用户工具和数据会保留。
 
 [Files]
-; Never enumerate a development output or an existing installation directly.
-; 不直接枚举开发输出或已有安装；发布脚本只把批准的运行载荷放进暂存目录。
-; Anchor private-root exclusions so nested third-party data and extensions remain available.
-; 私有目录排除规则限定在载荷根目录，保留第三方依赖内的同名目录。
-Source: "{#PayloadRoot}\*"; DestDir: "{app}"; Excludes: "\Data,\Data\*,\Extensions,\Extensions\*,\.git,\.git\*,*.pdb,\prerequisites,\prerequisites\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Package only staged runtime files, not a development output or existing installation.
+; 只打包暂存的运行文件，不直接读取开发输出或现有安装。
+; Exclude private directories only at the root, preserving nested third-party names.
+; 私有目录仅从根目录排除，保留第三方依赖内的同名目录。
+Source: "{#PayloadRoot}\*"; DestDir: "{app}"; Excludes: "\Data,\Data\*,\Extensions,\Extensions\*,\.git,\.git\*,*.pdb,\prerequisites,\prerequisites\*,\runtime\rerank\builtin-multilingual-reranker,\runtime\rerank\builtin-multilingual-reranker\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BrandImageFile}"; DestName: "kynxa-installer-logo.png"; Flags: dontcopy
 Source: "Configure-Kynxa.ps1"; DestName: "Configure-Kynxa-Read.ps1"; Flags: dontcopy
 Source: "{#PayloadRoot}\prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Flags: dontcopy skipifsourcedoesntexist
+
+[InstallDelete]
+; Remove only the previously shipped model files on upgrade; preserve unknown files and user data.
+; 升级时只删除旧版本随包模型的精确文件，保留未知文件和用户数据。
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\onnx\model_quantized.onnx"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\manifest.json"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\config.json"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\tokenizer_config.json"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\special_tokens_map.json"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\tokenizer.json"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\MODEL_CARD.md"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\CONVERSION_MODEL_CARD.md"
+Type: files; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\LICENSE"
+Type: dirifempty; Name: "{app}\runtime\rerank\builtin-multilingual-reranker\onnx"
+Type: dirifempty; Name: "{app}\runtime\rerank\builtin-multilingual-reranker"
+Type: dirifempty; Name: "{app}\runtime\rerank"
 
 [Icons]
 Name: "{userprograms}\KYNXA"; Filename: "{app}\{#LauncherFile}"; WorkingDir: "{app}"; IconFilename: "{app}\Assets\AppIcon.ico"

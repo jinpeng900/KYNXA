@@ -66,7 +66,7 @@ public sealed partial class MarkdownReply
         // WebView2 无法启动时，原生渲染器继续提供离线回退。
         rendered ??= MathFormulaRenderer.Render(entry.Latex, entry.Block);
         if (!_formulas.Contains(entry)) return; // A changed tail/chat must never receive an old image.
-        // 尾部内容或聊天已切换时，不能应用旧任务返回的图片。
+        // 回复或聊天已切换时，忽略旧任务返回的图片。
         entry.Formula = rendered;
         entry.Ready = true;
         if (IsLoaded) ApplyReadyFormulas();

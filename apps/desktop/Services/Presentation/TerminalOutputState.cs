@@ -191,7 +191,7 @@ public sealed class TerminalOutputState
             ApplyReceipt(run, value);
         }
         catch (JsonException) { } // A preview is optional; its raw JSON is never shown as terminal text.
-        // 预览可不存在；原始 JSON 不能作为终端文本展示。
+        // 预览可缺失，原始 JSON 不作为终端文本展示。
     }
 
     private static void ApplyReceipt(TerminalRun run, JsonElement receipt)

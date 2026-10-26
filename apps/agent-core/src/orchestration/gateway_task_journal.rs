@@ -1,5 +1,5 @@
-//! Thin I/O bridge from the existing request loop to its one persistent task repository.
-//! 现有请求循环到唯一任务仓储的薄 I/O 接线；不复制工具原文、模型事实或资源账本。
+//! Connect the request loop to its single task repository without duplicating ledgers.
+//! 请求循环复用唯一任务仓储，不复制账本。
 
 use crate::gateway_contract::GatewayError;
 use crate::storage::{managed_files, task_repository::*};
@@ -25,13 +25,329 @@ struct EventBuffer {
     bytes: usize,
 }
 
-/// An attempt owns this bridge; stable work identity stays in TaskRepository across replacement.
-/// 尝试拥有本接线；更换执行者时稳定工作身份和已取得回执继续由 TaskRepository 保存。
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cold_claim_uses_verified_original_limits_per_dimension_without_resetting_usage() {
+        let root = std::env::temp_dir().join(format!("kynxa-cold-budget-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (limits, requests, active_ms, succeeds) in [
+            (json!({}), 256, 1_800_000, true),
+            (json!({"maxDurationMs":1_800_000}), 256, 1_800_000, false),
+            (json!({"maxModelRequests":256}), 256, 1_800_000, false),
+            (json!({"maxDurationMs":1_800_000}), 256, 0, true),
+            (json!({"maxModelRequests":256}), 0, 1_800_000, true),
+        ] {
+            let request = uuid::Uuid::new_v4().to_string();
+            let conversation = uuid::Uuid::new_v4().to_string();
+            let document = json!({"input":{"requestId":request,"conversationId":conversation,
+                "message":"继续完成有实际成果的原任务","runLimits":limits},"fingerprint":"saved-fingerprint"});
+            let bytes = serde_json::to_vec(&document).unwrap();
+            let hash = managed_files::digest(&bytes);
+            let relative = format!("Agent/task-inputs/{request}-{hash}.json");
+            managed_files::atomic_write(&root, &root.join(&relative), &bytes, MAX_BLOB_BYTES).unwrap();
+            let input = NewTask {request_id:request, goal:"Preserve original progress".into(), acceptance:vec![],
+                scope:TaskScope {project_id:None, conversation_id:conversation,
+                    permission_snapshot:json!({"requestFingerprint":"saved-fingerprint"})},
+                parent_task_id:None, dependency_ids:vec![],
+                budget:TaskBudget {max_model_requests:256,max_known_tokens:Some(10_000),max_execution_ms:Some(1_800_000)},
+                input_reference:Some(json!({"kind":"task-input","relativePath":relative,"sha256":hash,"bytes":bytes.len()})),
+            };
+            let original = TaskJournal::begin(&root, &input, "first-worker", 60_000).unwrap();
+            original.repository.record_usage(original.token(), "actual-prior-usage", &TaskUsage {
+                model_requests:requests, input_tokens:100, output_tokens:20,
+                unknown_token_requests:u64::from(requests > 0), ..Default::default()
+            }).unwrap();
+            original.repository.record_active_duration(original.token(), active_ms).unwrap();
+            original.release("shutdown-checkpoint").await.unwrap();
+            let before = original.load_current().unwrap();
+            let claimed = TaskJournal::start_existing(&root, &before, "resumed-worker", 60_000);
+            if succeeds {
+                let resumed = claimed.unwrap();
+                let after = resumed.load_current().unwrap();
+                assert_eq!(after.task_id, before.task_id);
+                assert_eq!(after.usage, before.usage);
+                assert_eq!(after.budget.max_known_tokens, Some(10_000));
+                assert_eq!(after.budget.max_model_requests, if limits["maxModelRequests"].is_null() && requests == 256 {320} else {256});
+                assert_eq!(after.budget.max_execution_ms, Some(if limits["maxDurationMs"].is_null() && active_ms == 1_800_000 {3_600_000} else {1_800_000}));
+                resumed.release("fixture-complete").await.unwrap();
+            } else {
+                assert!(claimed.is_err(), "{limits}");
+                let after = original.load_current().unwrap();
+                assert_eq!(after.budget, before.budget);
+                assert_eq!(after.usage, before.usage);
+            }
+        }
+        crate::storage::sqlite_connections::drain_root(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_child_claim_inherits_root_caps_and_renews_only_the_implicit_tree() {
+        let root = std::env::temp_dir().join(format!("kynxa-child-cold-budget-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for explicit in [false, true] {
+            let request = uuid::Uuid::new_v4().to_string();
+            let conversation = uuid::Uuid::new_v4().to_string();
+            let limits = if explicit {json!({"maxModelRequests":256})} else {json!({})};
+            let bytes = serde_json::to_vec(&json!({"input":{"requestId":request,"conversationId":conversation,
+                "runLimits":limits},"fingerprint":"original-root"})).unwrap();
+            let hash = managed_files::digest(&bytes);
+            let relative = format!("Agent/task-inputs/{request}-{hash}.json");
+            managed_files::atomic_write(&root, &root.join(&relative), &bytes, MAX_BLOB_BYTES).unwrap();
+            let input = NewTask {request_id:request, goal:"Continue original root".into(), acceptance:vec![],
+                scope:TaskScope {project_id:None, conversation_id:conversation, permission_snapshot:json!({})},
+                parent_task_id:None, dependency_ids:vec![],
+                budget:TaskBudget {max_model_requests:256,max_known_tokens:None,max_execution_ms:Some(1_800_000)},
+                input_reference:Some(json!({"kind":"task-input","relativePath":relative,"sha256":hash,"bytes":bytes.len()})),
+            };
+            let parent = TaskJournal::begin(&root,&input,"parent",60_000).unwrap();
+            let child_input = NewTask {request_id:uuid::Uuid::new_v4().to_string(),parent_task_id:Some(parent.task_id().into()),
+                input_reference:Some(json!({"kind":"task-child-input"})),..input};
+            let child = TaskJournal::begin(&root,&child_input,"child",60_000).unwrap();
+            child.repository.record_usage(child.token(),"prior-child-provider-usage",
+                &TaskUsage {model_requests:256,input_tokens:120,unknown_token_requests:1,..Default::default()}).unwrap();
+            child.repository.record_active_duration(child.token(),1_800_000).unwrap();
+            parent.repository.record_active_duration(parent.token(),1_800_000).unwrap();
+            child.release("shutdown-checkpoint").await.unwrap();
+            parent.release("shutdown-checkpoint").await.unwrap();
+            let old_child = child.load_current().unwrap();
+            let old_parent = parent.load_current().unwrap();
+            let claimed = TaskJournal::start_existing(&root,&old_child,"continued-child",60_000);
+            if explicit {
+                assert!(claimed.is_err());
+            } else {
+                let continued = claimed.unwrap();
+                assert_eq!(continued.load_current().unwrap().budget.max_model_requests,320);
+                assert_eq!(parent.load_current().unwrap().budget.max_model_requests,320);
+                continued.release("fixture-complete").await.unwrap();
+            }
+            assert_eq!(child.load_current().unwrap().usage,old_child.usage);
+            assert_eq!(parent.load_current().unwrap().usage,old_parent.usage);
+            if explicit {
+                assert_eq!(child.load_current().unwrap().budget,old_child.budget);
+                assert_eq!(parent.load_current().unwrap().budget,old_parent.budget);
+            }
+        }
+        crate::storage::sqlite_connections::drain_root(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn child_dispatch_rechecks_formal_ancestor_steering_and_keeps_successful_receipts() {
+        let (mut context, _cancel) = crate::tools::gateway::test_context();
+        let root = context.data_home.clone();
+        let input = NewTask { request_id:uuid::Uuid::new_v4().to_string(), goal:"开始制作文件".into(), acceptance:vec![],
+            scope:TaskScope {project_id:None,conversation_id:context.conversation_id.clone(),permission_snapshot:json!({})},
+            parent_task_id:None,dependency_ids:vec![],budget:TaskBudget::default(),input_reference:None };
+        crate::storage::gateway::ensure_conversation(&root,&context.conversation_id,"Ancestor scope fixture").unwrap();
+        let parent = TaskJournal::begin(&root,&input,"parent",60_000).unwrap();
+        let child_input = NewTask {request_id:uuid::Uuid::new_v4().to_string(),parent_task_id:Some(parent.task_id().into()),..input.clone()};
+        let child = TaskJournal::begin(&root,&child_input,"child",60_000).unwrap();
+        child.refresh_ancestor_work_scope(&mut context,&child_input.goal).await.unwrap();
+        let intent = |id:&str| OperationIntent {operation_id:id.into(),tool_call_id:id.into(),tool_name:"filesystem.write".into(),
+            input_sha256:"a".repeat(64),input_reference:None,effect:OperationEffect::FileMutation};
+        child.record_operation(&intent("saved-success")).unwrap();
+        child.dispatch_with_ancestor_scope("saved-success",&context).unwrap();
+        let saved_receipt = child.save_blob("worker-log",br#"{"status":"completed","executed":true,"fixture":"original-receipt"}"#).await.unwrap();
+        child.finish_operation("saved-success",OperationState::Succeeded,Some(saved_receipt.clone()),None).unwrap();
+        child.record_operation(&intent("not-dispatched")).unwrap();
+        let quick_id = uuid::Uuid::new_v4().to_string();
+        let quick = "快一点";
+        crate::storage::gateway::upsert_message(&root,&context.conversation_id,
+            &json!({"Id":quick_id,"Role":"user","Content":quick,"Status":"completed"})).unwrap();
+        let current = parent.load_current().unwrap();
+        parent.repository.record_user_steering(parent.task_id(),current.version,&quick_id,"continue",
+            &super::super::gateway_task_hub::steering_content_hash(quick, &Value::Null)).unwrap();
+        let waiting = child.refresh_ancestor_work_scope(&mut context,&child_input.goal).await.unwrap().unwrap();
+        assert_eq!(waiting["stage"],"execute", "an ordinary speed request cannot change the task into an explanation");
+        assert_eq!(waiting["ancestorControlPending"],true);
+        assert_eq!(child.dispatch_with_ancestor_scope("not-dispatched",&context).unwrap_err().code,"TASK_PARENT_SCOPE_CHANGED");
+        parent.emit_control("task.user-directive",&json!({"userMessageId":quick_id,"stop":false,"deliverExisting":false})).unwrap();
+        parent.flush().await.unwrap();
+        let resumed = child.refresh_ancestor_work_scope(&mut context,&child_input.goal).await.unwrap().unwrap();
+        assert_eq!(resumed["stage"],"execute");
+        assert_eq!(resumed["ancestorControlPending"],false);
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let text = "先只给我方案，不要修改文件";
+        crate::storage::gateway::upsert_message(&root,&context.conversation_id,
+            &json!({"Id":message_id,"Role":"user","Content":text,"Status":"completed"})).unwrap();
+        let current = parent.load_current().unwrap();
+        parent.repository.record_user_steering(parent.task_id(),current.version,&message_id,"continue",
+            &super::super::gateway_task_hub::steering_content_hash(text, &Value::Null)).unwrap();
+        assert_eq!(parent.load_current().unwrap().state,TaskState::Running);
+        assert_eq!(child.dispatch_with_ancestor_scope("not-dispatched",&context).unwrap_err().code,"TASK_PARENT_SCOPE_CHANGED");
+        let scope = child.refresh_ancestor_work_scope(&mut context,&child_input.goal).await.unwrap().unwrap();
+        assert!(!super::super::task::scope_allows_call(&scope,"filesystem.write",false));
+        assert!(super::super::task::scope_allows_call(&scope,"filesystem.read",true));
+        let operations = child.repository.operations(child.task_id()).unwrap();
+        assert_eq!(operations.iter().find(|item|item.intent.operation_id=="saved-success").unwrap().state,OperationState::Succeeded);
+        assert_eq!(operations.iter().find(|item|item.intent.operation_id=="saved-success").unwrap().result_reference,Some(saved_receipt));
+        assert_eq!(operations.iter().find(|item|item.intent.operation_id=="not-dispatched").unwrap().state,OperationState::Pending);
+        child.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
+        parent.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
+        drop(child);drop(parent);crate::storage::sqlite_connections::drain_root(&root).unwrap();
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_checkpoints_restore_scoped_images_without_changing_receipts_or_raw_hashes() {
+        let root = std::env::temp_dir().join(format!("kynxa-journal-images-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = NewTask {
+            request_id:uuid::Uuid::new_v4().to_string(), goal:"Resume image evidence".into(), acceptance:Vec::new(),
+            scope:TaskScope {project_id:None, conversation_id:uuid::Uuid::new_v4().to_string(), permission_snapshot:json!({"permissionMode":"full"})},
+            parent_task_id:None, dependency_ids:Vec::new(), budget:TaskBudget::default(), input_reference:None,
+        };
+        crate::storage::gateway::ensure_conversation(&root, &input.scope.conversation_id, "Image fixture").unwrap();
+        let journal = TaskJournal::begin(&root, &input, "image-first", 60_000).unwrap();
+        let pixels = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=";
+        let image = json!({"type":"image","mimeType":"image/png","data":pixels});
+        let context = json!({"messages":[{"role":"tool","content":[image.clone()]}],
+            "progress":{"completedCallIds":["saved-call"],"sequence":7},
+            "signature":image,"documentText":pixels});
+        let origin = json!({"providerId":"fixture","model":"fixture"});
+        let reference = journal.save_root_work_context(&input.request_id, "fingerprint", &origin, &context).await.unwrap();
+        journal.checkpoint_from_chat("assistant-image", &input.request_id, Some(reference.clone()), json!({"next":"remaining detail"})).await.unwrap();
+        let raw = journal.read_blob(&reference).await.unwrap();
+        assert_eq!(reference["sha256"], managed_files::digest(&raw));
+        let archived: Value = serde_json::from_slice(&raw).unwrap();
+        let image_ref = &archived["context"]["messages"][0]["content"][0]["data"]["kynxaImageRef"];
+        assert_eq!(image_ref["requestId"], input.request_id);
+        assert_eq!(archived["context"]["signature"], context["signature"]);
+        assert_eq!(archived["context"]["documentText"], pixels);
+        assert_eq!(journal.read_root_work_context("assistant-image", &input.request_id, "wrong", &origin)
+            .await.unwrap_err().code, "INVALID_ROOT_WORK_CONTEXT");
+        let current = journal.load_current().unwrap();
+        journal.repository.control(journal.task_id(), current.version, TaskControl::Pause).unwrap();
+        let paused = journal.finish(TaskState::Paused, Some("fixture-pause")).await.unwrap();
+        let resumed = journal.repository.control(journal.task_id(), paused.version, TaskControl::Resume).unwrap();
+        let recovered = TaskJournal::start_existing(&root, &resumed, "image-resumed", 60_000).unwrap();
+        assert_eq!(recovered.read_root_work_context("assistant-image", &input.request_id, "fingerprint", &origin)
+            .await.unwrap().unwrap(), (context.clone(), reference.clone()));
+        assert_eq!(recovered.read_blob(&reference).await.unwrap(), raw);
+
+        // A child can read a verified parent context, but each saved checkpoint uses its own chat identity.
+        // 子任务可读取已核验的父上下文，自存检查点仍使用自己的聊天身份。
+        let mut child_input = input.clone();
+        child_input.request_id = "child-image-fixture".into();
+        child_input.parent_task_id = Some(recovered.task_id().into());
+        child_input.scope.conversation_id = uuid::Uuid::new_v4().to_string();
+        crate::storage::gateway::ensure_conversation(&root, &child_input.scope.conversation_id, "Child image fixture").unwrap();
+        let child = TaskJournal::begin(&root, &child_input, "image-child", 60_000).unwrap();
+        let inherited: Value = serde_json::from_slice(&child.read_model_blob(&reference).await.unwrap()).unwrap();
+        assert_eq!(inherited["context"], context);
+        let child_reference = child.save_task_blob("child-context", &context).await.unwrap().reference;
+        let child_raw: Value = serde_json::from_slice(&child.read_blob(&child_reference).await.unwrap()).unwrap();
+        assert_eq!(child_raw["messages"][0]["content"][0]["data"]["kynxaImageRef"]["requestId"], child.task_id());
+        let child_restored: Value = serde_json::from_slice(&child.read_model_blob(&child_reference).await.unwrap()).unwrap();
+        assert_eq!(child_restored, context);
+
+        let payload = root.join("Chats").join(&input.scope.conversation_id).join("model-images")
+            .join(format!("{}.bin", image_ref["id"].as_str().unwrap()));
+        std::fs::remove_file(payload).unwrap();
+        let (expired, _) = recovered.read_root_work_context("assistant-image", &input.request_id, "fingerprint", &origin)
+            .await.unwrap().unwrap();
+        assert_eq!(expired["messages"][0]["content"][0]["type"], "text");
+        assert!(expired["messages"][0]["content"][0]["text"].as_str().unwrap().contains(image_ref["imageSha256"].as_str().unwrap()));
+        assert_eq!(expired["progress"], context["progress"]);
+        assert_eq!(recovered.read_blob(&reference).await.unwrap(), raw);
+        assert_eq!(serde_json::from_slice::<Value>(&child.read_model_blob(&child_reference).await.unwrap()).unwrap(), context);
+        let plain = b"{ \"document\": \"unchanged text\" }";
+        let plain_reference = child.save_blob("worker-log", plain).await.unwrap();
+        assert_eq!(child.read_blob(&plain_reference).await.unwrap(), plain);
+        child.finish(TaskState::Partial, Some("fixture-finished")).await.unwrap();
+        recovered.finish(TaskState::Partial, Some("fixture-finished")).await.unwrap();
+        drop(child); drop(recovered); drop(journal);
+        crate::storage::gateway_memory::stop_candidates(&root);
+        crate::storage::sqlite_connections::drain_root(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_journal_cancelled_flush_keeps_original_ids_until_commit_acknowledgement() {
+        let root = std::env::temp_dir().join(format!("kynxa-durable-journal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let journal = TaskJournal::begin(&root, &NewTask {
+            request_id:uuid::Uuid::new_v4().to_string(), goal:"Durable stream fixture".into(), acceptance:Vec::new(),
+            scope:TaskScope { project_id:None, conversation_id:uuid::Uuid::new_v4().to_string(), permission_snapshot:json!({"permissionMode":"full"}) },
+            parent_task_id:None, dependency_ids:Vec::new(), budget:TaskBudget::default(), input_reference:None,
+        }, "journal-fixture", 60_000).unwrap();
+        // Disable only the test pump so cancellation targets the foreground flush deterministically.
+        // 仅在夹具中关闭定时泵，使取消准确作用于前台flush，而不是由时间竞争决定测试结果。
+        journal.scheduled.store(true, Ordering::Release);
+        journal.emit_control("text_delta", &json!({"type":"text_delta","delta":"preserved 🏰"})).unwrap();
+        let original_id = journal.pending.lock().unwrap().events[0].0.clone();
+        let writer = crate::storage::sqlite_connections::acquire_write(&root, &root.join("Agent/tasks.sqlite"), 30_000).unwrap();
+        let started = Arc::new(AtomicBool::new(false));
+        let operation = journal.clone(); let observed = started.clone();
+        let flushing = tokio::spawn(async move { observed.store(true, Ordering::Release); operation.flush().await });
+        while !started.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        flushing.abort(); assert!(flushing.await.unwrap_err().is_cancelled());
+        assert_eq!(journal.pending.lock().unwrap().events[0].0, original_id);
+        drop(writer);
+        journal.flush().await.unwrap();
+        assert!(journal.pending.lock().unwrap().events.is_empty());
+        let events = journal.repository.read_events(journal.task_id(), 0, 512).unwrap();
+        let saved = events.iter().filter(|event|event.kind=="text_delta").collect::<Vec<_>>();
+        assert_eq!(saved.len(),1); assert_eq!(saved[0].event_id,original_id);
+        assert_eq!(saved[0].payload["delta"],"preserved 🏰");
+        journal.scheduled.store(false, Ordering::Release);
+        journal.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
+        drop(journal); crate::storage::sqlite_connections::drain_root(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Resolve authority once from the original root input; legacy unknown origins retain their existing caps.
+/// 一次性读取原始根输入的授权；来源不可确认的旧任务保留原上限。
+fn takeover_budget_extensions(
+    root: &Path,
+    repository: &TaskRepository,
+    task: &TaskRecord,
+) -> Result<(Option<super::budget::OperationalBudgetPolicy>, Vec<TaskAttemptBudgetExtension>)> {
+    let mut owners = vec![task.clone()];
+    while let Some(parent) = owners.last().and_then(|owner| owner.parent_task_id.as_deref()) {
+        if owners.len() >= 64 || owners.iter().any(|owner|owner.task_id == parent) {
+            return Err(GatewayError::new("TASK_DEPTH_LIMIT", "任务祖先层级无效，原进度保留。", 409));
+        }
+        owners.push(repository.load(parent)?);
+    }
+    let origin = owners.last().expect("current task is an owner");
+    let Some(reference) = origin.input_reference.as_ref().filter(|reference|reference["kind"] == "task-input") else {
+        return Ok((None, Vec::new()));
+    };
+    let (input, _, fingerprint) = super::gateway_task_input::read_sync(root, reference)?;
+    if input["requestId"] != origin.request_id || input["conversationId"] != origin.scope.conversation_id
+        || origin.scope.permission_snapshot["requestFingerprint"].as_str().is_some_and(|saved|saved != fingerprint) {
+        return Err(GatewayError::new("TASK_INPUT_SCOPE_MISMATCH", "原始预算输入与任务身份不符，原进度保留。", 409));
+    }
+    let policy = super::budget::OperationalBudgetPolicy::from_input(&input);
+    let extensions = owners.iter().filter_map(|owner| {
+        let (requests, execution_ms) = super::budget::operational_budget_floor(
+            policy, owner.usage.model_requests, owner.usage.active_duration_ms.unwrap_or(0),
+            owner.budget.max_model_requests, owner.budget.max_execution_ms,
+        );
+        (requests > owner.budget.max_model_requests
+            || owner.budget.max_execution_ms.is_some_and(|limit|execution_ms > limit))
+            .then(||TaskAttemptBudgetExtension {
+                task_id:owner.task_id.clone(), expected_version:owner.version,
+                min_model_requests:requests, min_execution_ms:execution_ms,
+            })
+    }).collect();
+    Ok((Some(policy), extensions))
+}
+
+/// The attempt owns this bridge; TaskRepository retains task IDs and receipts across replacement.
+/// 尝试持有本接线，更换执行者后任务身份及回执仍由 TaskRepository 保留。
 pub struct TaskJournal {
     repository: Arc<TaskRepository>,
     root: PathBuf,
     token: AttemptToken,
     input_reference: Option<Value>,
+    operational_budget_policy: Option<super::budget::OperationalBudgetPolicy>,
     pending: Mutex<EventBuffer>,
     flush_serial: AsyncMutex<()>,
     scheduled: AtomicBool,
@@ -40,6 +356,8 @@ pub struct TaskJournal {
     released: AtomicBool,
     renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
     renewal_stop: Arc<Notify>,
+    #[cfg(test)]
+    committed_event_batches: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl TaskJournal {
@@ -77,13 +395,16 @@ impl TaskJournal {
         executor_id: &str,
         lease_ms: u64,
     ) -> Result<Arc<Self>> {
-        let attempt =
-            repository.start_attempt(&task.task_id, task.version, executor_id, lease_ms)?;
+        let (operational_budget_policy, extensions) = takeover_budget_extensions(root, &repository, task)?;
+        let attempt = repository.start_attempt_with_budget_extension(
+            &task.task_id, task.version, executor_id, lease_ms, &extensions,
+        )?;
         let journal = Arc::new(Self {
             repository,
             root: root.to_owned(),
             token: attempt.token,
             input_reference: task.input_reference.clone(),
+            operational_budget_policy,
             pending: Mutex::new(EventBuffer::default()),
             flush_serial: AsyncMutex::new(()),
             scheduled: AtomicBool::new(false),
@@ -92,6 +413,8 @@ impl TaskJournal {
             released: AtomicBool::new(false),
             renewal: Default::default(),
             renewal_stop: Arc::new(Notify::new()),
+            #[cfg(test)]
+            committed_event_batches: Default::default(),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&journal);
@@ -118,8 +441,19 @@ impl TaskJournal {
     pub fn task_id(&self) -> &str {
         &self.token.task_id
     }
+    #[cfg(test)]
+    pub(super) fn committed_event_batches(&self) -> usize {
+        self.committed_event_batches.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(super) fn pending_event_ids(&self) -> Vec<String> {
+        self.pending.lock().unwrap().events.iter().map(|event| event.0.clone()).collect()
+    }
     pub fn input_reference(&self) -> Option<&Value> {
         self.input_reference.as_ref()
+    }
+    pub(super) fn operational_budget_policy(&self) -> Option<super::budget::OperationalBudgetPolicy> {
+        self.operational_budget_policy
     }
     pub fn latest_checkpoint(&self) -> Result<Option<TaskCheckpoint>> {
         Ok(self.repository.latest_checkpoint(self.task_id())?)
@@ -129,6 +463,78 @@ impl TaskJournal {
     }
     pub fn check_dispatch_fence(&self) -> Result<TaskRecord> {
         Ok(self.repository.check_attempt(&self.token)?)
+    }
+
+    /// Refresh only when formal ancestor instructions change; cached scope grants no independent authority.
+    /// 仅在正式祖先引导变化时刷新；范围缓存本身不产生权限。
+    pub(crate) async fn refresh_ancestor_work_scope(
+        &self, context: &mut crate::tools::gateway::GatewayToolContext, goal: &str,
+    ) -> Result<Option<Value>> {
+        let mut ancestors = Vec::new();
+        let mut current = self.check_dispatch_fence()?;
+        while let Some(parent) = current.parent_task_id.as_deref() {
+            current = self.repository.load(parent)?;
+            ancestors.push(current.clone());
+            if ancestors.len() >= 64 { return Err(GatewayError::new("TASK_DEPTH_LIMIT", "任务祖先层级无效。", 409)); }
+        }
+        ancestors.reverse();
+        let mut version = Vec::new();
+        for ancestor in &ancestors {
+            let sequence = self.repository.latest_event(&ancestor.task_id, "task.user-steering")?.map_or(0, |event| event.sequence);
+            let directive = self.repository.latest_event(&ancestor.task_id, "task.user-directive")?.map_or(0, |event| event.sequence);
+            version.push(json!({"taskId":ancestor.task_id,"sequence":sequence,"directiveSequence":directive}));
+        }
+        let version = json!(version);
+        if context.config["ancestorWorkScopeVersion"] == version { return Ok(None); }
+        let mut scope = Value::Null;
+        let mut control_pending = false;
+        for ancestor in ancestors {
+            let inherited = scope.clone();
+            scope = super::task::resolve_work_scope(&ancestor.goal, &scope);
+            let events = self.repository.user_steering(&ancestor.task_id)?;
+            if !events.is_empty() {
+                let root = self.root.clone();
+                let scope_row = ancestor.scope.clone();
+                let ids = events.iter().filter_map(|event| event.payload["userMessageId"].as_str().map(str::to_owned)).collect();
+                let messages = tokio::task::spawn_blocking(move || crate::storage::conversation_history::read_latest(
+                    &root, &json!({"Id":scope_row.conversation_id,"ProjectId":scope_row.project_id}), Some(&ids), false))
+                    .await.map_err(|_|GatewayError::new("TASK_SCOPE_READ_FAILED", "父级要求读取失败，原进度保留。", 503))??;
+                let latest_user = events.last().map(|event|event.payload["userMessageId"].clone());
+                for event in events {
+                    let saved = messages.messages.iter().filter_map(|raw| serde_json::from_str::<Value>(
+                        &crate::storage::raw_json::scalar_projection(raw)).ok()).find(|message|
+                        message["Id"] == event.payload["userMessageId"] && message["Role"] == "user")
+                        .ok_or_else(||GatewayError::new("TASK_STEERING_MESSAGE_MISSING", "父级引导原文不可读取，旧调用未派发。", 409))?;
+                    let text = saved["Content"].as_str().ok_or_else(||GatewayError::new("TASK_STEERING_MESSAGE_INVALID", "父级引导正文无效。", 409))?;
+                    if super::gateway_task_hub::steering_content_hash(text, &saved["Attachments"]) != event.payload["contentHash"] {
+                        return Err(GatewayError::new("TASK_STEERING_MESSAGE_CHANGED", "父级引导正文已变化，旧调用未派发。", 409));
+                    }
+                    scope = super::task::resolve_work_scope(text, &scope);
+                }
+                let directive = self.repository.latest_event(&ancestor.task_id, "task.user-directive")?;
+                let latest_directive = directive.as_ref().filter(|event| Some(&event.payload["userMessageId"]) == latest_user.as_ref());
+                control_pending |= latest_directive.is_none();
+                if latest_directive.is_some_and(|event| event.payload["stop"] == true || event.payload["deliverExisting"] == true) {
+                    return Err(GatewayError::new("TASK_PARENT_EXECUTION_STOPPED", "父级已停止后续执行，原子任务进度及回执保留。", 409));
+                }
+            }
+            if inherited.is_object() && !super::task::scope_allows_mutation(&inherited) { scope["stage"] = inherited["stage"].clone(); }
+        }
+        let inherited = scope.clone();
+        scope = super::task::resolve_work_scope(goal, &scope);
+        if inherited.is_object() && !super::task::scope_allows_mutation(&inherited) { scope["stage"] = inherited["stage"].clone(); }
+        scope["ancestorRequest"] = inherited["request"].clone();
+        scope["ancestorControlPending"] = json!(control_pending);
+        context.config["currentWorkScope"] = scope.clone();
+        context.config["ancestorWorkScopeVersion"] = version;
+        Ok(Some(scope))
+    }
+
+    pub(crate) fn dispatch_with_ancestor_scope(&self, id: &str, context: &crate::tools::gateway::GatewayToolContext) -> Result<TaskOperation> {
+        if context.config["currentWorkScope"]["ancestorControlPending"] == true {
+            return Err(GatewayError::new("TASK_PARENT_SCOPE_CHANGED", "父级正在解析新要求，原调用尚未派发。", 409));
+        }
+        Ok(self.repository.dispatch_operation_with_ancestor_scope(&self.token, id, &context.config["ancestorWorkScopeVersion"])?)
     }
 
     async fn renew_while_owned(weak: Weak<Self>, lease_ms: u64, stop: Arc<Notify>) {
@@ -171,8 +577,8 @@ impl TaskJournal {
         }
     }
 
-    /// Queue compact controls, then batch disk writes outside streaming/model execution.
-    /// 小型控制事件先入队；流式和模型执行路径不随每个 token 同步写 SQLite。
+    /// Queue controls and batch writes instead of synchronously writing SQLite per token.
+    /// 控制事件入队后批量落盘，不逐 token 同步写 SQLite。
     pub fn emit_control(self: &Arc<Self>, kind: &str, payload: &Value) -> Result<()> {
         if self.is_released() {
             return Err(GatewayError::new(
@@ -242,8 +648,8 @@ impl TaskJournal {
         loop {
             tokio::select! {_=tokio::time::sleep(Duration::from_millis(100))=>{},_=self.wake_flush.notified()=>{}}
             let succeeded = self.flush().await.is_ok();
-            // Reset scheduling under the buffer lock so an arriving last event cannot be stranded.
-            // 在缓存锁内复位调度标志，避免最后一个晚到事件在后台等待时漏掉定期持久化。
+            // Reset scheduling under the buffer lock to avoid stranding late events.
+            // 缓存锁内复位调度，避免遗漏晚到事件。
             let Ok(pending) = self.pending.lock() else {
                 self.scheduled.store(false, Ordering::Release);
                 break;
@@ -257,27 +663,32 @@ impl TaskJournal {
     pub async fn flush(&self) -> Result<()> {
         let _serial = self.flush_serial.lock().await;
         let batch = {
-            let mut pending = self.pending.lock().map_err(|_| {
+            let pending = self.pending.lock().map_err(|_| {
                 GatewayError::new(
                     "TASK_EVENT_BUFFER_FAILED",
                     "Task event buffer is unavailable. / 任务事件缓存不可用。",
                     500,
                 )
             })?;
-            pending.bytes = 0;
-            std::mem::take(&mut pending.events)
+            // Retain original events until commit acknowledgement, even if the waiting future is cancelled.
+            // 提交确认前保留原事件，等待 Future 取消也不丢失。
+            pending.events.clone()
         };
         if batch.is_empty() {
             return Ok(());
         }
         let repository = self.repository.clone();
         let token = self.token.clone();
-        let dispatch = batch.clone();
+        let event_ids = batch.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>();
+        #[cfg(test)]
+        let committed_event_batches = self.committed_event_batches.clone();
         let result = tokio::task::spawn_blocking(move || {
-            // Stable event IDs make a partly committed batch safe to replay after a failure.
-            // 稳定事件 ID 允许部分批次提交后安全重放，单次事务仍遵守仓储的 512 条上限。
-            for portion in dispatch.chunks(512) {
+            // Stable IDs allow replay after partial commits; keep each transaction within 512 events.
+            // 稳定 ID 支持部分提交后重放，单次事务仍不超 512 条。
+            for portion in batch.chunks(512) {
                 repository.append_events(&token, portion)?;
+                #[cfg(test)]
+                committed_event_batches.fetch_add(1, Ordering::AcqRel);
             }
             Ok::<(), crate::storage::ContractError>(())
         })
@@ -290,11 +701,16 @@ impl TaskJournal {
             )
         })
         .and_then(|result| result.map(|_| ()).map_err(GatewayError::from));
-        if let Err(error) = &result {
-            let mut pending = self.pending.lock().map_err(|_| error.clone())?;
-            let mut restored = batch;
-            restored.append(&mut pending.events);
-            pending.events = restored;
+        if result.is_ok() {
+            let mut pending = self.pending.lock().map_err(|_| GatewayError::new(
+                "TASK_EVENT_BUFFER_FAILED", "Task event buffer is unavailable. / 任务事件缓存不可用。", 500))?;
+            if pending.events.len() < event_ids.len()
+                || !pending.events.iter().zip(&event_ids).all(|((id, _, _), expected)| id == expected)
+            {
+                return Err(GatewayError::new("TASK_EVENT_BUFFER_FAILED",
+                    "Task event acknowledgement does not match the queued batch. / 事件提交确认与原队列不匹配。", 500));
+            }
+            pending.events.drain(..event_ids.len());
             pending.bytes = pending
                 .events
                 .iter()
@@ -316,9 +732,12 @@ impl TaskJournal {
             .ok()
             .and_then(|error| error.clone())
     }
+    pub(crate) fn remember_persistence_error(&self, error: GatewayError) {
+        if let Ok(mut saved) = self.last_flush_error.lock() { *saved = Some(error); }
+    }
 
-    /// Only task-owned work context/logs use blobs; existing chat/tool originals stay referenced.
-    /// 仅任务自己的工作上下文、日志使用正文对象；已有聊天/工具原文继续按正式引用回读。
+    /// Store task context/logs as blobs; reference existing chat/tool originals.
+    /// 任务上下文及日志存正文对象，已有聊天和工具原文仅保留引用。
     pub async fn save_task_blob(&self, kind: &str, content: &Value) -> Result<TaskArtifact> {
         let bytes = serde_json::to_vec(content).map_err(|_| {
             GatewayError::new(
@@ -348,22 +767,31 @@ impl TaskJournal {
                 400,
             ));
         }
-        self.repository.check_receipt_attempt(&self.token)?;
-        if bytes.len() as u64 > MAX_BLOB_BYTES {
-            return Err(GatewayError::new(
-                "TASK_ARTIFACT_TOO_LARGE",
-                "Task artifact exceeds the bounded blob capacity. / 任务产物超过有界正文容量。",
-                413,
-            ));
-        }
-        let digest = managed_files::digest(&bytes);
-        let artifact_id = format!("{kind}-{digest}");
-        let relative = format!("Agent/task-artifacts/{}/{artifact_id}.json", self.task_id());
+        let task = self.repository.check_receipt_attempt(&self.token)?;
         let root = self.root.clone();
-        let path = root.join(&relative);
-        let write = bytes.to_vec();
-        tokio::task::spawn_blocking(move || {
-            managed_files::atomic_write(&root, &path, &write, MAX_BLOB_BYTES)
+        let owned_kind = kind.to_owned();
+        let mut write = bytes.to_vec();
+        let (digest, relative, size_bytes) = tokio::task::spawn_blocking(move || -> Result<_> {
+            // Bound and hash the final references; disk I/O and image projection stay off the async executor.
+            // 对最终引用正文限长及哈希；磁盘读写和图像投影不占异步执行线程。
+            if matches!(owned_kind.as_str(), "task-checkpoint" | "worker-log" | "task-output" | "child-context") {
+                if let Ok(value) = serde_json::from_slice::<Value>(&write) {
+                    let request_id = if task.parent_task_id.is_some() { &task.task_id } else { &task.request_id };
+                    let stored = crate::storage::gateway::externalize_model_images(
+                        &root, &task.scope.conversation_id, request_id, &value)?;
+                    if stored != value { write = serde_json::to_vec(&stored).map_err(|_| {
+                        GatewayError::new("INVALID_TASK_ARTIFACT", "Task image references cannot be encoded. / 任务图像引用无法编码。", 400)
+                    })?; }
+                }
+            }
+            if write.len() as u64 > MAX_BLOB_BYTES {
+                return Err(GatewayError::new("TASK_ARTIFACT_TOO_LARGE",
+                    "Task artifact exceeds the bounded blob capacity. / 任务产物超过有界正文容量。", 413));
+            }
+            let digest = managed_files::digest(&write);
+            let relative = format!("Agent/task-artifacts/{}/{owned_kind}-{digest}.json", task.task_id);
+            managed_files::atomic_write(&root, &root.join(&relative), &write, MAX_BLOB_BYTES)?;
+            Ok((digest, relative, write.len() as u64))
         })
         .await
         .map_err(|_| {
@@ -373,12 +801,13 @@ impl TaskJournal {
                 500,
             )
         })??;
+        let artifact_id = format!("{kind}-{digest}");
         let artifact = TaskArtifact {
             artifact_id: artifact_id.clone(),
             kind: kind.into(),
-            reference: json!({"kind":"task-blob","taskId":self.task_id(),"artifactId":artifact_id,"relativePath":relative,"sha256":digest,"bytes":bytes.len()}),
+            reference: json!({"kind":"task-blob","taskId":self.task_id(),"artifactId":artifact_id,"relativePath":relative,"sha256":digest,"bytes":size_bytes}),
             sha256: digest,
-            size_bytes: bytes.len() as u64,
+            size_bytes,
             source_version: None,
         };
         Ok(self.repository.save_artifact(&self.token, &artifact)?)
@@ -450,12 +879,31 @@ impl TaskJournal {
         }
         Ok(bytes)
     }
+    /// Hydrate only verified model context; receipt readers keep the immutable archived bytes.
+    /// 仅还原已核验的模型上下文；回执读取仍使用不可变归档原文。
+    pub async fn read_model_blob(&self, reference: &Value) -> Result<Vec<u8>> {
+        let bytes = self.read_blob(reference).await?;
+        let invalid = || GatewayError::new("INVALID_TASK_CHECKPOINT", "Task model context is invalid. / 任务模型上下文无效。", 409);
+        let owner = self.repository.load(reference["taskId"].as_str().ok_or_else(invalid)?)?;
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let restored = Self::restore_model_images(&root, &owner, &value)?;
+            serde_json::to_vec(&restored).map_err(|_| invalid())
+        }).await.map_err(|_| invalid())?
+    }
+    fn restore_model_images(root: &Path, task: &TaskRecord, value: &Value) -> Result<Value> {
+        if task.state == TaskState::Running {
+            crate::storage::gateway::protect_model_images(root, &task.scope.conversation_id, value, 30 * 60 * 1000)?;
+        }
+        Ok(crate::storage::gateway::hydrate_model_images(root, &task.scope.conversation_id, value)?["value"].take())
+    }
     pub async fn save_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<TaskCheckpoint> {
         self.flush().await?;
         Ok(self.repository.save_checkpoint(&self.token, checkpoint)?)
     }
-    /// A root work snapshot is private task state, bound to the original request, scope and provider identity.
-    /// 根工作快照属于私有任务状态，绑定原请求、权限范围和供应商身份，不作为公开工具证据。
+    /// Bind private root snapshots to request, scope and provider; they are not public tool evidence.
+    /// 根私有快照绑定请求、范围及供应商，不作公开工具证据。
     pub async fn save_root_work_context(
         &self,
         request_id: &str,
@@ -478,8 +926,8 @@ impl TaskJournal {
         })?;
         self.save_blob("task-checkpoint", &bytes).await
     }
-    /// Legacy checkpoints have no sidecar; malformed or foreign snapshots cannot silently become trusted context.
-    /// 旧检查点没有侧车时安全降级；损坏或跨任务快照不能静默升级为可信上下文。
+    /// Fall back for missing sidecars; reject corrupt or foreign snapshots as trusted context.
+    /// 缺少侧车时安全回退，不信任损坏或跨任务快照。
     pub async fn read_root_work_context(
         &self,
         assistant_message_id: &str,
@@ -527,7 +975,10 @@ impl TaskJournal {
         {
             return Err(invalid());
         }
-        Ok(Some((envelope["context"].clone(), reference.clone())))
+        let root = self.root.clone();
+        let restored = tokio::task::spawn_blocking(move || Self::restore_model_images(&root, &task, &envelope["context"]))
+            .await.map_err(|_| invalid())??;
+        Ok(Some((restored, reference.clone())))
     }
     pub async fn checkpoint_from_chat(
         &self,
@@ -562,8 +1013,8 @@ impl TaskJournal {
         &self, id: &str, dispatched: bool, usage: &TaskUsage,
         provider_usage: Option<crate::storage::task_repository::ProviderTokenUsage>,
     ) -> Result<ModelRequestReservation> {
-        // The real I/O outcome precedes accounting, so a crash between the two retains verifiable settlement facts.
-        // 真实 I/O 结果先于计量结算落盘，使两步之间崩溃后仍有可核验的精确结果。
+        // Persist I/O outcomes before accounting so crashes retain verifiable facts.
+        // 先保存 I/O 结果再结算，确保崩溃后仍可核验。
         let mut receipt = json!({"reservationId":id,"attemptId":self.token.attempt_id,"dispatched":dispatched,"usage":usage});
         if let Some(provider) = &provider_usage { receipt["providerUsage"] = json!(provider); }
         self.repository.append_events(&self.token, &[(
@@ -602,15 +1053,14 @@ impl TaskJournal {
         )?)
     }
 
-    /// Settle only native I/O evidence already persisted before interruption; this never calls a model or repeats a tool.
-    /// 只结算中断前已落盘的原生 I/O 证据，不调用模型，也不重做工具操作。
+    /// Settle persisted pre-interruption evidence only, without model calls or tool replay.
+    /// 仅结算中断前已保存证据，不调用模型或重放工具。
     pub async fn reconcile_receipts(&self) -> Result<Value> {
         let task = self.load_current()?;
         let events = self.repository.recovery_receipts(self.task_id())?;
         let mut resolved_operations = 0u64;
         let mut resolved_reservations = 0u64;
-        let mut pending = Vec::new();
-        let mut acknowledged = Vec::new();
+        let mut unconfirmed = Vec::new();
         for reservation in self.repository.model_reservations(self.task_id())?.into_iter()
             .filter(|reservation| matches!(reservation.state, ModelReservationState::Unknown | ModelReservationState::Reserved))
         {
@@ -630,47 +1080,37 @@ impl TaskJournal {
                     continue;
                 }
             }
-            if reservation.is_unknown_acknowledged() {
-                acknowledged.push(json!({"taskId":self.task_id(),"reservationId":reservation.reservation_id,"costUnknown":true}));
-                continue;
-            }
-            pending.push(json!({"taskId":self.task_id(),"reservationId":reservation.reservation_id,
-                "code":"MODEL_DISPATCH_EVIDENCE_REQUIRED","message":"模型请求尚无可核验的派发与用量回执。需核对供应商请求记录；不会假定未发送、伪造用量或重新发送原请求。"}));
+            unconfirmed.push(json!({"taskId":self.task_id(),"reservationId":reservation.reservation_id,
+                "costUnknown":true}));
         }
         for operation in self.repository.operations(self.task_id())?.into_iter()
             .filter(|operation| matches!(operation.state, OperationState::Unknown | OperationState::Dispatched))
         {
             match self.reconcile_operation(&task, &operation, &events).await {
                 Ok(true) => resolved_operations += 1,
-                // Missing observation receipts never become unknown mutations or block task recovery.
-                // 观察操作缺少回执不等于未知写入，也不能因此阻塞任务恢复。
+                // Missing read receipts are not unknown writes and cannot block recovery.
+                // 缺失读取回执不是未知写入，不阻塞恢复。
                 _ if operation.intent.effect == OperationEffect::Observation => {},
-                // The user accepted this outcome as unknown: keep it unknown, never replay, and do not block.
-                // 用户已确认该结果未知：保持 unknown、不重放，也不再阻塞恢复。
-                _ if operation.is_unknown_acknowledged() => acknowledged.push(json!({"taskId":self.task_id(),
-                    "operationId":operation.intent.operation_id,"toolCallId":operation.intent.tool_call_id,
-                    "toolName":operation.intent.tool_name})),
-                Ok(false) => pending.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
-                    "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name,
-                    "code":"TOOL_RECEIPT_EVIDENCE_REQUIRED","message":"未找到与原始参数、派发时间及调用身份匹配的唯一真实工具回执。请核对原操作的实际结果；不会自动重做该操作。"})),
-                Err(error) => pending.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
+                Ok(false) => unconfirmed.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
+                    "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name})),
+                Err(error) => unconfirmed.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
                     "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name,
                     "code":error.code,"message":error.message})),
             }
         }
-        Ok(json!({"resolvedOperations":resolved_operations,"resolvedReservations":resolved_reservations,"pending":pending,
-            "acknowledgedUnknown":acknowledged}))
+        Ok(json!({"resolvedOperations":resolved_operations,"resolvedReservations":resolved_reservations,
+            "unconfirmed":unconfirmed}))
     }
 
-    /// Poll a remote task by its journaled identity and settle its original operation exactly once.
-    /// 使用正式日志中的远端任务身份查询，仅结算原操作一次，不再次派发原工具。
+    /// Poll the journaled remote ID and settle its original operation once, without redispatch.
+    /// 按日志中的远端 ID 查询并结算原操作一次，不重新派发。
     pub async fn reconcile_remote_tasks(&self, context: &crate::tools::gateway::GatewayToolContext) -> Result<Value> {
         let task = self.load_current()?;
         let mut resolved = 0;
         let mut pending = Vec::new();
         let events = self.repository.recovery_receipts(self.task_id())?;
         for operation in self.repository.operations(self.task_id())?.into_iter()
-            .filter(|operation| operation.blocks_recovery()) {
+            .filter(|operation| matches!(operation.state, OperationState::Unknown | OperationState::Dispatched)) {
             let Some(checkpoint) = events.iter().rev().find(|event| event.kind == "mcp_task_checkpoint"
                 && event.payload["operationId"] == operation.intent.operation_id
                 && event.payload["toolCallId"] == operation.intent.tool_call_id) else { continue; };
@@ -733,8 +1173,8 @@ impl TaskJournal {
         }
         let mut matched = Vec::new();
         for call in candidates.into_iter().filter(|call| call["id"] == operation.intent.tool_call_id) {
-            // Steering copies the transcript into the new assistant; identical copies are one original call.
-            // 插话会把调用记录复制到新回复；完全相同的副本仍是同一次原始调用。
+            // Identical transcript copies after steering remain one original call.
+            // 插话复制的相同调用记录仍算同一次原始调用。
             if !matched.contains(&call) { matched.push(call); }
         }
         if matched.len() != 1 { return Ok(None); }
@@ -825,6 +1265,7 @@ impl TaskJournal {
                     observations.retain(|observation| observation["id"] != call["id"]);
                     observations.push(json!({"id":call["id"],"name":call["name"],"status":receipt["status"],"ref":receipt["resultRef"],
                         "verifiedSuccess":super::task::successful_completion_receipt(&receipt),
+                        "completionProof":super::completion_evidence::from_receipt(&call, &receipt),
                         "completionEvidence":super::task::completed_output_paths(call["name"].as_str().unwrap_or(""), &receipt)}));
                     round["observations"] = json!(observations);
                     patched = true;
@@ -852,8 +1293,8 @@ impl TaskJournal {
     }
     pub async fn finish(&self, state: TaskState, reason: Option<&str>) -> Result<TaskRecord> {
         if self.is_released() {
-            // The final state and release may already be committed when draining was interrupted.
-            // 最终状态与释放可能已提交、仅后台收尾被中断；重试不能再次使用已结束的尝试写入。
+            // If final state/release already committed, retry cleanup without reusing the closed attempt.
+            // 终态及释放已提交时，重试仅收尾，不再使用已结束尝试写入。
             self.drain_background().await?;
             let task = self.load_current()?;
             if task.state == state || matches!(task.state, TaskState::Paused | TaskState::Cancelled) {

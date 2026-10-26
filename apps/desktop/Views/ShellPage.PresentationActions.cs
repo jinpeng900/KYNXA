@@ -42,8 +42,8 @@ public sealed partial class ShellPage
         findPrevious.Invoked += TranscriptSearchNavigation_Invoked;
         var closeFind = new KeyboardAccelerator { Key = VirtualKey.Escape };
         closeFind.Invoked += TranscriptSearchClose_Invoked;
-        // Keep conversation search usable in Chinese input contexts that consume Ctrl+Shift+F before WebView keydown.
-        // 中文输入环境可能在 WebView 收到按下事件前处理 Ctrl+Shift+F，因此会话搜索使用 Ctrl+Shift+K。
+        // Use Ctrl+Shift+K because Chinese input may intercept Ctrl+Shift+F before WebView.
+        // 中文输入可能先拦截 Ctrl+Shift+F，因此会话搜索使用 Ctrl+Shift+K。
         var search = new KeyboardAccelerator { Key = VirtualKey.K, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift };
         search.Invoked += SearchShortcut_Invoked;
         var composer = new KeyboardAccelerator { Key = VirtualKey.L, Modifiers = VirtualKeyModifiers.Control };
@@ -103,8 +103,8 @@ public sealed partial class ShellPage
         // Trim only the reserved gutter so the existing footer icons have equal outer margins without moving them.
         // 仅缩小额外预留的拖动留白，让底栏原有图标外侧边距等宽，不移动图标。
         SidebarGripColumn.Width = new GridLength(_isCompactLayout || !expanded ? 0 : ShellLayoutMetrics.SidebarGripGutter);
-        // Span the root grid so the full eight-DIP hit target can overlap the narrower gutter without slot clipping.
-        // 命中区跨越根网格，让完整 8 DIP 拖动范围覆盖较窄留白两侧，避免被单列布局裁剪。
+        // Span the root grid to keep the full eight-DIP drag target unclipped.
+        // 拖动命中区跨根网格，保留完整 8 DIP 范围，避免窄列裁剪。
         SidebarGrip.Margin = new Thickness(preferredWidth - (SidebarGrip.Width - ShellLayoutMetrics.SidebarGripGutter) / 2, 0, 0, 0);
         SidebarPane.Width = _isCompactLayout && expanded ? preferredWidth : double.NaN;
         SidebarPane.HorizontalAlignment = _isCompactLayout && expanded ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
@@ -220,8 +220,8 @@ public sealed partial class ShellPage
             EnqueueAction();
             return;
         }
-        // Menu items invoke Click before unloading their flyout. Unwind that close stack before creating or activating another HWND.
-        // 菜单项先触发 Click，再卸载弹出层；等待实际卸载并退出关闭调用栈后再创建或激活独立窗口，避免展示和焦点恢复交叠。
+        // Wait for the flyout to unload and its close stack to unwind before activating another HWND.
+        // Click 早于菜单卸载；卸载并退出关闭调用栈后再创建或激活窗口，避免焦点恢复冲突。
         void Closed(object? sender, object args)
         {
             flyout.Closed -= Closed;

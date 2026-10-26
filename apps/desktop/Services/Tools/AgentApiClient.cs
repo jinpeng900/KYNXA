@@ -36,8 +36,8 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
     private readonly Func<CancellationToken, Task> _ensureGatewayReady;
     private readonly bool _ownsHttpClient;
 
-    public AgentApiClient() : this(new HttpClient { BaseAddress = ModelGatewayService.Address,
-        Timeout = TimeSpan.FromSeconds(150) }, ModelGatewayService.EnsureReadyAsync, true) { }
+    public AgentApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(150)),
+        ModelGatewayService.EnsureReadyAsync, true) { }
 
     public AgentApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)
     {

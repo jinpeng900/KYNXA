@@ -8,8 +8,8 @@ struct HistoryMessage {
     units: Vec<u16>,
 }
 
-/// Formal ownership is checked around IO; native history owns source filtering, matching and Unicode page boundaries.
-/// 正式归属在 IO 前后检查；原生历史服务拥有来源过滤、匹配和 Unicode 分页边界。
+/// Check ownership before and after I/O; native history handles filtering, matching and Unicode pagination.
+/// I/O 前后核验归属；原生历史服务负责过滤、匹配和 Unicode 分页。
 #[derive(Default)]
 pub struct HistoryState {
     messages: Vec<HistoryMessage>,

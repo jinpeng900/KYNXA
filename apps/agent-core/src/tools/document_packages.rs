@@ -60,7 +60,7 @@ impl Package {
             "{XML_HEADER}<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>{}</dc:title><dc:creator>KYNXA</dc:creator><cp:lastModifiedBy>KYNXA</cp:lastModifiedBy></cp:coreProperties>", escaped(title)
         ))?;
         package.add("docProps/app.xml", &format!(
-            "{XML_HEADER}<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>KYNXA</Application><AppVersion>1.5</AppVersion></Properties>"
+            "{XML_HEADER}<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>KYNXA</Application><AppVersion>{}</AppVersion></Properties>", env!("CARGO_PKG_VERSION")
         ))?;
         Ok(package)
     }

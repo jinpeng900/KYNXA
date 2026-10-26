@@ -45,8 +45,8 @@ pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
             }
         }
         if let Some(blocks) = content.as_array().or_else(|| content["content"].as_array()) {
-            // 中文：MCP 公开文本块可组成正文；思考、图像和未知块不能进入工作摘要。
-            // English: Only public MCP text blocks form a body; reasoning, media and unknown blocks stay excluded.
+            // Use only public MCP text; exclude reasoning, media and unknown blocks from summaries.
+            // 摘要仅使用 MCP 公开文本，不纳入思考、媒体或未知块。
             let texts = blocks
                 .iter()
                 .filter(|block| matches!(string(&block["type"]), "text" | "output_text"))
@@ -920,8 +920,8 @@ pub(crate) fn evidence_identity(evidence: &Value) -> String {
             digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
     };
-    // File byte versions and real text windows, never fresh wrapper IDs, identify an already acquired source.
-    // 已取得原件由真实内容版本与正文窗口标识，不因新包装归档 ID 改变就伪装成新增证据。
+    // Identify acquired sources by content version and text range, not new wrapper IDs.
+    // 按内容版本和正文范围识别已读来源，新包装 ID 不算新增证据。
     if evidence["kind"] == "original-source" {
         if let Some((start, end)) = actual_range {
             if matches!(string(&evidence["tool"]), "filesystem.read" | "document.read")
@@ -1009,8 +1009,8 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
             if target.is_empty() || !reference(original_ref) || original_ref["id"] != target {
                 return None;
             }
-            // The read page is derived working context, never a new original source or a request to summarize the summary.
-            // 回读页是派生工作上下文，不能成为新原件或再次摘要摘要；保留实际已读窗口以便立即压缩后继续。
+            // A summary page is derived context; retain its read range without treating it as a new source.
+            // 摘要页是派生上下文；保留已读范围，不当作新原件或重复摘要。
             evidence["kind"] = json!("working-summary-read");
             evidence["resultRef"] = original_ref.clone();
             evidence["readTarget"] = json!({"id":target,"offset":metadata["offset"].as_u64().unwrap_or_else(||source["arguments"]["offset"].as_u64().unwrap_or(0)),"nextOffset":metadata["nextOffset"],"limit":source["arguments"]["limit"]});
@@ -1081,8 +1081,8 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
     Some(evidence)
 }
 
-/// Keep one compact identity per model-visible receipt; the complete, hashed receipt stays in the sidecar.
-/// 模型投影只保留一份紧凑定位信息；完整带哈希回执仍在程序侧车和正式归档中，不重复跨窗口传输。
+/// Project one compact receipt identity; keep the full hashed receipt in the sidecar and archive.
+/// 仅投影一份紧凑回执身份；完整带哈希回执保留在侧车和归档中。
 fn compact_evidence(record: &Value) -> Value {
     let source = &record["source"];
     let arguments = &record["arguments"];

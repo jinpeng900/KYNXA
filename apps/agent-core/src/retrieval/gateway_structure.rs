@@ -3,6 +3,8 @@
 
 use crate::storage::{ContractError, gateway};
 use serde_json::{Value, json};
+
+pub(crate) const CHUNKER_VERSION: &str = "structure-unit-groups-v2";
 pub fn parser_version(path: &str) -> &'static str {
     if grammar(
         std::path::Path::new(path)
@@ -248,5 +250,113 @@ pub fn chunks(text: &str, structure: &Value, maximum: usize) -> Result<Vec<Value
             output.push(chunk);
         }
     }
-    Ok(output)
+    Ok(merge_adjacent_chunks(&units, output, maximum))
+}
+
+fn merge_boundary_matches(previous: &Value, next: &Value) -> bool {
+    let left = &previous["structure"];
+    let right = &next["structure"];
+    // Publication calls this per source; retain explicit identities too when future adapters supply them.
+    // 发布始终逐来源调用；适配器显式提供身份时仍核对，不能把跨范围内容拼成同一证据。
+    for field in ["sourceId", "scopeKey", "sourceRevision", "bindingRevision", "locator"] {
+        if previous[field] != next[field] { return false; }
+    }
+    for field in ["domain", "language", "parseStatus", "kind", "sectionPath", "sectionTitle",
+        "page", "pageIndex", "pageNumber", "slide", "slideNumber", "sheetName", "tableId"] {
+        if left[field] != right[field] { return false; }
+    }
+    if left["parseStatus"] != "parsed" { return false; }
+    match left["domain"].as_str() {
+        Some("code") => {
+            left["kind"] != "context" && left["unitStartOffset"].as_u64().is_some()
+                && left["unitEndOffset"].as_u64().is_some()
+                && ["unitStartOffset", "unitEndOffset", "symbolName", "qualifiedName", "parentSymbol"]
+                    .iter().all(|field| left[*field] == right[*field])
+        }
+        Some("knowledge") => {
+            // Paragraphs may share a verified section; tables, headings and fenced code stay separate.
+            // 段落只有在已识别的同一章节中才合并；表格、标题和围栏代码保持独立。
+            left["kind"] == "paragraph" && (left["sectionPath"].as_array().is_some_and(|path| !path.is_empty())
+                || left["sectionTitle"].as_str().is_some_and(|title| !title.is_empty()))
+        }
+        _ => false,
+    }
+}
+
+/// Coalesce compatible small pieces without changing source coordinates or inventing a language-sized policy.
+/// 合并结构兼容的小片段，保留来源坐标；沿用调用方粗边界，最终嵌入仍走真实分词器的 token 拟合。
+fn merge_adjacent_chunks(text: &[u16], chunks: Vec<Value>, maximum: usize) -> Vec<Value> {
+    let mut merged: Vec<Value> = Vec::with_capacity(chunks.len());
+    for mut next in chunks {
+        next["chunkerVersion"] = json!(CHUNKER_VERSION);
+        let Some(previous) = merged.last_mut() else { merged.push(next); continue; };
+        let range = previous["startOffset"].as_u64().zip(previous["endOffset"].as_u64())
+            .zip(next["startOffset"].as_u64().zip(next["endOffset"].as_u64()));
+        let can_merge = range.is_some_and(|((start, previous_end), (next_start, end))| {
+            start <= previous_end && previous_end <= next_start && next_start < end && end <= text.len() as u64
+                && end.saturating_sub(start) <= maximum as u64
+                && !super::chunking::split_pair(text, start as usize)
+                && !super::chunking::split_pair(text, end as usize)
+                && text[previous_end as usize..next_start as usize].iter().all(|unit| super::chunking::whitespace(*unit))
+                && !text[start as usize..end as usize].contains(&0x000c)
+                && merge_boundary_matches(previous, &next)
+        });
+        if !can_merge { merged.push(next); continue; }
+        previous["endOffset"] = next["endOffset"].clone();
+        previous["endLine"] = next["endLine"].clone();
+        let count = previous["structure"]["mergedUnitCount"].as_u64().unwrap_or(1)
+            .saturating_add(next["structure"]["mergedUnitCount"].as_u64().unwrap_or(1));
+        previous["structure"]["mergedUnitCount"] = json!(count);
+        if previous["structure"]["domain"] == "knowledge" {
+            previous["structure"]["unitStartOffset"] = previous["startOffset"].clone();
+            previous["structure"]["unitEndOffset"] = next["endOffset"].clone();
+            previous["structure"]["endOffset"] = next["structure"]["endOffset"].clone();
+            previous["structure"]["endLine"] = next["structure"]["endLine"].clone();
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_merge_preserves_utf16_text_and_section_table_boundaries() {
+        let text = "# First\n\nAlpha 😀.\n\nBeta 中文.\n\n| a | b |\n| - | - |\n| c | d |\n\nGamma.\n\n# Second\n\nDelta.\n\nEpsilon.\n";
+        let parsed = parse(text, "fixture.md").unwrap();
+        let output = chunks(text, &parsed, 384).unwrap();
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let groups = output.iter().filter(|chunk| chunk["structure"]["mergedUnitCount"].as_u64().unwrap_or(1) > 1).collect::<Vec<_>>();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["structure"]["sectionTitle"], "First");
+        assert_eq!(groups[1]["structure"]["sectionTitle"], "Second");
+        let body = |chunk: &Value| String::from_utf16(&units[chunk["startOffset"].as_u64().unwrap() as usize..chunk["endOffset"].as_u64().unwrap() as usize]).unwrap();
+        assert_eq!(body(groups[0]), "Alpha 😀.\n\nBeta 中文.\n");
+        assert!(!body(groups[0]).contains('|'));
+        assert_eq!(output.iter().filter(|chunk| chunk["structure"]["kind"] == "table").count(), 1);
+        for chunk in &output {
+            assert_eq!(chunk["chunkerVersion"], CHUNKER_VERSION);
+            assert!(!super::super::chunking::split_pair(&units, chunk["startOffset"].as_u64().unwrap() as usize));
+            assert!(chunk["endOffset"].as_u64().unwrap() - chunk["startOffset"].as_u64().unwrap() <= 384);
+        }
+    }
+
+    #[test]
+    fn structural_merge_requires_same_function_page_scope_and_budget() {
+        let text: Vec<u16> = "left\n\nright".encode_utf16().collect();
+        let left = json!({"startOffset":0,"endOffset":5,"startLine":1,"endLine":2,"scopeKey":"project:a",
+            "structure":{"domain":"code","language":"rust","parseStatus":"parsed","kind":"function","unitStartOffset":0,"unitEndOffset":11,"symbolName":"same"}});
+        let mut right = left.clone(); right["startOffset"]=json!(6);right["endOffset"]=json!(11);right["startLine"]=json!(3);right["endLine"]=json!(3);
+        assert_eq!(merge_adjacent_chunks(&text, vec![left.clone(),right.clone()], 64).len(), 1);
+        assert_eq!(merge_adjacent_chunks(&text, vec![left.clone(),right.clone()], 8).len(), 2);
+        for (field, value) in [("symbolName",json!("other")),("unitStartOffset",json!(6)),("pageNumber",json!(2)),("parseStatus",json!("partial"))] {
+            let mut changed=right.clone();changed["structure"][field]=value;
+            assert_eq!(merge_adjacent_chunks(&text, vec![left.clone(),changed], 64).len(), 2);
+        }
+        let mut other_scope=right.clone();other_scope["scopeKey"]=json!("project:b");
+        assert_eq!(merge_adjacent_chunks(&text, vec![left.clone(),other_scope], 64).len(), 2);
+        let mut page_break=text;page_break[5]=12;
+        assert_eq!(merge_adjacent_chunks(&page_break, vec![left,right], 64).len(), 2);
+    }
 }

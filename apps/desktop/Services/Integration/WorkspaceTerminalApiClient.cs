@@ -14,7 +14,7 @@ public sealed record WorkspaceTerminalOutput(string Output, ulong NextCursor, bo
 public sealed class WorkspaceTerminalApiClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http = new() { BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient _http = GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan);
 
     public async Task<WorkspaceTerminalSession> OpenAsync(Guid conversationId, int cols, int rows,
         CancellationToken cancellationToken = default, Guid? mountId = null)

@@ -15,7 +15,8 @@ public sealed class ArchivedScreenshot
 
     public Task<DecodedToolImage> DecodeAsync(int maximumPreviewDimension, CancellationToken cancellationToken) =>
         ToolResultImageDecoder.DecodeWithDimensionsAsync(_imageBlock, cancellationToken, pngOnly: _imageBlock.GetProperty("mimeType").GetString() == "image/png",
-            maximumImageBytes: 4 * 1024 * 1024, maximumPixels: 16_000_000, maximumPreviewDimension: maximumPreviewDimension);
+            maximumImageBytes: ConversationScreenshotSources.MaximumImageBytes,
+            maximumPixels: ConversationScreenshotSources.MaximumImagePixels, maximumPreviewDimension: maximumPreviewDimension);
 }
 
 /// <summary>
@@ -32,22 +33,23 @@ public static class ConversationScreenshotLoader
 
     public static async Task<ArchivedScreenshot> LoadArchiveAsync(IAgentApi api, ConversationScreenshotSource source, CancellationToken cancellationToken)
     {
-        if (source.ConversationId == Guid.Empty || source.MessageId == Guid.Empty || !ConversationScreenshotSources.IsScreenshotTool(source.Tool.Name) ||
+        if (source.ConversationId == Guid.Empty || source.MessageId == Guid.Empty ||
+            !ConversationScreenshotSources.IsScreenshotTool(source.Tool.Name) && source.PresentationPriority != WorkspacePresentationPriority.Requested ||
             source.Tool.Status != "completed" || !ConversationScreenshotSources.IsValidReference(source.Tool.ResultRef))
             throw new InvalidDataException("Invalid screenshot receipt.");
         var response = await api.GetToolResultAsync(source.ConversationId, source.Tool.ResultRef!, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        if (response.Result.ValueKind != JsonValueKind.Object || response.Result.GetRawText().Length > ConversationScreenshotSources.MaximumResultBytes ||
-            !response.Result.TryGetProperty("content", out var blocks) || blocks.ValueKind != JsonValueKind.Array)
+        if (response.Result.ValueKind != JsonValueKind.Object || response.Result.GetRawText().Length > ConversationScreenshotSources.MaximumHydratedResultBytes ||
+            !ConversationScreenshotSources.TryGetImageBlocks(response.Result, out var blocks))
             throw new InvalidDataException("Invalid screenshot archive.");
         int examined = 0;
         foreach (var block in blocks.EnumerateArray())
         {
             if (++examined > 20) break;
             if (block.ValueKind != JsonValueKind.Object || !block.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != "image" ||
-                !block.TryGetProperty("mimeType", out var mime) || mime.ValueKind != JsonValueKind.String || mime.GetString() is not ("image/png" or "image/jpeg")) continue;
+                !block.TryGetProperty("mimeType", out var mime) || mime.ValueKind != JsonValueKind.String || mime.GetString() is not ("image/png" or "image/jpeg" or "image/webp" or "image/gif")) continue;
             return new ArchivedScreenshot(block);
         }
-        throw new InvalidDataException("The screenshot archive contains no typed PNG or JPEG.");
+        throw new InvalidDataException("The screenshot archive contains no supported typed image.");
     }
 }

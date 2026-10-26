@@ -7,18 +7,11 @@ fn bounded(value: &Value, fallback: i64, minimum: i64, maximum: i64) -> i64 {
         .map_or(fallback, |number| number.clamp(minimum, maximum))
 }
 
-fn rerank_limit(value: &Value, fallback: i64) -> i64 {
-    value
-        .as_i64()
-        .filter(|value| [20, 40, 60].contains(value))
-        .unwrap_or(fallback)
-}
-
 /// Record configuration, grants and truncation together; candidate capacity is independent from final references.
 /// 同时记录配置、授额与截断；内部候选容量独立于最终引用额度，资源建议不能改变用户上限。
 pub fn apply(args: &Value) -> Result<Value, String> {
     if let Some(budget) = args.get("budget").filter(|value| value.is_object()) {
-        return finalize_rerank_budget(budget.clone(), args);
+        return Ok(retire_rerank_budget(budget.clone()));
     }
     let task = args["taskType"].as_str().unwrap_or("lookup");
     let complex = ["complex", "research"].contains(&task);
@@ -26,7 +19,7 @@ pub fn apply(args: &Value) -> Result<Value, String> {
     let configured = json!({"channelCandidates": if complex {128} else {64},
         "fusedCandidates":if complex {160} else {96},"limit":if complex {40} else if task=="file" {24} else {16},
         "maximumTokens":if complex {32768} else if task=="file" {16384} else {8192},
-        "rerankCandidates":if complex {60} else if task=="file" {40} else {20}});
+        "rerankCandidates":null});
     let tokens = args
         .get("maximumTokens")
         .filter(|value| !value.is_null())
@@ -42,7 +35,7 @@ pub fn apply(args: &Value) -> Result<Value, String> {
     let mut budget = json!({"channelCandidates":bounded(&suggestions["candidateLimit"],if complex {128} else {64},1,if complex {160} else {96}),
         "fusedCandidates":bounded(&suggestions["fusedCandidateLimit"],if complex {160} else {96},1,if complex {192} else {128}),
         "limit":args.get("limit").filter(|value| !value.is_null()).unwrap_or(&configured["limit"]),"maximumTokens":tokens,
-        "rerankCandidates":rerank_limit(&suggestions["rerankCandidates"],configured["rerankCandidates"].as_i64().unwrap_or(20)).min(rerank_limit(&suggestions["rerankCandidateLimit"],60)),
+        "rerankCandidates":null,
         "source":suggestions.get("source").filter(|value| !value.is_null()).cloned().unwrap_or(json!("task-policy"))});
     let mut cuts = Vec::new();
     for (suggestion, approved, unit) in [
@@ -69,8 +62,6 @@ pub fn apply(args: &Value) -> Result<Value, String> {
         "candidateLimit",
         "fusedCandidateLimit",
         "evidenceBudgetTokens",
-        "rerankCandidates",
-        "rerankCandidateLimit",
     ]
     .iter()
     .filter_map(|key| {
@@ -82,42 +73,20 @@ pub fn apply(args: &Value) -> Result<Value, String> {
     budget["audit"] = json!({"requested":{"limit":args["limit"],"maximumTokens":args["maximumTokens"]},"configured":configured,"resourceSuggestions":resource_suggestions,
         "approved":{"channelCandidates":budget["channelCandidates"],"fusedCandidates":budget["fusedCandidates"],"limit":budget["limit"],"maximumTokens":budget["maximumTokens"],"rerankCandidates":budget["rerankCandidates"]},
         "downstreamLimits":{"channelCandidates":160,"fusedCandidates":192,"finalReferences":60,"maximumTokens":32768},"actual":null,"earlyCutReasons":cuts});
-    Ok(budget)
+    Ok(retire_rerank_budget(budget))
 }
 
-/// Local settings override adaptive requests, while the actual resource grant remains authoritative.
-/// 本地设置优先于自适应请求，但实际资源授额仍是硬上限；保留原候选审计与其他预算。
-fn finalize_rerank_budget(mut budget: Value, args: &Value) -> Result<Value, String> {
-    let configured = args
-        .get("localRerankCandidates")
-        .filter(|value| !value.is_null());
-    let requested = configured
-        .unwrap_or(&budget["rerankCandidates"])
-        .as_i64()
-        .ok_or_else(|| "AGENT_CORE_INVALID_ARGUMENT".to_owned())?;
-    let resource_limit = rerank_limit(&args["suggestions"]["rerankCandidateLimit"], 60);
-    let approved = requested.min(resource_limit);
-    budget["rerankCandidates"] = json!(approved);
-    let audit = &mut budget["audit"];
-    audit["configured"]["localRerankCandidates"] = configured.cloned().unwrap_or(Value::Null);
-    audit["approved"]["rerankCandidates"] = json!(approved);
-    audit["rerankRequestedCandidates"] = json!(requested);
-    audit["resourceRerankLimit"] = json!(resource_limit);
-    audit["rerankBudgetSource"] = json!(if configured.is_some() {
-        "local-setting"
-    } else if args["suggestions"].get("rerankCandidates").is_some() {
-        "resource-suggestion"
-    } else {
-        "task-policy"
-    });
-    if approved < requested {
-        audit["earlyCutReasons"]
-            .as_array_mut()
-            .ok_or_else(|| "AGENT_CORE_INVALID_ARGUMENT".to_owned())?
-            .push(json!({"reason":"resource-grant","field":"rerankCandidates",
-                "proposed":requested,"approved":approved,"unit":"candidates"}));
+/// Keep retired fields readable for one compatibility version without reserving a neural-rerank budget.
+/// 旧字段保留一个兼容版本并统一为 null，不再计算或申请神经重排额度。
+fn retire_rerank_budget(mut budget: Value) -> Value {
+    budget["rerankCandidates"] = Value::Null;
+    budget["audit"]["configured"]["rerankCandidates"] = Value::Null;
+    budget["audit"]["configured"]["localRerankCandidates"] = Value::Null;
+    budget["audit"]["approved"]["rerankCandidates"] = Value::Null;
+    for field in ["rerankRequestedCandidates", "resourceRerankLimit", "rerankBudgetSource"] {
+        budget["audit"][field] = Value::Null;
     }
-    Ok(budget)
+    budget
 }
 
 #[cfg(test)]
@@ -125,29 +94,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_rerank_request_preserves_priority_and_actual_grant_audit() {
+    fn retired_rerank_budget_is_null_without_affecting_active_limits() {
         let suggestions =
             json!({"rerankCandidates":60,"rerankCandidateLimit":20,"candidateLimit":1});
         let original = apply(&json!({"taskType":"research","suggestions":suggestions})).unwrap();
         let result =
             apply(&json!({"budget":original,"localRerankCandidates":40,"suggestions":suggestions}))
                 .unwrap();
-        assert_eq!(result["rerankCandidates"], 20);
-        assert_eq!(result["audit"]["configured"]["localRerankCandidates"], 40);
-        assert_eq!(result["audit"]["rerankRequestedCandidates"], 40);
-        assert_eq!(result["audit"]["rerankBudgetSource"], "local-setting");
+        assert!(result["rerankCandidates"].is_null());
+        assert!(result["audit"]["configured"]["localRerankCandidates"].is_null());
+        assert!(result["audit"]["rerankRequestedCandidates"].is_null());
+        assert!(result["audit"]["rerankBudgetSource"].is_null());
+        assert_eq!(result["channelCandidates"], original["channelCandidates"]);
+        assert_eq!(result["maximumTokens"], original["maximumTokens"]);
         let original_cuts = original["audit"]["earlyCutReasons"].as_array().unwrap();
         let result_cuts = result["audit"]["earlyCutReasons"].as_array().unwrap();
-        assert_eq!(&result_cuts[..original_cuts.len()], original_cuts);
-        assert_eq!(
-            result_cuts.last().unwrap(),
-            &json!({"reason":"resource-grant","field":"rerankCandidates",
-            "proposed":40,"approved":20,"unit":"candidates"})
-        );
+        assert_eq!(result_cuts, original_cuts);
     }
 
     #[test]
-    fn adaptive_rerank_and_task_defaults_keep_source_and_invalid_grant_behavior() {
+    fn retired_rerank_suggestions_never_create_new_capacity_or_errors() {
         for (suggestions, expected, source) in [
             (
                 json!({"rerankCandidates":60,"rerankCandidateLimit":99}),
@@ -166,8 +132,8 @@ mod tests {
                 &json!({"budget":budget,"localRerankCandidates":null,"suggestions":suggestions}),
             )
             .unwrap();
-            assert_eq!(result["rerankCandidates"], expected);
-            assert_eq!(result["audit"]["rerankBudgetSource"], source);
+            assert!(result["rerankCandidates"].is_null(), "{expected}/{source}");
+            assert!(result["audit"]["rerankBudgetSource"].is_null());
             assert_eq!(
                 result["audit"]["earlyCutReasons"],
                 budget["audit"]["earlyCutReasons"]

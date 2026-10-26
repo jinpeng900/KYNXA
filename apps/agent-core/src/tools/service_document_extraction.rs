@@ -182,8 +182,8 @@ struct Archive {
     content_types: bool,
 }
 
-/// Native owners retain decoder slots and lease facts until observed close/release; SDK promises cannot certify effects.
-/// 原生拥有者保留解码槽与租约事实直至观察到关闭/释放；SDK Promise 不能代替真实执行效果。
+/// Retain decoder slots and leases until close/release is observed; SDK promises are not proof.
+/// 确认关闭或释放前保留解码槽和租约；SDK Promise 不算执行证明。
 #[derive(Default)]
 pub(crate) struct DocumentExtractionState {
     sequence: u64,

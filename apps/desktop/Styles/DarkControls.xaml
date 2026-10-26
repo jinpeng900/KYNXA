@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <ResourceDictionary.ThemeDictionaries>
-        <!-- Only dark controls use these aliases; no Default fallback can leak the dark surface into Light or HighContrast.
-             仅深色控件使用这些别名；不设置 Default 回退，避免浅色或高对比度沿用深色表面。
+        <!-- Limit aliases to Dark; a Default fallback would affect Light and HighContrast.
+             别名仅用于 Dark；不设 Default 回退，避免影响浅色和高对比度。
              Shared palette brushes update in place; SDK templates retain their focus, keyboard and accessibility behavior.
              共享配色画刷原位更新；SDK 模板继续负责焦点、键盘和无障碍行为。
         -->

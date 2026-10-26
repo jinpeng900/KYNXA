@@ -25,8 +25,8 @@ struct Borrower {
     released: bool,
 }
 
-/// Native facts own the shared prediction fence; adapters retain only live SDK objects.
-/// 原生事实拥有共享预测预约；适配器只保留实际 SDK 对象，不另存一份准入账本。
+/// Keep one shared prediction ledger; callers retain live runtime objects only.
+/// 共用一份预测账本，调用方仅持有活动运行时对象。
 #[derive(Default)]
 pub struct ExternalAdmissionState {
     entries: HashMap<String, Entry>,

@@ -12,8 +12,8 @@ fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// A request projection owns allocation decisions; provider callbacks supply actual projected token costs.
-/// 请求投影拥有分配决策；供应商回调仅提供真实投影 token 成本，不修改正式历史与确认记忆。
+/// Allocate request space using provider token costs; preserve formal history and confirmed memory.
+/// 按供应商 token 成本分配请求空间，保留正式历史和确认记忆。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.context.projection.input" => {

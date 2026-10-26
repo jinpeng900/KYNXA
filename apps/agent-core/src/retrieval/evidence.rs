@@ -30,8 +30,8 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
-/// Evidence decisions own only identities, versions and bounded facts; original quotes and complete tool receipts stay in Node.
-/// 证据决策只持有身份、版本与有界事实；原始引用和完整工具回执继续由 Node 缓存与持久化。
+/// Track evidence identities, versions and bounded facts; retain originals in native storage.
+/// 账本跟踪证据身份、版本和有界事实，原文及完整回执由原生存储保留。
 #[derive(Default)]
 pub struct EvidenceLedger {
     opened: bool,
@@ -383,6 +383,30 @@ impl EvidenceLedger {
                 let cached = self.cached.get(text(args, "key")).is_some();
                 json!({"key":args["key"],"snapshotKey":args["snapshotKey"],"gapKey":gap_key,"gap":args["gap"],"explicitGap":args["explicitGap"],"entrySearches":searches,"hasCached":cached,
                     "blocked":!cached && (self.searches>=self.maximum_searches() || searches>=self.maximum_per_gap())})
+            }
+            "retrieval.refinement-restore" => {
+                let key=text(args,"gapKey");
+                let count=args["attempt"].as_u64().unwrap_or(0).min(3);
+                let previous=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                self.gaps.set(key.to_owned(),json!(previous.max(count)));
+                Value::Null
+            }
+            "retrieval.refinement-reserve" => {
+                let key=text(args,"gapKey");
+                let count=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let blocked=count>=3;
+                let attempt=if blocked {count} else {count+1};
+                if !blocked {self.gaps.set(key.to_owned(),json!(attempt));}
+                json!({"gapKey":key,"attempt":attempt,"executed":!blocked,
+                    "remainingSupplementalSearches":3u64.saturating_sub(attempt),"maximumSupplementalSearches":2,
+                    "state":if blocked {"unresolved"}else{"searching"},
+                    "next":if blocked {"state-missing-evidence-or-use-another-evidence-type"}else{"rewrite-keywords-or-narrow-directory-if-needed"}})
+            }
+            "retrieval.refinement-release" => {
+                let key=text(args,"gapKey");
+                let count=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                self.gaps.set(key.to_owned(),json!(count.saturating_sub(1)));
+                Value::Null
             }
             "retrieval.evidence-invalidate" => {
                 self.cached.remove(text(args, "key"));

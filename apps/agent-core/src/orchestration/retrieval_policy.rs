@@ -56,23 +56,9 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
             ))
         }
         "orchestration.retrievalRerankerExecution" => {
-            let local = &args["local"];
-            let mut profile = local["rerankProfileId"].clone();
-            if [
-                "builtin-multilingual-reranker",
-                "builtin-multilingual-reranker-dml-q8",
-            ]
-            .contains(&text(&profile))
-            {
-                if local["rerankDevicePolicy"] == "cpu" {
-                    profile = json!("builtin-multilingual-reranker");
-                } else if local["rerankDevicePolicy"] == "gpu" {
-                    profile = json!("builtin-multilingual-reranker-dml-q8");
-                }
-            }
-            Ok(
-                json!({"profileId":profile,"devicePreference":if local["rerankDevicePolicy"]=="cpu" {"cpu"}else{"auto"}}),
-            )
+            // Legacy callers receive a disabled profile; lightweight fusion is always local.
+            // 旧调用方收到停用配置；轻量融合无需模型、设备准入或额外下载。
+            Ok(json!({"profileId":null,"method":"rank-rrf-structured"}))
         }
         "orchestration.retrievalMetadataMismatch" => {
             Ok(json!(metadata_mismatch(&args["expected"], &args["result"])))

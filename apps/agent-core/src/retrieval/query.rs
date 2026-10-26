@@ -116,8 +116,8 @@ fn is_symbol_shape(value: &str) -> bool {
     )
 }
 
-/// Natural-language clues stay preferences; only explicit caller constraints can exclude a retrieval domain.
-/// 自然语言线索保持可纠正的偏好；只有调用方明确约束才排除检索领域，原话与改写依据保留。
+/// Treat language clues as preferences; exclude domains only for explicit constraints.
+/// 自然语言线索仅影响偏好，显式约束才排除检索范围。
 pub fn interpret(query: &Value, options: &Value, context: &Value, relation: &Value) -> Value {
     let text = active(query);
     let mut clues = Vec::new();
@@ -644,10 +644,8 @@ fn acquisition(args: &Value) -> Value {
         .any(|item| item["exactTargetMatch"] == true || exact_target(item, &intent));
     let targeted =
         !string(&intent, "path").is_empty() || !string(&intent, "symbol").is_empty() || exact;
-    let complex = matches!(args["taskType"].as_str(), Some("complex" | "research"));
     let embedding =
         args["embeddingStatus"]["state"] == "ready" && args["embeddingStatus"]["loaded"] != false;
-    let reranker = args["rerankerStatus"]["state"] == "ready";
     let semantic = args
         .get("semanticEnabled")
         .is_none_or(|value| value != &Value::Bool(false));
@@ -660,21 +658,9 @@ fn acquisition(args: &Value) -> Value {
     } else {
         vec!["lexical"]
     };
-    if semantic && embedding && !exact {
+    if semantic && embedding && !targeted {
         channels.push("vector");
     }
-    let gap = args
-        .get("gap")
-        .is_some_and(|gap| !gap.is_null() && gap != &Value::Bool(false) && gap != &json!(""));
-    let rerank = complex
-        && items.len() > 1
-        && reranker
-        && !(exact && missing.is_empty())
-        && (assessment["state"] != "usable"
-            || assessment["requiresSourceRead"] == true
-            || gap
-            || items.len() > 6
-            || !missing.is_empty());
     let read =
         !items.is_empty() && (assessment["requiresSourceRead"] == true || !missing.is_empty());
     let no_progress = args["reused"] == true || args["newEvidenceCount"].as_u64() == Some(0);
@@ -704,8 +690,8 @@ fn acquisition(args: &Value) -> Value {
     } else {
         Vec::new()
     };
-    json!({"channels":channels,"shouldEmbed":semantic && embedding && !exact,"shouldRerank":rerank,
-        "rerankReason":if rerank {"ambiguous-or-incomplete-evidence"} else if !complex {"simple-task"} else if !reranker {"optional-model-not-ready"} else {"targeted-or-small-evidence-set"},
+    json!({"channels":channels,"shouldEmbed":semantic && embedding && !targeted,"shouldRerank":false,
+        "rankingMethod":"rank-rrf-structured","maximumSupplementalSearches":2,"preferredTool":if targeted {"filesystem.search"} else {"knowledge.search"},
         "missingInformation":args["gap"],"missingEvidence":missing,"next":next,"shouldContinueSearch":!exhausted && !no_progress && !read && items.is_empty(),
         "requiresVerification":verify,"requiredChecks":checks,"coverage":if pending {"partial-index"} else {"bounded-candidates"},"sufficiency":"not-evaluated"})
 }

@@ -5,7 +5,7 @@ namespace KYNXA_Desktop.Services;
 
 /// <summary>
 /// Submits the user's installer selection to the normal Rust model manager after startup.
-/// 启动后把安装器中明确勾选的模型交给正式 Rust 管理器，下载进度仍由模型设置页面展示。
+/// 启动后由 Rust 管理器下载安装器中勾选的模型，进度显示在模型设置页。
 /// </summary>
 internal static class InstallerModelPreparation
 {
@@ -36,7 +36,7 @@ internal static class InstallerModelPreparation
                 if (model is null)
                 {
                     // Explicit deletion cancels the installer selection instead of reinstalling it on the next launch.
-                    // 用户主动删除即取消安装意向，下次启动不能悄悄重新下载。
+                    // 用户删除模型即取消安装意向，下次启动不再下载。
                     request["status"] = "paused";
                     await SaveAsync(requestPath, request).ConfigureAwait(false);
                     return;

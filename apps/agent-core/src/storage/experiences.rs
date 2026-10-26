@@ -4,6 +4,63 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_AGE_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 
+/// Exclude historical credentials, commands, URLs and paths; bind current-task parameters anew.
+/// 模板不存历史凭据、命令、URL 或路径，每次重新绑定当前参数。
+pub(crate) fn procedure_arguments(value: &Value) -> Value {
+    fn mask(value: &Value, depth: usize) -> Value {
+        if depth >= 8 { return json!("{{current-value}}"); }
+        match value {
+            Value::Object(fields) => Value::Object(fields.iter().map(|(key,value)|(key.clone(),mask(value,depth+1))).collect()),
+            Value::Array(values) => json!(values.iter().take(16).map(|value|mask(value,depth+1)).collect::<Vec<_>>()),
+            Value::String(_) => json!("{{current-string}}"),
+            Value::Number(_) => json!("{{current-number}}"),
+            Value::Bool(_) => json!("{{current-boolean}}"),
+            Value::Null => Value::Null,
+        }
+    }
+    mask(value,0)
+}
+
+/// Promote only after real observations under the new tool identity, not legacy or mock statistics.
+/// 新工具身份下积累真实观察后才晋升，不沿用旧统计或模拟数据激活。
+pub(crate) fn verified_procedure_candidate(goal: &str, observations: &[Value]) -> Option<Value> {
+    use sha2::{Digest,Sha256};
+    let mut seen = HashSet::new();
+    let steps = observations.iter().filter(|observation| observation["verifiedSuccess"] == true
+        && observation["ref"]["id"].is_string() && observation["ref"]["sha256"].is_string()
+        && observation["toolIdentity"].as_str().is_some_and(|identity|identity.len()==64 && identity.bytes().all(|byte|byte.is_ascii_hexdigit()))
+        && !matches!(observation["name"].as_str(),Some("tool.search"|"tool.load"|"knowledge.experience"))
+        && !observation["name"].as_str().unwrap_or("").starts_with("task.")
+        && seen.insert(observation["id"].as_str().unwrap_or("").to_owned()))
+        .map(|observation|json!({"tool":observation["name"],"identity":observation["toolIdentity"],
+            "callId":observation["id"],"receipt":observation["ref"],"argumentsTemplate":observation["argumentsTemplate"]}))
+        .collect::<Vec<_>>();
+    if steps.is_empty() || steps.len()>64 { return None; }
+    let trigger = goal.chars().take(2000).collect::<String>();
+    let signature_steps = steps.iter().map(|step|json!([step["tool"],step["identity"],step["argumentsTemplate"]])).collect::<Vec<_>>();
+    let signature = format!("{:x}",Sha256::digest(json!([trigger.trim().to_lowercase(),signature_steps]).to_string().as_bytes()));
+    Some(json!({"schemaVersion":1,"identityPolicy":"per-tool-contract-v2","signature":signature,
+        "trigger":trigger,"steps":steps,"acceptanceReviewed":true,"completeSequence":true,"state":"candidate"}))
+}
+
+#[cfg(test)]
+mod verified_procedure_tests {
+    use super::*;
+    #[test]
+    fn verified_procedure_templates_require_receipts_and_never_reuse_private_parameters() {
+        let arguments = procedure_arguments(&json!({"path":"C:/PRIVATE/user.txt","command":"SECRET COMMAND","nested":{"token":"SECRET"}}));
+        assert!(!arguments.to_string().contains("PRIVATE"));
+        assert!(!arguments.to_string().contains("SECRET"));
+        let observation=json!({"id":"call","name":"filesystem.write","verifiedSuccess":true,
+            "toolIdentity":"a".repeat(64),"ref":{"id":"receipt","sha256":"b".repeat(64)},"argumentsTemplate":arguments});
+        assert!(verified_procedure_candidate("save report",&[observation.clone()]).is_some());
+        let mut failed=observation.clone(); failed["verifiedSuccess"]=json!(false);
+        assert!(verified_procedure_candidate("save report",&[failed]).is_none());
+        let mut legacy=observation; legacy.as_object_mut().unwrap().remove("toolIdentity");
+        assert!(verified_procedure_candidate("save report",&[legacy]).is_none());
+    }
+}
+
 fn failure(message: &str) -> ContractError {
     ContractError::new(message, "INVALID_RETRIEVAL_INPUT", 400)
 }
@@ -26,8 +83,8 @@ fn navigation(value: &Value) -> bool {
         .is_some_and(|values| values.len() <= 32 && values.iter().all(|value| text(value, 1000)))
 }
 
-/// Experience remains expiring, scope-bound navigation; no saved conclusion grants permission or correctness.
-/// 经验只是过期和范围绑定的导航线索，保存结论不能授予权限或认证正确性。
+/// Experience is expiring scoped guidance, not proof or permission.
+/// 经验是有时效和范围的线索，不证明正确或授予权限。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.experiences.validate" {
         let input = &arguments["input"];
@@ -117,8 +174,8 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 "Experience receipt is too large. / 检索经验回执过大。",
             ));
         }
-        // The codec supplies exact compact JSON byte counts; array commas and brackets belong to the service budget.
-        // 编码边界提供精确紧凑 JSON 字节数，数组逗号和括号由服务预算计算。
+        // Count compact JSON bytes exactly, including array separators and brackets.
+        // 精确计算紧凑 JSON 字节，包含数组分隔符和括号。
         let mut size = entry_bytes
             + 2
             + selected

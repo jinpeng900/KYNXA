@@ -34,8 +34,8 @@ struct Entry<V> {
     touched: u64,
 }
 
-/// The caller owns synchronization and supplies the complete retained value size, including owned strings.
-/// 调用方负责同步，并提供保留值的完整字节数，含其拥有的字符串；键与节点开销在此统一计入。
+/// The caller synchronizes access and counts retained bytes, including strings.
+/// 调用方负责同步，并统计含字符串在内的驻留字节数。
 pub(crate) struct ByteLru<V> {
     entries: HashMap<String, Entry<V>>,
     capacity: usize,

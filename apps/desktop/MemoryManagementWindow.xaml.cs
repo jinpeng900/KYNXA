@@ -65,7 +65,10 @@ public sealed partial class MemoryManagementWindow : Window
         Render();
     }
 
-    public bool HasPendingChanges => _viewModel.IsBusy || _viewModel.HasChanges;
+    public bool HasUnsavedChanges => _viewModel.HasChanges;
+    // Active operations still guard storage and scope changes; loading is not an unsaved edit.
+    // 进行中的操作仍保护存储与范围切换；加载不等于未保存的编辑。
+    public bool HasPendingChanges => _viewModel.IsBusy || HasUnsavedChanges;
     public bool IsEmbedded => _settingsOwner is not null;
 
     /// <summary>
@@ -397,7 +400,7 @@ public sealed partial class MemoryManagementWindow : Window
         if (_viewModel is not null) QueueRender();
     }
 
-    private Task<bool> ConfirmDiscardAsync() => !_viewModel.HasChanges ? Task.FromResult(!_dialogOpen) :
+    private Task<bool> ConfirmDiscardAsync() => !HasUnsavedChanges ? Task.FromResult(!_dialogOpen) :
         ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改");
 
     private async Task<bool> ConfirmAsync(string title, string content, string action)
@@ -422,7 +425,7 @@ public sealed partial class MemoryManagementWindow : Window
 
     private async void Window_Closing(AppWindow sender, AppWindowClosingEventArgs e)
     {
-        if (_allowClose || !_viewModel.HasChanges) return;
+        if (_allowClose || !HasUnsavedChanges) return;
         e.Cancel = true;
         if (await ConfirmDiscardAsync() && !_closed)
         {

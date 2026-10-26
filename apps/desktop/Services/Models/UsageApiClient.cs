@@ -16,8 +16,8 @@ public sealed class UsageApiClient : IDisposable
     private readonly Func<CancellationToken, Task> _ensureReady;
     private readonly bool _ownsHttp;
 
-    public UsageApiClient() : this(new HttpClient { BaseAddress = ModelGatewayService.Address,
-        Timeout = Timeout.InfiniteTimeSpan }, ModelGatewayService.EnsureReadyAsync, ownsHttp: true) { }
+    public UsageApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan),
+        ModelGatewayService.EnsureReadyAsync, ownsHttp: true) { }
 
     public UsageApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttp = false)
     { _http = http; _ensureReady = ensureReady ?? (_ => Task.CompletedTask); _ownsHttp = ownsHttp; }

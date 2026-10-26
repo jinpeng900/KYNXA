@@ -95,8 +95,8 @@ fn section_end(headings: &[Value], heading: &Value, length: usize) -> usize {
         .unwrap_or(length)
 }
 
-/// Window and reference coordinates stay in UTF-16 units; parser facts are supplied by the real source parser.
-/// 窗口与引用坐标始终使用 UTF-16 单元；章节事实由现有真实来源解析器提供。
+/// Use UTF-16 window/reference offsets and facts from the actual parser.
+/// 窗口及引用偏移使用 UTF-16，语法事实取自实际解析器。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     if operation == "retrieval.window-options" {
         return options(&args["options"]);

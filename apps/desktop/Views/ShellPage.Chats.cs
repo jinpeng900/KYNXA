@@ -24,8 +24,8 @@ public sealed partial class ShellPage
 
     private void PositionConversationComposer(ProjectChatState? chat)
     {
-        // Persisted chat identity is available before its paged body; it must not use the centered new-chat layout.
-        // 正式聊天身份先于分页正文到达；已有聊天不能因为正文仍在读取就使用居中的新聊天布局。
+        // Existing chat identity prevents new-chat layout while its paged body is loading.
+        // 已有聊天的分页正文尚未加载时，也不能切成居中的新聊天布局。
         bool conversationLayout = chat is not null && (chat.IsPersisted || chat.Messages.Count > 0);
         ConversationMessages.Visibility = conversationLayout || ConversationMessages.IsFindTextOpen ? Visibility.Visible : Visibility.Collapsed;
         LogoHost.Visibility = conversationLayout ? Visibility.Collapsed : Visibility.Visible;
@@ -85,8 +85,8 @@ public sealed partial class ShellPage
 
     private void RebuildStandaloneRows()
     {
-        // Preserve stable row identities and let ListView virtualize containers instead of rebuilding every chat.
-        // 保留稳定行身份，让 ListView 虚拟化容器，避免每次刷新重建全部聊天行。
+        // Preserve chat row identities and let ListView virtualize their containers.
+        // 保留聊天行身份，由 ListView 虚拟化容器，避免刷新时全部重建。
         var rows = ViewModel.RecentConversations;
         var desired = _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned).ToList();
         var activeIds = desired.Select(chat => chat.Id).ToHashSet();
@@ -177,10 +177,9 @@ public sealed partial class ShellPage
         if (ConversationMessages is null) return;
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
         PositionConversationComposer(chat);
-        if (chat is { IsPersisted: true } && !IsReplyInProgress(chat.Id))
-            _ = GetPausedTaskRecovery(chat, FindChat(chat.Id).Project?.Id);
         if (chat is not null) _ = EnsureRecentHistoryAsync(chat);
         else _historyConversationId = null;
+        RecoverRunningTaskObservation(chat, chat is null ? null : FindChat(chat.Id).Project?.Id);
         if (chat is null || ActiveMessages.Count > 0 && ActiveMessages[0].ConversationId != chat.Id)
             ActiveMessages.Clear();
         if (chat is not null)
@@ -233,6 +232,7 @@ public sealed partial class ShellPage
     {
         if (TryQueuePrompt()) return;
         if (_sendingPrompt || _savingOnClose || _chatClosing || IsReplyInProgress(ActiveChatId)) return;
+        if (await TryContinueSavedTaskAsync(PromptTextBox.Text.Trim())) return;
         string originalDraft = PromptTextBox.Text;
         string text = originalDraft.Trim();
         string attachmentDraftKey = AttachmentDraftKey;

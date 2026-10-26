@@ -1,7 +1,7 @@
-/* This function runs inside the identified page; it is not a Node backend.
- * 本函数在已确认的页面内执行，不作为 Node 后端运行。
- * Keep the original main-document actionable enumeration and numeric refs unchanged.
- * 主文档可操作元素的遍历及数字 ref 保持不变，附加正文不能伪造跨文档操作引用。
+/* Run in the identified page, preserving main-document actions and numeric refs.
+ * 在已确认的页面内执行，保留主文档操作及数字 ref。
+ * Extra document text must not create cross-document action refs.
+ * 附加文档正文不能生成跨文档操作引用。
  */
 (function (maximum) {
   const max = Math.max(1, Math.min(64000, Number(maximum) || 16000));

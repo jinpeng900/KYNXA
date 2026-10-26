@@ -83,8 +83,8 @@ impl AdaptivePolicy {
         let backend_group = if ["gpu","dml","cuda"].contains(&backend) {"gpu"} else {backend};
         let sequence_bucket = feedback.sequence_tokens.map(|value| value.next_power_of_two().to_string()).unwrap_or("legacy".into());
         let context = format!("{}|{}|{}|{}|{}", task_id, backend, phase, feedback.unit.as_deref().unwrap_or("legacy"), sequence_bucket);
-        // Compare cost per token across batch sizes, while holding sequence-length classes apart.
-        // 按每 token 成本跨批次比较，同时隔离不同序列长度类别。
+        // Compare per-token batch cost within the same sequence-length class.
+        // 在相同序列长度类别内比较每 token 的批次成本。
         let comparable_latency_ms = feedback.latency_ms.map(|value| value / feedback.input_tokens.unwrap_or(1).max(1) as f64);
         let control_context = if backend == "legacy" { "legacy".to_string() } else { format!("{}|{}",task_id,backend_group) };
         if self.histories.len() >= 128 && !self.histories.contains_key(&context) {
@@ -120,8 +120,8 @@ impl AdaptivePolicy {
                 .zip(history.1)
                 .is_none_or(|(current, previous)| current <= previous * 1.1)
             && feedback.queue_depth.is_some_and(|depth| depth > 0);
-        // Pressure shrinks immediately; growth needs measured benefit and a hold interval.
-        // 压力立即收紧；扩张必须有实测吞吐收益且满足保持时间，缺少指标不按零处理。
+        // Shrink under pressure; grow only after measured benefit and the hold interval.
+        // 有压力即收缩；扩容须有实测收益并满足保持时间，缺失指标不当作零。
         if is_pressure {
             control.0 = (control.0 / 2.0).min(0.5).max(0.125);
             control.1 = now_ms;
@@ -143,8 +143,8 @@ impl AdaptivePolicy {
             self.adjustment_reason = if !["legacy","hot-inference"].contains(&phase) {"non-hot-sample-held"}
                 else if is_gain {"hold-interval"} else {"no-comparable-throughput-gain"};
         }
-        // Explicit backend feedback controls its own task/backend only; legacy callers retain their old default.
-        // 显式后端反馈只影响对应任务与后端；旧调用方保留原默认，冷热和不同吞吐单位不混比。
+        // Apply feedback only to its task/backend; keep legacy defaults and separate metric units.
+        // 反馈仅影响对应任务与后端；保留旧默认，不混比冷热和不同单位的指标。
         if backend == "legacy" { self.background_fraction = control.0; }
         self.task_backend_fraction = control.0;
         self.measurement_context = Some(context);
@@ -198,8 +198,8 @@ impl AdaptivePolicy {
         } else { self.fraction(task_id,uses_gpu) };
         let is_idle = hardware.cpu.usage_percent.is_some_and(|usage| usage < 35.0)
             && hardware.memory.available_bytes >= 2 * 1024 * 1024 * 1024;
-        // The search lease is planning overhead; suggestions do not approve reranker execution.
-        // 检索租约仅为规划开销；建议本身不批准重排执行。
+        // Search-planning leases do not authorize model inference.
+        // 检索规划租约不授予模型推理权限。
         let has_gpu_headroom = gpu_headroom_bytes >= 512 * 1024 * 1024;
         let rerank_candidates = if factor < 1.0 || pressure || memory_headroom_bytes < 512 * 1024 * 1024 || (cpu_headroom < 1 && !has_gpu_headroom) { 20 }
             else if (cpu_headroom >= 3 || has_gpu_headroom) && memory_headroom_bytes >= 1024 * 1024 * 1024 { 60 }

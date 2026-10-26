@@ -1,15 +1,40 @@
 ﻿[CmdletBinding()]
-param([Parameter(Mandatory = $true)][string]$BundleRoot)
+param([Parameter(Mandatory = $true)][string]$BundleRoot, [switch]$PublishedOutput)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $bundle = [IO.Path]::GetFullPath($BundleRoot).TrimEnd('\', '/')
 if (-not [IO.Directory]::Exists($bundle)) { return }
 $allowed = @((Join-Path $repositoryRoot 'apps/desktop/bin'), (Join-Path $repositoryRoot 'artifacts/development'))
-if (-not ($allowed | Where-Object { $bundle.StartsWith($_.TrimEnd('\', '/') + '\', [StringComparison]::OrdinalIgnoreCase) })) {
+$managedInstallerOutput = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'artifacts/installer/win-x64/Release/app')).TrimEnd('\', '/')
+$isManagedOutput = [bool]($allowed | Where-Object { $bundle.StartsWith($_.TrimEnd('\', '/') + '\', [StringComparison]::OrdinalIgnoreCase) })
+if ($PublishedOutput -and $bundle.Equals($managedInstallerOutput, [StringComparison]::OrdinalIgnoreCase)) { $isManagedOutput = $true }
+if (-not $isManagedOutput) {
+    if ($PublishedOutput) {
+        Write-Warning 'Published output is outside the managed build roots; retired model files were preserved. Use a fresh publication directory for a clean software ZIP.'
+        return
+    }
     throw 'Legacy payload cleanup is limited to the verified desktop build output or isolated development fixture.'
 }
 if (-not [IO.File]::Exists((Join-Path $bundle 'KYNXA.Desktop.dll'))) { throw 'Desktop assembly marker is absent; no files were removed.' }
+if ($PublishedOutput) {
+    # Publishing never authorizes changing the running application, even inside a managed build root.
+    # 发布操作也不授权改动运行中的软件，即使它位于受控构建输出内也必须保留。
+    $runningOutput = $false
+    foreach ($process in [Diagnostics.Process]::GetProcesses()) {
+        try {
+            $executable = $process.MainModule.FileName
+            if ($executable -and $executable.StartsWith($bundle + '\', [StringComparison]::OrdinalIgnoreCase)) { $runningOutput = $true }
+        }
+        catch { }
+        finally { $process.Dispose() }
+        if ($runningOutput) { break }
+    }
+    if ($runningOutput) {
+        Write-Warning 'The published output is in use; no retired files were removed. Close that application or publish to a fresh managed directory.'
+        return
+    }
+}
 
 function Assert-UnlinkedOutputPath([string]$Path) {
     if (-not $Path.StartsWith($bundle + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Obsolete payload escaped the desktop output.' }
@@ -21,14 +46,21 @@ function Assert-UnlinkedOutputPath([string]$Path) {
         $ancestor = [IO.Path]::GetDirectoryName($ancestor)
     }
 }
-$obsoleteDirectories = @('runtime/node', 'runtime/node_modules', 'model-gateway')
+$obsoleteDirectories = @('runtime/node', 'runtime/node_modules', 'model-gateway', 'runtime/rerank/builtin-multilingual-reranker')
 $obsoleteFiles = @('runtime/node.exe', 'runtime/node-runtime.json', 'runtime/npm', 'runtime/npm.cmd', 'runtime/npm.ps1',
     'runtime/npx', 'runtime/npx.cmd', 'runtime/npx.ps1', 'runtime/agent/kynxa-agent-core-native.node')
+if ($PublishedOutput) {
+    # The publish hook owns only the retired BGE model, not other runtime generations or user extensions.
+    # 发布钩子仅负责移除旧 BGE 模型，不处理其他运行时版本或用户扩展。
+    $obsoleteDirectories = @('runtime/rerank/builtin-multilingual-reranker')
+    $obsoleteFiles = @()
+}
 $payloadRoots = @($bundle)
 $appx = [IO.Path]::GetFullPath((Join-Path $bundle 'AppX'))
 if ([IO.Directory]::Exists($appx)) { $payloadRoots += $appx }
 $legacyRevisions = [Collections.Generic.List[string]]::new()
-foreach ($payloadRoot in $payloadRoots) {
+$revisionRoots = if ($PublishedOutput) { @() } else { $payloadRoots }
+foreach ($payloadRoot in $revisionRoots) {
     $revisionRoot = [IO.Path]::GetFullPath((Join-Path $payloadRoot 'runtime/agent/revisions'))
     if (-not [IO.Directory]::Exists($revisionRoot)) { continue }
     Assert-UnlinkedOutputPath $revisionRoot
@@ -74,6 +106,7 @@ foreach ($root in $directoryTargets) {
     if (-not [IO.Directory]::Exists($root)) { continue }
     $isRevision = $legacyRevisions.Contains($root)
     $isGatewaySource = [IO.Path]::GetFileName($root) -eq 'model-gateway'
+    $isRemovedReranker = [IO.Path]::GetFileName($root) -eq 'builtin-multilingual-reranker'
     $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($root)
     while ($pending.Count) {
         $directory = $pending.Pop(); $directories.Add($directory)
@@ -95,6 +128,16 @@ foreach ($root in $directoryTargets) {
                 ($entry.Name -in @('Chats', 'Projects', 'Memory', 'Agent', 'catalog.json', 'storage.json', 'providers.json', 'model-providers.json') -or
                  $entry.Extension -in @('.sqlite', '.sqlite3', '.db', '.jsonl'))) {
                 throw 'Possible formal data found in an obsolete source directory; no files were removed.'
+            }
+            if ($isRemovedReranker) {
+                # Only the old pinned model files are build-owned; unknown content is preserved atomically.
+                # 仅旧固定模型文件属于构建载荷；发现未知内容时整批保留，不触碰正式数据。
+                $modelRelative = $entry.FullName.Substring($root.Length + 1).Replace('\', '/')
+                $knownModelEntry = if ($entry.PSIsContainer) { $modelRelative -eq 'onnx' } else {
+                    $modelRelative -in @('manifest.json', 'config.json', 'tokenizer_config.json', 'special_tokens_map.json',
+                        'tokenizer.json', 'onnx/model_quantized.onnx', 'MODEL_CARD.md', 'CONVERSION_MODEL_CARD.md', 'LICENSE')
+                }
+                if (-not $knownModelEntry) { throw 'Unknown content in the retired reranker payload; no files were removed.' }
             }
             if ($entry.PSIsContainer) { $pending.Push($entry.FullName) } else { $files.Add($entry.FullName) }
         }

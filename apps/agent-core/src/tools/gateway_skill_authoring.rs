@@ -235,8 +235,8 @@ fn successful(value: &Value) -> bool {
     true
 }
 
-/// Promotion verifies original receipts, not a model-written reliability flag or an editable project manifest.
-/// 全局提升核验原始工具回执，不把模型自报可靠或可编辑的项目元数据当作证据。
+/// Verify original receipts before global promotion; model claims and editable metadata are not proof.
+/// 提升到全局前核验原始回执；模型自报和可编辑元数据不算证据。
 fn promotion_evidence(ctx: &GatewayToolContext, args: &Value, package: &Value) -> Result<Value, GatewayError> {
     let generalization=args["generalization"].as_str().filter(|text|!text.trim().is_empty() && text.chars().count()<=2000)
         .ok_or_else(||invalid("请说明此流程如何去掉项目专用路径、数据和约定，适用于其他项目。"))?;

@@ -52,10 +52,8 @@ function Find-VisualRuntimeRedist {
     }
     $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (-not [IO.File]::Exists($locator)) { throw 'The licensed MSVC Redist build source is unavailable. Supply -RedistDirectory from the official pinned toolset.' }
-    # SSMS is also discoverable by vswhere and can sort newer than Visual Studio,
-    # but it has no MSVC toolchain/redist. Require the C++ workload so the selected
-    # path is a real compiler installation before resolving the pinned runtime.
-    # vswhere 也会返回 SSMS；它没有 MSVC 工具链。要求 C++ 组件后再解析固定运行库。
+    # Require the C++ toolchain; vswhere can also return SSMS.
+    # 要求 C++ 工具链，避免 vswhere 误选 SSMS。
     $compilerInstall = & $locator -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $compilerInstall) { throw 'A stable Visual Studio build source is required for the pinned VC runtime.' }
     return Join-Path $compilerInstall ("VC/Redist/MSVC/$($runtimeManifest.toolsetDirectory)/$($runtimeSpec.redistDirectory)")

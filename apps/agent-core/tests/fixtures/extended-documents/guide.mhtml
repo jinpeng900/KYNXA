@@ -1,9 +1,0 @@
-MIME-Version: 1.0
-Content-Type: multipart/related; boundary=fixture
-
---fixture
-Content-Type: text/html; charset=utf-8
-Content-Transfer-Encoding: base64
-
-PGh0bWw+PGJvZHk+6LSm5oi3IHJlc2V0IDI1IGtnPHNjcmlwdD5zZWNyZXRfc2NyaXB0PC9zY3JpcHQ+PC9ib2R5PjwvaHRtbD4=
---fixture--

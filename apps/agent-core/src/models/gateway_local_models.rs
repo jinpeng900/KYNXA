@@ -370,8 +370,8 @@ async fn start_download(home:&Path, library:&Arc<Library>, id:&str)->Result<(),M
     Ok(())
 }
 
-/// The route owner stops affected engines before entering a mutation; this manager never stops a second copy.
-/// 路由所有者先停止受影响引擎，再进入管理操作；此处不重复停止另一套进程。
+/// Routes stop affected engines before mutation; the manager does not repeat that work.
+/// 路由在变更前停止受影响引擎；管理器不重复停止。
 pub async fn affected_models(home:&Path,path:&str,body:&Value)->Result<Vec<String>,ModelError> {
     let library=library(home).await?;let state=library.state.lock().await;
     if path=="/api/local-models/delete" || path=="/api/local-models/enable" && body["enabled"]==false {

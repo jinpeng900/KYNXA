@@ -4,10 +4,10 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 const toRelativePath = (repositoryRoot, path) => relative(repositoryRoot, path).split(sep).join('/');
 const isInside = (root, path) => path === root || path.startsWith(`${root}${sep}`);
 
-// Ignore comments and literals before reading module paths, including nested comments and raw strings.
-// 读取模块路径前跳过注释和字面量，包括嵌套注释与原始字符串，避免把示例当作依赖。
-// This is a limited static scanner; Rust compilation remains responsible for names, macros and cfg expansion.
-// 此扫描器仅检查静态结构；名称解析、宏展开及 cfg 条件仍由 Rust 编译负责。
+// Skip literals and nested comments so examples do not become dependencies.
+// 跳过字面量和嵌套注释，避免把示例当作依赖。
+// This scans static structure; Rust resolves names, macros and cfg conditions.
+// 此处仅扫描静态结构，名称、宏和 cfg 条件由 Rust 解析。
 function rustTokens(source) {
   const tokens = [];
   let offset = 0;
@@ -64,8 +64,8 @@ function rustTokens(source) {
   return tokens;
 }
 
-// Resolve explicit module paths and grouped use trees without executing code or expanding macros.
-// 解析显式模块路径与分组 use 树，不执行代码或展开宏；编译器仍负责完整名称解析。
+// Resolve explicit paths and grouped use trees without expanding macros.
+// 解析显式路径和分组 use 树，不展开宏。
 function referencedModules(tokens, nativeModule, crateNames, domains, moduleFiles) {
   const module = nativeModule.replace(/\.rs$/u, '').split('/');
   if (module.at(-1) === 'mod') module.pop();
@@ -184,16 +184,16 @@ function moduleDeclarations(tokens) {
   const declarations = [];
   for (let index = 0; index < tokens.length; index++) {
     if (tokens[index].kind !== 'identifier' || tokens[index].value !== 'mod' || tokens[index + 1]?.kind !== 'identifier' || tokens[index + 2]?.value !== ';') continue;
-    let explicitPath;
+    let explicitPath, testOnly = false;
     // A path attribute may precede visibility/cfg attributes; inspect only the current declaration prefix.
     // path 属性可以位于可见性或 cfg 属性之前；只检查当前声明的前缀，避免借用上一项的路径。
     for (let cursor = index - 1; cursor >= 0 && ![';', '{', '}'].includes(tokens[cursor].value); cursor--) {
       if (tokens[cursor].kind === 'identifier' && tokens[cursor].value === 'path' && tokens[cursor + 1]?.value === '=' && tokens[cursor + 2]?.kind === 'string') {
         explicitPath = tokens[cursor + 2].value;
-        break;
       }
+      if (tokens.slice(cursor, cursor + 7).map(token => token.value).join('') === '#[cfg(test)]') testOnly = true;
     }
-    declarations.push({ module: tokens[index + 1].value, explicitPath });
+    declarations.push({ module: tokens[index + 1].value, explicitPath, testOnly });
   }
   return declarations;
 }
@@ -239,10 +239,11 @@ async function isFile(path) {
   catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false; throw error; }
 }
 
-/** Check the declared native-core boundary without introducing a second ownership manifest.
- * 使用主责清单声明的原生核心边界检查结构，不再维护第二份负责人配置。 */
+/** Use the shared architecture configuration to check native-core boundaries.
+ * 使用同一技术配置检查原生核心边界。 */
 export async function checkRustArchitecture({ repositoryRoot, manifest, sourceFiles }) {
   const violations = [];
+  const localTestFiles = new Set((manifest.localTestFiles ?? []).map(path => resolve(repositoryRoot, path)));
   let sourceFileCount = 0, moduleReferences = 0, domainReferences = 0, dependencyCount = 0, integrationModuleCount = 0, integrationReferences = 0, executionModuleCount = 0;
   const domainDependencies = {};
   for (const application of manifest.rustApps ?? []) {
@@ -334,6 +335,10 @@ export async function checkRustArchitecture({ repositoryRoot, manifest, sourceFi
         for (const candidate of candidates) {
           if (await isFile(candidate)) { target = candidate; break; }
         }
+        // Only declared cfg(test) modules may be absent from a production-only checkout.
+        // 只有清单内且受 cfg(test) 保护的模块才允许不随生产源码提供。
+        if (declaration.testOnly && candidates.some(candidate => isInside(rustRoot, candidate) && localTestFiles.has(candidate)) &&
+            (!target || localTestFiles.has(target))) continue;
         if (!target || extname(target) !== '.rs') violations.push({ code: 'RUST_MODULE_TARGET_MISSING', source, module: declaration.module });
         else if (!isInside(rustRoot, target)) violations.push({ code: 'RUST_MODULE_SCOPE_ESCAPE', source, target: toRelativePath(repositoryRoot, target) });
         else if (!sourceFiles.includes(target)) violations.push({ code: 'RUST_MODULE_TARGET_NOT_INVENTORIED', source, target: toRelativePath(repositoryRoot, target) });

@@ -17,7 +17,7 @@
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
-    toolDenied: '已拒绝', toolApproval: '等待批准', toolCancelled: '已取消', toolUnknown: '结果未知',
+    toolDenied: '已拒绝', toolApproval: '等待批准', toolCancelled: '已取消', toolUnknown: '未确认',
     toolSearchWeb: '搜索网页', toolReadWeb: '阅读网页', toolReadFile: '读取文件', toolInspectFile: '查看文件',
     toolListFiles: '查看文件夹', toolSearchFiles: '查找文件', toolEditFile: '修改文件', toolDeleteFile: '删除文件',
     toolCreateFolder: '创建文件夹', toolRunCommand: '运行命令', toolUseSkill: '使用技能', toolReadSkill: '读取技能',
@@ -28,7 +28,7 @@
     toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
     toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',
     toolMoreWebLinks: '另{0}个链接',
-    taskPartial: '部分完成', taskVerificationFailed: '核验失败', taskExecutionUnknown: '执行结果未知',
+    taskPartial: '部分完成', taskVerificationFailed: '核验失败', taskExecutionUnknown: '执行结果未确认',
     toolInspectWindows: '查看窗口', toolFindApps: '查找软件', toolScreenshot: '截图', toolReadWindow: '读取窗口', toolOpenApp: '打开软件',
     toolActivateWindow: '切换窗口', toolClick: '点击', toolMovePointer: '移动鼠标', toolScroll: '滚动', toolDrag: '拖动',
     toolTypeText: '输入文字', toolPressKey: '按下按键', toolCharacterCount: '{0}字符', toolScrollDelta: '滚动量 {0}',
@@ -132,9 +132,8 @@
         durationMs = mode === 'final' && hasTotal ? message.durationMs : elapsedMs ?? retainedElapsedMs;
       }
     } else if (message.role === 'assistant') {
-      // Older snapshots lack clock identity. Preserve their preparation reset, but never erase
-      // an established clock just because the final prose arrived before its official total.
-      // 旧快照没有时钟身份，保留准备阶段清零行为；最终正文先于正式总时长到达时不抹掉已知计时。
+      // Keep legacy preparation resets; final text arriving before totals must not erase an established clock.
+      // 保留旧快照的准备阶段清零；正文先于总时长到达时，保留已有计时。
       const presentation = presentationFor(message);
       if (message.streaming && elapsedMs !== null) {
         mode = 'live'; durationMs = Math.max(elapsedMs, entry.elapsedMode === 'live' ? previousElapsedMs ?? 0 : 0);
@@ -193,6 +192,7 @@
     // 正文选区保留旧快照时，仅更新页脚元信息；切换语言仍使用最新结束状态。
     entry.timeMetadata = {
       role: message.role, streaming: message.streaming, status: message.status,
+      executionPhase: message.executionPhase, generationTimingState: message.generationTimingState,
       createdAtMs: message.createdAtMs, endRecordedAtMs: message.endRecordedAtMs
     };
     const english = document.documentElement.lang === 'en', separator = english ? ': ' : '：';
@@ -201,7 +201,12 @@
     const value = user ? message.createdAtMs : message.endRecordedAtMs;
     const formatted = streaming ? uiStrings.timeNotRecorded : formatMessageTime(value);
     const label = user ? uiStrings.messageSentAt : message.status === 'completed' ? uiStrings.replyCompletedAt : uiStrings.replyEndedAt;
-    const text = streaming ? uiStrings.generating : label + separator + formatted;
+    const phases = english
+      ? {saving:'Saving…',reviewing:'Verifying…','waiting-verification':'Waiting for verification…',recovering:'Recovering…','waiting-config':'Waiting for configuration…'}
+      : {saving:'正在保存',reviewing:'正在核验','waiting-verification':'等待核验',recovering:'正在恢复','waiting-config':'等待配置'};
+    const text = streaming ? phases[message.executionPhase]
+      || (message.generationTimingState === 'paused' ? (english ? 'Waiting for task status…' : '等待任务状态') : uiStrings.generating)
+      : label + separator + formatted;
     // The persistent footer is outside copied content; unknown end times must never be inferred from duration.
     // 时间常显在操作行，不进入复制正文；未知结束时刻不能根据用时推算。
     if (entry.time.textContent !== text) entry.time.textContent = text;
@@ -210,15 +215,44 @@
       if (entry.time.getAttribute('datetime') !== dateTime) entry.time.setAttribute('datetime', dateTime);
     } else if (entry.time.hasAttribute('datetime')) entry.time.removeAttribute('datetime');
   }
+  function retainMessageState(entry, message, revision) {
+    if (Number.isSafeInteger(revision) && Number.isSafeInteger(entry.stateRevision) && revision < entry.stateRevision)
+      return entry.stateMetadata || message;
+    entry.stateMetadata = message;
+    entry.stateRevision = Number.isSafeInteger(revision) ? revision : null;
+    return message;
+  }
+  function updateMessageState(entry, message) {
+    if (!entry.mounted || !message) return;
+    updateElapsedState(entry, message);
+    updateMessageTime(entry, message);
+    // Final metadata must not infer an interrupted answer from body segments still awaiting layout.
+    // 终态元信息不根据尚待排版的旧正文分段，误判回复中断。
+    const mode = message.status === 'streaming' ? 'active' : message.status === 'completed' ? 'final' : 'partial';
+    setStatusText(entry, statusText(message, Array.isArray(message.assistantSegments) ? presentationFor(message) : {mode}));
+    const generating = message.streaming && message.generationTimingState !== 'paused';
+    const existingDot = entry.status.querySelector('.streaming-dot');
+    if (generating && !existingDot) {
+      const dot = document.createElement('span'); dot.className = 'streaming-dot';
+      dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot);
+    } else if (!generating) existingDot?.remove();
+    const retryHidden = !message.canRetry;
+    if (entry.retry.hidden !== retryHidden) entry.retry.hidden = retryHidden;
+  }
+  function applyMessageState(command) {
+    if (command.conversationId !== conversationId || !command.message) return;
+    const entry = entries.get(String(command.message.id));
+    if (!entry) return;
+    updateMessageState(entry, retainMessageState(entry, command.message, command.revision));
+    synchronizeElapsedTimer();
+  }
   function localizeEntry(entry) {
     if (entry.mounted && entry.message) updateAttachments(entry, entry.message);
     if (!entry.mounted) return;
     localizeCopyButton(entry);
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
-      updateMessageTime(entry);
-      setStatusText(entry, statusText(entry.message));
-      refreshElapsedText(entry);
+      updateMessageState(entry, entry.stateMetadata || entry.message);
     }
     entry.status.querySelector('.streaming-dot')?.setAttribute('aria-label', uiStrings.generating);
     for (const row of entry.toolRows?.values() || []) localizeToolRow(row);
@@ -333,9 +367,8 @@
     window.kynxaTables?.setLanguage(uiStrings);
     window.kynxaTranscriptSearch?.setLanguage(uiStrings);
     if (!localizingUi) return;
-    // Labels may wrap differently. Keep the user's scroll position and suppress only
-    // the automatic bottom-follow triggered by this layout, without touching ranges.
-    // 文案换行可能改变布局；保留用户滚动位置，仅暂停本次布局触发的底部跟随，不修改选择范围。
+    // Label wrapping may shift layout; preserve scroll position and selection, skipping this auto-follow.
+    // 文案换行可能改变布局；保留滚动位置和选区，仅跳过本次自动跟随。
     if (scrollX !== left || scrollY !== top) scrollTo({ left, top, behavior: 'instant' });
     languageFrame = requestAnimationFrame(() => {
       languageFrame = requestAnimationFrame(() => {
@@ -628,13 +661,12 @@
   function updateMessage(entry, message) {
     if (!entry.mounted) { entry.message = message; return; }
     const old = entry.message;
-    updateElapsedState(entry, message);
+    updateMessageState(entry, entry.stateMetadata || message);
     if (old && ['role', 'content', 'html', 'htmlStableLength', 'htmlStableBlocks', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'generationTimingState', 'generationClockId', 'presentationMode', 'createdAtMs', 'endRecordedAtMs', 'taskCompletionState']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length &&
       JSON.stringify(old.attachments || []) === JSON.stringify(message.attachments || [])) return;
     entry.message = message;
-    updateMessageTime(entry, message);
     const presentation = presentationFor(message); entry.presentation = presentation;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -666,11 +698,6 @@
       }
       patchBlocks(entry.body, message.html || '', message.htmlStableLength, message.htmlStableBlocks);
     }
-    setStatusText(entry, statusText(message, presentation));
-    const existingDot = entry.status.querySelector('.streaming-dot');
-    if (message.streaming && !existingDot) { const dot = document.createElement('span'); dot.className = 'streaming-dot'; dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot); }
-    else if (!message.streaming) existingDot?.remove();
-    entry.retry.hidden = !message.canRetry;
     entry.copy.hidden = !copiedMessage(message);
   }
   const FILE_ICON = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
@@ -844,9 +871,8 @@
       const expected = previous ? previous.nextSibling : entry.tools.firstChild;
       if (expected !== row.root) entry.tools.insertBefore(row.root, expected);
       previous = row.root;
-      // Immutable source records get a lightweight display revision from the desktop.
-      // Historical/standalone clients fall back to a signature without changing formal events.
-      // 不可变的源记录由桌面分配轻量展示版本；旧版或独立客户端回退到签名，正式事件不变。
+      // Use the desktop display revision, falling back to a signature for older or standalone clients.
+      // 优先使用桌面展示版本，旧版或独立客户端回退到签名；正式记录不变。
       const signature = JSON.stringify(group.views.map(view => view.signature));
       if (row.signature === signature) continue;
       row.signature = signature;
@@ -883,9 +909,8 @@
   function cacheCharactersWithin(value, remaining) {
     const pendingValues = [value];
     let characters = 0, visited = 0;
-    // Cache admission estimates plain transport data without serializing a second large JSON copy.
-    // Complex payloads that exceed traversal or size bounds remain rereadable rather than blocking navigation.
-    // 缓存准入直接估算传输对象，不再次编码大型 JSON；超出遍历或容量边界时不缓存，保持可回读。
+    // Estimate cache size without copying large JSON; oversized or complex data stays rereadable.
+    // 直接估算缓存大小，避免复制大型 JSON；过大或过于复杂的数据保留回读能力。
     while (pendingValues.length) {
       if (++visited > 8192 || characters > remaining) return Infinity;
       const item = pendingValues.pop();
@@ -916,9 +941,8 @@
     window.kynxaTables?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
     pending = null; clearSelection(); cancelAnimationFrame(scrollFrame);
-    // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
-    // and expanded reasoning instead of rebuilding every element.
-    // 暂存完整 DOM 树；返回聊天时复用公式、高亮与展开状态，避免重建所有元素。
+    // Cache the DOM tree so returning to a chat reuses formulas, highlighting and expanded reasoning.
+    // 缓存 DOM 树，返回聊天时复用公式、高亮和思考展开状态。
     const restored = removeCached(id);
     if (restored?.view && !restored.view.following) {
       stopFollowing();
@@ -999,7 +1023,8 @@
       for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
       for (const message of snapshot.messages) {
         const entry = entries.get(String(message.id));
-        if (entry?.mounted) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
+        if (entry) updateMessageState(entry, snapshot.stateMessageIds && !snapshot.stateMessageIds.has(String(message.id))
+          ? entry.stateMetadata || message : retainMessageState(entry, message, snapshot.revision));
       }
       synchronizeElapsedTimer(); updateJumpButton(); return;
     }
@@ -1016,7 +1041,10 @@
       const id = String(message.id);
       let entry = entries.get(id);
       if (!entry) { entry = createMessage(message); entries.set(id, entry); }
+      const state = snapshot.stateMessageIds && !snapshot.stateMessageIds.has(id)
+        ? entry.stateMetadata || message : retainMessageState(entry, message, snapshot.revision);
       if (entry.message !== message) { updateMessage(entry, message); if (entry.mounted) changedArticles.push(entry.article); }
+      else updateMessageState(entry, state);
       const expected = previous ? previous.nextSibling : messages.firstChild;
       if (expected !== entry.article) messages.insertBefore(entry.article, expected);
       if (searchingLoadedMessages && !entry.mounted) mountMessage(entry);
@@ -1058,7 +1086,7 @@
     for (const [id, message] of replacements) merged.set(id, message);
     const ordered = Array.isArray(messageOrder) ? messageOrder.map(id => merged.get(String(id))).filter(Boolean)
       : [...merged.values()];
-    applyTranscript({ ...snapshot, messages: ordered });
+    applyTranscript({ ...snapshot, messages: ordered, stateMessageIds: new Set(replacements.keys()) });
   }
 
   function requestEarlierHistory() {
@@ -1159,9 +1187,8 @@
     if (!selection || !selection.rangeCount || selection.isCollapsed || !activeSelection()) return null;
     const range = selection.getRangeAt(0);
     const fragment = range.cloneContents();
-    // Selected ranges may span unloaded messages. Reconstruct their literal bodies for copying,
-    // instead of silently returning only the currently mounted viewport.
-    // 选区可能跨越已卸载消息；复制时补回这些消息的原始正文，不能静默只复制可见窗口。
+    // Restore unloaded message bodies when copying a selection beyond the mounted viewport.
+    // 复制跨越当前视口的选区时，补回已卸载消息的原始正文。
     for (const node of fragment.querySelectorAll('article[data-virtualized]')) {
       const entry = entries.get(node.dataset.messageId);
       if (!entry) continue;
@@ -1219,9 +1246,8 @@
     return fragment ? fragmentText(fragment) : '';
   }
   function fragmentText(fragment) {
-    // A range entirely inside literal user text/code has no structural block separators.
-    // Preserve even deliberately selected leading/trailing newlines in that case.
-    // 选择完全位于用户原文或代码内部时，不额外添加结构分隔；保留用户明确选中的首尾换行。
+    // Inside literal text or code, preserve selected boundary newlines without adding separators.
+    // 选区完全位于原文或代码内时，保留选中的首尾换行，不额外添加分隔。
     if (fragment.childNodes.length === 1 && fragment.firstChild.nodeType === Node.ELEMENT_NODE
       && fragment.firstChild.hasAttribute('data-copy-plain')) return fragment.firstChild.textContent;
     return serializeSelectionNode(fragment).replace(/^\n+|\n+$/g, '');
@@ -1260,13 +1286,11 @@
     // Update the direction baseline even for guarded restoration and navigation scrolls.
     // 锚点恢复或导航屏蔽的程序滚动也更新方向基准，避免沿用上一会话的位置。
     lastScrollTop = scrollY;
-    // Clearing the old DOM may queue a scroll event until after the new long chat is rendered.
-    // Keep explicit navigation alive until its first bottom frame; real upward input cancels it immediately.
-    // 清空旧 DOM 产生的滚动事件可能在新长聊天渲染后才到达；首个底部帧前保留显式导航，真实上滚输入立即撤销。
+    // Old DOM scroll events may arrive late; keep explicit navigation until the first bottom frame or real upward input.
+    // 旧 DOM 滚动事件可能迟到；显式导航保持到首个底部帧，用户上滚则立即取消。
     if (!applying && !localizingUi && !updatingAppearance && !anchoringScroll && !bottomNavigationPending && !restoringReadingNavigation()) {
-      // A smooth upward wheel starts inside the usual 36 px bottom tolerance. Keep its reading pause
-      // until a real downward scroll reaches the bottom; viewport reconciliation must not pull it back.
-      // 平滑上滚首帧仍可能处于常用的 36 px 底部容差内；仅真实向下滚动到底才解除阅读暂停，避免虚拟视口协调反拉到底。
+      // Upward scrolling can start within the 36 px bottom tolerance; resume following only after a real downward scroll to bottom.
+      // 上滚可能始于底部 36 px 容差内；仅在用户真实下滚到底后恢复跟随，避免视口更新拉回。
       if (movedUp) bottomFollowingPaused = true;
       const reachedBottom = document.documentElement.scrollHeight - innerHeight - scrollY <= 1;
       if (bottomFollowingPaused && movedDown && reachedBottom && !activeSelection() && !pointerSelecting)
@@ -1296,7 +1320,9 @@
     const link = event.target.closest('a[href]');
     if (!link) return;
     event.preventDefault();
-    try { const url = new URL(link.getAttribute('href')); if (['http:', 'https:', 'mailto:'].includes(url.protocol)) send({ type: 'link', conversationId, url: url.href }); } catch { }
+    if (link.getAttribute('href')?.startsWith('#')) { stopFollowing(); cancelAnimationFrame(scrollFrame); }
+    const scope = link.closest('.message-body') || link.closest('article') || messages;
+    window.kynxaMarkdownLinks?.follow(link, scope, url => send({ type: 'link', conversationId, url }));
   });
   new ResizeObserver(() => { updateJumpButton(); scheduleViewport(); followBottom(); }).observe(messages);
   window.addEventListener('resize', () => { updateJumpButton(); scheduleViewport(); followBottom(); });
@@ -1306,6 +1332,7 @@
     else if (command?.type === 'setAppearance') setAppearance(command);
     else if (command?.type === 'render') applyTranscript(command);
     else if (command?.type === 'renderPatch') applyTranscriptPatch(command);
+    else if (command?.type === 'messageState') applyMessageState(command);
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'historyAvailability' && command.conversationId === conversationId) {
       historyHasOlder = command.hasOlder === true; historyHasNewer = command.hasNewer === true;
@@ -1352,9 +1379,8 @@
   }
   function beforeContentLayoutChange(block) {
     if (activeSelection() || pointerSelecting || localizingUi) return false;
-    // An explicit reading control keeps its visible header, or the surrounding prose,
-    // in place rather than moving the reader to the end of the reply.
-    // 主动调整阅读方式时保留可见工具栏或周围正文的位置，避免把读者带到回复末尾。
+    // Reading controls preserve the visible header or prose instead of jumping to the reply's end.
+    // 调整阅读方式时保留可见工具栏或正文的位置，避免跳到回复末尾。
     stopFollowing(); cancelAnimationFrame(scrollFrame);
     const anchors = scrollAnchors(), bounds = block.getBoundingClientRect();
     const visibleHeader = bounds.top >= 0 && bounds.top < innerHeight;

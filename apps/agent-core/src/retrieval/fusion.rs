@@ -1,293 +1,188 @@
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+pub const SORT_VERSION: &str = "e5-lexical-rrf-structured-v2";
+
+pub fn rrf_k(input: &Value) -> u64 {
+    input["rrfK"].as_u64().unwrap_or(60).clamp(20, 100)
+}
+
 struct Candidate {
     chunk_id: String,
     positions: HashMap<&'static str, usize>,
     score: f64,
-    exact_target: bool,
-    domain: String,
     collation_index: usize,
 }
 
-/// Merge complete authorized channels before limiting; a soft domain preference is a bounded tie signal.
-/// 完整合并已授权通道后再限制候选，软领域偏好仅增加有界排序信号。
+/// Fuse channel ranks, never scores from incompatible lexical/vector scales.
+/// 融合通道名次，不相加词法和向量的不同量纲原始分数；结构通道仅提供小幅增益。
 pub fn apply(arguments: &Value) -> Value {
-    let collation_order: HashMap<_, _> = arguments["collationOrder"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .filter_map(|(index, id)| id.as_str().map(|id| (id, index)))
-        .collect();
+    let k = rrf_k(arguments);
+    let collation_order: HashMap<_, _> = arguments["collationOrder"].as_array().into_iter().flatten()
+        .enumerate().filter_map(|(index, id)| id.as_str().map(|id| (id, index))).collect();
     let mut candidates: HashMap<String, Candidate> = HashMap::new();
-    for (channel, weight) in [
-        ("lexical", 1.0),
-        ("vector", 1.0),
-        ("symbol", 2.0),
-        ("path", 1.5),
-    ] {
-        for (rank, row) in arguments[channel]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            let chunk_id = row["chunkId"].as_str().unwrap_or("").to_owned();
-            let candidate = candidates
-                .entry(chunk_id.clone())
-                .or_insert_with(|| Candidate {
-                    collation_index: collation_order
-                        .get(chunk_id.as_str())
-                        .copied()
-                        .unwrap_or(usize::MAX),
-                    chunk_id,
-                    positions: HashMap::new(),
-                    score: 0.0,
-                    exact_target: false,
-                    domain: String::new(),
-                });
+    for (channel, weight) in [("lexical", 1.0), ("vector", 1.0), ("symbol", 0.12), ("path", 0.10)] {
+        let mut channel_seen = HashSet::new();
+        for (rank, row) in arguments[channel].as_array().into_iter().flatten().enumerate() {
+            let Some(id) = row["chunkId"].as_str().filter(|id| !id.is_empty()) else { continue; };
+            if !channel_seen.insert(id) { continue; }
+            let candidate = candidates.entry(id.to_owned()).or_insert_with(|| Candidate {
+                collation_index: collation_order.get(id).copied().unwrap_or(usize::MAX),
+                chunk_id: id.to_owned(), positions: HashMap::new(), score: 0.0,
+            });
             candidate.positions.insert(channel, rank);
-            candidate.score += weight / (61 + rank) as f64;
-            candidate.exact_target |= row["exactTargetMatch"] == true;
-            candidate.domain = row["actualDomain"].as_str().unwrap_or("").to_owned();
+            candidate.score += weight / (k + 1 + rank as u64) as f64;
         }
     }
-    let preferred_domain = arguments["preferredDomain"].as_str().unwrap_or("");
     let mut candidates: Vec<_> = candidates.into_values().collect();
-    for candidate in &mut candidates {
-        if !preferred_domain.is_empty() && candidate.domain == preferred_domain {
-            candidate.score += 0.05 / 61.0;
-        }
-    }
-    candidates.sort_by(|left, right| {
-        right
-            .exact_target
-            .cmp(&left.exact_target)
-            .then_with(|| right.score.total_cmp(&left.score))
-            .then_with(|| left.collation_index.cmp(&right.collation_index))
-            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
-    });
+    candidates.sort_by(|left, right| right.score.total_cmp(&left.score)
+        .then_with(|| left.collation_index.cmp(&right.collation_index))
+        .then_with(|| left.chunk_id.cmp(&right.chunk_id)));
     candidates.truncate(arguments["limit"].as_u64().unwrap_or(8) as usize);
-    json!(candidates.into_iter().map(|candidate| json!({"chunkId": candidate.chunk_id, "score": candidate.score, "positions": candidate.positions})).collect::<Vec<_>>())
+    json!(candidates.into_iter().map(|candidate| json!({"chunkId":candidate.chunk_id,
+        "score":candidate.score,"positions":candidate.positions})).collect::<Vec<_>>())
 }
 
-/// Reranking observes a diverse subset; original evidence and source coordinates stay unchanged.
-/// 重排只观察具有来源多样性的候选子集，原证据与来源坐标保持不变。
-pub struct RerankPlan {
-    pub indices: Vec<usize>,
-    pub texts: Vec<String>,
-    pub windowed_inputs: usize,
-    pub reason: &'static str,
+fn normalized(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-pub fn rerank_plan(items: &[Value], input: &Value, maximum: usize) -> RerankPlan {
-    let skipped = |reason| RerankPlan { indices: vec![], texts: vec![], windowed_inputs: 0, reason };
-    let query = input["query"].as_str().unwrap_or("").trim();
-    if items.len() < 2 || maximum < 2 || query.is_empty() {
-        return skipped("insufficient-candidates");
-    }
-    if items.iter().any(|item| {
-        let mut target = item.clone();
-        target["exactPath"] = json!(item["locator"]["relativePath"].as_str()
-            .or_else(|| item["locator"]["path"].as_str()).unwrap_or("").replace('\\', "/").to_lowercase());
-        let intent = json!({"path":input["path"].as_str().unwrap_or("").replace('\\', "/"),"symbol":input["symbol"]});
-        item["exactTargetMatch"] == true || super::query::exact_target(&target, &intent)
-    }) {
-        return skipped("exact-path-or-symbol");
-    }
-    if query.chars().all(|character| character.is_ascii_alphanumeric() || "_./\\:-".contains(character))
-        && !matches!(input["taskType"].as_str(), Some("complex" | "research")) {
-        return skipped("literal-lookup");
-    }
-    let query_tokens = crate::text_metrics::estimate_tokens(query);
-    if query_tokens >= 448 {
-        return skipped("query-exceeds-reranker-window");
-    }
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut sources = HashMap::new();
-    let mut seen_chunks = HashSet::new();
-    let mut seen_texts = HashSet::new();
-    for (index, item) in items.iter().enumerate() {
-        let excerpt = item["excerpt"].as_str().unwrap_or("");
-        if excerpt.trim().is_empty() { continue; }
-        let source = json!([item["scopeKey"], item["sourceId"]]).to_string();
-        let normalized = excerpt.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-        if !seen_texts.insert((source.clone(), normalized)) { continue; }
-        if let Some(chunk) = item["chunkId"].as_str() {
-            if !seen_chunks.insert((item["scopeKey"].clone().to_string(), chunk.to_owned())) { continue; }
-        }
-        let position = *sources.entry(source).or_insert_with(|| { groups.push(Vec::new()); groups.len() - 1 });
-        let duplicate = groups[position].iter().any(|previous| {
-            let left = &items[*previous];
-            let range = |value: &Value| value["startOffset"].as_u64().zip(value["endOffset"].as_u64());
-            let (Some((a,b)), Some((c,d))) = (range(left),range(item)) else { return false; };
-            let shortest = b.saturating_sub(a).min(d.saturating_sub(c));
-            shortest > 0 && b.min(d).saturating_sub(a.max(c)) as f64 / shortest as f64 >= 0.8
-        });
-        if !duplicate { groups[position].push(index); }
-    }
-    let mut indices = Vec::new();
-    for depth in 0..items.len() {
-        let before = indices.len();
-        for group in &groups {
-            if let Some(index) = group.get(depth) { indices.push(*index); }
-            if indices.len() == maximum { break; }
-        }
-        if indices.len() == maximum || indices.len() == before { break; }
-    }
-    if indices.len() < 2 { return skipped("duplicate-candidates"); }
-    let mut windowed_inputs = 0;
-    let texts = indices.iter().map(|index| {
-        let (passage, windowed) = rerank_passage(&items[*index], query, (448 - query_tokens) as usize);
-        windowed_inputs += usize::from(windowed);
-        passage
-    }).collect();
-    RerankPlan { indices, texts, windowed_inputs, reason: "semantic-disambiguation" }
+fn source_key(item: &Value) -> String {
+    json!([item["scopeKey"], item["sourceId"], item["contentHash"], item["sourceRevision"], item["derivationSignature"]]).to_string()
 }
 
-fn fitted_end(text: &str, offsets: &[usize], start: usize, budget: usize) -> usize {
-    let (mut low, mut high) = (start, offsets.len() - 1);
-    while low < high {
-        let middle = low + (high - low).div_ceil(2);
-        if crate::text_metrics::estimate_tokens(&text[offsets[start]..offsets[middle]]) <= budget as u64 { low = middle; }
-        else { high = middle - 1; }
-    }
-    low
-}
-
-/// A query-centered window avoids treating a 512-token prefix as a complete long passage.
-/// 查询相关窗口避免用长片段的前512 token代替完整内容；真实分词截断仍由模型回执说明。
-fn rerank_passage(item: &Value, query: &str, budget: usize) -> (String, bool) {
-    let title = item["title"].as_str().unwrap_or("");
-    let title_offsets: Vec<_> = title.char_indices().map(|(index,_)| index).chain(std::iter::once(title.len())).collect();
-    let title_end = fitted_end(title, &title_offsets, 0, budget.min(64));
-    let title = &title[..title_offsets[title_end]];
-    let body_budget = budget.saturating_sub(crate::text_metrics::estimate_tokens(title) as usize + 1).max(1);
-    let excerpt = item["excerpt"].as_str().unwrap_or("");
-    if crate::text_metrics::estimate_tokens(excerpt) <= body_budget as u64 {
-        return (format!("{title}\n{excerpt}"), false);
-    }
-    let offsets: Vec<_> = excerpt.char_indices().map(|(index,_)| index).chain(std::iter::once(excerpt.len())).collect();
-    let lower = excerpt.to_lowercase();
-    let terms: Vec<_> = super::lexical::collect_terms(query, 24, true).into_iter()
-        .filter(|term| term.chars().count() > 1 && !["the","and","for","how","what","does","this","that","with","from"].contains(&term.as_str())).collect();
-    let mut starts = vec![0];
-    for term in &terms {
-        for (position,_) in lower.match_indices(term.as_str()).take(2) {
-            starts.push(lower[..position].chars().count().saturating_sub(64).min(offsets.len()-1));
-        }
-    }
-    starts.sort_unstable(); starts.dedup();
-    let mut best = (0, fitted_end(excerpt, &offsets, 0, body_budget), 0);
-    for start in starts {
-        let end = fitted_end(excerpt, &offsets, start, body_budget);
-        let window = excerpt[offsets[start]..offsets[end]].to_lowercase();
-        let matches = terms.iter().filter(|term| window.contains(term.as_str())).count();
-        if matches > best.2 { best = (start,end,matches); }
-    }
-    (format!("{title}\n{}", &excerpt[offsets[best.0]..offsets[best.1]]), true)
-}
-
-/// Fuse ranks, not incomparable logits; an incomplete reranker view receives less weight.
-/// 融合名次而非不同量纲的logit；重排输入仍被截断时降低其影响，保留原融合得分。
-pub fn fuse_reranked(items: &mut [Value], indices: &[usize], scores: &[f64], truncated: usize) -> bool {
-    if indices.len() != scores.len() || scores.iter().any(|score| !score.is_finite()) { return false; }
-    let mut ranked: Vec<_> = indices.iter().copied().zip(scores.iter().copied()).collect();
-    ranked.sort_by(|left,right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    let weight = if truncated > 0 {0.25} else {0.5};
-    for (index,item) in items.iter_mut().enumerate() {
-        item["retrievalRank"] = json!(index + 1);
-        item["rerankFusionScore"] = json!(1.0 / (61 + index) as f64);
-    }
-    for (rank,(index,score)) in ranked.iter().enumerate() {
-        let item = &mut items[*index];
-        item["rerankScore"] = json!(score);
-        item["rerankRank"] = json!(rank + 1);
-        item["rerankFusionScore"] = json!(item["rerankFusionScore"].as_f64().unwrap() + weight / (61 + rank) as f64);
-    }
-    items.sort_by(|left,right| (right["exactTargetMatch"] == true).cmp(&(left["exactTargetMatch"] == true))
-        .then_with(|| right["rerankFusionScore"].as_f64().unwrap().total_cmp(&left["rerankFusionScore"].as_f64().unwrap()))
-        .then_with(|| left["retrievalRank"].as_u64().cmp(&right["retrievalRank"].as_u64())));
+/// Merge only contiguous, byte-consistent source ranges; source authority is never invented.
+/// 仅合并同一来源版本且内容一致的相邻原文区间；保留原片段凭据，适配器再生成来源级引用。
+fn merge_adjacent(left: &mut Value, right: &Value) -> bool {
+    if source_key(left) != source_key(right) { return false; }
+    let range = |item: &Value| item["startOffset"].as_u64().zip(item["endOffset"].as_u64());
+    let (Some((a,b)),Some((c,d))) = (range(left),range(right)) else { return false; };
+    if b < a || d < c || b < c || d < a || b.max(d).saturating_sub(a.min(c)) > 8192 { return false; }
+    let Some(ltext) = left["excerpt"].as_str() else { return false; };
+    let Some(rtext) = right["excerpt"].as_str() else { return false; };
+    let l: Vec<u16> = ltext.encode_utf16().collect();
+    let r: Vec<u16> = rtext.encode_utf16().collect();
+    if l.len() as u64 != b-a || r.len() as u64 != d-c { return false; }
+    let overlap_start = a.max(c); let overlap_end = b.min(d);
+    if overlap_end > overlap_start && l[(overlap_start-a)as usize..(overlap_end-a)as usize]
+        != r[(overlap_start-c)as usize..(overlap_end-c)as usize] { return false; }
+    let start = a.min(c); let end = b.max(d);
+    let mut merged = vec![0u16; (end-start)as usize];
+    merged[(a-start)as usize..(b-start)as usize].copy_from_slice(&l);
+    merged[(c-start)as usize..(d-start)as usize].copy_from_slice(&r);
+    let Ok(merged) = String::from_utf16(&merged) else { return false; };
+    let descriptor = |item: &Value| json!({"sourceRef":item["sourceRef"],"chunkId":item["chunkId"],
+        "chunkHash":item["chunkHash"],"startOffset":item["startOffset"],"endOffset":item["endOffset"]});
+    let mut chunks = left["mergedChunks"].as_array().cloned().unwrap_or_else(||vec![descriptor(left)]);
+    chunks.extend(right["mergedChunks"].as_array().cloned().unwrap_or_else(||vec![descriptor(right)]));
+    left["mergedChunks"]=json!(chunks);
+    left["excerpt"]=json!(merged); left["startOffset"]=json!(start); left["endOffset"]=json!(end);
+    if c<a { left["startLine"]=right["startLine"].clone(); }
+    if d>b { left["endLine"]=right["endLine"].clone(); }
+    left["score"]=json!(left["score"].as_f64().unwrap_or(0.0).max(right["score"].as_f64().unwrap_or(0.0)));
+    left["lightweightScore"]=json!(left["lightweightScore"].as_f64().unwrap_or(0.0).max(right["lightweightScore"].as_f64().unwrap_or(0.0)));
+    if let Some(fields)=left.as_object_mut() { fields.remove("chunkId"); fields.remove("chunkHash"); }
     true
+}
+
+/// Keep a bounded top-ten source share without replacing stronger evidence with arbitrary raw scores.
+/// 前十条同一文档最多三条；其余来源保留原排序，不能因缺少其他文档而回填第四条。
+pub fn diversify(items: &mut Vec<Value>) {
+    let mut counts = HashMap::new(); let mut selected=Vec::new(); let mut deferred=Vec::new();
+    for item in items.drain(..) {
+        if selected.len()<10 {
+            let key=source_key(&item); let count=counts.entry(key).or_insert(0usize);
+            if *count>=3 { deferred.push(item); continue; }
+            *count+=1;
+        }
+        selected.push(item);
+    }
+    if selected.len()>=10 { selected.extend(deferred); }
+    *items=selected;
+}
+
+/// Only exact path, whole symbol and title matches add small structured bonuses after RRF.
+/// RRF 后仅使用精确路径、完整符号名和标题三类结构信号，不叠加关键词启发式规则。
+pub fn lightweight(items: &mut Vec<Value>, input: &Value) -> Value {
+    let k=rrf_k(input) as f64;
+    let query=normalized(input["query"].as_str().unwrap_or(""));
+    // The index contract carries constraints inside retrievalIntent; retain direct-call compatibility.
+    // 索引合同将约束放在 retrievalIntent 中，同时兼容直接调用的顶层字段。
+    let requested_path=input["retrievalIntent"]["path"].as_str().or_else(||input["path"].as_str())
+        .unwrap_or("").replace('\\',"/").to_lowercase();
+    let symbol=input["retrievalIntent"]["symbol"].as_str().or_else(||input["symbol"].as_str()).unwrap_or("");
+    let before=items.len(); let mut seen=HashSet::new(); let mut unique:Vec<Value>=Vec::new();
+    for mut item in items.drain(..) {
+        let text=normalized(item["excerpt"].as_str().unwrap_or(""));
+        if text.is_empty() || !seen.insert((source_key(&item),text)) { continue; }
+        let path=item["locator"]["relativePath"].as_str().or_else(||item["locator"]["path"].as_str()).unwrap_or("").replace('\\',"/").to_lowercase();
+        let exact_path=!requested_path.is_empty() && (path==requested_path || path.ends_with(&format!("/{requested_path}")));
+        let exact_symbol=!symbol.is_empty() && ["symbolName","qualifiedName"].iter()
+            .any(|key| item["structure"][key].as_str().is_some_and(|name|name==symbol));
+        let title=normalized(item["title"].as_str().unwrap_or(""));
+        let title_hit=title.chars().count()>=4 && query.contains(&title);
+        let bonus=(if exact_path {0.10} else {0.0})+(if exact_symbol {0.12} else {0.0})+(if title_hit {0.08} else {0.0});
+        item["lightweightScore"]=json!(item["score"].as_f64().unwrap_or(0.0)+bonus/(k+1.0));
+        item["rankingSignals"]=json!({"exactPath":exact_path,"wholeSymbol":exact_symbol,"title":title_hit});
+        if !unique.iter_mut().any(|previous|merge_adjacent(previous,&item)) { unique.push(item); }
+    }
+    unique.sort_by(|left,right|right["lightweightScore"].as_f64().unwrap_or(0.0)
+        .total_cmp(&left["lightweightScore"].as_f64().unwrap_or(0.0)));
+    diversify(&mut unique);
+    unique.truncate(input["limit"].as_u64().unwrap_or(8).clamp(1,192) as usize);
+    let result=json!({"state":"applied","method":"rank-rrf-structured","version":SORT_VERSION,
+        "rrfK":k as u64,"removedOrMerged":before.saturating_sub(unique.len()),"topTenPerDocument":3});
+    *items=unique; result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rerank_fusion_retains_retrieval_signal_exact_hits_and_unranked_candidates() {
-        let original: Vec<_> = (0..10).map(|index| json!({"chunkId":format!("c{index}"),
-            "score":1.0/(61+index) as f64,"exactTargetMatch":index==7})).collect();
-        let indices: Vec<_> = (0..8).collect();
-        let scores: Vec<_> = (0..8).map(|index| index as f64).collect();
-        let mut first = original.clone();
-        assert!(fuse_reranked(&mut first,&indices,&scores,0));
-        assert_eq!(first[0]["chunkId"],"c7");
-        assert_eq!(first[1]["chunkId"],"c0");
-        assert_eq!(first.len(),original.len());
-        for item in &first {
-            assert_eq!(item["score"],original.iter().find(|previous| previous["chunkId"]==item["chunkId"]).unwrap()["score"]);
-        }
-        let mut scaled = original;
-        let scores: Vec<_> = scores.iter().map(|score|score*1_000_000.0-20_000.0).collect();
-        assert!(fuse_reranked(&mut scaled,&indices,&scores,0));
-        assert_eq!(first.iter().map(|item|&item["chunkId"]).collect::<Vec<_>>(),
-            scaled.iter().map(|item|&item["chunkId"]).collect::<Vec<_>>());
-        assert!(first.iter().find(|item|item["chunkId"]=="c9").unwrap().get("rerankScore").is_none());
-    }
-
-    #[test]
-    fn rerank_candidates_preserve_exact_paths_and_share_budget_across_sources() {
-        let row=|source:&str,chunk:&str,text:&str,start:usize|json!({"scopeKey":"project:a","sourceId":source,
-            "chunkId":chunk,"title":source,"excerpt":text,"startOffset":start,"endOffset":start+100,
-            "locator":{"relativePath":format!("{source}.md")}});
-        let items=vec![row("a","a0","Cache retains original bytes.",0),
-            row("a","a1","Cache retains original bytes.",10),
-            row("a","a2","Cache eviction releases old entries.",200),
-            row("b","b0","Scope boundaries isolate cache entries.",0),
-            row("c","c0","Cache versions invalidate earlier evidence.",0)];
-        let plan=rerank_plan(&items,&json!({"query":"how cache entries are isolated"}),4);
-        assert_eq!(plan.indices,vec![0,3,4,2]);
-        assert_eq!(plan.texts.len(),4);
-        let targeted=rerank_plan(&items,&json!({"query":"explain cache eviction","path":"a.md"}),4);
-        assert_eq!(targeted.reason,"exact-path-or-symbol");
-        assert!(targeted.indices.is_empty());
-        assert_eq!(rerank_plan(&items,&json!({"query":"cache"}),4).reason,"literal-lookup");
-    }
-
-    #[test]
-    fn rerank_window_keeps_late_english_and_chinese_evidence_without_replacing_sources() {
-        for (query,excerpt,expected) in [
-            ("memory throughput network contention",format!("{}The mechanism protects memory throughput during network contention.","Unrelated background material. ".repeat(300)),"network contention"),
-            ("向量索引 作用域隔离",format!("{}新的核心结论：向量索引应按作用域隔离，删除来源后同步失效。","旧章节背景材料。".repeat(300)),"作用域隔离"),
-        ] {
-            let item=json!({"title":"Source title","excerpt":excerpt,"startOffset":123,"sourceRef":"unchanged-reference"});
-            let original=item.clone();
-            let (passage,windowed)=rerank_passage(&item,query,320);
-            assert!(windowed); assert!(passage.contains(expected));
-            assert!(passage.starts_with("Source title\n"));
-            assert!(crate::text_metrics::estimate_tokens(&passage)<=320);
-            assert_eq!(item,original);
-        }
-    }
-
     #[test]
     fn equal_channel_scores_follow_the_original_icu_collation_receipt() {
-        let result = apply(&json!({"lexical":[{"chunkId":"A"},{"chunkId":"a"}],
+        let result=apply(&json!({"lexical":[{"chunkId":"A"},{"chunkId":"a"}],
             "vector":[{"chunkId":"a"},{"chunkId":"A"}],"collationOrder":["a","A"],"limit":2}));
-        assert_eq!(result[0]["score"], result[1]["score"]);
-        assert_eq!(result[0]["chunkId"], "a");
-        assert_eq!(result[1]["chunkId"], "A");
+        assert_eq!(result[0]["score"],result[1]["score"]); assert_eq!(result[0]["chunkId"],"a");
+    }
+    #[test]
+    fn two_channel_rrf_ignores_raw_score_scale_and_bounds_k() {
+        let mut args=json!({"lexical":[{"chunkId":"first","score":90000},{"chunkId":"both","score":-99}],
+            "vector":[{"chunkId":"both","score":-999999}],"limit":2,"rrfK":60});
+        assert_eq!(apply(&args)[0]["chunkId"],"both"); let original=apply(&args);
+        args["vector"][0]["score"]=json!(999999); assert_eq!(apply(&args),original);
+        args["rrfK"]=json!(0); assert_eq!(rrf_k(&args),20);
+        args["rrfK"]=json!(1000); assert_eq!(rrf_k(&args),100);
+    }
+    #[test]
+    fn merge_ranges_retains_provenance_and_refuses_conflicting_bytes_or_versions() {
+        let row=|start,end,text:&str|json!({"scopeKey":"project:a","sourceId":"a","contentHash":"v1","sourceRevision":1,
+            "chunkId":format!("c{start}"),"chunkHash":format!("h{start}"),"startOffset":start,"endOffset":end,"excerpt":text,
+            "sourceRef":format!("ref{start}"),"score":0.03});
+        let mut first=row(0,4,"ab中文"); let next=row(2,6,"中文cd");
+        assert!(merge_adjacent(&mut first,&next)); assert_eq!(first["excerpt"],"ab中文cd");
+        assert_eq!(first["mergedChunks"].as_array().unwrap().len(),2); assert!(first.get("chunkId").is_none());
+        assert!(!merge_adjacent(&mut first,&row(4,8,"zzef")));
+        let mut other=row(6,8,"ef");other["sourceRevision"]=json!(2);assert!(!merge_adjacent(&mut first,&other));
+    }
+    #[test]
+    fn top_ten_source_share_never_backfills_a_fourth_fragment() {
+        let mut rows=(0..15).map(|i|json!({"sourceId":if i<7{"a"}else{"b"},"scopeKey":"x","n":i})).collect();
+        diversify(&mut rows);assert_eq!(rows.len(),6);
+        let mut rows:Vec<_>=(0..15).map(|i|json!({"sourceId":if i<7{"a".to_owned()}else{format!("s{i}")},"n":i})).collect();
+        diversify(&mut rows);assert_eq!(rows.len(),15);
+        assert_eq!(rows.iter().take(10).filter(|item|item["sourceId"]=="a").count(),3);
     }
 
     #[test]
-    fn a_two_channel_hit_outranks_a_single_channel_first_hit() {
-        // Additive RRF favours the candidate both channels agree on, even against a lexical first hit.
-        // 加法式 RRF 偏向两个通道都命中的候选，即使对手是词法首位。
-        let result = apply(&json!({"lexical":[{"chunkId":"first"},{"chunkId":"both"}],
-            "vector":[{"chunkId":"both"}],"limit":2}));
-        assert_eq!(result[0]["chunkId"], "both");
+    fn index_intent_constraints_reach_structured_ranking_without_partial_symbol_matches() {
+        let row=|id:&str,path:&str,symbol:&str|json!({"sourceId":id,"excerpt":format!("body {id}"),"score":0.03,
+            "locator":{"relativePath":path},"structure":{"symbolName":symbol}});
+        let mut rows=vec![row("partial","src/math-extra.rs","add_total"),row("exact","src/math.rs","add")];
+        lightweight(&mut rows,&json!({"query":"find add","limit":2,"retrievalIntent":{"path":"src/math.rs","symbol":"add"}}));
+        assert_eq!(rows[0]["sourceId"],"exact");
+        assert_eq!(rows[0]["rankingSignals"]["exactPath"],true);
+        assert_eq!(rows[0]["rankingSignals"]["wholeSymbol"],true);
+        assert_eq!(rows[1]["rankingSignals"]["exactPath"],false);
+        assert_eq!(rows[1]["rankingSignals"]["wholeSymbol"],false);
     }
 }

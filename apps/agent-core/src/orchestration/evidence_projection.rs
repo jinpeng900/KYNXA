@@ -15,8 +15,8 @@ fn utf16(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-/// Candidate records arrive in the original wire codec; selection never reserializes private source identities.
-/// 候选记录使用原有传输编码；选择过程不重新序列化私有来源身份。
+/// Select from original wire records without reserializing private source IDs.
+/// 从原始传输记录选择，不重新序列化私有来源身份。
 fn project(args: &Value, compact: bool, navigate: bool) -> Value {
     let items = args["items"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     let max_chars = args["maximumCharacters"].as_f64().unwrap_or(10000.0);

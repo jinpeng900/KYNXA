@@ -27,6 +27,123 @@ pub type SummaryExecutor = Arc<
         + Sync,
 >;
 
+fn prefix_fingerprint(connection: &Value, model: &str, messages: &[Value], system: &str, tools: &[Value]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(json!([connection["protocol"], connection["baseUrl"], model,
+        messages, system, tools]).to_string().as_bytes()))
+}
+
+/// Snapshot the wire prefix from a series clone; do not mutate live history or project twice.
+/// 从序列副本生成协议前缀，不修改活动历史或重复投影。
+pub(crate) fn summary_prefix(connection: &Value, model: &str, messages: &[Value], system: &str,
+    tools: &[Value], series: &super::tool_updates::ToolSeries) -> Result<Option<Value>, ModelError> {
+    if !super::tool_updates::supports_additions(connection) { return Ok(None); }
+    let mut request = gateway_protocol::build_request(connection, model, messages, system, None, tools, false)?;
+    super::tool_updates::project(connection, &mut request, &mut series.clone());
+    Ok(Some(json!({"version":1,"logicalFingerprint":prefix_fingerprint(connection,model,messages,system,tools),
+        "request":request})))
+}
+
+fn matching_summary_prefix<'a>(connection: &Value, model: &str, messages: &[Value], system: &str,
+    tools: &[Value], candidate: Option<&'a Value>) -> Option<&'a Value> {
+    let candidate = candidate?;
+    (super::tool_updates::supports_additions(connection) && candidate["version"] == 1 &&
+        candidate["logicalFingerprint"] == prefix_fingerprint(connection,model,messages,system,tools) &&
+        candidate["request"]["messages"].is_array()).then_some(&candidate["request"])
+}
+
+/// Borrow only the live authorized projection; never revive an earlier cached system or tool catalog.
+/// 仅借用本次已授权投影，不从旧缓存恢复系统提示或工具目录。
+#[derive(Clone, Copy)]
+struct SummaryRequestPrefix<'a> {
+    messages: &'a [Value],
+    system: &'a str,
+    tools: &'a [Value],
+    wire: Option<&'a Value>,
+}
+
+/// Reuse the entire prefix only when it fits; source coverage and tool/result pairing take precedence.
+/// 仅在完整前缀装得下时复用；来源覆盖与工具调用／回执配对优先，不为缓存截断历史。
+fn build_summary_with_prefix(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    max_output_tokens: Option<u64>,
+    input_budget_tokens: u64,
+    prefix: Option<SummaryRequestPrefix<'_>>,
+) -> Result<(Value, Value, Value), ModelError> {
+    let mut audit = json!({"mode":"standalone","reason":"no-live-prefix"});
+    if let Some(prefix) = prefix {
+        let reason = if prefix.messages.iter().any(opaque) {
+            Some("private-continuation")
+        } else if prefix.messages.iter().any(|message| protocol::image_inputs(message) > 0) {
+            Some("unmeasured-media-input")
+        } else if !gateway_protocol::supports_tools(connection) {
+            Some("native-text-turn-projection")
+        } else if gateway_protocol::protocol(connection) == "ollama" && !prefix.tools.is_empty() {
+            Some("tool-free-summary-required")
+        } else if gateway_protocol::protocol(connection) == "anthropic-messages"
+            && prefix.messages.last().is_some_and(|message| message["role"] == "system") {
+            // The new user summary tail would invalidate a native system-message boundary.
+            // 新增的 user 摘要指令会破坏原生 system 的位置约束，保留原历史并走独立摘要。
+            Some("summary-tail-after-native-system")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            audit["reason"] = json!(reason);
+        } else {
+            // Keep the source payload and citation validator unchanged; only move its instruction after history.
+            // 来源载荷及出处验收保持不变，仅将摘要指令移到完整历史之后。
+            let mut tail = vec![json!({"role":"user","content":format!(
+                "{system}\n\nThe retained conversation above is historical context. Summarize only the supplied source payload below, using its allowed source identities. Do not continue the original task or invoke tools."
+            )})];
+            tail.extend_from_slice(messages);
+            if let Some(wire) = matching_summary_prefix(connection,model,
+                prefix.messages,prefix.system,prefix.tools,prefix.wire) {
+                if protocol::array(&wire["messages"]).last().is_some_and(|message| message["role"] == "system") {
+                    audit["reason"] = json!("wire-summary-tail-after-native-system");
+                } else {
+                    let (body,controls) = gateway_protocol::build_summary_from_wire_prefix(
+                        connection,model,wire,&tail,max_output_tokens)?;
+                    let estimated = protocol::estimate_tokens(&body.to_string());
+                    if estimated <= input_budget_tokens {
+                        return Ok((body,controls,json!({"mode":"projected-wire-prefix","reason":Value::Null,
+                            "prefixEstimatedInputTokens":estimated,"inputBudgetTokens":input_budget_tokens,
+                            "preservedMessages":protocol::array(&wire["messages"]).len(),
+                            "preservedTools":protocol::array(&wire["tools"]).len()})));
+                    }
+                    audit = json!({"mode":"standalone","reason":"wire-prefix-input-over-budget",
+                        "prefixEstimatedInputTokens":estimated,"inputBudgetTokens":input_budget_tokens});
+                }
+                let (body,controls)=gateway_protocol::build_summary_request(connection,model,messages,system,max_output_tokens,false)?;
+                return Ok((body,controls,audit));
+            }
+            let mut retained = prefix.messages.to_vec();
+            retained.extend(tail);
+            let estimated_tokens = protocol::tool_message_tokens(&retained, prefix.system)
+                .saturating_add(protocol::estimate_tokens(&json!(prefix.tools).to_string()));
+            audit = json!({"mode":"standalone","reason":"prefix-input-over-budget",
+                "prefixEstimatedInputTokens":estimated_tokens,"inputBudgetTokens":input_budget_tokens});
+            if estimated_tokens <= input_budget_tokens {
+                let (body, controls) = gateway_protocol::build_summary_request_with_tools(
+                    connection, model, &retained, prefix.system, max_output_tokens, prefix.tools, false,
+                )?;
+                audit["mode"] = json!("original-prefix");
+                audit["reason"] = Value::Null;
+                audit["preservedMessages"] = json!(prefix.messages.len());
+                audit["preservedTools"] = json!(prefix.tools.len());
+                return Ok((body, controls, audit));
+            }
+        }
+    }
+    let (body, controls) = gateway_protocol::build_summary_request(
+        connection, model, messages, system, max_output_tokens, false,
+    )?;
+    Ok((body, controls, audit))
+}
+
 static SUMMARY: OnceLock<Mutex<semantic::SummaryRuntimeState>> = OnceLock::new();
 fn summary_call(operation: &str, args: &Value) -> Result<Value, ModelError> {
     SUMMARY
@@ -135,8 +252,8 @@ fn summary_output_allocation(
     )
 }
 
-/// Revalidate the actual public archive even on cache hits and process recovery; a persisted boolean is not proof.
-/// 缓存命中和进程恢复也重新核验真实公开归档，持久化布尔值不能作为可回读证明。
+/// Recheck the public archive on cache hits and recovery; a saved flag does not prove readability.
+/// 缓存命中和恢复时仍核验公开归档；保存的标记不能证明可读。
 pub(crate) async fn verify_working_summary_archive(
     data_root: &std::path::Path,
     conversation: &str,
@@ -218,8 +335,8 @@ async fn archive_working_summary(
     Ok((verified["archive"]["verified"] == true).then(|| verified["archive"].clone()))
 }
 
-/// Persist changed public payloads before exposing their archive; unchanged payloads reuse actual readback verification.
-/// 公开载荷改变后先重新保存并读回核验；未改变时复用本轮真实回读结果，不以新统计冒用旧归档。
+/// Save and read back changed payloads; unchanged payloads reuse this round's verified archive.
+/// 内容变化后重新保存并回读；未变时复用本轮已核验归档。
 async fn refresh_working_summary_archive(
     root: &std::path::Path,
     conversation: &str,
@@ -257,7 +374,7 @@ async fn refresh_working_summary_archive(
 
 /// Work summaries share the caller's model executor and meter; only formal public results are read.
 /// 工作摘要复用调用方模型执行器及计量，只读取正式公开回执；不建立记忆、不读取模型私有推理。
-async fn summarize_current_step(
+async fn summarize_current_step_with_prefix(
     connection: &Value,
     model: &str,
     budget: &Value,
@@ -268,6 +385,7 @@ async fn summarize_current_step(
     user_goals: &[Value],
     mut cancellation: watch::Receiver<bool>,
     executor: Option<&SummaryExecutor>,
+    prefix: Option<SummaryRequestPrefix<'_>>,
 ) -> Result<(Option<Value>, Value), ModelError> {
     let started = std::time::Instant::now();
     let mut previous = plan["checkpointSemanticSummary"].clone();
@@ -287,8 +405,8 @@ async fn summarize_current_step(
     // Size public work against the actual remaining checkpoint, not a fixed 2K ceiling.
     // 工作正文按实际检查点余量授额，不固定压到 2K；其余空间保留引用与执行状态。
     let content_budget = (u128::from(checkpoint_budget) * 3 / 4) as u64;
-    // 中文：正文目标与供应商思考/正文共用的传输额度分开，实际硬限仍由统一预算夹取。
-    // English: Public facts have a separate target from shared reasoning/output transport, capped by the common budget.
+    // Separate the public-content target from reasoning/output transport; both respect the shared hard limit.
+    // 正文目标与思考/正文传输额度分开，均遵守统一硬上限。
     let requested_output = requested_summary_output(content_budget);
     let Some(executor) = executor else {
         return Ok((
@@ -519,6 +637,7 @@ async fn summarize_current_step(
         .unwrap_or(content_budget)
         .min(content_budget);
     let mut calls = 0_u64;
+    let mut prefix_projection = Value::Null;
     let mut reason = Value::Null;
     let mut model_request_failed = false;
     let mut usage = Vec::new();
@@ -649,15 +768,17 @@ async fn summarize_current_step(
                 if *cancellation.borrow() {
                     return Err(ModelError::cancelled());
                 }
-                let (request, applied_controls) = gateway_protocol::build_summary_request(
+                let (request, applied_controls, request_projection) = build_summary_with_prefix(
                     connection,
                     model,
                     &response_messages,
                     STEP_SUMMARY_SYSTEM,
                     Some(output_budget),
-                    false,
+                    summary_input,
+                    prefix,
                 )?;
                 model_controls = applied_controls;
+                prefix_projection = request_projection;
                 let call_started = std::time::Instant::now();
                 let outcome = executor(request, cancellation.clone()).await;
                 if outcome
@@ -787,8 +908,8 @@ async fn summarize_current_step(
                     ) => value,
                     _ => "unknown",
                 };
-                // 中文：诊断仅保留安全形状，不保存正文、私有推理或模型生成的未知字符串。
-                // English: Diagnostics retain only safe response shape, never content, private reasoning or unknown generated strings.
+                // Keep only safe response metadata; exclude content, private reasoning and unknown generated strings.
+                // 诊断仅保留安全元信息，不保存正文、私有推理或未知生成字符串。
                 last_response_shape = json!({"publicCharacters":response.content.encode_utf16().count(),"publicEstimatedTokens":public_tokens,
                 "privateReasoningPresent":!response.reasoning.is_empty(),"outputTruncated":response.output_truncated,"normalizedFinish":normalized_finish,
                 "jsonParsed":candidate.is_some(),"wholeJsonFence":whole_json_fence,"factsArray":next_facts.is_some(),"factsCount":next_facts.map_or(0,Vec::len),
@@ -822,8 +943,8 @@ async fn summarize_current_step(
                 if response.calls.is_empty()
                     && (rejection == Some("over-content-budget") || rejection.is_none())
                 {
-                    // 中文：正文目标是软目标；只有真实检查点可完整容纳事实与未知副作用时才接纳偏差。
-                    // English: The content target is soft; only a complete, safe projection inside the real checkpoint grant can accept overshoot.
+                    // Exceed the soft content target only if the checkpoint still fits all facts and unknown effects.
+                    // 仅当检查点仍能容纳全部事实和未知副作用时，才允许超过正文软目标。
                     let mut projected_cursors = cursors.clone();
                     let current = json!({"tool":source["tool"],"resultRef":reference,"source":source["source"],"processedCharacters":end,"totalCharacters":total});
                     if let Some(index) = projected_cursors
@@ -903,8 +1024,8 @@ async fn summarize_current_step(
                     && calls < summary_call_limit
                     && (optional_refinement || missing_prior_refinement || hard_refinement)
                 {
-                    // 中文：每次压缩只允许一次公开事实精简，仍共享真实调用总限额与执行器计量。
-                    // English: One public-fact refinement per compaction shares the existing dispatch cap and metered executor.
+                    // Allow one fact refinement per compaction, within the shared call cap and metering.
+                    // 每次压缩只精简一次事实，仍计入共用调用上限和计量。
                     repair_used = true;
                     let mut feedback_facts = merged_facts.clone().unwrap();
                     if missing_prior_refinement {
@@ -1026,16 +1147,19 @@ async fn summarize_current_step(
     )
     .await?;
     let audit = json!({"state":if reason.is_null(){if calls==0{"cached"}else{"bounded-public-work-summary"}}else{"deterministic-fallback"},"reason":reason,"modelCalls":calls,"summaryCallLimit":summary_call_limit,"sourceContentBudgetTokens":source_content_budget,"modelCallDurationsMs":call_durations,"usage":usage,"durationMs":started.elapsed().as_millis(),"completedSources":completed,"partialSources":partial,"unprocessedSources":summary["unprocessedSources"],"unavailableSources":summary["unavailableSources"],"metadataOnlySources":metadata_only_sources,"contentBudgetTokens":content_budget,"contentBudgetKind":"soft-target","checkpointBudgetTokens":checkpoint_budget,"acceptanceVersion":STEP_SUMMARY_ACCEPTANCE_VERSION,"requestedSummaryOutputTokens":requested_output,"summaryInputBudgetTokens":summary_input,"summaryOutputBudgetTokens":output_budget,"modelControls":model_controls,"lastResponseShape":last_response_shape,"repairAttempt":repair_attempt,"workingArchive":archive_audit,"semanticCorrectnessCertified":false});
+    let mut audit = audit;
+    audit["prefixProjection"] = prefix_projection;
     Ok((Some(summary), audit))
 }
 
-async fn summarize(
+async fn summarize_with_prefix(
     connection: &Value,
     model: &str,
     budget: &Value,
     input: u64,
     cancellation: watch::Receiver<bool>,
     executor: Option<&SummaryExecutor>,
+    prefix: Option<SummaryRequestPrefix<'_>>,
 ) -> Result<(Option<Value>, Value), ModelError> {
     let started = std::time::Instant::now();
     let sources = budget["summarySources"]
@@ -1108,8 +1232,8 @@ async fn summarize(
         ));
     };
     let mut plan = plan.clone();
-    // 中文：原生计划仍用正文预算验收；仅传输请求授予经统一硬限夹取的思考/正文额度。
-    // English: Native acceptance keeps the content budget; transport receives the separately capped allowance.
+    // Validate against the content budget; cap reasoning/output transport separately.
+    // 按正文预算验收，思考/正文传输额度另行限额。
     plan["maxOutputTokens"] = output_allocation["summaryOutputBudgetTokens"].clone();
     let opened = summary_call(
         "open",
@@ -1125,6 +1249,7 @@ async fn summarize(
     }
     let run = opened["runId"].clone();
     let mut model_controls = Value::Null;
+    let mut prefix_projection = Value::Null;
     let outcome=async {
         let request=semantic::calculate("models.semantic.request",&json!({"plan":plan})).map_err(ModelError::native)?;
         let messages=request["messages"].as_array().cloned().unwrap_or_default();
@@ -1132,8 +1257,9 @@ async fn summarize(
         if protocol::tool_message_tokens(&messages,&summary_system)>summary_input {
             return Err(ModelError::new("SUMMARY_INPUT_OVER_BUDGET","摘要请求超出实际输入额度。",400));
         }
-        let (body,applied_controls)=gateway_protocol::build_summary_request(connection,model,&messages,&summary_system,request["maxOutputTokens"].as_u64(),false)?;
+        let (body,applied_controls,request_projection)=build_summary_with_prefix(connection,model,&messages,&summary_system,request["maxOutputTokens"].as_u64(),summary_input,prefix)?;
         model_controls=applied_controls;
+        prefix_projection=request_projection;
         let outcome = if let Some(executor) = executor { executor(body, cancellation.clone()).await }
             else { gateway::request(connection, body, cancellation.clone(), None).await };
         if outcome.as_ref().map_or_else(|error| error.details["requestDispatched"]==true, |_| true) {
@@ -1184,7 +1310,37 @@ async fn summarize(
         audit[field] = value.clone();
     }
     audit["modelControls"] = model_controls;
+    audit["prefixProjection"] = prefix_projection;
     Ok((candidate, audit))
+}
+
+#[cfg(test)]
+async fn summarize(
+    connection: &Value,
+    model: &str,
+    budget: &Value,
+    input: u64,
+    cancellation: watch::Receiver<bool>,
+    executor: Option<&SummaryExecutor>,
+) -> Result<(Option<Value>, Value), ModelError> {
+    summarize_with_prefix(connection, model, budget, input, cancellation, executor, None).await
+}
+
+#[cfg(test)]
+async fn summarize_current_step(
+    connection: &Value,
+    model: &str,
+    budget: &Value,
+    input: u64,
+    checkpoint_budget: u64,
+    plan: &Value,
+    projection: &Value,
+    user_goals: &[Value],
+    cancellation: watch::Receiver<bool>,
+    executor: Option<&SummaryExecutor>,
+) -> Result<(Option<Value>, Value), ModelError> {
+    summarize_current_step_with_prefix(connection, model, budget, input, checkpoint_budget,
+        plan, projection, user_goals, cancellation, executor, None).await
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1440,13 +1596,14 @@ pub async fn compact_request_with_executor(
         } else {
             8 + protocol::estimate_tokens(system)
         });
-        let (candidate, audit) = summarize(
+        let (candidate, audit) = summarize_with_prefix(
             connection,
             model,
             &actual_budget,
             input,
             cancellation.clone(),
             executor.as_ref(),
+            Some(SummaryRequestPrefix { messages, system, tools: protocol::array(&budget["declarations"]), wire:budget.get("wireRequestPrefix") }),
         )
         .await?;
         summary_update = candidate;
@@ -1521,12 +1678,17 @@ pub async fn compact_request_with_executor(
             )?;
         }
     }
-    let actions = call(
-        &mut state,
-        "observations",
-        &json!({"items":descriptors(&items)}),
-    )?;
-    apply_actions(&mut state, &mut items, &actions)?;
+    // Replacing an earlier duplicate still rewrites a cached prefix. Defer optional observation
+    // deduplication until real compaction or completion of its existing public checkpoint.
+    // 替换旧的重复回执仍会改写缓存前缀；可选观察去重只在实际压缩或已有公开检查点续写时进行。
+    if pressure || pending_public_sources {
+        let actions = call(
+            &mut state,
+            "observations",
+            &json!({"items":descriptors(&items)}),
+        )?;
+        apply_actions(&mut state, &mut items, &actions)?;
+    }
     let actions = call(
         &mut state,
         "compaction",
@@ -1548,6 +1710,7 @@ pub async fn compact_request_with_executor(
     if audit.is_null() {
         audit = json!({});
     }
+    audit["observationRewritePolicy"] = json!("pressure-or-pending-checkpoint");
     let images: u64 = items
         .iter()
         .map(|(message, _)| protocol::image_inputs(message))
@@ -1655,7 +1818,7 @@ pub async fn compact_request_with_executor(
                     .filter(|message| message["role"] == "user")
                     .map(|message| json!(protocol::text_parts(&message["content"])))
                     .collect::<Vec<_>>();
-                let (working_summary, working_audit) = summarize_current_step(
+                let (working_summary, working_audit) = summarize_current_step_with_prefix(
                     connection,
                     model,
                     budget,
@@ -1666,6 +1829,7 @@ pub async fn compact_request_with_executor(
                     &goals,
                     cancellation.clone(),
                     executor.as_ref(),
+                    Some(SummaryRequestPrefix { messages, system, tools: protocol::array(&budget["declarations"]), wire:budget.get("wireRequestPrefix") }),
                 )
                 .await?;
                 audit["currentStepSummary"] = working_audit.clone();
@@ -1770,6 +1934,184 @@ pub async fn compact_request_with_executor(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn summary_wire_prefix_preserves_deferred_tools_and_updates_once_without_mutating_history() {
+        use super::super::tool_updates::{self,ToolSeries};
+        let route = json!({"protocol":"anthropic-messages","baseUrl":"https://api.deepseek.com/anthropic",
+            "routeProjection":{"kind":"deepseek-messages","toolUpdate":"addition-only"}});
+        let tool = |name:&str| json!({"name":name,"description":name,"input_schema":{"type":"object","properties":{}}});
+        let first_tools = vec![tool("a.read")];
+        let tools = vec![tool("a.read"),tool("b.search")];
+        let system = "Stable authorized system.";
+        let mut history = vec![json!({"role":"user","content":"Start."})];
+        let mut series = ToolSeries::default();
+        series.reconcile(&route,&tools,&json!({"generation":1}));
+        let mut first = gateway_protocol::build_request(&route,"deepseek-flash",&history,system,None,&first_tools,false).unwrap();
+        tool_updates::project(&route,&mut first,&mut series);
+        history.extend([json!({"role":"assistant","content":"Loaded."}),json!({"role":"user","content":"Use the new search."})]);
+        let mut added = gateway_protocol::build_request(&route,"deepseek-flash",&history,system,None,&tools,false).unwrap();
+        tool_updates::project(&route,&mut added,&mut series);
+        history.extend([json!({"role":"assistant","content":"Searched."}),json!({"role":"user","content":"Continue."})]);
+        let original = history.clone();
+        let wire = summary_prefix(&route,"deepseek-flash",&history,system,&tools,&series).unwrap().unwrap();
+        let payload = vec![json!({"role":"user","content":"Summarize only these saved source facts."})];
+        let (summary,_,audit)=build_summary_with_prefix(&route,"deepseek-flash",&payload,"Summarize source facts.",Some(512),64000,
+            Some(SummaryRequestPrefix {messages:&history,system,tools:&tools,wire:Some(&wire)})).unwrap();
+        let prefix = protocol::array(&wire["request"]["messages"]);
+        assert_eq!(&protocol::array(&summary["messages"])[..prefix.len()],prefix);
+        assert_eq!(summary["tools"],wire["request"]["tools"]);
+        assert_eq!(summary["tools"][1]["defer_loading"],true);
+        assert_eq!(protocol::array(&summary["messages"]).iter().flat_map(|message| protocol::array(&message["content"]))
+            .filter(|block|block["type"]=="tool_addition").count(),1);
+        assert_eq!(audit["mode"],"projected-wire-prefix");
+        assert_eq!(history,original);
+        assert_eq!(series.required_tool_names(&route),vec!["a.read","b.search"]);
+        let (_,_,small)=build_summary_with_prefix(&route,"deepseek-flash",&payload,"Summarize.",Some(32),1,
+            Some(SummaryRequestPrefix {messages:&history,system,tools:&tools,wire:Some(&wire)})).unwrap();
+        assert_eq!(small["reason"],"wire-prefix-input-over-budget");
+        assert!(matching_summary_prefix(&route,"deepseek-flash",&history,
+            "Current revoked authority.",&tools,Some(&wire)).is_none());
+    }
+
+    #[test]
+    fn summary_prefix_keeps_native_history_and_live_tools_before_the_instruction() {
+        for name in ["openai-completions", "anthropic-messages", "openai-responses"] {
+            let connection = json!({"protocol":name});
+            let definition = json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]});
+            let tools = match name {
+                "anthropic-messages" => vec![json!({"name":"filesystem.read","description":"Read an authorized file","input_schema":definition})],
+                "openai-responses" => vec![json!({"type":"function","name":"filesystem.read","description":"Read an authorized file","parameters":definition})],
+                _ => vec![json!({"type":"function","function":{"name":"filesystem.read","description":"Read an authorized file","parameters":definition}})],
+            };
+            let history = match name {
+                "anthropic-messages" => vec![
+                    json!({"role":"user","content":"Continue the authorized task."}),
+                    json!({"role":"assistant","content":[{"type":"tool_use","id":"saved-read","name":"filesystem.read","input":{"path":"notes.md"}}]}),
+                    json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"saved-read","content":"Already observed evidence."}]}),
+                ],
+                "openai-responses" => vec![
+                    json!({"role":"user","content":"Continue the authorized task."}),
+                    json!({"type":"function_call","call_id":"saved-read","name":"filesystem.read","arguments":"{\"path\":\"notes.md\"}"}),
+                    json!({"type":"function_call_output","call_id":"saved-read","output":"Already observed evidence."}),
+                ],
+                _ => vec![
+                    json!({"role":"user","content":"Continue the authorized task."}),
+                    json!({"role":"assistant","content":"","tool_calls":[{"id":"saved-read","type":"function","function":{"name":"filesystem.read","arguments":"{\"path\":\"notes.md\"}"}}]}),
+                    json!({"role":"tool","tool_call_id":"saved-read","content":"Already observed evidence."}),
+                ],
+            };
+            let original = history.clone();
+            let live_system = "Current memory: none. Current authorization: filesystem.read only.";
+            let payload = [json!({"role":"user","content":"{\"allowedSourceMessageIds\":[\"current-source\"]}"})];
+            let normal = gateway_protocol::build_request(&connection, "fixture", &history, live_system,
+                Some(1024), &tools, false).unwrap();
+            let (summary, _, audit) = build_summary_with_prefix(&connection, "fixture", &payload,
+                "Produce cited summary JSON only.", Some(1024), 16384,
+                Some(SummaryRequestPrefix { messages:&history, system:live_system, tools:&tools, wire:None })).unwrap();
+            let field = if name == "openai-responses" { "input" } else { "messages" };
+            let leading = normal[field].as_array().unwrap();
+            let sent = summary[field].as_array().unwrap();
+            assert_eq!(&sent[..leading.len()], leading.as_slice(), "{name}");
+            assert_eq!(summary["system"], normal["system"]);
+            assert_eq!(summary["instructions"], normal["instructions"]);
+            assert_eq!(summary["tools"], normal["tools"]);
+            assert!(protocol::text_parts(&sent[leading.len()]["content"]).contains("Produce cited summary JSON only."));
+            assert_eq!(sent.last().unwrap(), &payload[0]);
+            assert_eq!(audit["mode"], "original-prefix");
+            assert_eq!(audit["preservedMessages"], history.len());
+            assert_eq!(history, original);
+        }
+    }
+
+    #[test]
+    fn summary_prefix_fallback_preserves_source_payload_and_excludes_private_continuation() {
+        let connection = json!({"protocol":"openai-completions"});
+        let payload = [json!({"role":"user","content":"Exact source identities and public evidence."})];
+        let history = [json!({"role":"user","content":"A very large original history. ".repeat(600)})];
+        let original = history.clone();
+        let (body, _, audit) = build_summary_with_prefix(&connection, "fixture", &payload,
+            "Summarize public evidence.", Some(256), 256,
+            Some(SummaryRequestPrefix { messages:&history, system:"Current authorized system.", tools:&[], wire:None })).unwrap();
+        assert_eq!(audit["mode"], "standalone");
+        assert_eq!(audit["reason"], "prefix-input-over-budget");
+        assert_eq!(body["messages"][1], payload[0]);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert!(body["tools"].is_null());
+        assert_eq!(history, original);
+        let private = [json!({"role":"assistant","content":"Public text.","reasoning_content":"Private reasoning must not become summary input."})];
+        let (body, _, audit) = build_summary_with_prefix(&connection, "fixture", &payload,
+            "Summarize public evidence.", Some(256), 16384,
+            Some(SummaryRequestPrefix { messages:&private, system:"Current authorized system.", tools:&[], wire:None })).unwrap();
+        assert_eq!(audit["reason"], "private-continuation");
+        assert!(!body.to_string().contains("Private reasoning"));
+        assert_eq!(body["messages"][1], payload[0]);
+        let tools = [json!({"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{}}}})];
+        let (body, _, audit) = build_summary_with_prefix(&json!({"protocol":"ollama"}), "fixture", &payload,
+            "Summarize public evidence.", Some(256), 16384,
+            Some(SummaryRequestPrefix { messages:&[], system:"Current authorized system.", tools:&tools, wire:None })).unwrap();
+        assert_eq!(audit["reason"], "tool-free-summary-required");
+        assert!(body["tools"].is_null());
+        assert_eq!(body["messages"][1], payload[0]);
+        let native = [json!({"role":"user","content":"Existing goal."}), json!({"role":"system","content":"Recorded runtime facts."})];
+        let original = native.clone();
+        let (body, _, audit) = build_summary_with_prefix(&json!({"protocol":"anthropic-messages"}), "claude-opus-4-8", &payload,
+            "Summarize public evidence.", Some(256), 16384,
+            Some(SummaryRequestPrefix { messages:&native, system:"Current authorized system.", tools:&tools, wire:None })).unwrap();
+        assert_eq!(audit["reason"], "summary-tail-after-native-system");
+        assert_eq!(body["messages"], json!(payload));
+        assert_eq!(body["system"], "Summarize public evidence.");
+        assert!(body["tools"].is_null());
+        assert_eq!(native, original);
+    }
+
+    #[tokio::test]
+    async fn summary_prefix_compaction_uses_current_authorization_and_keeps_existing_progress() {
+        let user = uuid::Uuid::new_v4().to_string();
+        let assistant = uuid::Uuid::new_v4().to_string();
+        let chat = uuid::Uuid::new_v4().to_string();
+        let goal = "Preserve the saved work and user constraints. ".repeat(32);
+        let progress = "The recorded work is saved; verify it before another write. ".repeat(32);
+        let history = vec![json!({"role":"user","content":goal}), json!({"role":"assistant","content":progress}),
+            json!({"role":"user","content":"Continue with the existing saved progress."})];
+        let original = history.clone();
+        let sources = json!([{"checkpointComplete":true,"user":{"messageId":user,"content":goal,"status":"completed"},
+            "assistant":{"messageId":assistant,"replyTo":user,"status":"completed","finalText":progress},"rounds":[]}]);
+        let system = "KYNXA. Current memory: revoked. Only filesystem.read is authorized.";
+        let tools = json!([{"type":"function","function":{"name":"filesystem.read","parameters":{"type":"object","properties":{}}}}]);
+        let budget = json!({"inputBudgetTokens":1024,"contextWindowTokens":16384,"providerMaxInputTokens":16384,
+            "conversationId":chat,"summaryBudgetTokens":1024,"summarySources":sources,"declarations":tools,
+            "historySources":[{"turnIndex":0,"messageId":user},{"turnIndex":0,"messageId":assistant},{"messageId":uuid::Uuid::new_v4().to_string()}]});
+        let original_tokens = protocol::tool_message_tokens(&history, system)
+            + protocol::estimate_tokens(&tools.to_string());
+        assert!(original_tokens > 1024 * 9 / 10);
+        let summary_input = summary_output_allocation(&budget, 1024, 1024).unwrap()
+            ["summaryInputBudgetTokens"].as_u64().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let expected = history.clone();
+        let executor: SummaryExecutor = Arc::new(move |body, _| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            assert_eq!(body["messages"][0]["content"], system);
+            assert_eq!(&body["messages"].as_array().unwrap()[1..=expected.len()], expected.as_slice());
+            assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(body["tool_choice"], "none");
+            assert!(protocol::tool_message_tokens(protocol::array(&body["messages"]), "")
+                + protocol::estimate_tokens(&body["tools"].to_string()) <= summary_input);
+            let content = json!({"entries":[{"kind":"progress","text":"Saved work remains available; verify before another write.","sourceMessageIds":[user]}]}).to_string();
+            Box::pin(async move { Ok(gateway_protocol::ModelResponse { content, reasoning:String::new(), calls:vec![], continuation:vec![],
+                finish:json!("stop"), usage:json!({"prompt_tokens":100,"completion_tokens":50}), raw:json!({}), output_truncated:false }) })
+        });
+        let (_owner, cancellation) = watch::channel(false);
+        let compact = compact_request_with_executor(&json!({"protocol":"openai-completions"}), "fixture",
+            &history, system, &budget, cancellation, None, Some(executor)).await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(compact.audit["semanticSummary"]["prefixProjection"]["mode"], "original-prefix");
+        assert!(compact.summary_update.is_some(), "{}", compact.audit);
+        assert_eq!(compact.messages.last(), original.last());
+        assert_eq!(history, original);
+        assert_eq!(budget["summarySources"], sources);
+    }
 
     #[tokio::test]
     async fn summary_uses_the_callers_meter_and_preserves_dispatched_failure() {
@@ -2024,8 +2366,8 @@ mod tests {
             second.history_sources.last().unwrap()["checkpointSemanticSummary"]["semanticCorrectnessCertified"],
             false
         );
-        // 中文：同版本、同读取范围的新归档引用复用已核验摘要游标。
-        // English: A new archive of the same verified source range reuses the summary cursor.
+        // Reuse the summary cursor for the same verified version and read range.
+        // 同一已核验版本和读取范围复用摘要游标。
         let duplicate_reference = data::save_tool_result(
             &root,
             &chat,
@@ -2111,7 +2453,8 @@ mod tests {
         let finish_pending: SummaryExecutor = Arc::new(move |request, _| {
             counted.fetch_add(1, Ordering::AcqRel);
             let input: Value =
-                serde_json::from_str(protocol::string(&request["messages"][1]["content"])).unwrap();
+                serde_json::from_str(protocol::string(&protocol::array(&request["messages"])
+                    .last().unwrap()["content"])).unwrap();
             assert_eq!(input["source"]["resultId"], original_id);
             assert_eq!(input["source"]["offset"], 0);
             assert_eq!(input["priorFacts"], json!([]));
@@ -2310,8 +2653,8 @@ mod tests {
         assert_eq!(retry["modelCalls"], 1);
         assert_eq!(calls.load(Ordering::Acquire), 2);
         assert!(retry_plan["checkpointSemanticSummary"]["failedInputSignature"].is_null());
-        // 中文：旧版只做投影的失败签名不能阻断新有界反馈策略的一次恢复。
-        // English: A projection-only failure signature must not fence one recovery under the bounded refinement policy.
+        // An old projection-only failure must not block the bounded refinement attempt.
+        // 旧版仅投影失败不能阻止一次有界精简恢复。
         use sha2::{Digest, Sha256};
         let old_signature = format!(
             "{:x}",
@@ -2655,8 +2998,8 @@ mod tests {
             summary["sources"][0]["processedCharacters"],
             body.encode_utf16().count()
         );
-        // 中文：真正超出检查点的公开候选只精简一次，保持来源、目标及未知操作原始边界。
-        // English: A truly oversized public candidate gets one refinement with original source, goal and unknown-effect boundaries.
+        // Refine an oversized candidate once; preserve its source, goal and unknown-effect boundaries.
+        // 超限候选仅精简一次；保留来源、目标和未知副作用边界。
         let repair_calls = Arc::new(AtomicUsize::new(0));
         let count = repair_calls.clone();
         let original_candidate = hard.clone();
@@ -3335,6 +3678,61 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn stable_prefix_receipts() -> (Vec<Value>,Value) {
+        let content="Stable archived observation including the exact recorded version. ".repeat(160);
+        let mut messages=vec![json!({"role":"user","content":"Inspect this source twice, then continue without repeating actions."})];
+        let mut receipts=Vec::new();
+        for (round,call) in [(1,"first-read"),(2,"second-read")] {
+            messages.push(json!({"role":"assistant","content":"Inspecting the existing source.",
+                "tool_calls":[{"id":call,"type":"function","function":{"name":"filesystem_read","arguments":"{}"}}]}));
+            messages.push(json!({"role":"tool","tool_call_id":call,"content":content}));
+            receipts.push(json!({"callId":call,"name":"filesystem.read","status":"completed","round":round,
+                "resultRef":{"id":uuid::Uuid::new_v4().to_string(),"sha256":"a".repeat(64),"bytes":content.len()},
+                "identity":{"archiveVerified":true,"targetKey":"fixture-scope-and-original-range",
+                    "contentFingerprint":"b".repeat(64),"version":{"sha256":"a".repeat(64)}},
+                "originalExcerpt":content,"originalCharacters":content.encode_utf16().count()}));
+        }
+        messages.push(json!({"role":"user","content":"Continue using the already saved evidence."}));
+        (messages,json!({"inputBudgetTokens":64000,"declarations":[],"resultSources":receipts,
+            "conversationId":"11111111-1111-4111-8111-111111111111"}))
+    }
+
+    #[tokio::test]
+    async fn stable_prefix_under_pressure_threshold_keeps_completed_receipts_byte_identical() {
+        let (messages,mut budget)=stable_prefix_receipts();
+        let (_owner,cancel)=watch::channel(false);
+        let first=compact_request(&json!({"protocol":"openai-completions"}),"fixture",&messages,"",
+            &budget,cancel.clone(),None).await.unwrap();
+        assert_eq!(first.messages,messages);
+        assert_eq!(first.audit["observationCompaction"]["duplicateCount"].as_u64().unwrap_or(0),0);
+        // A different still-sufficient input grant must not re-project already completed operations.
+        // 输入授额改变但仍有余量时，不重新投影已经完成的操作及其回执。
+        budget["inputBudgetTokens"]=json!(48000);
+        budget["declarations"]=json!([{"type":"function","function":{"name":"additional_tool","parameters":{"type":"object"}}}]);
+        let second=compact_request(&json!({"protocol":"openai-completions"}),"fixture",&first.messages,"",
+            &budget,cancel,None).await.unwrap();
+        assert_eq!(second.messages,messages);
+        assert!(!second.budget_exceeded);
+        assert_eq!(second.audit["observationCompaction"]["duplicateCount"].as_u64().unwrap_or(0),0);
+    }
+
+    #[tokio::test]
+    async fn stable_prefix_policy_still_repairs_real_pressure_without_relaxing_input_limit() {
+        let (messages,mut budget)=stable_prefix_receipts();
+        let input=protocol::tool_message_tokens(&messages,"")
+            + protocol::estimate_tokens(&budget["declarations"].to_string())-64;
+        budget["inputBudgetTokens"]=json!(input);
+        let (_owner,cancel)=watch::channel(false);
+        let projected=compact_request(&json!({"protocol":"openai-completions"}),"fixture",&messages,"",
+            &budget,cancel,None).await.unwrap();
+        assert_ne!(projected.messages,messages);
+        assert!(projected.audit["observationCompaction"]["duplicateCount"].as_u64().unwrap_or(0)>0);
+        assert!(protocol::complete_pairs(&projected.messages));
+        let actual=protocol::tool_message_tokens(&projected.messages,"")
+            + protocol::estimate_tokens(&budget["declarations"].to_string());
+        assert!(actual<=input || projected.budget_exceeded, "Unfittable input remains explicitly marked for repair.");
     }
 
     #[tokio::test]

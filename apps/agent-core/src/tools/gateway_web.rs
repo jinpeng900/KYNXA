@@ -18,8 +18,8 @@ async fn decoded_body_bounded(
     response: reqwest::Response,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, GatewayError> {
-    // Reqwest removes accepted compression headers and yields decoded bytes; cap that stream, not the compressed wire length.
-    // reqwest 解压受支持的响应并移除压缩头；限制解压后正文，不能用较小的压缩长度绕过内存额度。
+    // Cap reqwest's decoded stream, not the compressed Content-Length.
+    // 限制 reqwest 解压后的正文大小，不能按压缩 Content-Length 计算。
     if response
         .content_length()
         .is_some_and(|size| size > maximum_bytes as u64)
@@ -251,8 +251,8 @@ fn redirect_target(
                     .any(|character| character.is_control() || character == '\\')
         })
         .ok_or_else(|| failure("WEB_REDIRECT_FAILED", "网页重定向缺少有效 Location。", 502))?;
-    // Servers may emit a UTF-8 IRI in Location; URL joining encodes it before the same public-address policy runs.
-    // 部分服务器在 Location 返回 UTF-8 国际化地址；标准 URL 合并编码后仍执行相同公共地址检查。
+    // Encode UTF-8 Location values through URL joining, then recheck the public destination.
+    // 合并 URL 时编码 UTF-8 Location，再核验公共目的地址。
     let target = base
         .join(location)
         .map_err(|_| failure("WEB_REDIRECT_FAILED", "网页重定向地址无效。", 502))?;

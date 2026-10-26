@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,
@@ -9,15 +9,18 @@ use std::sync::{
 use std::time::UNIX_EPOCH;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::intent::matches;
 use super::local_files::{
-    absolute_path, inspect, is_link, path_key, path_text, random_identity, read_checked, sha256,
+    absolute_path, file_version, handle_version, inspect, is_link, open_read, path_key, path_text,
+    random_identity, read_checked, sha256,
 };
 use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::string;
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_READ_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_BINARY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 static FILE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
 
@@ -194,75 +197,152 @@ pub(super) fn text_page(text: &str, offset: usize, maximum: usize) -> ServiceRes
     )
 }
 
-fn read_page(path: &Path, input: &Value) -> ServiceResult<Value> {
-    let bytes = read_bounded(
-        path,
-        bounded(&input["maxBytes"], MAX_FILE_BYTES, 1, MAX_FILE_BYTES)?,
-    )?;
-    let text = decode_text(&bytes)?;
+fn read_page(path: &Path, input: &Value, cancellation: &Option<Arc<AtomicBool>>) -> ServiceResult<Value> {
+    let maximum_bytes = bounded(&input["maxBytes"], MAX_READ_FILE_BYTES, 1, MAX_READ_FILE_BYTES)?;
     let maximum = bounded(&input["maxChars"], 32000, 1, 64000)? as usize;
-    let mut page;
-    if input.get("startLine").is_some() || input.get("endLine").is_some() {
-        let start_line = bounded(&input["startLine"], 1, 1, MAX_FILE_BYTES + 1)? as usize;
-        let end_line =
-            bounded(&input["endLine"], MAX_FILE_BYTES + 1, 1, MAX_FILE_BYTES + 1)? as usize;
-        if end_line < start_line {
-            return Err(invalid("endLine 不能小于 startLine。"));
-        }
-        let units = text.encode_utf16().collect::<Vec<_>>();
-        let mut total_lines = 1;
-        let mut range_start = (start_line == 1).then_some(0);
-        let mut range_end = units.len();
-        for (index, unit) in units.iter().enumerate() {
-            if *unit != 10 {
-                continue;
-            }
-            total_lines += 1;
-            if total_lines == start_line {
-                range_start = Some(index + 1);
-            }
-            if total_lines == end_line + 1 {
-                range_end = index + 1;
-            }
-        }
-        let range_start = range_start
-            .ok_or_else(|| invalid("startLine 超出当前文件行数，请重新读取文件状态。"))?;
-        let offset = bounded(&input["offset"], range_start as u64, 0, MAX_FILE_BYTES)? as usize;
-        if offset < range_start || offset > range_end {
-            return Err(invalid(
-                "offset 不在指定行范围中，请使用该范围返回的 nextOffset。",
-            ));
-        }
-        page = text_page(text, offset, maximum.min(range_end - offset))?;
-        let next = page["nextOffset"].as_u64().unwrap() as usize;
-        let more = next < range_end;
-        page["hasMore"] = json!(more);
-        page["lineRangeHasMore"] = json!(more);
-        page["hasMoreInFile"] = json!(next < units.len());
-        page["nextLine"] = if more {
-            json!(
-                start_line
-                    + units[range_start..next]
-                        .iter()
-                        .filter(|unit| **unit == 10)
-                        .count()
-            )
-        } else {
-            Value::Null
-        };
-        page["lineRange"] = json!({"startLine":start_line,"endLine":end_line.min(total_lines),"totalLines":total_lines,
-            "startOffset":range_start,"endOffset":range_end});
-    } else {
-        page = text_page(
-            text,
-            bounded(&input["offset"], 0, 0, MAX_FILE_BYTES)? as usize,
-            maximum,
-        )?;
+    let ranged = input.get("startLine").is_some() || input.get("endLine").is_some();
+    let start_line = bounded(&input["startLine"], 1, 1, MAX_READ_FILE_BYTES + 1)? as usize;
+    let end_line = bounded(&input["endLine"], MAX_READ_FILE_BYTES + 1, 1, MAX_READ_FILE_BYTES + 1)? as usize;
+    if end_line < start_line { return Err(invalid("endLine 不能小于 startLine。")); }
+    let requested_offset = (!input["offset"].is_null()).then(|| bounded(
+        &input["offset"], 0, 0, MAX_READ_FILE_BYTES)).transpose()?.map(|value| value as usize);
+    let expected = input["expectedSha256"].as_str();
+    if !input["expectedSha256"].is_null() && !expected.is_some_and(|value| matches(r"^[a-f0-9]{64}$", value)) {
+        return Err(invalid("expectedSha256 必须是完整的 SHA-256。"));
     }
+    let original = inspect(path, false, true)?.filter(|metadata| metadata.is_file())
+        .ok_or_else(|| invalid("路径不是普通文件。"))?;
+    if original.len() > maximum_bytes {
+        return Err(ServiceError::new("TOOL_FILE_TOO_LARGE", "文件超过本次读取的大小上限。", 400));
+    }
+    let first = file_version(path, &original)?;
+    let mut file = open_read(path)?;
+    if first != handle_version(&file, &file.metadata().map_err(ServiceError::io)?)? {
+        return Err(conflict("文件在读取前已变化，请重新搜索或读取。"));
+    }
+    // Hash the whole stable file while retaining only one output page and one decoder block.
+    // 全文件流式核验版本，只保留一页输出及一个解码块；长行不会变成整行内存副本。
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut pending = Vec::new();
+    let mut encoding = None;
+    let mut bytes_read = 0u64;
+    let mut window = ReadWindow {
+        start_line, end_line, requested_offset, maximum, offset: 0, line: 1,
+        range_start: (start_line == 1).then_some(0), range_end: None,
+        content: String::new(), content_units: 0, page_closed: false, next_line: start_line,
+    };
+    loop {
+        cancelled(cancellation)?;
+        let count = file.read(&mut buffer).map_err(ServiceError::io)?;
+        let end = count == 0;
+        bytes_read += count as u64;
+        if bytes_read > maximum_bytes { return Err(conflict("文件在读取期间已增大，请重新读取。")); }
+        hash.update(&buffer[..count]);
+        pending.extend_from_slice(&buffer[..count]);
+        if encoding.is_none() {
+            if pending.len() < 3 && !end { continue; }
+            let (name, prefix) = if pending.starts_with(&[0xff, 0xfe]) { ("utf-16le", 2) }
+                else if pending.starts_with(&[0xef, 0xbb, 0xbf]) { ("utf-8", 3) }
+                else { ("utf-8", 0) };
+            pending.drain(..prefix);
+            encoding = Some(name);
+        }
+        let encoding = encoding.unwrap();
+        let available = if encoding == "utf-16le" {
+            let mut available = pending.len() / 2 * 2;
+            if !end && available >= 2 && (0xd800..=0xdbff).contains(&u16::from_le_bytes([
+                pending[available - 2], pending[available - 1]])) { available -= 2; }
+            available
+        } else {
+            match std::str::from_utf8(&pending) {
+                Ok(_) => pending.len(),
+                Err(error) if error.error_len().is_none() && !end => error.valid_up_to(),
+                Err(_) => return Err(ServiceError::new("NON_TEXT_FILE", "文件不是受支持的 UTF-8 或 UTF-16LE 文本。", 400)),
+            }
+        };
+        let decoded = super::service_source_reading::decode(&pending[..available], encoding)
+            .map_err(|_| ServiceError::new("NON_TEXT_FILE", "文本编码或字符边界无效。", 400))?;
+        for character in decoded.chars() {
+            if character == '\0' { return Err(ServiceError::new("NON_TEXT_FILE", "文件包含二进制内容。", 400)); }
+            window.observe(character)?;
+        }
+        pending.drain(..available);
+        if end {
+            if !pending.is_empty() { return Err(ServiceError::new("NON_TEXT_FILE", "文本编码或字符边界无效。", 400)); }
+            break;
+        }
+    }
+    cancelled(cancellation)?;
+    let after = inspect(path, false, true)?.ok_or_else(|| conflict("读取期间文件已移除。"))?;
+    if bytes_read != first.size || first != file_version(path, &after)?
+        || first != handle_version(&file, &file.metadata().map_err(ServiceError::io)?)? {
+        return Err(conflict("文件在读取期间已变化，请重新读取。"));
+    }
+    let actual_hash = format!("{:x}", hash.finalize());
+    if expected.is_some_and(|expected| expected != actual_hash) {
+        return Err(conflict("文件已更新，请重新搜索或从新版本读取。"));
+    }
+    let mut page = window.finish(ranged)?;
     page["path"] = json!(path_text(path));
-    page["sha256"] = json!(sha256(&bytes));
-    page["bytes"] = json!(bytes.len());
+    page["sha256"] = json!(actual_hash);
+    page["bytes"] = json!(bytes_read);
+    page["encoding"] = json!(encoding.unwrap_or("utf-8"));
+    page["offsetUnit"] = json!("utf16-code-units");
     Ok(page)
+}
+
+struct ReadWindow {
+    start_line: usize, end_line: usize, requested_offset: Option<usize>, maximum: usize,
+    offset: usize, line: usize, range_start: Option<usize>, range_end: Option<usize>,
+    content: String, content_units: usize, page_closed: bool, next_line: usize,
+}
+impl ReadWindow {
+    fn observe(&mut self, character: char) -> ServiceResult<()> {
+        let length = character.len_utf16();
+        if let Some(requested) = self.requested_offset {
+            if self.offset < requested && requested < self.offset + length {
+                return Err(invalid("offset 不能位于字符代理对中间，请使用上一页的 nextOffset。"));
+            }
+        }
+        if let Some(start) = self.range_start {
+            let requested = self.requested_offset.unwrap_or(start);
+            if self.line <= self.end_line && self.offset >= requested && !self.page_closed {
+                if self.content_units + length <= self.maximum || self.content_units == 0 {
+                    self.content.push(character);
+                    self.content_units += length;
+                    self.next_line = self.line + usize::from(character == '\n');
+                } else { self.page_closed = true; }
+            }
+        }
+        self.offset += length;
+        if character == '\n' {
+            self.line += 1;
+            if self.line == self.start_line { self.range_start = Some(self.offset); }
+            if self.line == self.end_line + 1 { self.range_end = Some(self.offset); }
+        }
+        Ok(())
+    }
+    fn finish(self, ranged: bool) -> ServiceResult<Value> {
+        let start = self.range_start.ok_or_else(|| invalid("startLine 超出当前文件行数，请重新读取文件状态。"))?;
+        let end = self.range_end.unwrap_or(self.offset);
+        let offset = self.requested_offset.unwrap_or(start);
+        if offset < start || offset > end {
+            return Err(invalid("offset 不在指定范围中，请使用该范围返回的 nextOffset。"));
+        }
+        let next = offset + self.content_units;
+        let more = next < end;
+        let mut page = json!({"content":self.content,"offset":offset,"nextOffset":next,
+            "totalCharacters":self.offset,"hasMore":more,"truncated":offset > 0 || next < self.offset});
+        if ranged {
+            page["lineRangeHasMore"] = json!(more);
+            page["hasMoreInFile"] = json!(next < self.offset);
+            page["nextLine"] = if more { json!(self.next_line) } else { Value::Null };
+            page["lineRange"] = json!({"startLine":self.start_line,"endLine":self.end_line.min(self.line),
+                "totalLines":self.line,"startOffset":start,"endOffset":end});
+        }
+        Ok(page)
+    }
 }
 
 fn atomic_write(
@@ -343,6 +423,89 @@ pub(super) fn commit_binary(
 }
 
 #[cfg(test)]
+mod read_window_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("kynxa-file-read-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&root).unwrap(); Self(root)
+        }
+        fn path(&self) -> PathBuf { self.0.join("sample.log") }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if self.0.starts_with(std::env::temp_dir()) { let _ = fs::remove_dir_all(&self.0); }
+        }
+    }
+
+    #[test]
+    fn large_search_match_reads_current_line_without_raising_write_limits() {
+        let fixture = Fixture::new(); let path = fixture.path();
+        let mut text = "ordinary log line\n".repeat(128 * 1024);
+        text.push_str("unique-needle 🔬\nlast line\n");
+        assert!(text.len() > 2 * 1024 * 1024);
+        fs::write(&path,&text).unwrap();
+        let mut search = super::super::service_search::SearchService::default();
+        search.apply("search.init",&json!({"path":path,"input":{"query":"unique-needle"}}),&None).unwrap();
+        let mut step = search.apply("search.pageStart",&json!({"maxMatches":10}),&None).unwrap();
+        while step["pageReady"] != true {
+            assert!(step["authorization"].is_object());
+            step = search.apply("search.step",&json!({"allowed":true}),&None).unwrap();
+        }
+        let result = search.apply("search.pageFinish",&json!({}),&None).unwrap();
+        let found = &result["matches"][0];
+        assert!(found.is_object(),"{result}");
+        let line = found["line"].as_u64().unwrap();
+        let page = read_page(&path,&json!({"startLine":line,"endLine":line,"expectedSha256":found["sha256"]}),&None).unwrap();
+        assert_eq!(page["content"],"unique-needle 🔬\n");
+        assert_eq!(page["sha256"],sha256(text.as_bytes()));
+        assert_eq!(page["lineRange"]["startLine"],line);
+        assert_eq!(page["hasMore"],false); assert_eq!(page["hasMoreInFile"],true);
+        assert_eq!(read_page(&path,&json!({"maxBytes":MAX_FILE_BYTES}),&None).unwrap_err().code,"TOOL_FILE_TOO_LARGE");
+        assert_eq!(apply("file.write",&json!({"path":path,"input":{"content":"small","expectedHash":page["sha256"]}}),&None).unwrap_err().code,"TOOL_FILE_TOO_LARGE");
+        fs::write(&path,"changed\n").unwrap();
+        assert_eq!(read_page(&path,&json!({"expectedSha256":page["sha256"]}),&None).unwrap_err().code,"TOOL_FILE_CONFLICT");
+    }
+
+    #[test]
+    fn streaming_utf8_and_utf16_keep_surrogates_and_line_offsets_across_blocks() {
+        let fixture = Fixture::new(); let path = fixture.path();
+        for (prefix, utf16) in [(65535,false),(32766,true)] {
+            let text = format!("{}🔬\r\n目标行 🔬\n尾部", "x".repeat(prefix));
+            let bytes = if utf16 {
+                [vec![0xff,0xfe],text.encode_utf16().flat_map(u16::to_le_bytes).collect()].concat()
+            } else { text.as_bytes().to_vec() };
+            fs::write(&path,&bytes).unwrap();
+            let first = read_page(&path,&json!({"offset":prefix,"maxChars":1}),&None).unwrap();
+            assert_eq!(first["content"],"🔬"); assert_eq!(first["nextOffset"],prefix+2);
+            assert_eq!(first["sha256"],sha256(&bytes));
+            assert_eq!(read_page(&path,&json!({"offset":prefix+1}),&None).unwrap_err().code,"INVALID_TOOL_ARGUMENTS");
+            let line = read_page(&path,&json!({"startLine":2,"endLine":2,"maxChars":3}),&None).unwrap();
+            assert_eq!(line["content"],"目标行"); assert_eq!(line["nextLine"],2);
+            let rest = read_page(&path,&json!({"startLine":2,"endLine":2,"offset":line["nextOffset"],
+                "expectedSha256":line["sha256"]}),&None).unwrap();
+            assert_eq!(rest["content"]," 🔬\n"); assert_eq!(rest["hasMore"],false);
+            assert_eq!(rest["lineRange"]["startOffset"],prefix+4);
+            assert_eq!(rest["totalCharacters"],text.encode_utf16().count());
+        }
+    }
+
+    #[test]
+    fn long_lines_keep_output_bounded_and_cancelled_reads_do_not_change_files() {
+        let fixture = Fixture::new(); let path = fixture.path();
+        let text = "文".repeat(1024 * 1024); fs::write(&path,&text).unwrap();
+        let page = read_page(&path,&json!({"startLine":1,"endLine":1,"maxChars":64000}),&None).unwrap();
+        assert_eq!(page["content"].as_str().unwrap().encode_utf16().count(),64000);
+        assert_eq!(page["nextOffset"],64000); assert_eq!(page["hasMore"],true);
+        let cancelled = Some(Arc::new(AtomicBool::new(true)));
+        assert_eq!(read_page(&path,&json!({}),&cancelled).unwrap_err().code,"TOOL_CANCELLED");
+        assert_eq!(fs::metadata(&path).unwrap().len(),text.len() as u64);
+    }
+}
+
+#[cfg(test)]
 mod binary_commit_tests {
     use super::*;
 
@@ -397,7 +560,7 @@ pub fn apply(
     let binding = &arguments["pathBinding"];
     revalidate(binding)?;
     if operation == "file.read" {
-        return read_page(&path, input);
+        return read_page(&path, input, cancellation);
     }
     if operation == "file.stat" {
         let metadata = inspect(&path, false, true)?.ok_or_else(|| invalid("路径不是普通文件。"))?;

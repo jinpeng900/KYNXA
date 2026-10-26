@@ -1,6 +1,5 @@
-/* Render original TeX with the same KaTeX version and fallback sequence as the reference UI.
-   All output stays in this local document; only measured image regions leave the worker.
-   使用与参考界面相同的 KaTeX 版本和回退顺序渲染原始 TeX；所有输出留在本地文档，只有测量后的图片区域离开工作器。 */
+/* Match the reference UI's KaTeX version and fallback; export only measured image regions.
+   使用与参考界面相同的 KaTeX 版本和回退方式，仅导出测量后的图片区域。 */
 (() => {
   const root = document.getElementById('formulas');
   const nextPaint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));

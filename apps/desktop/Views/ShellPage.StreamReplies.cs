@@ -32,6 +32,8 @@ public sealed partial class ShellPage
         public Dictionary<string, (StringBuilder Content, StringBuilder Reasoning)> SegmentText { get; } = new(StringComparer.Ordinal);
         public HashSet<string> DirtySegments { get; } = new(StringComparer.Ordinal);
         public Stopwatch ThinkingTime { get; } = new();
+        public long LastTextFlushTimestamp { get; set; }
+        public Guid LastTextFlushMessageId { get; set; }
         public bool Dirty { get; set; }
         public bool Started { get; set; }
         public bool UserPersisted { get; set; }
@@ -57,6 +59,7 @@ public sealed partial class ShellPage
         if (SendButton is null) return;
         RefreshUsageSummaryScope();
         bool active = ActiveChatId is Guid id && _pendingReplies.ContainsKey(id);
+        bool queued = ActiveChatId is Guid queueChat && HasQueuedTaskActivity(queueChat);
         bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text) || HasAttachmentDrafts;
         SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
             && hasInput);
@@ -66,16 +69,16 @@ public sealed partial class ShellPage
         bool pause = active && !hasInput;
         SendArrow.Visibility = pause ? Visibility.Collapsed : Visibility.Visible;
         StopReplyIcon.Visibility = pause ? Visibility.Visible : Visibility.Collapsed;
-        string caption = pause ? "暂停并保存进度" : active ? "加入等待队列" : "发送";
+        string caption = pause ? "暂停并保存进度" : queued ? "加入等待队列" : "发送";
         AutomationProperties.SetName(SendButton, UiText.Get(caption));
         ToolTipService.SetToolTip(SendButton, UiText.Get(caption));
     }
 
-    private PendingChatReply BeginPendingReply(Guid chatId, string question, string? provider, string? model, string? permissionMode = null, Guid? requestId = null)
+    private PendingChatReply BeginPendingReply(Guid chatId, string question, string? provider, string? model, string? permissionMode = null, Guid? requestId = null, Guid? userMessageId = null)
     {
         var (chat, _) = FindChat(chatId);
         if (chat is null || _pendingReplies.ContainsKey(chatId)) throw new InvalidOperationException(UiText.Get("当前聊天正在生成回复。"));
-        var user = chat.Messages.LastOrDefault(message => message.Role == "user")
+        var user = chat.Messages.LastOrDefault(message => message.Role == "user" && (userMessageId is null || message.Id == userMessageId))
             ?? throw new InvalidOperationException(UiText.Get("找不到要回复的用户消息。"));
         var pending = new PendingChatReply(chatId, user.Id, question, provider, model, permissionMode ?? _layout.PermissionMode);
         if (requestId is Guid existingId) pending.Message.Id = existingId;
@@ -117,16 +120,36 @@ public sealed partial class ShellPage
     private void FlushReply(PendingChatReply pending, bool final = false)
     {
         if (!pending.Dirty && !final) return;
+        bool textChanged = pending.Message.Content.Length != pending.Content.Length
+            || pending.Message.Reasoning.Length != pending.Reasoning.Length;
+        // Use a 120 ms snapshot interval above 256 KiB of growing text; anchors and final state flush immediately.
+        // 增长中的文本超过 256 KiB 时按 120 毫秒合并快照；新回复锚和终态立即刷新。
+        if (!final && textChanged && (long)pending.Content.Length + pending.Reasoning.Length >= 128 * 1024
+            && pending.LastTextFlushMessageId == pending.Message.Id && pending.LastTextFlushTimestamp != 0
+            && Stopwatch.GetElapsedTime(pending.LastTextFlushTimestamp).TotalMilliseconds < 120) return;
         foreach (string id in pending.DirtySegments)
         {
             int index = pending.Message.AssistantSegments.FindIndex(segment => segment.Id == id);
             if (index >= 0 && pending.SegmentText.TryGetValue(id, out var text))
-                pending.Message.AssistantSegments[index] = pending.Message.AssistantSegments[index] with
-                { Content = text.Content.ToString(), Reasoning = text.Reasoning.ToString() };
+            {
+                var segment = pending.Message.AssistantSegments[index];
+                pending.Message.AssistantSegments[index] = segment with
+                {
+                    Content = segment.Content.Length == text.Content.Length ? segment.Content : text.Content.ToString(),
+                    Reasoning = segment.Reasoning.Length == text.Reasoning.Length ? segment.Reasoning : text.Reasoning.ToString()
+                };
+            }
         }
         pending.DirtySegments.Clear();
-        pending.Message.Content = pending.Content.ToString();
-        pending.Message.Reasoning = pending.Reasoning.ToString();
+        // Absolute replacements update Message too; unchanged channels reuse their existing strings.
+        // 绝对快照同步更新 Message；未增长的通道直接复用已有字符串。
+        if (pending.Message.Content.Length != pending.Content.Length) pending.Message.Content = pending.Content.ToString();
+        if (pending.Message.Reasoning.Length != pending.Reasoning.Length) pending.Message.Reasoning = pending.Reasoning.ToString();
+        if (textChanged)
+        {
+            pending.LastTextFlushTimestamp = Stopwatch.GetTimestamp();
+            pending.LastTextFlushMessageId = pending.Message.Id;
+        }
         pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
         pending.Dirty = false;
@@ -147,7 +170,6 @@ public sealed partial class ShellPage
                     // 用户消息与等待占位已显示后再准备正式提交与连接；失败保留本轮稳定身份供重试。
                     if (!isPrepared)
                     {
-                        if (await QueueRecoveredPausedPromptAsync(pending)) return;
                         await SavePendingUserMessageAsync(pending);
                         isPrepared = true;
                     }
@@ -164,9 +186,14 @@ public sealed partial class ShellPage
                     isSubmitted = true;
                     await foreach (var update in updates)
                     {
-                        if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
+                        // Exit blocks new dispatches while the existing stream awaits its pause acknowledgement.
+                        // 退出阻止新派发；已有观察保留到暂停受理，窗口关闭后不再处理界面事件。
+                        if (_projectViewClosed || _chatClosing && !_savingOnClose ||
+                            !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
                         if (pending.WaitingReplyAnchorId is not null && update.Type is "reasoning_delta" or "text_delta"
                             or "assistant_segment" or "content_snapshot") continue;
+                        if (pending.WaitingReplyAnchorId is Guid expectedReply && (update.Type is "completed" or "cancelled" or "failed")
+                            && update.ReplyMessageId != expectedReply) continue;
                         // Transport acceptance can precede the durable write; model output confirms execution reached it.
                         // 传输接受可能早于正式写入；收到模型输出后才确认用户消息已进入持久化执行流程。
                         if (!pending.UserPersisted && update.Type is "reasoning_delta" or "text_delta" or "assistant_segment" or "completed")
@@ -191,12 +218,19 @@ public sealed partial class ShellPage
                             case "started":
                                 pending.Started = true;
                                 pending.TaskId = update.RootRequestTaskId ?? update.TaskId ?? pending.TaskId;
+                                if (pending.TaskId is Guid registered && _queuedPrompts.TryGetValue(pending.ConversationId, out var waiting))
+                                    foreach (var guidance in waiting.Where(item => item.TargetRequestId == pending.StreamRequestId))
+                                        guidance.TargetTaskId ??= registered;
                                 pending.TaskRegistered.TrySetResult(pending.TaskId);
                                 if (update.TaskId is not null) TaskPanel.NotifyChanged(pending.ConversationId);
                                 if (pending.StopRequested) await StopPendingReplyAsync(pending);
                                 break;
                             case "task_progress":
-                                if (update.Phase == "waiting-verification") _ = RefreshUnknownOutcomeAsync(pending.ConversationId);
+                                if (update.TaskId is null || update.TaskId == pending.TaskId)
+                                {
+                                    pending.Message.ExecutionPhase = update.Phase ?? string.Empty;
+                                    pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
+                                }
                                 TaskPanel.NotifyChanged(pending.ConversationId);
                                 continue;
                             case "task_tool_call":
@@ -224,7 +258,7 @@ public sealed partial class ShellPage
                                 break;
                             case "terminal_output":
                                 continue; // Command output stays in the formal tool receipt; it has no sidebar projection.
-                                // 命令输出保留在正式工具回执中，不生成侧栏展示投影。
+                                // 命令输出保留在正式工具回执中，不生成侧栏投影。
                             case "workspace_terminal_open":
                                 AcceptWorkspaceTerminal(pending.ConversationId, update);
                                 continue;
@@ -237,12 +271,14 @@ public sealed partial class ShellPage
                                 }
                                 break;
                             case "reasoning_delta":
+                                pending.Message.ExecutionPhase = string.Empty;
                                 StartReplyTimer(pending);
                                 pending.ThinkingTime.Start();
                                 pending.Reasoning.Append(update.Delta);
                                 AppendSegmentDelta(pending, update, reasoning: true);
                                 break;
                             case "text_delta":
+                                pending.Message.ExecutionPhase = string.Empty;
                                 StartReplyTimer(pending);
                                 pending.ThinkingTime.Stop();
                                 pending.Content.Append(update.Delta);
@@ -258,16 +294,22 @@ public sealed partial class ShellPage
                             case "content_snapshot":
                                 // Reattached streams publish absolute snapshots, including an intentionally empty current reply.
                                 // 重附事件流给出绝对快照；当前回复为空也应覆盖旧投影，避免重复文字或遗留上一段内容。
-                                pending.Content.Clear(); pending.Content.Append(update.Content);
-                                pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning);
+                                AcceptReplyTextSnapshot(pending, update.Content, update.Reasoning);
                                 break;
                             case "completed":
                             case "interrupted":
                             case "error":
                                 pending.ThinkingTime.Stop();
                                 if (!string.IsNullOrEmpty(update.Content) || pending.Content.Length == 0)
-                                { pending.Content.Clear(); pending.Content.Append(update.Content); }
-                                if (update.Reasoning is not null) { pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning); }
+                                {
+                                    pending.Message.Content = update.Content ?? string.Empty;
+                                    pending.Content.Clear(); pending.Content.Append(pending.Message.Content);
+                                }
+                                if (update.Reasoning is not null)
+                                {
+                                    pending.Message.Reasoning = update.Reasoning;
+                                    pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning);
+                                }
                                 if (update.AssistantSegments is { } segments && (segments.Any() || pending.Message.AssistantSegments.Count == 0))
                                 {
                                     pending.Message.AssistantSegments.Clear();
@@ -276,18 +318,18 @@ public sealed partial class ShellPage
                                     pending.DirtySegments.Clear();
                                 }
                                 pending.Message.Status = update.Type == "completed" ? "completed" : update.Type;
+                                pending.Message.ExecutionPhase = string.Empty;
+                                SettleReplySegments(pending);
                                 pending.Message.Error = update.Error ?? string.Empty;
                                 pending.Message.DurationMs = update.DurationMs;
                                 pending.Message.TaskCompletionState = ChatMessageState.ReadTaskCompletion(update.TaskCompletion);
-                                if (update.Code == "TASK_PAUSED" && pending.TaskId is Guid pausedTaskId)
+                                if (update.Code == "TASK_PAUSED" && pending.TaskId is not null)
                                 {
                                     pending.PauseConfirmed = true;
-                                    _pausedTaskIds[pending.ConversationId] = pausedTaskId;
                                     pending.Message.Error = string.Empty;
                                 }
                                 MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                                 FlushReply(pending, final: true);
-                                await CacheReplyPresentationAsync(pending, maintainHistory: false);
                                 break;
                         }
                         pending.Dirty = true;
@@ -303,8 +345,8 @@ public sealed partial class ShellPage
                     && error is not GatewayApiException && error is (IOException or UnauthorizedAccessException or
                         InvalidOperationException or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException))
                 {
-                    // A failed presentation is not a failed execution; observe the same request again after yielding the UI thread.
-                    // 展示投影失败不等于执行失败；释放界面线程后只重附原请求，不提交用户消息或重复工具操作。
+                    // Yield the UI thread, then observe the same request after a presentation failure.
+                    // 展示失败不等于执行失败；让出界面线程后重接原请求，不重发消息或操作。
                     pending.Dirty = true;
                     observedTaskId = null;
                     int delayMs = projectionRecoveryAttempt++ switch { 0 => 100, 1 => 500, 2 => 1000, _ => 5000 };
@@ -326,6 +368,7 @@ public sealed partial class ShellPage
         }
         finally
         {
+            bool cachePresentation = false;
             try
             {
                 CloseReplyApprovals(pending);
@@ -337,18 +380,13 @@ public sealed partial class ShellPage
                     pending.Message.Status = "interrupted";
                     pending.Message.Error = UiText.Get("连接已结束，回复尚未完成。");
                 }
-                if (pending.Message.Status != "completed")
-                {
-                    var segments = pending.Message.AssistantSegments;
-                    for (int index = 0; index < segments.Count; index++)
-                        if (segments[index].Status == "streaming") segments[index] = segments[index] with { Status = "interrupted" };
-                }
+                SettleReplySegments(pending);
                 if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
                 {
                     MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                     FlushReply(pending, final: true);
                     _pendingReplies.Remove(pending.ConversationId);
-                    await CacheReplyPresentationAsync(pending, maintainHistory: true);
+                    cachePresentation = true;
                 }
             }
             finally
@@ -363,6 +401,7 @@ public sealed partial class ShellPage
                 if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
                 if (!_chatClosing)
                 {
+                    ReleaseTaskReplyObservation(pending);
                     UpdateSendButtonState();
                     RenderProjects();
                     RefreshPromptQueue();
@@ -370,21 +409,24 @@ public sealed partial class ShellPage
                         _ = DrainQueuedPromptsAsync(pending.ConversationId);
                 }
             }
+            // Formal terminal state releases execution first; display-cache maintenance cannot hold the queue.
+            // 正式终态先释放执行状态；展示缓存维护不能拖住发送和后续队列。
+            if (cachePresentation) await CacheReplyPresentationAsync(pending);
         }
     }
 
-    private async Task CacheReplyPresentationAsync(PendingChatReply pending, bool maintainHistory)
+    private async Task CacheReplyPresentationAsync(PendingChatReply pending)
     {
         try
         {
             await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
-            if (maintainHistory) await MaintainHistoryAfterReplyAsync(pending.ConversationId);
+            await MaintainHistoryAfterReplyAsync(pending.ConversationId);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException
             or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException)
         {
-            // The gateway has already committed the reply; optional display caches cannot change that durable outcome.
-            // 网关已正式提交回复；可选展示缓存失败不能改写正式结果，也不能中断后续队列。
+            // Display-cache failures must not alter committed replies or stop the queue.
+            // 展示缓存失败不改已提交回复，也不阻断后续队列。
             Debug.WriteLine($"Reply presentation cache deferred: {error.GetType().Name}");
         }
     }
@@ -420,9 +462,26 @@ public sealed partial class ShellPage
 
     private static void StartReplyTimer(PendingChatReply pending)
     {
-        // The first model segment follows preparation; transport acceptance and later rounds do not restart the clock.
-        // 首个模型消息段表示准备已完成；传输接受事件不开始计时，后续轮次也不重置计时。
+        // Start timing at the first model segment, not transport acceptance or later rounds.
+        // 首个模型段开始计时；接受传输不启表，后续轮次不重置。
         pending.Message.StartGenerationTiming();
+    }
+
+    private static void AcceptReplyTextSnapshot(PendingChatReply pending, string? content, string? reasoning)
+    {
+        pending.Message.Content = content ?? string.Empty;
+        pending.Message.Reasoning = reasoning ?? string.Empty;
+        pending.Content.Clear(); pending.Content.Append(pending.Message.Content);
+        pending.Reasoning.Clear(); pending.Reasoning.Append(pending.Message.Reasoning);
+    }
+
+    private static void SettleReplySegments(PendingChatReply pending)
+    {
+        if (pending.Message.Status == "streaming") return;
+        var segments = pending.Message.AssistantSegments;
+        for (int index = 0; index < segments.Count; index++)
+            if (segments[index].Status == "streaming")
+                segments[index] = segments[index] with { Status = pending.Message.Status == "completed" ? "completed" : "interrupted" };
     }
 
     private static void AcceptAssistantSegment(PendingChatReply pending, AssistantSegment segment)
@@ -448,52 +507,47 @@ public sealed partial class ShellPage
     private async void Transcript_RetryRequested(object? sender, Guid messageId)
     {
         var failed = ActiveMessages.FirstOrDefault(row => row.Message.Id == messageId);
-        if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || failed is null ||
-            failed.ToolActivities.Count > 0 || IsReplyInProgress(failed.ConversationId)) return;
-        var (chat, _) = FindChat(failed.ConversationId);
-        if (chat is null || chat.Messages.LastOrDefault() != failed.Message) return;
-        string? question = chat.Messages.Take(chat.Messages.Count - 1).LastOrDefault(message => message.Role == "user")?.Content;
-        if (question is null || !_retryingReplies.Add(chat.Id)) return;
-        PendingChatReply pending;
+        if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || failed is null || IsReplyInProgress(failed.ConversationId)) return;
+        var (chat, project) = FindChat(failed.ConversationId);
+        if (chat is null || chat.Messages.LastOrDefault() != failed.Message || !_retryingReplies.Add(chat.Id)) return;
         try
         {
-            // Reserve this retry across cache I/O, then recheck ownership before replacing its source row.
-            // 缓存读写期间保留重试占位，替换原消息前再次核对会话和请求归属。
-            if (!await MessageTimePresentation.ForgetAsync(chat.Id, failed.Message))
-                ShowActionFeedback(UiText.Get("回复时间未能保存到本机缓存，聊天内容不受影响。"));
-            if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || IsReplyInProgress(chat.Id) ||
-                FindChat(chat.Id).Chat != chat || chat.Messages.LastOrDefault() != failed.Message) return;
-            chat.Messages.Remove(failed.Message);
-            pending = BeginPendingReply(chat.Id, question,
-                string.IsNullOrEmpty(failed.Message.Provider) ? _selectedModel?.ProviderId : failed.Message.Provider,
-                string.IsNullOrEmpty(failed.Message.Model) ? _selectedModel?.ModelId : failed.Message.Model, requestId: failed.Message.Id);
-            if (ActiveChatId == chat.Id)
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var detail = await FindReplyTaskAsync(chat, project?.Id, failed.Message, deadline.Token);
+            if (_chatClosing || IsReplyInProgress(chat.Id) || FindChat(chat.Id).Chat != chat) return;
+            if (detail is not null)
             {
-                int index = ActiveMessages.IndexOf(failed);
-                if (index >= 0)
-                {
-                    ActiveMessages[index] = pending.Presentation;
-                    ConversationMessages.ShowConversation(chat.Id, ActiveMessages.ToArray(), openAtBottom: false);
-                    ScreenshotPanel.ShowConversation(chat.Id, ActiveMessages.ToArray());
-                }
-                else UpdateConversationPresentation();
+                // Retry continues the original task and receipts; its old reply remains visible.
+                // 重试续接原任务和回执，已有回复保留，不重发原问题或删除正文。
+                var receipt = await _tasksApiClient.ControlAsync(chat.Id, detail.Task.TaskId, detail.Task.Version,
+                    "resume", project?.Id, deadline.Token);
+                await ObserveResumedTaskAsync(receipt.Task, detail.Checkpoint, expectedReplyId: failed.Message.Id);
+                return;
             }
-            UpdateSendButtonState();
+            if (failed.ToolActivities.Count > 0) return;
+            var user = chat.Messages.Take(chat.Messages.IndexOf(failed.Message)).LastOrDefault(message => message.Role == "user");
+            if (user is null) return;
+            var pending = new PendingChatReply(chat.Id, user.Id, user.Content,
+                failed.Message.Provider, failed.Message.Model, _layout.PermissionMode, failed.Message)
+                { StreamRequestId = failed.Message.Id, Presentation = failed };
+            pending.Content.Append(failed.Message.Content); pending.Reasoning.Append(failed.Message.Reasoning);
+            failed.Message.Status = "streaming"; failed.Message.Error = string.Empty;
+            _pendingReplies.Add(chat.Id, pending); StartReplyRefreshTimer(); UpdateSendButtonState(); failed.Refresh();
+            await ReceiveReplyAsync(pending);
         }
+        catch (Exception error) when (error is HttpRequestException or OperationCanceledException or InvalidOperationException
+            or InvalidDataException or System.Text.Json.JsonException)
+        { if (!_chatClosing) ShowActionFeedback(UiText.Get("消息已保留，请重试。")); }
         finally { _retryingReplies.Remove(chat.Id); }
-        await ReceiveReplyAsync(pending);
     }
 
     private void CancelPendingReply(Guid chatId)
     {
         if (!_pendingReplies.Remove(chatId, out var pending)) return;
         pending.ThinkingTime.Stop();
-        pending.Message.Content = pending.Content.ToString();
-        pending.Message.Reasoning = pending.Reasoning.ToString();
-        pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Message.Status = "interrupted";
         MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
-        pending.Presentation.Refresh();
+        FlushReply(pending, final: true);
         pending.Cancellation.Cancel();
         RenderProjects();
     }

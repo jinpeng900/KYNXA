@@ -10,8 +10,8 @@ use std::sync::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Notifications share the scanner's built-in directory exclusions; full ignore evaluation stays in the scanner.
-/// 通知复用扫描器的内置目录排除；自定义gitignore及权限仍由正式扫描器最终核验。
+/// Reuse scanner exclusions for notifications; the scanner still checks custom ignores and permissions.
+/// 通知复用扫描器的目录排除；自定义忽略规则和权限仍由扫描器核验。
 pub(crate) fn watch_path_relevant(path: &Path) -> bool {
     !path.components().any(|part| part.as_os_str().to_str().is_some_and(|name| IGNORED.contains(&name.to_ascii_lowercase().as_str())))
 }
@@ -941,10 +941,10 @@ fn append_window(
     *byte += bytes;
 }
 
-/// Read-only source I/O runs on native worker threads with the actual cancellation token and object identity.
-/// 只读来源 I/O 在原生工作线程使用真实取消标记与文件对象身份；不能用缓存或路径检查代替打开句柄校验。
-/// Binary native decoders reuse the same opened-file identity checks without JSON/base64 transport.
-/// 原生二进制解码器复用相同文件句柄身份检查，不经过 JSON/base64 传输。
+/// Read sources on native workers with cancellation and open-handle identity checks, not cached path checks.
+/// 原生线程读取来源，使用取消标记并核验已打开句柄；缓存路径检查不能代替句柄核验。
+/// Binary decoders share those checks without JSON/base64 transport.
+/// 二进制解码复用同一核验，不经过 JSON/base64 传输。
 pub(crate) fn read_binary_stable(path:&Path,maximum:u64,token:&Option<Arc<AtomicBool>>)->ServiceResult<(Vec<u8>,Value)> {
     cancelled(token)?;let (mut file,first)=stable_file(path,maximum)?;
     let mut bytes=Vec::new();let mut buffer=[0u8;64*1024];

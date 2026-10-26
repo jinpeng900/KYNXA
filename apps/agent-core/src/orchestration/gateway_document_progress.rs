@@ -242,6 +242,23 @@ impl DocumentWorkRecords {
             "guidance":"Reuse saved analyses first. Read a document record for complete conclusions and original references; revisit originals only for invalidated versions or a specific evidence gap. / 优先复用已存分析；读取文档工作记录取得完整结论与原件引用，仅在版本失效或具体证据缺口时回读原文。"})
     }
 
+    /// A trusted current file version invalidates old analysis without deleting the archived observations.
+    /// 可信当前文件版本让旧分析立即失效；原始观察与历史归档保持完整。
+    pub async fn observe_output_version(&mut self, journal: &TaskJournal, receipt: &Value) -> Result<bool> {
+        let Some(path) = receipt["path"].as_str() else { return Ok(false); };
+        let Some(hash) = valid_hash(&receipt["sha256"]).or_else(|| valid_hash(&receipt["version"])) else {
+            return Ok(false);
+        };
+        let stale: Vec<String> = self.records.iter().filter(|(_, record)| record["active"] == true &&
+            record["source"]["path"] == path && valid_hash(&record["sourceVersion"]["sha256"])
+                .is_some_and(|previous| !previous.eq_ignore_ascii_case(hash)))
+            .map(|(key, _)| key.clone()).collect();
+        for key in &stale {
+            self.invalidate_source(journal, key, "source-version-changed").await?;
+        }
+        Ok(!stale.is_empty())
+    }
+
     /// Public findings are navigation for the current version, never a copy of the original or a completion certificate.
     /// 仅提供当前有效版本的公开成果导航，不复制原文、内部观察或声明任务完成。
     pub fn saved_findings(&self, source_identity: &str) -> Option<Value> {
@@ -337,6 +354,11 @@ fn text(value: &Value) -> &str {
 fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
+
+fn valid_hash(value: &Value) -> Option<&str> {
+    value.as_str().filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn invalid(message: &str) -> GatewayError {
     GatewayError::new("INVALID_DOCUMENT_PROGRESS", message, 409)
 }

@@ -25,8 +25,8 @@ fn valid(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_:".contains(&b))
 }
 
-/// Tokens are shared across Node isolates; only atomic flags cross worker-thread boundaries.
-/// 取消令牌跨 Node 隔离环境共享，线程间仅传递原子标志，不借用 JavaScript 缓冲区。
+/// Share cancellation tokens across workers through atomic flags only.
+/// 工作线程通过原子标记共享取消状态。
 pub struct CancellationLease {
     id: String,
     pub token: Arc<AtomicBool>,
@@ -90,8 +90,8 @@ pub fn is_cancelled() -> bool {
 pub fn current_token() -> Option<Arc<AtomicBool>> {
     CURRENT.with(|current| current.borrow().clone())
 }
-/// A worker request owns its token across several native transactions, including time between them.
-/// worker 请求跨多次原生事务持有取消令牌，包括两次事务之间的空档。
+/// Keep the request token across native transactions and the gaps between them.
+/// 请求持续持有取消令牌，覆盖多次原生事务及其间隔。
 pub fn retain(id: &str) -> Result<(), String> {
     if !valid(id) {
         return Err("AGENT_CORE_INVALID_ARGUMENT".into());

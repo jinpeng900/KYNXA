@@ -210,8 +210,8 @@ impl CompactionPlan {
     }
 }
 
-/// Plan against compact metadata; original bodies and their JS object identities are never copied back.
-/// 仅依据紧凑元信息生成计划；原始正文及其 JS 对象身份不会被整体复制回调用者。
+/// Build plans from compact metadata without copying original bodies back.
+/// 根据紧凑元信息生成计划，不回传原始正文副本。
 fn context_compaction(args: &Value) -> Value {
     let hard = args["inputBudgetTokens"]
         .as_i64()

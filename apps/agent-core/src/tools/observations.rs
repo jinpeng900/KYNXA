@@ -51,6 +51,7 @@ impl ObservationGuard {
         let mut repeated = true;
         let mut observed = false;
         let mut changed_state = false;
+        let mut discovery_only = true;
         let mut incoming = Vec::new();
         for pair in pairs {
             let call = required_object(pair, "call")?;
@@ -68,10 +69,8 @@ impl ObservationGuard {
                     && !matches!(call["name"].as_str(), Some("tool.search" | "tool.load"));
                 continue;
             }
-            if matches!(call["name"].as_str(), Some("tool.search" | "tool.load")) {
-                continue;
-            }
             observed = true;
+            discovery_only &= matches!(call["name"].as_str(), Some("tool.search" | "tool.load"));
             // Broker-created source identity takes precedence over call explanations and changing archive IDs.
             // 优先使用代理生成的来源身份；调用理由和每次变化的归档 ID 不构成新信息。
             let source = source_observation(call, result);
@@ -121,6 +120,9 @@ impl ObservationGuard {
         }
         if !observed && !changed_state {
             return Ok(progress_result(false, 0));
+        }
+        if observed && discovery_only && !changed_state {
+            return Ok(progress_result(repeated, 0));
         }
         repeated &= observed && !changed_state;
         self.stagnant_rounds = if repeated {
@@ -325,6 +327,21 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
         .unwrap_or(value);
     let name = call["name"].as_str()?;
     let observation = match name {
+        "tool.search" | "tool.load" => {
+            let tools = value["tools"].as_array()?;
+            // Capability identity ignores query scores and call IDs, but includes schemas and authority versions.
+            // 能力身份不含查询分数及调用 ID，保留声明和权限版本变化。
+            let mut definitions = tools.iter().map(|tool| json!({
+                "name":tool["name"],"description":tool["description"],
+                "inputSchema":tool["inputSchema"],"parameters":tool["parameters"],
+                "annotations":tool["annotations"],"execution":tool["execution"],
+                "version":tool["version"],"fingerprint":tool["fingerprint"],
+                "identity":tool["identity"],"configurationGeneration":tool["configurationGeneration"]
+            })).collect::<Vec<_>>();
+            definitions.sort_by_cached_key(Value::to_string);
+            json!([definitions, value["configurationGeneration"],value["mcpConfigurationGeneration"],
+                value["permissionMode"],value["permissions"]])
+        }
         "knowledge.read"
             if value["text"].is_string()
                 && is_truthy(&value["sourceId"])
@@ -441,6 +458,18 @@ mod tests {
             assert_eq!(result["warning"], round == 2);
             assert_eq!(result["finalize"], round >= 3);
         }
+    }
+
+    #[test]
+    fn discovery_identity_uses_schema_and_authority_instead_of_call_or_query() {
+        let mut guard = ObservationGuard::default();
+        let capability = |id: &str, version: u64| json!({"call":{"id":id,"name":"tool.search",
+            "arguments":{"query":id}},"observation":true,"result":{"status":"completed",
+            "content":{"configurationGeneration":version,"tools":[{"name":"filesystem.read",
+                "score":id,"inputSchema":{"type":"object"}}]}}});
+        assert_eq!(guard.apply("observations.success",&json!({"results":[capability("one",1)]})).unwrap()["repeated"],false);
+        assert_eq!(guard.apply("observations.success",&json!({"results":[capability("two",1)]})).unwrap()["repeated"],true);
+        assert_eq!(guard.apply("observations.success",&json!({"results":[capability("three",2)]})).unwrap()["repeated"],false);
     }
 
     #[test]

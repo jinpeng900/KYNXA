@@ -28,6 +28,11 @@
       state: { useMaxWidth: false }, class: { useMaxWidth: false },
       er: { useMaxWidth: false }, gantt: { useMaxWidth: false },
       mindmap: { useMaxWidth: false },
+      timeline: { useMaxWidth: false, textPlacement: 'tspan' },
+      journey: { useMaxWidth: false, textPlacement: 'tspan' },
+      pie: { useMaxWidth: false }, gitGraph: { useMaxWidth: false },
+      xyChart: { useMaxWidth: false }, quadrantChart: { useMaxWidth: false },
+      requirement: { useMaxWidth: false },
       themeVariables: {
         fontFamily: UI_FONT_FAMILY,
         darkMode: palette?.isDark === true,

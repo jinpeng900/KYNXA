@@ -1,7 +1,7 @@
 namespace KYNXA_Desktop.Controls;
 
-// Fixed geometry converted during development from Resources/UI/Icons and the keys in Styles/Icons.xaml.
-// 开发时由仓库内的 SVG 图标与 Styles/Icons.xaml 键转换；运行时不读取 SVG 或用户内容。
+// Fixed geometry comes from Resources/UI/Icons and Styles/Icons.xaml keys.
+// 几何由仓库图标和样式键预先生成，运行时不读取 SVG 或用户内容。
 internal static class ThemeIconGeometry
 {
     internal static readonly IReadOnlyDictionary<string, ThemeIconDefinition> Icons =
@@ -17,8 +17,8 @@ internal static class ThemeIconGeometry
         ["IconWork"] = new(24, 24, [new("M3 7.5h7l2-2h3.5a2 2 0 0 1 2 2v1H21v9.3a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.8z", 1.8, true, false)]),
         ["IconFolderAdd"] = new(20, 20, [new("M11 16H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3l2 2h6a2 2 0 0 1 2 2v3M2 7h15M15 12v6m-3-3h6", 1.4, true, false)]),
         ["IconChatAdd"] = new(20, 20, [new("M17 9.5a7 7 0 0 1-7 7H3l1-4a7 7 0 1 1 13-3Z", 1.4, true, false), new("M10 6.5v6m-3-3h6", 1.4, true, false)]),
-        // Quarter arcs preserve the .8-radius circle without float-rounded antipodal endpoints shifting its center.
-        // 四段四分之一圆弧保留半径 .8 的原始圆，避免对径端点经 float 取整后使半圆弧的圆心偏移。
+        // Use quarter arcs to preserve the .8 radius despite float rounding at opposite endpoints.
+        // 用四段圆弧保留 .8 半径，避免对径端点的浮点取整使圆心偏移。
         ["IconConnect"] = new(24, 24, [new("M5,4 H19 A2,2 0 0 1 21,6 V15 A2,2 0 0 1 19,17 H5 A2,2 0 0 1 3,15 V6 A2,2 0 0 1 5,4 Z", 1.8, true, false), new("M8 21h8M12 17v4", 1.8, true, false), new("M18.3,13.5 A0.8,0.8 0 0 1 17.5,14.3 A0.8,0.8 0 0 1 16.7,13.5 A0.8,0.8 0 0 1 17.5,12.7 A0.8,0.8 0 0 1 18.3,13.5 Z", 1.8, false, true)]),
         ["IconScheduledTask"] = new(24, 24, [new("M20.5,12 A8.5,8.5 0 1 1 3.5,12 A8.5,8.5 0 1 1 20.5,12 Z", 1.8, true, false), new("M12 7v5l3.5 2", 1.8, true, false)]),
         ["IconSkills"] = new(24, 24, [new("m12 3-9 4.5 9 4.5 9-4.5zM4.5 11l7.5 3.8 7.5-3.8M4.5 15l7.5 3.8 7.5-3.8", 1.8, true, false)]),

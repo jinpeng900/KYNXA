@@ -3,6 +3,7 @@ pub mod budget;
 pub(crate) mod cache;
 pub(crate) mod cache_budget;
 pub(crate) mod cache_candidates;
+pub(crate) mod cache_passages;
 pub(crate) mod gateway_cache;
 pub mod candidates;
 pub mod chunking;

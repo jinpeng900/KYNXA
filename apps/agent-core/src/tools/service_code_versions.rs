@@ -13,8 +13,8 @@ use super::service_error::{ServiceError, ServiceResult};
 const MAX_TARGETS: usize = 64;
 const MAX_HASH_BYTES: u64 = 1024 * 1024;
 
-/// Verification covers authorized observed targets only; the signature never claims a complete repository scan.
-/// 验证仅覆盖已授权且已观察的目标；签名不声称已完整扫描仓库。
+/// The signature covers only authorized observed targets, not the whole repository.
+/// 签名只覆盖已授权且已观察的目标，不代表扫描了整个仓库。
 #[derive(Default)]
 pub struct CodeVersions {
     targets: Vec<Value>,

@@ -12,7 +12,7 @@ public sealed record WorkspaceDirectoryListing(string Path, WorkspaceFileEntry[]
 public sealed class WorkspaceFilesApiClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http = new() { BaseAddress = ModelGatewayService.Address, Timeout = TimeSpan.FromSeconds(20) };
+    private readonly HttpClient _http = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(20));
 
     public async Task<WorkspaceDirectoryListing> ListAsync(Guid conversationId, Guid? mountId, string? path,
         CancellationToken cancellationToken = default)

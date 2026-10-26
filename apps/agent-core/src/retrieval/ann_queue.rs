@@ -68,8 +68,8 @@ impl BuildJob {
     }
 }
 
-/// Background scheduling owns generations, capacity, retries and completion records independently of runtime promises.
-/// 后台调度独立于运行时 Promise，拥有版本、容量、重试与完成记录。
+/// Track background generations, capacity, retries and completion independently of runtime futures.
+/// 独立维护后台代次、容量、重试和完成记录，不依赖运行时 Future。
 #[derive(Default)]
 struct BuildQueue {
     records: HashMap<u64, BuildJob>,
@@ -369,8 +369,8 @@ struct AnnStore {
     batches: HashMap<u64, BackgroundBatch>,
 }
 
-/// The shared native session exposes only operation receipts; runtime objects and vector buffers stay outside state.
-/// 共用原生会话仅暴露操作回执；运行时对象与向量缓冲不进入控制状态。
+/// Expose operation receipts only; keep runtime objects and vector buffers with the caller.
+/// 仅返回操作回执，运行时对象与向量缓冲由调用方持有。
 #[derive(Default)]
 pub struct AnnSession {
     queue: BuildQueue,
@@ -946,8 +946,8 @@ impl AnnStore {
                     })?;
                     ids.push((id, count));
                 }
-                // The current shard is replaced in order; Node keeps only the opaque-ID-to-SDK-object mapping.
-                // 按顺序替换当前分片；Node 仅保留不透明身份到 SDK 对象的映射，不保存队列或进度。
+                // Replace the current shard with ordered partition IDs; keep queue state here.
+                // 按顺序用分区 ID 替换当前分片，队列状态由本模块管理。
                 for part in ids.iter().rev() {
                     batch.pending.push_front(*part);
                 }

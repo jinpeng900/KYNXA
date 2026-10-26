@@ -137,7 +137,7 @@ public sealed partial class ShellPage
             var about = new StackPanel { Spacing = 12 };
             about.Children.Add(new TextBlock { Text = "KYNXA", FontFamily = font, FontSize = 22,
                 Foreground = AppearanceService.GetBrush("KynxaTextBrush") });
-            about.Children.Add(new TextBlock { Text = typeof(ShellPage).Assembly.GetName().Version?.ToString(2) ?? "1.65",
+            about.Children.Add(new TextBlock { Text = typeof(ShellPage).Assembly.GetName().Version?.ToString(3) ?? "1.8.1",
                 FontFamily = font, FontSize = 14, Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush") });
             return SettingsWorkspace.ScrollPage(about);
         }, font);
@@ -226,13 +226,16 @@ public sealed partial class ShellPage
         {
             PreventClose(sender, e);
             if (ownerClosing || e.Cancel) return;
-            string? pending = _memoryManagementWindow is { HasPendingChanges: true } ? "memory"
-                : _toolManagementWindow is { HasPendingChanges: true } ? "tools"
-                : _retrievalSettingsWindow is { HasPendingChanges: true } ? "retrieval" : null;
+            // Loading is disposable view work, not an unsaved user edit.
+            // 加载可随窗口取消，不属于用户尚未保存的编辑。
+            string? pending = _memoryManagementWindow is { HasUnsavedChanges: true } ? "memory"
+                : _toolManagementWindow is { HasUnsavedChanges: true } ? "tools"
+                : _retrievalSettingsWindow is { HasUnsavedChanges: true } ? "retrieval" : null;
             if (pending is null) return;
             e.Cancel = true;
             workspace.SelectPage(pending);
-            Message(UiText.Get("请先保存或放弃当前编辑，再关闭设置。"), InfoBarSeverity.Warning);
+            Message(UiText.Get(pending == "retrieval" ? "正在处理，请稍候。" :
+                "请先保存或放弃当前编辑，再关闭设置。"), InfoBarSeverity.Warning);
         };
         void CloseSettings(object sender, WindowEventArgs e) { ownerClosing = true; window.Close(); }
         App.Window.Closed += CloseSettings;
@@ -319,7 +322,7 @@ public sealed partial class ShellPage
                 progress.IsActive = true; progress.Visibility = Visibility.Visible;
                 Message(UiText.Get("正在准备迁移，请保持应用打开…"));
                 await ModelGatewayService.EnsureReadyAsync();
-                using var http = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(5) };
+                using var http = GatewayHttpClient.Create(address, TimeSpan.FromSeconds(5));
                 var health = await http.GetFromJsonAsync<StorageHealth>("/health");
                 if (health?.StorageProtocol != 1 || string.IsNullOrWhiteSpace(health.ModelDataHome)) throw new InvalidOperationException(UiText.Get("当前网关版本不支持存储迁移，请关闭旧网关并重新打开 KYNXA。"));
                 string expectedModels = ApplicationPaths.ModelHome;

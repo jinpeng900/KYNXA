@@ -20,7 +20,7 @@ public sealed record SavedAttachmentPage(SavedAttachmentEntry[] Attachments, int
 public sealed class MessageAttachmentsApiClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http = new() { BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient _http = GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan);
     private sealed record AttachmentResponse(ChatAttachment[] Attachments);
 
     /// <summary>List committed attachments in the selected chat or its explicitly selected work.</summary>

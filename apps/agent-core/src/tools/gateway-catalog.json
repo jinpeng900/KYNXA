@@ -236,14 +236,57 @@
       "source": "builtin"
     },
     {
+      "name": "image.read",
+      "description": "Read actual pixels from an authorized local PNG, JPEG, GIF, WebP, BMP or TIFF for visual analysis; GIF uses its first frame and BMP/TIFF are converted for model input. Use the path directly, without launching a viewer or taking a desktop screenshot. Sources are limited to 32 MiB, 64 million pixels and bounded decoding memory. The default output fits a 2048-pixel longest edge; maxDimension may raise this to 4096. crop selects a rectangle in original image coordinates after orientation, before resizing. Returns source SHA-256/original dimensions and actual sent image SHA-256/dimensions. Original files remain unchanged. expectedSha256 rejects changed sources. Reading does not open or switch the right workspace; artifact.open is for requested display. A text-only model cannot inspect pixels; metadata/OCR is not visual evidence.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mountId": { "type": "string", "description": "Authorized work folder mount ID; omitted uses the task default." },
+          "path": { "type": "string", "minLength": 1, "description": "Existing image path, relative to the selected workspace or an authorized absolute path." },
+          "reason": { "type": "string", "description": "Explanation for access outside the linked work folder; does not itself grant permission." },
+          "expectedSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Expected original file SHA-256 from a prior receipt, if supplied." },
+          "maxDimension": { "type": "integer", "minimum": 1, "maximum": 4096, "default": 2048 },
+          "crop": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "image.retain",
+      "description": "Keep the actual image media from an existing tool receipt in this conversation beyond temporary retention. Use when the user requests preservation or the image supports a key conclusion; state that reason. Supply the original resultId, not a file path or tool call ID. This only marks verified archived media for retention; it neither modifies the source file nor opens the right workspace, and grants no new file access.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resultId": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["resultId", "reason"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "artifact.open",
-      "description": "Open an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. For a URL, opens the interactive sidebar browser and returns its actual sessionId and tabId; retain them for browser.snapshot and later interactions. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. Metadata kind is not the final rendered mode. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching. The current page becomes interactive before remaining content prepares in the background; cached file views retain their state without rereading on tab switches. Only unsupported content or an actual rendering failure uses a cached PDF fallback; legacy DOC/PPT/XLS use conversion. Spreadsheet previews display stored formula caches, not recalculated results. Claim final layout, text fallback or a missing converter only from actual preview observation, never from this registration receipt alone. Does not create files or grant broader file access.",
+      "description": "Present a selected final report, useful result or explicitly requested resource in the user's right workspace. Use exactly one of path, url or resultId and an optional natural title. resultId displays an existing image/screenshot receipt from this conversation without copying the image; choose meaningful conclusions or key results, never routine analysis captures. Background webpage analysis uses browser.open, not this presentation tool. For a URL, returns the actual sidebar browser sessionId and tabId. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching; only unsupported content or an actual rendering failure uses a cached PDF fallback. Spreadsheet previews display stored formula caches, not recalculated results. Claim final appearance only from actual image observation, never from this registration receipt alone. Does not create files, retain temporary images permanently, or grant broader file access.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": { "type": "string", "description": "Existing file path, relative to the current workspace or explicitly authorized absolute path." },
           "url": { "type": "string", "description": "Full HTTP or HTTPS webpage URL, used instead of path." },
+          "resultId": { "type": "string", "minLength": 1, "description": "Original image/screenshot resultRef.id in this conversation, used instead of path/url. Only for selected useful results or explicit user-requested display." },
           "title": { "type": "string", "maxLength": 1024 },
           "reason": { "type": "string" },
           "offset": { "type": "integer", "minimum": 0 },
@@ -282,7 +325,7 @@
     },
     {
       "name": "filesystem.read",
-      "description": "Read UTF-8 text (file <=1 MiB) with full-file SHA-256. Optional startLine/endLine select inclusive 1-based lines. Continue nextOffset while hasMore, retaining the same line range; restart if hash changes.",
+      "description": "Read UTF-8 or BOM-marked UTF-16LE text from files up to 16 MiB with full-file SHA-256. Reading is streamed; each output page remains limited by maxChars (at most 64000 UTF-16 units). Optional startLine/endLine select inclusive 1-based lines. Supply the search result hash or previous page hash as expectedSha256; continue nextOffset while hasMore, retaining the same line range. A changed version must be searched/read again. This does not increase the 1 MiB text write/edit limit.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -298,7 +341,8 @@
           "maxBytes": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048576
+            "maximum": 16777216,
+            "description": "Maximum source file bytes, not response page bytes; defaults to 16 MiB."
           },
           "maxChars": {
             "type": "integer",
@@ -308,18 +352,23 @@
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 1048576,
+            "maximum": 16777216,
             "description": "Absolute UTF-16 position; use nextOffset to avoid splitting characters."
           },
           "startLine": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048577
+            "maximum": 16777217
           },
           "endLine": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048577
+            "maximum": 16777217
+          },
+          "expectedSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Full-file SHA-256 from filesystem.search or a prior page; rejects stale reads before returning any content."
           }
         },
         "required": [
@@ -407,7 +456,7 @@
     },
     {
       "name": "filesystem.search",
-      "description": "Find literal UTF-8 content or paths without an index; path mode reads names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Ignore files apply by default. Changed sources require a fresh search.",
+      "description": "Find paths, globs, literal UTF-8 content or line-wise Rust regex without an index. Prefer exact path/glob and content/regex for known filenames or symbols, then filesystem.read at matching lines. Path/glob modes read names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Honors ignore files by default; changed sources need a fresh search. Each page returns up to 1000 matches within 2 MiB and 30 seconds; content/regex skip files above 16 MiB and report incomplete coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -428,15 +477,17 @@
           "maxMatches": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 200
+            "maximum": 1000
           },
           "mode": {
             "type": "string",
             "enum": [
               "content",
-              "path"
+              "path",
+              "glob",
+              "regex"
             ],
-            "description": "Default content; path matches a literal relative-path/name substring (case-insensitive on Windows)."
+            "description": "Default content matches literal text. path matches a literal relative-path/name substring; glob matches path patterns such as **/*.rs (both case-insensitive on Windows). regex matches file content one line at a time, with Rust regex syntax; use (?i) for case-insensitive content. Glob/regex do not bypass ignore or workspace permissions."
           },
           "respectIgnoreFiles": {
             "type": "boolean",
@@ -766,7 +817,7 @@
     {
       "name": "knowledge.search",
       "source": "builtin",
-      "description": "Search authorized local documents and code. domain is an explicit scope; choose it from the user or verified source, not words like method/function or brand capitalization. Keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing mean only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
+      "description": "Search authorized local documents and code with E5 + lexical rank-RRF and lightweight structured sorting. For a known filename/path/function, prefer filesystem.search glob/regex then filesystem.read. domain is an explicit scope from the user or verified source, not words like method/function or brand capitalization; keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Preserve the same gap identity while rewriting keywords or narrowing directories: at most two supplemental searches for that gap, then state missing evidence or use another evidence type and continue the task. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing prove only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1035,7 +1086,7 @@
     {
       "name": "knowledge.experience",
       "source": "builtin",
-      "description": "Recall current-chat navigation experience with live citation version checks. Historical answers are not current facts. Re-read and validate sources before reusing an experience; stale dependencies require repair.",
+      "description": "Recall receipt-verified procedure templates for the current project/chat and legacy current-chat retrieval navigation. Templates activate only after real-data maturation with matching current tool contracts; rebind parameters and obtain current permission, never inherit prior approval. Legacy navigation is not a verified procedure or current fact: reread original sources and validate versions. Missing evidence returns empty/collecting guidance without stopping the task. / 查询当前项目或聊天的回执验证模板及历史检索导航；真实数据成熟后才可复用，参数和权限重新核验，旧导航须回读原文，缺证据不阻断任务。",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1716,7 +1767,7 @@
     },
     {
       "name": "tool.load",
-      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service.",
+      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service. Batch currently needed known names in one names array and reuse unchanged loaded schemas. Discover additional tools whenever the task needs them.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1737,7 +1788,7 @@
     },
     {
       "name": "tool.result.read",
-      "description": "Page this chat's saved result by opaque id. Typed media references; no private MCP metadata.",
+      "description": "Read this chat's immutable saved result by opaque id. Offsets are UTF-16 positions in its public projected JSON, not original document offsets. While hasMore is true, continue with nextOffset and the same id/resultRef.sha256; stop paging when false. A successful archive read does not mean the original operation succeeded or that the source document was fully read. Working summaries are derived context, not original evidence. Typed media references; no private MCP metadata.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1899,10 +1950,13 @@
     {
       "name": "computer.screenshot",
       "source": "builtin",
-      "description": "Capture the identified client area, optionally crop original physical pixels without resizing. PNG is archived locally; the text projection does not provide image vision. Host desktop; broker permissions and target checks apply.",
+      "description": "Capture the identified client area, optionally crop original physical pixels without resizing. PNG is delivered as actual image content to a vision-capable model; routine screenshots are temporary and do not open the right workspace. Optionally state the concrete visual question. Use permanent retention only for a user request or key evidence, with retentionReason; later preservation uses image.retain. Inspect the delivered image for visual conclusions; metadata alone does not mean the model has seen its pixels. Host desktop; broker permissions and target checks apply.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "retention": { "type": "string", "enum": ["temporary", "permanent"], "default": "temporary" },
+          "retentionReason": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Required for permanent retention: the user requested preservation or this image supports a key conclusion." },
+          "question": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "The concrete visual question this screenshot should answer." },
           "windowId": {
             "type": "string",
             "minLength": 1,
@@ -2045,7 +2099,7 @@
     {
       "name": "computer.launch",
       "source": "builtin",
-      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Websites default to artifact.open/browser.open in the right workspace; use this for browsers only when the user explicitly requests a local/system/external browser application. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
+      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Analyze webpages with browser.open in its default background mode; show a requested webpage with artifact.open(url) or browser.open(presentation=workspace). Use this tool for browsers only when the user explicitly requests a local/system/external browser application. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2584,7 +2638,7 @@
     },
     {
       "name": "task.describe",
-      "description": "Name this existing task and choose whether it belongs in the task list. Use a concise meaningful title for substantive multi-step work; brief chat can stay hidden. Changes only current-task presentation, preserves usage and task identity, and never starts another task.",
+      "description": "Name this existing task and choose whether it belongs in the task list. Set displayInTaskList=true only for important actual work clearly requested by the user, with a concise meaningful title. Ordinary questions, explanations, chat, simple lookups and incidental suggestions stay hidden; time, retries or interruption do not make them task-list items. Changes presentation only; preserves the same task identity, recovery and usage, and never starts another task.",
       "inputSchema": {
         "type": "object",
         "properties": {

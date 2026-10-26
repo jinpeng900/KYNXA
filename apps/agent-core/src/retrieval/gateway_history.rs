@@ -290,7 +290,7 @@ fn checked_scope(
     input: &Value,
     role: &str,
     expected: &str,
-    versions: &[(Value, Value)],
+    versions: &mut [(Value, conversation_history::HistoryRead)],
 ) -> Result<(), ContractError> {
     // Recheck ownership and observed log snapshots after I/O, without holding the catalog lock throughout scanning.
     // I/O 完成后再次核验归属与已观察日志快照；扫描期间不长时间持有目录锁。
@@ -303,9 +303,9 @@ fn checked_scope(
                 409,
             ));
         }
-        for (location, version) in versions {
+        for (location, snapshot) in versions {
             source_allowed(catalog, context, &location["Id"])?;
-            conversation_history::verify_snapshot(&config.data_root, location, version)?;
+            snapshot.verify()?;
         }
         Ok(())
     })
@@ -382,8 +382,7 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
             break;
         }
         let location = &locations[cursor.conversation];
-        let page = conversation_history::apply(
-            "storage.history.page",
+        let page = conversation_history::read_page(
             &json!({
                 "root": config.data_root,
                 "location": location,
@@ -392,7 +391,7 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
                 "cursor": cursor.page
             }),
         );
-        let page = match page {
+        let (page, snapshot) = match page {
             Ok(page) => page,
             Err(error)
                 if scope == "work"
@@ -421,7 +420,7 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
                 409,
             ));
         }
-        versions.push((location.clone(), page["snapshot"].clone()));
+        versions.push((location.clone(), snapshot));
         bytes += page["returnedBytes"].as_u64().unwrap_or(0) as usize;
         let raw_messages = page["rawMessages"].as_array().unwrap();
         // Newest-first traversal is stable across bounded calls; archived/private/streaming records never become user evidence.
@@ -475,7 +474,7 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
             cursor.conversation += 1;
         }
     }
-    checked_scope(config, context, scope, input, role, &identity, &versions)?;
+    checked_scope(config, context, scope, input, role, &identity, &mut versions)?;
     let scan_complete = cursor.conversation == locations.len();
     let next_cursor = if scan_complete {
         Value::Null

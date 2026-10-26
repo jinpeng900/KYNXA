@@ -13,10 +13,11 @@ public sealed partial class ShellPage
     {
         if (_toolResultOpen || _chatClosing || ActiveChatId != request.ConversationId || XamlRoot is null ||
             sender is not (ConversationTranscript or ConversationScreenshotsPanel) || request.Tool.ResultRef is null) return;
-        var currentTool = ActiveMessages.FirstOrDefault(row => row.Message.Id == request.MessageId)?.ToolActivities
+        var screenshotSource = sender is ConversationScreenshotsPanel ? ScreenshotPanel.Items.FirstOrDefault(source =>
+            source.ConversationId == request.ConversationId && source.MessageId == request.MessageId && source.Tool == request.Tool) : null;
+        var currentTool = screenshotSource?.Tool ?? ActiveMessages.FirstOrDefault(row => row.Message.Id == request.MessageId)?.ToolActivities
             .FirstOrDefault(tool => tool.ToolCallId == request.Tool.ToolCallId && tool.ResultRef == request.Tool.ResultRef);
-        if (currentTool is null || (sender is ConversationScreenshotsPanel &&
-            (!ConversationScreenshotSources.IsScreenshotTool(currentTool.Name) || currentTool.Status != "completed"))) return;
+        if (currentTool is null || sender is ConversationScreenshotsPanel && screenshotSource is null) return;
         _toolResultOpen = true;
         using var cancellation = new CancellationTokenSource();
         _toolResultCancellation = cancellation;
@@ -26,10 +27,10 @@ public sealed partial class ShellPage
         ConversationMessages.ConversationChanged += Cancel;
         try
         {
-            if (ConversationScreenshotSources.IsScreenshotTool(currentTool.Name) && currentTool.Status == "completed")
+            if (screenshotSource is not null || ConversationScreenshotSources.IsScreenshotTool(currentTool.Name) && currentTool.Status == "completed")
             {
                 using var viewer = new ScreenshotViewerWindow(_agentApiClient,
-                    new(request.ConversationId, request.MessageId, currentTool), cancellation.Token);
+                    screenshotSource ?? new(request.ConversationId, request.MessageId, currentTool), cancellation.Token);
                 await viewer.ShowAsync();
             }
             else

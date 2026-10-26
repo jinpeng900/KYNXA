@@ -266,8 +266,8 @@ $timer.Add_Tick({
                 if ($result -and $result.status -eq 'ready') {
                     $script:launchingInstaller = $true
                     $status.Text = Get-Text '完整安装程序已就绪，正在打开…' 'The full installer is ready. Opening…'
-                    # Launch only the verified final EXE; the shared helper owns integrity and source selection.
-                    # 只启动共享下载入口核验完成的正式 EXE，来源选择与完整性仍由该入口负责。
+                    # Launch only the EXE verified by the shared download helper.
+                    # 只启动共用下载工具核验通过的 EXE。
                     Start-Process -FilePath ([string]$result.path) -WorkingDirectory ([IO.Path]::GetDirectoryName([string]$result.path))
                     $form.Close()
                 }

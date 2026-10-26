@@ -3,8 +3,8 @@ namespace KYNXA_Desktop.Services;
 public enum WorkspacePresentationPriority { CatalogOnly, Automatic, Requested, Final }
 
 /// <summary>
-/// Key is a logical call identity, not a mutable result-reference or output version.
-/// 键使用逻辑调用身份，不使用可能变化的结果引用或输出版本。
+/// Key follows each resource's stable identity; Version describes that resource's content revision.
+/// 键沿用各类资源的稳定身份；Version 描述该资源的内容版本。
 /// </summary>
 public sealed record ConversationWorkTab(string Key, string Kind, string Title,
     string? Target = null, string? Version = null, bool UserSelected = false,
@@ -28,6 +28,7 @@ public sealed class ConversationWorkTabState
         public long Touched { get; set; }
         public bool HasCustomOrder { get; set; }
         public bool HomeSelected { get; set; }
+        public bool CatalogComplete { get; set; } = true;
     }
 
     private readonly Dictionary<Guid, Tabs> _chats = [];
@@ -40,12 +41,13 @@ public sealed class ConversationWorkTabState
     public bool HasItems => Items.Count > 0;
     public bool HasOpenTabs => OpenItems.Count > 0;
 
-    public bool ShowConversation(Guid? conversationId, IReadOnlyList<ConversationWorkTab> items, bool autoOpenNew = true)
+    public bool ShowConversation(Guid? conversationId, IReadOnlyList<ConversationWorkTab> items, bool autoOpenNew = true, bool catalogComplete = true)
     {
         ArgumentNullException.ThrowIfNull(items);
         ConversationId = conversationId is Guid id && id != Guid.Empty ? id : null;
         if (ConversationId is not Guid currentId) return false;
         if (!_chats.TryGetValue(currentId, out var tabs)) _chats[currentId] = tabs = new();
+        tabs.CatalogComplete = catalogComplete;
         tabs.Touched = ++_version;
         while (_chats.Count > MaximumConversations) _chats.Remove(_chats.Where(pair => pair.Key != currentId).MinBy(pair => pair.Value.Touched).Key);
         var keys = new HashSet<string>(StringComparer.Ordinal);
@@ -68,11 +70,16 @@ public sealed class ConversationWorkTabState
         foreach (var pair in absentClosed.Skip(MaximumAbsentClosedTabs)) tabs.Closed.Remove(pair.Key);
         foreach (var pair in tabs.ExplicitlyOpened.Where(pair => !keys.Contains(pair.Key)).OrderByDescending(pair => pair.Value).Skip(MaximumAbsentClosedTabs).ToArray())
             tabs.ExplicitlyOpened.Remove(pair.Key);
-        if (!autoOpenNew) foreach (var item in added) tabs.Closed[item.Key] = ++_version;
+        if (!autoOpenNew)
+            foreach (var item in added.Where(item => item.Key != tabs.SelectedKey && !tabs.ExplicitlyOpened.ContainsKey(item.Key)))
+                tabs.Closed[item.Key] = ++_version;
         ApplyAutomaticPresentation(tabs);
         // Background presentation preserves the current reader; lower-priority files remain reopenable.
         // 后台展示保留正在阅读的标签；低优先级文件仍在目录中，用户可按需打开。
-        if (!tabs.HomeSelected && keys.Count > 0 && (tabs.SelectedKey is null || !keys.Contains(tabs.SelectedKey) || tabs.Closed.ContainsKey(tabs.SelectedKey)))
+        // A partial catalog cannot revoke this chat's selection; no absent resource is exposed meanwhile.
+        // 部分目录不撤销本聊天的选择意图；来源缺席期间不暴露该资源。
+        bool awaitingSelected = !catalogComplete && tabs.SelectedKey is { } selectedKey && !keys.Contains(selectedKey);
+        if (!awaitingSelected && !tabs.HomeSelected && keys.Count > 0 && (tabs.SelectedKey is null || !keys.Contains(tabs.SelectedKey) || tabs.Closed.ContainsKey(tabs.SelectedKey)))
             tabs.SelectedKey = tabs.Items.Where(item => IsOpen(tabs, item.Key)).OrderByDescending(item => item.PresentationPriority).FirstOrDefault()?.Key;
         return added.Length > 0;
     }
@@ -99,7 +106,8 @@ public sealed class ConversationWorkTabState
 
     public bool Close(string key)
     {
-        if (Current is not { } tabs || !tabs.Items.Any(item => item.Key == key) || !IsOpen(tabs, key)) return false;
+        if (Current is not { } tabs || !IsOpen(tabs, key) ||
+            !tabs.Items.Any(item => item.Key == key) && (tabs.CatalogComplete || tabs.SelectedKey != key)) return false;
         tabs.Closed.Add(key, ++_version);
         if (tabs.SelectedKey == key)
         {

@@ -50,8 +50,8 @@ pub(super) async fn read(
         super::service_filesystem::revalidate(&binding)
             .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
         if deferred_settings {
-            // Lightweight workspace previews load decoder limits only when Office text extraction is needed.
-            // 轻量工作区预览仅在确需 Office 正文解析时读取用户的解析限额，不为普通展示准备检索配置。
+            // Load decoder limits only for Office text extraction, not ordinary previews.
+            // 仅提取 Office 正文时加载解析限额，普通预览无需准备检索配置。
             let saved = crate::retrieval::gateway::effective(&config, project_id.as_deref())?;
             let mut configured = saved["local"]["indexing"].clone();
             for (name, value) in limits.as_object().unwrap() {

@@ -35,27 +35,38 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
     private readonly Func<CancellationToken, Task> _ensureReady;
     private readonly bool _ownsHttp;
 
-    public TasksApiClient() : this(new HttpClient { BaseAddress = ModelGatewayService.Address,
-        Timeout = Timeout.InfiniteTimeSpan }, ModelGatewayService.EnsureReadyAsync, ownsHttp: true) { }
+    public TasksApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan),
+        ModelGatewayService.EnsureReadyAsync, ownsHttp: true) { }
 
     public TasksApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttp = false)
     {
         _http = http; _ensureReady = ensureReady ?? (_ => Task.CompletedTask); _ownsHttp = ownsHttp;
     }
 
-    public async Task<TaskListResponse> ListAsync(Guid conversationId, Guid? projectId = null,
-        Guid? afterTaskId = null, CancellationToken cancellationToken = default)
+    public Task<TaskListResponse> ListAsync(Guid conversationId, Guid? projectId = null,
+        Guid? afterTaskId = null, CancellationToken cancellationToken = default) =>
+        ReadListAsync(conversationId, projectId, afterTaskId, true, cancellationToken);
+
+    // Reopening one chat must not page through other chats in the same project.
+    // 重开单个聊天仅查询该聊天；仍用预期项目复核归属，不分页读取同项目其他聊天。
+    internal Task<TaskListResponse> ListConversationAsync(Guid conversationId, Guid? projectId = null,
+        Guid? afterTaskId = null, CancellationToken cancellationToken = default) =>
+        ReadListAsync(conversationId, projectId, afterTaskId, false, cancellationToken);
+
+    private async Task<TaskListResponse> ReadListAsync(Guid conversationId, Guid? projectId,
+        Guid? afterTaskId, bool includeProjectConversations, CancellationToken cancellationToken)
     {
         using var deadline = CreateDeadline(cancellationToken, 30);
         cancellationToken = deadline.Token;
         string path = $"/api/tasks?conversationId={ValidId(conversationId):D}";
-        if (projectId is Guid project) path += $"&projectId={ValidId(project):D}";
+        if (includeProjectConversations && projectId is Guid project) path += $"&projectId={ValidId(project):D}";
         if (afterTaskId is Guid after) path += $"&afterTaskId={ValidId(after):D}";
         await _ensureReady(cancellationToken);
         var result = await ReadProjectionAsync<TaskListResponse>(path, cancellationToken);
         if (result.Tasks is null || result.Tasks.Length > 100 || (result.HasMore && result.NextTaskId is not { } next)
             || (result.NextTaskId is Guid nextId && (nextId == Guid.Empty || nextId == afterTaskId))) throw Invalid();
-        foreach (var task in result.Tasks) Validate(task, conversationId, projectId, allowProjectConversations: projectId is not null);
+        foreach (var task in result.Tasks) Validate(task, conversationId, projectId,
+            allowProjectConversations: includeProjectConversations && projectId is not null);
         if (result.Tasks.Select(task => task.TaskId).Distinct().Count() != result.Tasks.Length) throw Invalid();
         return result;
     }
@@ -137,62 +148,21 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
         return result;
     }
 
-    public Task<TaskControlResponse> ControlAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
+    public async Task<TaskControlResponse> ControlAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
         string action, Guid? projectId = null, CancellationToken cancellationToken = default)
     {
         if (action is not ("pause" or "resume" or "cancel")) throw new ArgumentException("Invalid task control.");
-        return SendControlAsync(conversationId, taskId, expectedVersion, action, null, projectId, cancellationToken);
-    }
-
-    /// <summary>
-    /// Confirm listed outcomes stay unknown and resume; the gateway neither replays nor marks them succeeded.
-    /// 确认所列操作结果保持未知并继续；网关不会重放这些操作，也不会改记为成功。
-    /// </summary>
-    public Task<TaskControlResponse> AcknowledgeUnknownAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
-        IReadOnlyCollection<string> operationIds, Guid? projectId = null, CancellationToken cancellationToken = default)
-    {
-        if (operationIds.Count is 0 or > 64 || operationIds.Any(string.IsNullOrWhiteSpace))
-            throw new ArgumentException("Invalid unknown operation confirmation.");
-        return SendControlAsync(conversationId, taskId, expectedVersion, "acknowledge-unknown", operationIds.ToArray(),
-            projectId, cancellationToken);
-    }
-
-    private async Task<TaskControlResponse> SendControlAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
-        string action, string[]? operationIds, Guid? projectId, CancellationToken cancellationToken,
-        TaskModelReservationIdentity[]? modelReservationIds = null, TaskOperationIdentity[]? operations = null)
-    {
         using var deadline = CreateDeadline(cancellationToken, 30);
         cancellationToken = deadline.Token;
         if (expectedVersion == 0) throw new ArgumentException("Invalid task control.");
         string path = $"/api/tasks/{ValidId(taskId):D}/control";
         await _ensureReady(cancellationToken);
         using var response = await _http.PostAsJsonAsync(path,
-            new TaskControlRequest(ValidId(conversationId), expectedVersion, action, operationIds, modelReservationIds, operations), JsonOptions, cancellationToken);
+            new TaskControlRequest(ValidId(conversationId), expectedVersion, action), JsonOptions, cancellationToken);
         var result = await ReadAsync<TaskControlResponse>(response, cancellationToken);
         Validate(result.Task, conversationId, projectId, taskId);
         if (result.AffectedTaskIds is null || result.AffectedTaskIds.Any(id => id == Guid.Empty)) throw Invalid();
         return result;
-    }
-
-    /// <summary>Unknown cost remains reserved; user confirmation never invents billed usage.
-    /// 未知成本保留预约；用户确认不会捏造计费用量。</summary>
-    public Task<TaskControlResponse> AcknowledgeUnknownCostsAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
-        IReadOnlyCollection<TaskModelReservationIdentity> reservations, Guid? projectId = null,
-        CancellationToken cancellationToken = default)
-    {
-        if (reservations.Count is 0 or > 128 || reservations.Any(item => item.TaskId == Guid.Empty || string.IsNullOrWhiteSpace(item.ReservationId)))
-            throw new ArgumentException("Invalid unknown cost confirmation.");
-        return SendControlAsync(conversationId, taskId, expectedVersion, "acknowledge-unknown-costs", null,
-            projectId, cancellationToken, reservations.ToArray());
-    }
-
-    public Task<TaskControlResponse> AcknowledgeUnknownScopedAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
-        IReadOnlyCollection<TaskOperationIdentity> operations, Guid? projectId = null, CancellationToken cancellationToken = default)
-    {
-        if (operations.Count is 0 or > 64 || operations.Any(item => item.TaskId == Guid.Empty || string.IsNullOrWhiteSpace(item.OperationId)))
-            throw new ArgumentException("Invalid unknown operation confirmation.");
-        return SendControlAsync(conversationId, taskId, expectedVersion, "acknowledge-unknown", null,
-            projectId, cancellationToken, operations: operations.ToArray());
     }
 
     public Task<TaskControlResponse> SteerAsync(Guid conversationId, Guid taskId, ulong expectedVersion,

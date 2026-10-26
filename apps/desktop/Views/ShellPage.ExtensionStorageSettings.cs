@@ -98,7 +98,7 @@ public sealed partial class ShellPage
             controls.ShowProgress(true);
             controls.Message("正在准备迁移，请保持应用打开…");
             await ModelGatewayService.EnsureReadyAsync(controls.Token);
-            using var http = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(5) };
+            using var http = GatewayHttpClient.Create(address, TimeSpan.FromSeconds(5));
             var health = await http.GetFromJsonAsync<ExtensionStorageHealth>("/health", controls.Token);
             RequireExtensionStorageHealth(health, source);
             Directory.CreateDirectory(Path.GetDirectoryName(StoragePaths.MigrationLockPath)!);
@@ -143,7 +143,7 @@ public sealed partial class ShellPage
         if (controls.IsClosed) { IsEnabled = true; return; }
         try
         {
-            using var http = new HttpClient { BaseAddress = ModelGatewayService.Address, Timeout = TimeSpan.FromSeconds(5) };
+            using var http = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(5));
             var health = await http.GetFromJsonAsync<ExtensionStorageHealth>("/health", controls.Token);
             RequireExtensionStorageHealth(health, destination!);
             if (health!.Migrating) throw new InvalidOperationException(UiText.Get("网关仍处于维护状态，请稍后重试。"));

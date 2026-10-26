@@ -179,16 +179,16 @@ impl RunSession {
     }
 }
 
-/// An engine owns isolated control and native services; adapters authorize and supply live SDK receipts.
-/// 引擎拥有隔离控制及原生服务；适配器先授权，再提供实际 SDK 回执。
+/// The engine owns isolated control and services; callers authorize and supply receipts.
+/// 引擎管理独立控制与服务，调用方负责授权并提供真实回执。
 #[derive(Default)]
 pub struct AgentEngine {
     sessions: HashMap<String, RunSession>,
 }
 
 impl AgentEngine {
-    /// A closing service session signals long-running native scans without blocking JavaScript.
-    /// 服务会话关闭时通知长时原生扫描，避免阻塞 JavaScript 线程等待退出。
+    /// Signal scan cancellation when a service session closes, without waiting for exit.
+    /// 关闭服务会话时通知原生扫描取消，不同步等待扫描退出。
     pub fn bind_service_cancellation(
         &mut self,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,

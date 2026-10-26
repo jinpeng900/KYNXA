@@ -74,7 +74,7 @@ pub(super) fn category(tool: &Value) -> &'static str {
     ) {
         return "web-search";
     }
-    if name.starts_with("filesystem.") || ["document.read", "document.create", "attachment.read", "artifact.open"].contains(&name.as_str()) {
+    if name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "image.retain", "attachment.read", "artifact.open"].contains(&name.as_str()) {
         return "filesystem";
     }
     "other"
@@ -120,6 +120,12 @@ fn aliases(tool: &Value) -> String {
     }
     if name == "document.read" {
         return "document read parse extract word docx doc pdf ppt pptx xlsx markdown image OCR 文档 读取文档 解析文档 正文 页码 图片 文字识别 表格 幻灯片".to_owned();
+    }
+    if name == "image.read" {
+        return "image photo picture read view inspect analyze pixels local png jpeg jpg webp gif crop vision 图片 图像 照片 看图 读图 分析图片 查看图片 本地图片 裁剪 局部 像素 颜色 画面 构图".to_owned();
+    }
+    if name == "image.retain" {
+        return "image screenshot retain keep preserve evidence result receipt 图片 截图 保留 保存证据 关键图像 回执".to_owned();
     }
     if name == "document.create" {
         return "generate create write export document docx word pdf pptx powerpoint presentation slides xlsx excel spreadsheet workbook 生成文档 创建文档 写文档 导出 报告 总结 幻灯片 演示文稿 电子表格 工作簿".to_owned();
@@ -230,6 +236,8 @@ fn search_tools(arguments: &Value) -> Value {
     let active = analyze_clauses(&text);
     let active_text = active["activeText"].as_str().unwrap_or(&text);
     let workspace_terminal = workspace_terminal_topic(active_text);
+    let image_read = matches(r"(?:\.(?:png|jpe?g|webp|gif)\b|图片|图像|照片|\b(?:image|photo|picture)\b)", active_text)
+        && matches(r"看图|读图|分析|读取|查看|辨认|识别|\b(?:read|inspect|analy[sz]e|describe|view)\b", active_text);
     // Exact capability names in the active request outrank generic words in long tasks or exclusions.
     // 当前有效请求中的完整能力名优先于长任务里的泛词；被明确排除的能力名不获得此优先级。
     let named_tools = pattern(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)+|k_[a-z0-9_]+_[a-f0-9]{8}")
@@ -277,6 +285,7 @@ fn search_tools(arguments: &Value) -> Value {
         if name == "document.create" && authoring_topics(&text).iter().any(|topic| *topic != "visual-artifacts") {
             score += 30_000;
         }
+        if name == "image.read" && image_read { score += 30_000; }
         // A named file plus an explicit read/write action beats incidental local/keyboard vocabulary.
         // 明确文件目标及读写动作优先于偶然出现的本地或键盘词；此处只排序，不扩大执行权限。
         if let Some(action) = match name.as_str() {
@@ -944,6 +953,15 @@ fn computer_alias(action: &str) -> &'static str {
 mod search_score_tests {
     use super::search_tools;
     use serde_json::{Value, json};
+
+    #[test]
+    fn local_image_analysis_discovers_pixels_instead_of_text_or_desktop_capture() {
+        let catalog: Value = serde_json::from_str(include_str!("gateway-catalog.json")).unwrap();
+        for query in ["读取本地 photo.png，分析图片构图", "Inspect local photo.webp pixels", "查看这张照片的颜色"] {
+            let hits = search_tools(&json!({"query":query,"descriptors":catalog["tools"]}));
+            assert_eq!(catalog["tools"][hits[0].as_u64().unwrap() as usize]["name"], "image.read", "{query}");
+        }
+    }
 
     #[test]
     fn document_authoring_prefers_real_generators_without_matching_ordinary_chat() {

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using Markdig;
+using Markdig.Extensions.AutoIdentifiers;
 using Markdig.Extensions.Mathematics;
 using Markdig.Extensions.Tables;
 using Markdig.Renderers;
@@ -17,6 +18,25 @@ namespace KYNXA_Desktop.Services;
 /// </summary>
 internal static class TranscriptMarkdown
 {
+    internal const string ImageHost = "kynxa-markdown-images.local";
+
+    internal static bool TryImageSource(Uri resource, out string source)
+    {
+        source = "";
+        if (resource.Scheme != "https" || resource.Host != ImageHost || resource.AbsolutePath != "/image"
+            || !resource.Query.StartsWith("?source=", StringComparison.Ordinal) || resource.Query.Length > 16384) return false;
+        try { source = Uri.UnescapeDataString(resource.Query[8..]); }
+        catch (UriFormatException) { return false; }
+        return IsSafeUrl(source) && !source.StartsWith('#') && !source.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string ResolveFileLink(string target, string? sourcePath)
+    {
+        if (Uri.TryCreate(target, UriKind.Absolute, out var address) && address.Scheme is "http" or "https" or "mailto") return target;
+        if (Path.IsPathRooted(target) || sourcePath is null) return target;
+        string? directory = Path.GetDirectoryName(sourcePath.Replace('/', Path.DirectorySeparatorChar));
+        return string.IsNullOrEmpty(directory) ? target : Path.Combine(directory, target);
+    }
     internal sealed record StreamingState(string Source, int StableLength, string StableHtml, int ParsedCharacters, int StableBlocks = 0);
     internal sealed record StreamingResult(string Html, StreamingState State);
     private const int MaximumStreamingTailCharacters = 32768;
@@ -25,6 +45,7 @@ internal static class TranscriptMarkdown
     internal static long ParsedCharacters => Interlocked.Read(ref _parsedCharacters);
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().UseMathematics()
+        .UseFootnotes().UseAlertBlocks().UseAutoIdentifiers(AutoIdentifierOptions.GitHub)
         // Preserve reply line breaks in both streaming and final HTML without rewriting source.
         // 流式与最终显示均保留回复换行，不改写原文或按编号猜测断行。
         .UseSoftlineBreakAsHardlineBreak()
@@ -200,10 +221,13 @@ internal static class TranscriptMarkdown
         }
     }
 
-    private static bool IsSafeUrl(string? value)
+    internal static bool IsSafeUrl(string? value)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)
-            || !Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+            || value.StartsWith("//", StringComparison.Ordinal) || value.StartsWith("\\\\", StringComparison.Ordinal)) return false;
+        if (value.StartsWith('#')) return value.Length > 1;
+        if (value.Length >= 3 && char.IsAsciiLetter(value[0]) && value[1] == ':' && value[2] is '/' or '\\') return true;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return Uri.TryCreate(value, UriKind.Relative, out _);
         return uri.Scheme is "http" or "https" ? uri.Host.Length > 0
             : uri.Scheme == "mailto" && uri.AbsolutePath.Length > 0;
     }
@@ -225,6 +249,16 @@ internal static class TranscriptMarkdown
             for (var parent = link.Parent; parent is not null; parent = parent.Parent)
                 if (parent is LinkInline { IsImage: false }) { nested = true; break; }
             bool linked = !nested && IsSafeUrl(url);
+            if (link.IsImage && IsSafeUrl(url) && !url!.StartsWith('#') && !url.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
+            {
+                // Pixels cross the existing authorized preview boundary; Markdown never fetches arbitrary resources.
+                // 图片经过现有授权预览边界，Markdown 不直接请求任意网络或磁盘资源。
+                string label = string.Concat(link.Descendants<LiteralInline>().Select(item => item.Content.ToString()));
+                renderer.Write("<img class=\"markdown-image\" loading=\"lazy\" decoding=\"async\" src=\"https://kynxa-markdown-images.local/image?source=")
+                    .Write(WebUtility.HtmlEncode(Uri.EscapeDataString(url))).Write("\" alt=\"")
+                    .Write(WebUtility.HtmlEncode(label)).Write("\" />");
+                return;
+            }
             if (linked) OpenLink(renderer, url!, link.Title, link.IsImage);
             if (link.FirstChild is null && link.IsImage) renderer.WriteEscape(url ?? string.Empty);
             else renderer.WriteChildren(link);

@@ -431,8 +431,8 @@ async fn start_workspace_browser(ctx: &GatewayToolContext) -> Result<WorkspaceBr
     super::gateway_browser_permissions::prepare(ctx, &browser).await?;
     let mut command = Command::new(browser);
     hide(&mut command);
-    // Native occlusion assumes top-level Chrome windows; the embedded child must keep its surface when the shell loses focus.
-    // 原生遮挡检测假设 Chrome 是顶层窗口；嵌入子窗口须在软件失去前台时保留页面表面。
+    // Disable top-level occlusion handling so embedded pages survive loss of shell focus.
+    // 关闭顶层遮挡处理，避免软件失去焦点时嵌入页面停止显示。
     command.args([
         "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
         "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
@@ -467,8 +467,8 @@ async fn start_workspace_browser(ctx: &GatewayToolContext) -> Result<WorkspaceBr
     let socket = version["webSocketDebuggerUrl"].as_str()
         .ok_or_else(|| failure("BROWSER_INVALID_ENDPOINT", "随包浏览器窗口连接尚未就绪。", 502))?.to_owned();
     let client = Box::pin(CdpClient::connect(&socket)).await?;
-    // DevTools can listen before the app's first page exists; consume that page instead of creating a second window.
-    // DevTools 可能先于应用首页就绪；等待并接管这个页面，不能误建第二个窗口留下孤窗。
+    // DevTools may be ready before the first page; wait for that page instead of opening another window.
+    // DevTools 可能先于首页就绪；等待并接管首页，避免多开窗口。
     let initial_target = loop {
         check_cancelled(ctx)?;
         let targets = client.call("Target.getTargets", json!({}), ctx).await?;
@@ -570,8 +570,8 @@ pub(crate) async fn workspace_open(
     loop {
         match workspace_action(&json!({"sessionId":id,"action":"state"}), ctx).await {
             Ok(value) if value["navigationCommitted"] != true && tokio::time::Instant::now() < committed_deadline => {
-                // A pending first URL is not a history entry yet; let Chrome commit before a second navigation replaces it.
-                // 初始 URL 尚在等待时还不是历史记录；短暂等待实际提交，避免紧接着导航吞掉可返回的第一页。
+                // Wait for the first URL to enter history before a second navigation replaces it.
+                // 等首页写入历史再导航，保留可返回的第一页。
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             Ok(value) => return Ok(value),
@@ -809,8 +809,8 @@ pub(crate) async fn workspace_action(
     )
 }
 
-/// Renderer replacement can briefly reject a read after navigation already succeeded; never replay that navigation.
-/// 导航已成功时 renderer 切换可能短暂拒绝历史读取；仅重查只读元数据，不能因此重放导航。
+/// After navigation, renderer changes may reject history reads; retry metadata, not navigation.
+/// 导航后切换渲染器可能暂时无法读取历史；仅重读元信息，不重放导航。
 async fn workspace_navigation_history(socket: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
     loop {
@@ -901,8 +901,8 @@ async fn clear_workspace_site_data(ctx: &GatewayToolContext) -> Result<Value, Ga
     Ok(json!({"cleared":true,"scope":"application","closedSessionIds":closed}))
 }
 
-/// Cleanup keeps only the already-closed owned session; the existing sixteen-session bound also bounds these jobs.
-/// 清理仅持有已确认关闭的自有会话，复用既有十六会话上限约束后台任务，不保留用户请求或另建调度器。
+/// Clean only confirmed-closed sessions, within the existing sixteen-session limit; retain no user request.
+/// 仅清理已确认关闭的会话，沿用十六会话上限，不保留用户请求。
 fn defer_owned_profile_cleanup(
     id: String,
     handle: Arc<Mutex<BrowserSession>>,
@@ -1008,8 +1008,8 @@ pub(crate) fn descriptors() -> Vec<Value> {
     for (name, description, properties, required) in [
         (
             "open",
-            "Connect to this chat's current right-workspace page without a URL, or open the requested URL there. An unchanged URL preserves the current page. Returns actual sessionId and tabId; inspect with browser.snapshot.",
-            json!({"url":{"type":"string"},"foreground":{"type":"boolean"},"browserPath":{"type":"string"},"cdpEndpoint":{"type":"string","description":"Explicit HTTP(S) DevTools endpoint of an already authorized browser; never launches or kills that external process."}}),
+            "Open a webpage for background analysis by default, without opening or switching the right workspace. Reuse this chat's matching URL without navigating another page; omit URL to connect to an existing page. Use presentation=workspace only for requested display. Returns actual sessionId/tabId for DOM inspection and screenshots.",
+            json!({"url":{"type":"string"},"presentation":{"type":"string","enum":["background","workspace"],"default":"background","description":"Background analysis or explicit right-workspace display; neither grants foreground application permission."},"foreground":{"type":"boolean"},"browserPath":{"type":"string"},"cdpEndpoint":{"type":"string","description":"Explicit HTTP(S) DevTools endpoint of an already authorized browser; never launches or kills that external process."}}),
             vec!["reason"],
         ),
         (
@@ -1032,8 +1032,8 @@ pub(crate) fn descriptors() -> Vec<Value> {
         ),
         (
             "screenshot",
-            "Capture a background tab as PNG; does not activate a desktop window. Returns actual image data for vision-capable models.",
-            json!({"sessionId":{"type":"string"},"tabId":{"type":"string"},"fullPage":{"type":"boolean"}}),
+            "Capture a background tab as PNG for visual analysis, without activating a window or opening the right workspace. Returns actual pixels for vision-capable models. Temporary by default; permanent retention needs a reason tied to user-requested preservation or key evidence.",
+            json!({"sessionId":{"type":"string"},"tabId":{"type":"string"},"fullPage":{"type":"boolean"},"question":{"type":"string","minLength":1,"maxLength":1000,"description":"Optional concrete question this visual observation should answer."},"retention":{"type":"string","enum":["temporary","permanent"],"default":"temporary"},"retentionReason":{"type":"string","minLength":1,"maxLength":2000,"description":"Required for permanent retention; explain the requested preservation or key conclusion supported."}}),
             vec!["sessionId", "tabId", "reason"],
         ),
         (
@@ -1266,6 +1266,15 @@ fn workspace_presentation_path(state: &Value) -> Value {
         state.get("requestedUrl").filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
             .cloned().unwrap_or_else(|| state["url"].clone())
     }
+}
+
+fn browser_presentation(mut state: Value, presentation: &str) -> Value {
+    state["kind"] = json!("browser");
+    state["presentation"] = json!(presentation);
+    state["path"] = workspace_presentation_path(&state);
+    state["mimeType"] = json!("text/html");
+    state["version"] = json!("live");
+    state
 }
 
 fn allowed_url(input: &str) -> Result<url::Url, GatewayError> {
@@ -1609,8 +1618,8 @@ async fn stage_upload(
         .as_u64()
         .unwrap_or(2 * 1024 * 1024 * 1024)
         .clamp(1024 * 1024, 16 * 1024 * 1024 * 1024);
-    // Copy from stable verified handles once; Chromium's delayed form submission must not reopen a changed source path.
-    // 从稳定核验句柄复制一次；Chromium 延后提交表单时不能重新读取已改变的源路径。
+    // Copy once from verified handles; delayed form submission must not reopen a changed source.
+    // 从已核验句柄复制一次；延迟提交表单时不重读已变化的源路径。
     let result = tokio::task::spawn_blocking(move || {
         use std::io::{Read, Write};
         super::local_files::inspect(&created, true, false)
@@ -1750,6 +1759,7 @@ pub(crate) async fn execute(
         return Ok(known_sessions(ctx).await);
     }
     if name == "browser.open" {
+        let presentation = input["presentation"].as_str().unwrap_or("background");
         if let Some(endpoint) = input["cdpEndpoint"].as_str() {
             let endpoint = url::Url::parse(endpoint).map_err(|_| {
                 failure(
@@ -1839,8 +1849,16 @@ pub(crate) async fn execute(
         }
         let intent = super::intent::calculate("tools.browserIntent", &json!({"message":ctx.config["trustedUserText"],"previousUserMessages":ctx.config["previousUserMessages"]}))
             .map_err(|message| failure("TOOL_INTENT_FAILED", &message, 500))?;
-        // Prefer the visible workspace page; external presentation follows trusted user intent, not a guessed foreground flag.
-        // 优先复用可见工作区网页；外部展示依据真实用户意图，不依据模型猜测的前台参数。
+        // Background navigation owns a matching page, never replaces the page the user is reading.
+        // 后台分析复用同址页面或创建独立页面，不导航用户正在阅读的其他网页。
+        if input["browserPath"].is_null() && intent["presentationTarget"] != "application"
+            && presentation != "workspace" && input["url"].is_string()
+        {
+            let opened = Box::pin(workspace_open(&input, ctx)).await?;
+            return Ok(browser_presentation(opened, "background"));
+        }
+        // Connecting without navigation preserves the real session; only explicit display reveals it.
+        // 不导航的连接保留真实会话；只有明确展示才进入右侧工作区。
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
             let handles = ctx
                 .runtime
@@ -1875,11 +1893,9 @@ pub(crate) async fn execute(
                         }
                     }
                     drop(session);
-                    let mut opened = workspace_action(&json!({"sessionId":id,
+                    let opened = workspace_action(&json!({"sessionId":id,
                         "action":if navigate { "navigate" } else { "state" },"url":input["url"]}), ctx).await?;
-                    opened["kind"] = json!("browser"); opened["presentation"] = json!("workspace");
-                    opened["path"] = workspace_presentation_path(&opened); opened["mimeType"] = json!("text/html"); opened["version"] = json!("live");
-                    return Ok(opened);
+                    return Ok(browser_presentation(opened, presentation));
                 }
                 let tabs = update_tabs(&mut session, ctx).await?;
                 let tab = session.embedded_target.as_deref().unwrap_or("");
@@ -1900,13 +1916,8 @@ pub(crate) async fn execute(
             }
         }
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
-            let mut opened = Box::pin(workspace_open(&input, ctx)).await?;
-            opened["kind"] = json!("browser");
-            opened["presentation"] = json!("workspace");
-            opened["path"] = workspace_presentation_path(&opened);
-            opened["mimeType"] = json!("text/html");
-            opened["version"] = json!("live");
-            return Ok(opened);
+            let opened = Box::pin(workspace_open(&input, ctx)).await?;
+            return Ok(browser_presentation(opened, presentation));
         }
         let path = executable(&input, ctx)?;
         let forbidden=super::intent::calculate("tools.foregroundForbidden",&json!({"message":ctx.config["trustedUserText"],"target":{"kind":"browser","appPath":path}})).map_err(|message|failure("TOOL_INTENT_FAILED",&message,500))?;
@@ -2483,9 +2494,31 @@ mod tests {
         let connected = super::super::gateway::execute("browser.open",
             json!({"url":format!("http://{address}/"),"reason":"Inspect the existing page"}), &approved).await.unwrap();
         assert_eq!(connected["sessionId"], id);
+        assert_eq!(connected["presentation"], "background");
         assert_eq!(evaluate(&socket, "window.sidebarContinuity".into(), &ctx).await.unwrap(), "preserved");
         let duplicate = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx).await.unwrap();
         assert_eq!(duplicate["sessionId"], id);
+        let background = super::super::gateway::execute("browser.open",
+            json!({"url":format!("http://{address}/opened"),"reason":"Analyze another page in the background"}), &approved).await.unwrap();
+        assert_eq!(background["presentation"], "background");
+        assert_ne!(background["sessionId"], id);
+        assert_eq!(background["processId"], opened["processId"]);
+        assert_eq!(evaluate(&socket, "({url:location.href,saved:window.sidebarContinuity})".into(), &ctx).await.unwrap(),
+            json!({"url":format!("http://{address}/"),"saved":"preserved"}));
+        let background_id = background["sessionId"].as_str().unwrap();
+        let snapshot = execute("browser.snapshot", json!({"sessionId":background_id,"tabId":background["tabId"]}), &ctx).await.unwrap();
+        assert_eq!(snapshot["value"]["title"], "Opened page");
+        let captured = execute("browser.screenshot", json!({"sessionId":background_id,"tabId":background["tabId"]}), &ctx).await.unwrap();
+        let pixels = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
+            captured["value"]["content"][0]["data"].as_str().unwrap()).unwrap();
+        assert!(pixels.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let repeated = execute("browser.open", json!({"url":format!("http://{address}/opened")}), &ctx).await.unwrap();
+        assert_eq!(repeated["sessionId"], background_id);
+        let presented = super::super::gateway::execute("browser.open",
+            json!({"url":format!("http://{address}/opened"),"presentation":"workspace","reason":"Show the analyzed page"}), &approved).await.unwrap();
+        assert_eq!(presented["presentation"], "workspace");
+        assert_eq!(presented["sessionId"], background_id);
+        assert_eq!(workspace_action(&json!({"sessionId":background_id,"action":"close"}), &ctx).await.unwrap()["closed"], true);
         let mut foreign = ctx.clone(); foreign.conversation_id = uuid::Uuid::new_v4().to_string();
         assert!(execute("browser.tabs", json!({"reason":"Discover only this chat"}), &foreign).await.unwrap()["sessions"].as_array().unwrap().is_empty());
         assert_eq!(workspace_action(&json!({"sessionId":id,"action":"state"}), &foreign).await.unwrap_err().code, "BROWSER_SESSION_NOT_FOUND");

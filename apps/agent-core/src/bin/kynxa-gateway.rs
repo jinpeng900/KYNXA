@@ -4,6 +4,24 @@
 #[tokio::main]
 async fn main() {
     let arguments = std::env::args().collect::<Vec<_>>();
+    let desktop_shutdown = arguments.iter().any(|argument| argument == "--desktop-lifetime").then(|| {
+        let (shutdown, requested) = tokio::sync::oneshot::channel();
+        // Only the owning desktop opts into stdin lifetime; manual launch keeps its normal lifecycle.
+        // 仅桌面自启动进程使用 stdin 生命周期；手动运行不因输入 EOF 自动退出。
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let input = std::io::stdin();
+            for line in input.lock().lines() {
+                match line {
+                    Ok(line) if line.trim().eq_ignore_ascii_case("shutdown") => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = shutdown.send(());
+        });
+        requested
+    });
     if let Some(index) = arguments
         .iter()
         .position(|value| value == "--initialize-storage")
@@ -31,7 +49,7 @@ async fn main() {
     }
     let result = match kynxa_agent_core_native::gateway_contract::GatewayConfig::from_environment()
     {
-        Ok(config) => kynxa_agent_core_native::gateway::serve(config).await,
+        Ok(config) => kynxa_agent_core_native::gateway::serve_with_desktop_lifetime(config, desktop_shutdown).await,
         Err(error) => Err(error),
     };
     if let Err(error) = result {

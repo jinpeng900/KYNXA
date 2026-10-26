@@ -324,7 +324,7 @@
     },
     {
       "name": "filesystem.read",
-      "description": "Read UTF-8 text (file <=1 MiB) with full-file SHA-256. Optional startLine/endLine select inclusive 1-based lines. Continue nextOffset while hasMore, retaining the same line range; restart if hash changes.",
+      "description": "Read UTF-8 or BOM-marked UTF-16LE text from files up to 16 MiB with full-file SHA-256. Reading is streamed; each output page remains limited by maxChars (at most 64000 UTF-16 units). Optional startLine/endLine select inclusive 1-based lines. Supply the search result hash or previous page hash as expectedSha256; continue nextOffset while hasMore, retaining the same line range. A changed version must be searched/read again. This does not increase the 1 MiB text write/edit limit.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -343,7 +343,8 @@
           "maxBytes": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048576
+            "maximum": 16777216,
+            "description": "Maximum source file bytes, not response page bytes; defaults to 16 MiB."
           },
           "maxChars": {
             "type": "integer",
@@ -353,18 +354,23 @@
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 1048576,
+            "maximum": 16777216,
             "description": "Absolute UTF-16 position; use nextOffset to avoid splitting characters."
           },
           "startLine": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048577
+            "maximum": 16777217
           },
           "endLine": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1048577
+            "maximum": 16777217
+          },
+          "expectedSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Full-file SHA-256 from filesystem.search or a prior page; rejects stale reads before returning any content."
           }
         },
         "required": [
@@ -458,7 +464,7 @@
     },
     {
       "name": "filesystem.search",
-      "description": "Find literal UTF-8 content or paths without an index; path mode reads names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Ignore files apply by default. Changed sources require a fresh search.",
+      "description": "Find paths, globs, literal UTF-8 content or line-wise Rust regex without an index. Prefer exact path/glob and content/regex for known filenames or symbols, then filesystem.read at matching lines. Path/glob modes read names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Honors ignore files by default; changed sources need a fresh search. Each page returns up to 1000 matches within 2 MiB and 30 seconds; content/regex skip files above 16 MiB and report incomplete coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -482,15 +488,17 @@
           "maxMatches": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 200
+            "maximum": 1000
           },
           "mode": {
             "type": "string",
             "enum": [
               "content",
-              "path"
+              "path",
+              "glob",
+              "regex"
             ],
-            "description": "Default content; path matches a literal relative-path/name substring (case-insensitive on Windows)."
+            "description": "Default content matches literal text. path matches a literal relative-path/name substring; glob matches path patterns such as **/*.rs (both case-insensitive on Windows). regex matches file content one line at a time, with Rust regex syntax; use (?i) for case-insensitive content. Glob/regex do not bypass ignore or workspace permissions."
           },
           "respectIgnoreFiles": {
             "type": "boolean",
@@ -836,7 +844,7 @@
     {
       "name": "knowledge.search",
       "source": "builtin",
-      "description": "Search authorized local documents and code. domain is an explicit scope; choose it from the user or verified source, not words like method/function or brand capitalization. Keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing mean only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
+      "description": "Search authorized local documents and code with E5 + lexical rank-RRF and lightweight structured sorting. For a known filename/path/function, prefer filesystem.search glob/regex then filesystem.read. domain is an explicit scope from the user or verified source, not words like method/function or brand capitalization; keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Preserve the same gap identity while rewriting keywords or narrowing directories: at most two supplemental searches for that gap, then state missing evidence or use another evidence type and continue the task. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing prove only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -895,7 +903,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1000,
-            "description": "Specific unanswered fact or omitted condition, not a restatement of the entire task."
+            "description": "Editable missing-fact description; rewriting it does not reset the same requirement's search allowance."
+          },
+          "requirementId": {
+            "type": "string",
+            "pattern": "^requirement-[1-9][0-9]*$",
+            "description": "Existing native acceptance requirement ID from this task. Independent registered requirements have separate refinement allowances. Never invent IDs; omitted shares the original question allowance."
           }
         }
       }
@@ -1105,7 +1118,7 @@
     {
       "name": "knowledge.experience",
       "source": "builtin",
-      "description": "Recall current-chat navigation experience with live citation version checks. Historical answers are not current facts. Re-read and validate sources before reusing an experience; stale dependencies require repair.",
+      "description": "Recall receipt-verified procedure templates for the current project/chat and legacy current-chat retrieval navigation. Templates activate only after real-data maturation with matching current tool contracts; rebind parameters and obtain current permission, never inherit prior approval. Legacy navigation is not a verified procedure or current fact: reread original sources and validate versions. Missing evidence returns empty/collecting guidance without stopping the task. / 查询当前项目或聊天的回执验证模板及历史检索导航；真实数据成熟后才可复用，参数和权限重新核验，旧导航须回读原文，缺证据不阻断任务。",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1892,7 +1905,7 @@
     },
     {
       "name": "tool.load",
-      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service.",
+      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service. Batch currently needed known names in one names array and reuse unchanged loaded schemas. Discover additional tools whenever the task needs them.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1913,7 +1926,7 @@
     },
     {
       "name": "tool.result.read",
-      "description": "Page this chat's saved result by opaque id. Typed media references; no private MCP metadata.",
+      "description": "Read this chat's immutable saved result by opaque id. Offsets are UTF-16 positions in its public projected JSON, not original document offsets. While hasMore is true, continue with nextOffset and the same id/resultRef.sha256; stop paging when false. A successful archive read does not mean the original operation succeeded or that the source document was fully read. Working summaries are derived context, not original evidence. Typed media references; no private MCP metadata.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2808,7 +2821,7 @@
     },
     {
       "name": "task.describe",
-      "description": "Name this existing task and choose whether it belongs in the task list. Use a concise meaningful title for substantive multi-step work; brief chat can stay hidden. Changes only current-task presentation, preserves usage and task identity, and never starts another task.",
+      "description": "Name this existing task and choose whether it belongs in the task list. Set displayInTaskList=true only for important actual work clearly requested by the user, with a concise meaningful title. Ordinary questions, explanations, chat, simple lookups and incidental suggestions stay hidden; time, retries or interruption do not make them task-list items. Changes presentation only; preserves the same task identity, recovery and usage, and never starts another task.",
       "inputSchema": {
         "type": "object",
         "properties": {

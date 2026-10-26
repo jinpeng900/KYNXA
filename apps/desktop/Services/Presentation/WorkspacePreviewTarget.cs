@@ -13,6 +13,8 @@ public sealed record WorkspacePreviewTarget
     public string? Language { get; init; }
     public string MimeType { get; init; } = "text/plain";
     public string? Text { get; init; }
+    public string[][]? Rows { get; init; }
+    public string? Delimiter { get; init; }
     public string? ContentUrl { get; init; }
     public bool HasMore { get; init; }
     public int? NextOffset { get; init; }

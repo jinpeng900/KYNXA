@@ -32,16 +32,12 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
     private readonly bool _ownsHttpClient;
     private readonly HttpClient? _urlImportHttpClient;
 
-    public RetrievalApiClient() : this(new HttpClient
-    {
-        BaseAddress = ModelGatewayService.Address,
-        Timeout = TimeSpan.FromSeconds(60)
-    }, ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true)
+    public RetrievalApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(60)),
+        ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true)
     {
         // URL parsing has its own bounded transport; ordinary status reads keep their existing deadline.
         // 链接解析使用独立有界传输；普通状态读取继续使用原有截止时间。
-        _urlImportHttpClient = new HttpClient { BaseAddress = ModelGatewayService.Address,
-            Timeout = TimeSpan.FromMinutes(5) };
+        _urlImportHttpClient = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromMinutes(5));
     }
 
     public RetrievalApiClient(HttpClient httpClient, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)

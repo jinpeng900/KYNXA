@@ -18,7 +18,6 @@ public sealed partial class RetrievalSettingsWindow
     private readonly CheckBox _inherit = new();
     private readonly ScrollSafeComboBox _localMode = new();
     private readonly ScrollSafeComboBox _semanticMode = new();
-    private readonly ScrollSafeComboBox _rerankMode = new();
     private readonly ScrollSafeComboBox _webMode = new();
     private readonly ScrollSafeComboBox _webProvider = new();
     private readonly ScrollSafeComboBox _webDepth = new();
@@ -79,10 +78,8 @@ public sealed partial class RetrievalSettingsWindow
         }
         ConfigurePicker(_localMode, "RetrievalLocalMode", "本地检索", ("true", "启用"), ("false", "停用"));
         ConfigurePicker(_semanticMode, "RetrievalSemanticMode", "语义检索", ("auto", "自动"), ("off", "停用"));
-        ConfigurePicker(_rerankMode, "RetrievalRerankMode", "复杂查询重排", ("off", "停用"), ("builtin-multilingual-reranker", "按需启用"));
         _settingsPanel.Children.Add(Row("本地检索", _localMode));
         _settingsPanel.Children.Add(Row("语义检索", _semanticMode));
-        _settingsPanel.Children.Add(Row("复杂查询重排", _rerankMode));
         _settingsPanel.Children.Add(Row("内置中英文模型", _embeddingStatus));
         AutomationProperties.SetAutomationId(_embeddingStatus, "RetrievalEmbeddingStatus");
 
@@ -130,7 +127,7 @@ public sealed partial class RetrievalSettingsWindow
             await RunOperationAsync(LoadAsync);
         };
         root.Unloaded += (_, _) => StopStatusObservation();
-        foreach (var picker in new[] { _localMode, _semanticMode, _rerankMode, _webMode, _webProvider, _webDepth, _webLanguage })
+        foreach (var picker in new[] { _localMode, _semanticMode, _webMode, _webProvider, _webDepth, _webLanguage })
             picker.SelectionChanged += async (_, _) => { if (!_rendering) await SaveAsync(); };
         _inherit.Checked += async (_, _) => { if (!_rendering) await SaveAsync(); };
         _inherit.Unchecked += async (_, _) => { if (!_rendering) await SaveAsync(); };

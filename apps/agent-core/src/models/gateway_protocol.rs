@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[path = "gateway_protocol/history_cache.rs"]
+mod history_cache;
+
 use super::{
     capabilities, context_control,
     gateway::ModelError,
@@ -119,20 +122,55 @@ pub fn build_summary_request(
     max_output_tokens: Option<u64>,
     stream: bool,
 ) -> Result<(Value, Value), ModelError> {
+    build_summary_request_with_tools(connection, model, messages, system, max_output_tokens, &[], stream)
+}
+
+/// Reuse an authorized request prefix for compaction while allowing text output only.
+/// 压缩复用当前授权的请求前缀，但摘要只能输出正文，不触发工具执行。
+pub fn build_summary_request_with_tools(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    max_output_tokens: Option<u64>,
+    tools: &[Value],
+    stream: bool,
+) -> Result<(Value, Value), ModelError> {
     let mut body = build_request(
         connection,
         model,
         messages,
         system,
         max_output_tokens,
-        &[],
+        tools,
         stream,
     )?;
+    if body["tools"].as_array().is_some_and(|tools| !tools.is_empty()) {
+        match protocol(connection) {
+            "anthropic-messages" => body["tool_choice"] = json!({"type":"none"}),
+            "ollama" => { body.as_object_mut().unwrap().remove("tools"); },
+            _ => body["tool_choice"] = json!("none"),
+        }
+    }
     let controls = summary_controls(connection, model)?;
     for (field, value) in controls["parameters"].as_object().into_iter().flatten() {
         body[field] = value.clone();
     }
     Ok((body, controls["audit"].clone()))
+}
+
+/// Append only a native summary tail to an already projected prefix; never translate its tool updates twice.
+/// 只给已投影的协议前缀追加原生摘要尾部；已有工具增量块不再翻译第二遍。
+pub(crate) fn build_summary_from_wire_prefix(connection: &Value, model: &str, prefix: &Value,
+    tail: &[Value], max_output_tokens: Option<u64>) -> Result<(Value, Value), ModelError> {
+    let (mut body, controls) = build_summary_request_with_tools(connection, model, tail, "",
+        max_output_tokens, protocol::array(&prefix["tools"]), false)?;
+    let mut messages = protocol::array(&prefix["messages"]).to_vec();
+    messages.extend_from_slice(protocol::array(&body["messages"]));
+    body["messages"] = json!(messages);
+    if let Some(system) = prefix.get("system") { body["system"] = system.clone(); }
+    else if let Some(object) = body.as_object_mut() { object.remove("system"); }
+    Ok((body, controls))
 }
 
 fn content_block(protocol: &str, role: &str, value: &Value) -> Value {
@@ -264,6 +302,15 @@ pub fn build_request(
             );
         }
     }
+    if name == "anthropic-messages" {
+        // Messages endpoints reject empty turns; dropping them the same way every round keeps the prefix stable.
+        // Messages 接口拒绝空内容消息；每轮按同一规则去掉空消息，前缀保持一致，正式历史不变。
+        messages.retain(|message| match &message["content"] {
+            Value::String(text) => !text.is_empty(),
+            Value::Array(blocks) => !blocks.is_empty(),
+            _ => true,
+        });
+    }
     if !supports_tools(connection) {
         // Broker notices and a new user message can share a turn; strict Gemma templates require alternating roles.
         // 调度提示与用户补充可能相邻；仅在不支持工具的自管模型投影中合并同角色，正式消息仍原样保存。
@@ -301,8 +348,17 @@ pub fn build_request(
     if name == "ollama" {
         body["stream"] = json!(stream);
         body.as_object_mut().unwrap().remove("tool_choice");
+        let mut options = json!({});
         if let Some(limit) = body.as_object_mut().unwrap().remove("max_tokens") {
-            body["options"] = json!({"num_predict":limit});
+            options["num_predict"] = limit;
+        }
+        // Generation must retain the same configured window used during local preparation.
+        // 正式生成沿用本地预热所用的窗口，不能重新落回 Ollama 默认值。
+        if let Some(window) = connection["contextWindowTokens"].as_u64().filter(|window| *window > 0) {
+            options["num_ctx"] = json!(window);
+        }
+        if options.as_object().is_some_and(|options| !options.is_empty()) {
+            body["options"] = options;
         }
         for message in body["messages"].as_array_mut().unwrap() {
             if let Some(parts) = message["content"].as_array() {
@@ -359,23 +415,33 @@ pub fn apply_summary_prompt_cache(connection: &Value, model: &str, body: &mut Va
     apply_prompt_cache(connection, model, body, scope, &stable_system)
 }
 
-/// Validate the fully templated input against the same owned runtime, before generation is dispatched.
-/// 使用同一自管运行时的完整模板计数核验输入，并为本次输出预留空间；拒绝只触发上下文重投影。
+/// Fit output to the owned runtime's exact input count; only genuinely oversized input needs compaction.
+/// 按自管运行时的实测输入调整输出预留；只有输入确实放不下时才请求压缩。
 pub(crate) fn validate_measured_request(
     connection: &Value,
-    body: &Value,
+    body: &mut Value,
     input_tokens: u64,
     context_window_tokens: u64,
 ) -> Result<(), ModelError> {
-    let output_tokens = body["max_tokens"]
-        .as_u64()
-        .or_else(|| body["max_completion_tokens"].as_u64())
-        .or_else(|| body["max_output_tokens"].as_u64())
-        .unwrap_or(0);
+    let output_field = ["max_tokens", "max_completion_tokens", "max_output_tokens"]
+        .into_iter().find(|field| body[*field].as_u64().is_some());
+    let mut output_tokens = output_field.and_then(|field| body[field].as_u64()).unwrap_or(0);
+    let provider_input_limit = connection["maxInputTokens"].as_u64().unwrap_or(u64::MAX);
+    let available_output = context_window_tokens.saturating_sub(input_tokens).saturating_sub(64)
+        .min(connection["maxOutputTokens"].as_u64().unwrap_or(u64::MAX));
+    let minimum_output = if context_window_tokens < 2048 { 32 } else { 256 };
+    if input_tokens <= provider_input_limit && output_tokens > available_output
+        && available_output >= minimum_output
+    {
+        if let Some(field) = output_field {
+            body[field] = json!(available_output);
+            output_tokens = available_output;
+        }
+    }
     let input_limit = context_window_tokens
         .saturating_sub(output_tokens)
         .saturating_sub(64)
-        .min(connection["maxInputTokens"].as_u64().unwrap_or(u64::MAX));
+        .min(provider_input_limit);
     if input_tokens <= input_limit {
         return Ok(());
     }
@@ -553,7 +619,13 @@ pub fn append_results(
             && pair["result"]["isError"] != true
             && canonical["isError"] != true
         {
-            for block in canonical["content"]
+            // Native browser receipts wrap their image blocks in value; keep the pixels out of tool text.
+            // 原生浏览器回执用 value 包装图块；像素走多模态输入，不塞进工具文字。
+            let image_content = canonical.get("content").or_else(|| {
+                (canonical["sessionId"].is_string() && canonical["tabId"].is_string())
+                    .then(|| canonical["value"].get("content")).flatten()
+            });
+            for block in image_content.unwrap_or(&Value::Null)
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -800,9 +872,9 @@ pub async fn history_projection_verified(
     declarations: &[Value],
 ) -> Result<HistoryProjection, ModelError> {
     let name = protocol(connection);
-    let mut projection = history_projection(name, formal_history, available_tools)?;
     let origin = json!({"providerId":connection["providerId"],"model":model,"protocol":name,
         "connectionFingerprint":fingerprint(&json!([connection["providerId"],model,name,connection["baseUrl"],connection["apiKey"].as_str().unwrap_or("")]))});
+    let mut projection = history_projection_for_origin(name, formal_history, available_tools, Some(&origin))?;
     for assistant in formal_history
         .iter()
         .filter(|message| message["Role"] == "assistant")
@@ -885,6 +957,28 @@ pub fn history_projection(
     formal_history: &[Value],
     available_tools: &[String],
 ) -> Result<HistoryProjection, ModelError> {
+    history_projection_for_origin(name, formal_history, available_tools, None)
+}
+
+/// Runtime broker messages replay only through the verified route, never through generic public history.
+/// 运行时代理消息仅在已核验路由内回放，不经通用公开历史取得系统权威。
+fn history_projection_for_origin(
+    name: &str,
+    formal_history: &[Value],
+    available_tools: &[String],
+    runtime_origin: Option<&Value>,
+) -> Result<HistoryProjection, ModelError> {
+    history_cache::project(name, formal_history, available_tools, runtime_origin, || {
+        build_history_projection(name, formal_history, available_tools, runtime_origin)
+    })
+}
+
+fn build_history_projection(
+    name: &str,
+    formal_history: &[Value],
+    available_tools: &[String],
+    runtime_origin: Option<&Value>,
+) -> Result<HistoryProjection, ModelError> {
     let descriptors:Vec<Value>=formal_history.iter().map(|message|json!({"id":message["Id"],"key":message["Id"].as_str().unwrap_or("").to_lowercase(),
         "role":message["Role"],"status":message["Status"],"replyKey":message["ReplyTo"].as_str().map(str::to_lowercase),
         "hasContent":message["Content"].as_str().is_some_and(|s|!s.trim().is_empty()),"validUserContent":message["Content"].is_string(),"taskCompletion":task_completion(message)})).collect();
@@ -953,7 +1047,9 @@ pub fn history_projection(
         } else {
             planned["publicContent"].clone()
         };
-        let rounds = history_rounds(assistant)?;
+        let mut rounds = history_rounds(assistant)?;
+        let runtime_allowed = runtime_origin.is_some_and(|origin| assistant["ModelTranscript"]["origin"] == *origin);
+        for round in &mut rounds { round["runtimeReplayAllowed"] = json!(runtime_allowed); }
         summary_sources.push(summary_source(user, assistant, &rounds)?);
         let record = json!({"turn":{"user":{"Id":user["Id"],"Content":user["Content"],"contentJson":user["Content"].to_string()},
             "assistant":{"Id":assistant["Id"],"Content":content,"contentJson":content.to_string(),"Status":assistant["Status"]},"taskCompletion":task_completion(assistant)},"rounds":rounds});
@@ -1094,7 +1190,7 @@ fn history_rounds(assistant: &Value) -> Result<Vec<Value>, ModelError> {
             observation["contentJson"] = json!(observation["content"].to_string());
             observations.push(observation);
         }
-        records.push(json!({"round":round["round"],"text":round["text"],"textJson":round["text"].to_string(),"calls":round["calls"],"observations":observations}));
+        records.push(json!({"round":round["round"],"text":round["text"],"textJson":round["text"].to_string(),"calls":round["calls"],"observations":observations,"contextBefore":round["contextBefore"]}));
     }
     Ok(records)
 }
@@ -1314,6 +1410,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ollama_generation_reuses_prepared_context_without_changing_cloud_requests() {
+        let messages = [json!({"role":"user","content":"hello"})];
+        let mut connection = json!({"protocol":"ollama","baseUrl":"http://127.0.0.1:11434",
+            "contextWindowTokens":8192});
+        let body = build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
+        assert_eq!(body["options"], json!({"num_ctx":8192,"num_predict":1024}));
+        connection.as_object_mut().unwrap().remove("contextWindowTokens");
+        let automatic = build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
+        assert!(automatic["options"].get("num_ctx").is_none());
+        connection["protocol"] = json!("openai-completions");
+        connection["contextWindowTokens"] = json!(8192);
+        let cloud = build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
+        assert!(cloud.get("options").is_none());
+    }
+
+    #[test]
+    fn messages_requests_drop_empty_turns_while_other_protocols_keep_them() {
+        let history = [json!({"role":"user","content":"start"}), json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":[]}), json!({"role":"user","content":""}), json!({"role":"user","content":"review"})];
+        let messages = json!({"protocol":"anthropic-messages","baseUrl":"https://api.deepseek.com/anthropic","providerId":"fixture"});
+        let body = build_request(&messages, "deepseek-flash", &history, "", Some(64), &[], true).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert!(body["messages"].as_array().unwrap().iter().all(|message| message["content"] != json!([]) && message["content"] != ""));
+        let compatible = json!({"protocol":"openai-completions","baseUrl":"https://api.deepseek.com","providerId":"fixture"});
+        let body = build_request(&compatible, "deepseek-flash", &history, "", Some(64), &[], true).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), history.len());
+    }
+
+    #[test]
     fn auxiliary_summary_cache_uses_native_system_fields_without_changing_roles_or_responses_instructions() {
         for (kind, model, base) in [("openai-responses","gpt-6.1-sol","https://api.openai.com/v1"),
             ("openai-completions","gpt-4.1","https://api.openai.com/v1"),
@@ -1345,11 +1470,11 @@ mod tests {
     #[test]
     fn measured_context_preflight_reserves_output_and_retains_actual_runtime_limit() {
         let connection = json!({"contextWindowTokens":32768,"apiKey":"fixture-secret"});
-        let body = json!({"messages":[{"role":"user","content":"retain original request"}],
+        let mut body = json!({"messages":[{"role":"user","content":"retain original request"}],
             "tools":[{"type":"function","function":{"name":"fixture","parameters":{"type":"object"}}}],
             "max_tokens":2048});
-        assert!(validate_measured_request(&connection, &body, 6080, 8192).is_ok());
-        let error = validate_measured_request(&connection, &body, 12163, 8192).unwrap_err();
+        assert!(validate_measured_request(&connection, &mut body, 6080, 8192).is_ok());
+        let error = validate_measured_request(&connection, &mut body, 12163, 8192).unwrap_err();
         assert_eq!(error.code, "MODEL_CONTEXT_LIMIT_REJECTED");
         assert_eq!(error.details["requestDispatched"], false);
         assert_eq!(error.details["contextRejection"]["contextWindowTokens"], 8192);
@@ -1359,8 +1484,26 @@ mod tests {
             > protocol::tool_message_tokens(protocol::array(&body["messages"]), ""));
         assert!(!error.details.to_string().contains("fixture-secret"));
         let constrained = json!({"maxInputTokens":3000});
-        assert!(validate_measured_request(&constrained, &body, 3000, 8192).is_ok());
-        assert!(validate_measured_request(&constrained, &body, 3001, 8192).is_err());
+        assert!(validate_measured_request(&constrained, &mut body, 3000, 8192).is_ok());
+        assert!(validate_measured_request(&constrained, &mut body, 3001, 8192).is_err());
+    }
+
+    #[test]
+    fn measured_context_preflight_shrinks_only_output_when_actual_input_fits() {
+        for (window, input, output, fitted) in [(8192, 6081, 2048, 2047), (1024, 800, 256, 160)] {
+            let original = json!({"messages":[{"role":"user","content":"keep this exact input"}],
+                "tools":[{"type":"function","function":{"name":"fixture"}}],"max_tokens":output});
+            let mut body = original.clone();
+            validate_measured_request(&json!({}), &mut body, input, window).unwrap();
+            assert_eq!(body["max_tokens"], fitted);
+            assert_eq!(body["messages"], original["messages"]);
+            assert_eq!(body["tools"], original["tools"]);
+        }
+        let mut body = json!({"messages":[],"max_tokens":2048});
+        assert!(validate_measured_request(&json!({}), &mut body, 7900, 8192).is_err());
+        assert_eq!(body["max_tokens"], 2048);
+        assert!(validate_measured_request(&json!({"maxInputTokens":6000}), &mut body, 6081, 8192).is_err());
+        assert_eq!(body["max_tokens"], 2048);
     }
 
     #[test]
@@ -1914,18 +2057,18 @@ mod tests {
         ];
         for (name, raw) in fixtures {
             let turn = decode_response(name, raw, &catalog(), Value::Null).unwrap();
-            let continued=append_results(name,&[],&turn,&[json!({"call":turn.calls[0],"result":{"status":"completed","content":{"content":[{"type":"text","text":"temporary image"},{"type":"image","mimeType":"image/png","data":"aGVsbG8="}],"_meta":{"private":"secret"}}}})]).unwrap();
-            assert!(protocol::complete_pairs(&continued));
-            assert_eq!(
-                &continued[..turn.continuation.len()],
-                turn.continuation.as_slice()
-            );
-            let image = &continued.last().unwrap()["content"][1]["image_url"]["url"];
-            assert_eq!(image, "data:image/png;base64,aGVsbG8=");
-            let tool_text =
-                json!(&continued[turn.continuation.len()..continued.len() - 1]).to_string();
-            assert!(!tool_text.contains("aGVsbG8="));
-            assert!(!tool_text.contains("secret"));
+            let image = json!({"content":[{"type":"text","text":"temporary image"},{"type":"image","mimeType":"image/png","data":"aGVsbG8="}],"_meta":{"private":"secret"}});
+            for canonical in [image.clone(), json!({"sessionId":"browser-session","tabId":"page","value":image})] {
+                let continued = append_results(name, &[], &turn,
+                    &[json!({"call":turn.calls[0],"result":{"status":"completed","content":canonical}})]).unwrap();
+                assert!(protocol::complete_pairs(&continued));
+                assert_eq!(&continued[..turn.continuation.len()], turn.continuation.as_slice());
+                let image = &continued.last().unwrap()["content"][1]["image_url"]["url"];
+                assert_eq!(image, "data:image/png;base64,aGVsbG8=");
+                let tool_text = json!(&continued[turn.continuation.len()..continued.len() - 1]).to_string();
+                assert!(!tool_text.contains("aGVsbG8="));
+                assert!(!tool_text.contains("secret"));
+            }
         }
     }
 

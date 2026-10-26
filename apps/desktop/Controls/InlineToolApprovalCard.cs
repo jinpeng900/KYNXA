@@ -68,8 +68,8 @@ public sealed partial class InlineToolApprovalCard : UserControl
             : tool.Name.StartsWith("mcp.", StringComparison.Ordinal) ? "MCP 服务是受信任的外部程序，不属于终端沙箱。" : null;
         if (executionBoundaryKey is not null)
         {
-            // Reuse the existing detail boundaries in the main readable area without truncating their scope.
-            // 主可读区复用原有详情中的执行边界，不截断关键授权范围，也不添加新的审批规则。
+            // Reuse complete execution boundaries in the readable details.
+            // 详情完整保留原执行边界和授权范围，沿用审批规则。
             var executionBoundary = Label("InlineToolApprovalExecutionBoundary", secondary: true);
             UiLocalization.Bind(executionBoundary, TextBlock.TextProperty, executionBoundaryKey);
             body.Children.Add(executionBoundary);
@@ -134,8 +134,8 @@ public sealed partial class InlineToolApprovalCard : UserControl
         _surface.Child = _layout;
         Content = _surface;
 
-        // Full operation text scrolls between a fixed title and decisions; short windows reserve the composer area.
-        // 完整操作说明在固定标题与决定按钮之间滚动；矮窗口继续为输入区预留空间，不裁切整个卡片。
+        // Scroll details between the fixed title and buttons; reserve composer space in short windows.
+        // 详情在固定标题和按钮之间滚动；矮窗口仍为输入区留出空间。
         SizeChanged += (_, args) => { UpdateActionsLayout(args.NewSize.Width); UpdateContentHeight(); };
         _title.SizeChanged += (_, _) => UpdateContentHeight();
         _actions.SizeChanged += (_, _) => UpdateContentHeight();
@@ -159,8 +159,8 @@ public sealed partial class InlineToolApprovalCard : UserControl
             Math.Max(_actions.ActualHeight, _actions.DesiredSize.Height));
         double fixedHeight = titleHeight + actionsHeight + 2 * _layout.RowSpacing +
             _surface.Padding.Top + _surface.Padding.Bottom + _surface.BorderThickness.Top + _surface.BorderThickness.Bottom;
-        // Never impose a positive content minimum when the host has less space than the non-scrolling controls.
-        // 宿主空间不足时不强制可读区最小高度；决定按钮保持自然高度，避免正文下限把输入框推出窗口。
+        // Drop the content minimum when fixed controls exhaust the available height.
+        // 空间不足时取消正文最小高度，保留按钮高度，避免挤走输入框。
         double contentHeight = Math.Max(0, cardBudget - fixedHeight);
         if (Math.Abs(_contentScroll.MaxHeight - contentHeight) > 0.5) _contentScroll.MaxHeight = contentHeight;
     }

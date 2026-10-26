@@ -16,8 +16,8 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Open tabs retain bounded views and parsed projections; inactive views yield browser resources.
-/// 已打开标签保留有界视图和解析投影；闲置视图让出浏览器资源，切换不重复解析文档。
+/// Cache open views within limits; inactive views yield browser resources.
+/// 限量缓存已打开视图，切换不重复解析；闲置视图让出浏览器资源。
 /// </summary>
 public sealed class ConversationDocumentPanel : Grid, IDisposable
 {
@@ -39,8 +39,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private readonly List<DocumentWork> _pendingDocuments = [];
     private int _preparingDocuments;
     private sealed record CachedDocument(WorkspacePreviewTarget Preview, bool ShowSource, string? RequestedVersion);
-    // Each open resource owns preparation; selection only controls which completed view is presented.
-    // 每份资源独立持有准备过程，标签选择只决定展示哪个视图，不取消其他资源。
+    // Prepare each resource independently; selection only changes the visible view.
+    // 各资源独立准备；切换标签只改变显示，不取消其他资源。
     private sealed class DocumentWork(string key, Guid conversationId, string path, string? title, bool userSelected,
         string? requestedVersion, bool changes, Guid? messageId, ChatAttachment? attachment, Guid? mountId)
     {
@@ -112,6 +112,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private readonly TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Dictionary<string, string> _viewStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Uri> _navigationUris = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _pendingAnchors = new(StringComparer.Ordinal);
     private readonly Queue<string> _viewOrder = new();
     private sealed record ChromeTab(ConversationChromeView View, Task Initialization) { public long Touched { get; set; } }
     private readonly Dictionary<string, ChromeTab> _chromeViews = new(StringComparer.Ordinal);
@@ -124,13 +125,14 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private Guid _conversationId;
     private string? _activeKey, _path, _title, _requestedVersion, _websiteKey;
     private bool _userSelected, _isWebsite, _isChanges, _showSource, _enabled = true, _disposed;
-    private bool _websiteActivationRequested, _clearingWebsiteData;
+    private bool _websiteActivationRequested, _clearingWebsiteData, _diagramExportPending;
     private Guid? _attachmentMessageId;
     private Guid? _mountId;
     private ChatAttachment? _attachment;
     private long _generation;
 
     public event EventHandler<string>? WebsiteRequested;
+    public event EventHandler<(Guid ConversationId, string Path, Guid? MountId)>? FileRequested;
     internal WebView2? DocumentBrowser => _document;
     internal WebView2? WebsiteBrowser => _website;
     internal ConversationChromeView? ChromeBrowser => _chrome;
@@ -180,11 +182,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _address.KeyDown += AddressKeyDown;
         _browserOptions.Click += (_, _) => ShowWebsiteDataMenu();
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
-        Loaded += (_, _) =>
-        {
-            _loaded.TrySetResult();
-            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => _ = WarmPreviewEnvironmentAsync());
-        };
+        Loaded += (_, _) => _loaded.TrySetResult();
         AppearanceService.Changed += AppearanceChanged;
         UiText.LanguageChanged += LanguageChanged;
         SetToolbarMode(false); ApplyAppearance();
@@ -213,6 +211,21 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _isChanges = false; _isWebsite = false; _path = attachment.Name; _title = attachment.Name;
         _requestedVersion = attachment.Sha256; _activeKey = key; _showSource = false; _current = null; _contentAddress = null;
         OpenCachedOrRead();
+    }
+
+    public void NavigateToAnchor(string fragment)
+    {
+        if (_activeKey is not { } key || string.IsNullOrEmpty(fragment)) return;
+        _pendingAnchors[key] = fragment;
+        if (_views.TryGetValue(key, out var view) && view.RenderedSignature is not null && !view.Preparing
+            && view.Rendered.Task.IsCompletedSuccessfully)
+            ApplyPendingAnchor(view);
+    }
+
+    private void ApplyPendingAnchor(BrowserView view)
+    {
+        if (view.Browser.CoreWebView2?.Source == PreviewPage && _pendingAnchors.Remove(view.Key, out var fragment))
+            view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "anchor", key = view.Key, fragment }));
     }
 
     public void ShowChanges(Guid conversationId, Guid? mountId = null)
@@ -260,8 +273,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         string? version = work.Attachment.Sha256;
         if (string.IsNullOrEmpty(version) && work.Preview?.Version is { Length: 64 } acceptedVersion)
             version = acceptedVersion;
-        // Keep the immutable version returned by the attachment client inside the exact scoped address.
-        // 附件客户端返回的不可变版本属于合法地址；仍精确限制同源、消息与附件路径，不能放行任意查询。
+        // Accept the returned immutable version only within the exact attachment scope.
+        // 允许附件返回的不可变版本，仍严格校验同源、消息和附件路径及查询。
         string query = $"messageId={work.MessageId:D}";
         if (!string.IsNullOrEmpty(version)) query += "&version=" + Uri.EscapeDataString(version);
         if (work.Preview?.Kind == "pdf" && !string.Equals(Path.GetExtension(work.Attachment.Name), ".pdf", StringComparison.OrdinalIgnoreCase))
@@ -417,7 +430,13 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (_activeKey is not { } key) return;
         if (_documentWork.Remove(key, out var previous)) CloseDocumentWork(previous);
         _documents.Remove(key);
-        if (_views.TryGetValue(key, out var view)) view.RenderedSignature = null;
+        if (_views.TryGetValue(key, out var view))
+        {
+            // A failed controller must be recreated; reusing its failed task cannot retry initialization.
+            // 初始化失败须重建控制器；复用失败任务无法真正重试，也不能重复注册旧控制器的事件。
+            if (view.Initialization is { IsFaulted: true } or { IsCanceled: true }) CloseView(key);
+            else view.RenderedSignature = null;
+        }
         _current = null;
         OpenCachedOrRead();
     }
@@ -469,7 +488,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             if (!IsLive(work)) return;
             if (next.Version != previous.Version) { if (IsSelected(work)) BeginRead(); return; }
             if (IsSelected(work)) SaveViewState();
-            work.Preview = next with { Text = (previous.Text ?? "") + (next.Text ?? "") };
+            work.Preview = next with { Text = (previous.Text ?? "") + (next.Text ?? ""),
+                Rows = previous.Rows is null ? next.Rows : [.. previous.Rows, .. next.Rows ?? []] };
             CacheDocument(work);
             await QueueDocument(work);
         }
@@ -534,21 +554,22 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 view.Rendered = NewReady(); view.BackgroundPreparing = false;
                 view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "show", key = work.Key,
                     renderId = ++view.RenderId,
-                    kind = source ? "text" : code ? "code" : preview.Kind, text, html,
+                    kind = source ? "text" : code ? "code" : preview.Kind, text, html, rows = preview.Rows, delimiter = preview.Delimiter,
                     contentUrl = IsDirectOfficeDocument(preview.Kind) ? DocumentContentAddress(preview.Kind, preview.Version) : work.ContentAddress?.AbsoluteUri,
                     state = _viewStates.GetValueOrDefault(work.Key), title = work.Title ?? preview.Title }));
                 try { await view.Rendered.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken); }
                 catch (Exception error) when (IsDirectOfficeDocument(preview.Kind)
                     && error is DirectDocumentPreviewException or TimeoutException)
                 {
-                    // A failed direct render changes only this file's representation, never the user's selected tab.
-                    // 直接渲染失败只替换本文件的表示形式，不切换用户当前标签，也不重复打开产物。
+                    // Render fallback replaces only this file's view, preserving the selected tab.
+                    // 渲染回退只替换本文件视图，保留当前标签，不重复打开。
                     if (!IsLive(work)) return;
                     await RequestPdfFallbackAsync(work);
                     if (!IsLive(work)) return;
                     continue;
                 }
                 view.RenderedSignature = signature;
+                ApplyPendingAnchor(view);
             }
             if (work.ShowSource == source && ReferenceEquals(work.Preview, preview)) return;
         }
@@ -576,8 +597,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         try
         {
-            // A later page can fail after the initial shown receipt; coalesce the same fallback and retain tab ownership.
-            // 后续页可能在首屏 shown 回执后失败；合并同一文件的转换请求，保留原标签与当前选择。
+            // Later pages may fail after first display; merge fallback requests for the same tab.
+            // 首屏显示后仍可能出错；合并同文件的转换请求，保留标签及当前选择。
             await RequestPdfFallbackAsync(work);
             if (work.Preparing) await work.Completion.Task;
             if (!IsLive(work)) return;
@@ -592,7 +613,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private void SetPreviewActions(WorkspacePreviewTarget preview)
     {
-        _source.Visibility = preview.Kind is "markdown" or "mermaid" ? Visibility.Visible : Visibility.Collapsed;
+        _source.Visibility = preview.Kind is "markdown" or "mermaid" or "delimited" ? Visibility.Visible : Visibility.Collapsed;
         _more.Visibility = preview.HasMore ? Visibility.Visible : Visibility.Collapsed;
         _source.Content = _showSource ? UiText.Get("显示预览") : UiText.Get("查看源码");
     }
@@ -624,8 +645,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         var browser = view.Browser;
         _viewport.Children.Insert(0, browser);
-        _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
-        var environment = await _previewEnvironment;
+        var environment = await GetDocumentEnvironmentAsync(website: false);
         if (_disposed || view.Closed) return;
         await browser.EnsureCoreWebView2Async(environment);
         if (_disposed || view.Closed) return;
@@ -647,6 +667,13 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += (sender, args) =>
         {
+            if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var imageUri)
+                && TranscriptMarkdown.TryImageSource(imageUri, out var imagePath))
+            {
+                var imageDeferral = args.GetDeferral();
+                _ = SupplyMarkdownImageAsync(view, args, environment, imagePath, imageDeferral.Complete);
+                return;
+            }
             if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var documentUri)
                 && documentUri.Scheme == "https" && documentUri.Host == DocumentContentHost
                 && documentUri.AbsolutePath is "/Workspace/document.docx" or "/Workspace/document.pptx" or "/Workspace/document.xlsx")
@@ -673,6 +700,27 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private static bool IsDirectOfficeDocument(string kind) => kind is "docx" or "pptx" or "xlsx";
 
+    private async Task SupplyMarkdownImageAsync(BrowserView view, CoreWebView2WebResourceRequestedEventArgs args,
+        CoreWebView2Environment environment, string path, Action completeDeferral)
+    {
+        try
+        {
+            var work = view.Work;
+            if (work is null || !IsLive(work) || args.Request.Method != "GET"
+                || view.Browser.CoreWebView2.Source != PreviewPage || work.Preview?.Kind != "markdown")
+            { args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", ""); return; }
+            string resolved = TranscriptMarkdown.ResolveFileLink(path, work.Path);
+            var image = await _api.ReadImageContentAsync(work.ConversationId, resolved, work.Cancellation.Token, work.MountId);
+            if (!IsLive(work))
+            { args.Response = environment.CreateWebResourceResponse(null, 409, "Document changed", ""); return; }
+            args.Response = environment.CreateWebResourceResponse(new MemoryStream(image.Bytes, writable: false).AsRandomAccessStream(), 200, "OK",
+                $"Content-Type: {image.ContentType}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff");
+        }
+        catch (Exception error) when (error is HttpRequestException or InvalidDataException or OperationCanceledException or System.Runtime.InteropServices.COMException)
+        { if (!_disposed) args.Response = environment.CreateWebResourceResponse(null, 404, "Image unavailable", ""); }
+        finally { completeDeferral(); }
+    }
+
     private static string DocumentContentAddress(string kind, string version) =>
         "https://" + DocumentContentHost + "/Workspace/document." + kind + "?version=" + Uri.EscapeDataString(version);
 
@@ -689,8 +737,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", "");
                 return;
             }
-            // Mapped static hosts bypass this event; a separate host serves only this view's verified original.
-            // 静态目录映射不会触发此事件；独立代理域只返回此视图已核验的原件，不开放其他文件或地址。
+            // Static mappings bypass this event; the separate host serves only the verified original.
+            // 静态映射不触发此事件；独立代理域仅提供本视图已核验的原件。
             var bytes = await _api.ReadDocumentContentAsync(address, work.Cancellation.Token);
             if (!IsLive(work) || !ReferenceEquals(work.Preview, preview))
             {
@@ -727,8 +775,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _viewport.Children.Insert(0, browser);
         // Local HTML remains an isolated document renderer, without browser automation or a native message bridge.
         // 本地 HTML 保持独立文档视图，不开放浏览器自动化或原生消息桥。
-        _websiteEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspaceHtml"));
-        await browser.EnsureCoreWebView2Async(await _websiteEnvironment);
+        await browser.EnsureCoreWebView2Async(await GetDocumentEnvironmentAsync(website: true));
         if (_disposed || view.Closed) return;
         var core = browser.CoreWebView2;
         core.Settings.AreHostObjectsAllowed = false; core.Settings.IsWebMessageEnabled = false;
@@ -865,14 +912,52 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 return;
             }
             if (messageKey != _activeKey) return;
-            if (type == "link" && message.TryGetProperty("url", out var url) && TryWebsite(url.GetString(), out _)) OpenLink(url.GetString()!);
+            if (type == "exportDiagram") { _ = ExportWorkspaceDiagramAsync(view, message.Clone()); return; }
+            if (type == "link" && message.TryGetProperty("url", out var url) && url.GetString() is { } target && TranscriptMarkdown.IsSafeUrl(target))
+            {
+                if (TryWebsite(target, out _)) OpenLink(target);
+                else if (Uri.TryCreate(target, UriKind.Absolute, out var mail) && mail.Scheme == "mailto") _ = Launcher.LaunchUriAsync(mail);
+                else if (view.Work is { } work)
+                    FileRequested?.Invoke(this, (work.ConversationId, TranscriptMarkdown.ResolveFileLink(target, work.Path), work.MountId));
+            }
             else if (type == "copy" && message.TryGetProperty("text", out var text))
             {
-                var data = new DataPackage(); data.SetText(text.GetString() ?? ""); Clipboard.SetContent(data);
+                bool success = false;
+                try { var data = new DataPackage(); data.SetText(text.GetString() ?? ""); Clipboard.SetContent(data); Clipboard.Flush(); success = true; }
+                catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
+                view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "copyResult", key = view.Key,
+                    requestId = message.TryGetProperty("requestId", out var request) ? request.GetString() : null, success }));
             }
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
         { Debug.WriteLine($"Workspace preview message: {error.GetType().Name}"); }
+    }
+
+    private async Task ExportWorkspaceDiagramAsync(BrowserView view, JsonElement message)
+    {
+        if (!message.TryGetProperty("requestId", out var request) || request.GetString() is not { Length: > 0 and <= 80 } requestId
+            || !message.TryGetProperty("format", out var format) || !message.TryGetProperty("content", out var content)) return;
+        long renderId = view.RenderId;
+        void Reply(DiagramExportOutcome outcome)
+        {
+            if (_disposed || view.Closed || _activeKey != view.Key || view.RenderId != renderId) return;
+            view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "diagramExportResult", key = view.Key,
+                requestId, outcome = outcome switch { DiagramExportOutcome.Success => "success", DiagramExportOutcome.Cancelled => "cancelled", _ => "error" } }));
+        }
+        if (_diagramExportPending) { Reply(DiagramExportOutcome.Error); return; }
+        _diagramExportPending = true;
+        try
+        {
+            var export = await DiagramExport.ValidateAsync(format.GetString() ?? "", content.GetString() ?? "");
+            if (_disposed || view.Closed || _activeKey != view.Key || view.RenderId != renderId) return;
+            nint owner = XamlRoot is null ? 0 : Microsoft.UI.Win32Interop.GetWindowFromWindowId(XamlRoot.ContentIslandEnvironment.AppWindowId);
+            Reply(await DiagramExport.SaveAsync(export, owner));
+        }
+        catch (OperationCanceledException) { Reply(DiagramExportOutcome.Cancelled); }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or FormatException
+            or ArgumentException or InvalidOperationException or System.Xml.XmlException or NotSupportedException or TimeoutException
+            or System.Runtime.InteropServices.COMException) { Reply(DiagramExportOutcome.Error); }
+        finally { _diagramExportPending = false; }
     }
 
     private void SaveViewState()
@@ -938,8 +1023,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 && !item.BackgroundPreparing && item.Initialization?.IsCompleted != false)
                 .OrderBy(item => item.LastUsed).FirstOrDefault();
             if (oldest is null) break;
-            _views.Remove(oldest.Key); oldest.Closed = true;
-            _viewport.Children.Remove(oldest.Browser); oldest.Browser.Close();
+            CloseView(oldest.Key);
         }
     }
 
@@ -961,8 +1045,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private static void DeactivateView(BrowserView view)
     {
         view.Active = false; view.Browser.Opacity = 0; view.Browser.IsHitTestVisible = false;
-        // First-paint admission and background settling are separate: keep unfinished hidden work alive without taking input.
-        // 首屏准入与后台完成分开；未完成的隐藏视图继续准备，但不能抢占用户输入。
+        // Separate first display from background completion; hidden work must not take input.
+        // 首屏显示与后台完成分开；隐藏视图继续准备，但不接收输入。
         view.Browser.Visibility = view.Preparing || view.BackgroundPreparing ? Visibility.Visible : Visibility.Collapsed;
         if (!view.Preparing && !view.BackgroundPreparing) _ = SuspendAsync(view);
     }
@@ -974,7 +1058,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _viewStates[key] = state;
         while (_viewOrder.Count > 128)
         {
-            string removed = _viewOrder.Dequeue(); _viewStates.Remove(removed); _navigationUris.Remove(removed);
+            string removed = _viewOrder.Dequeue(); _viewStates.Remove(removed); _navigationUris.Remove(removed); _pendingAnchors.Remove(removed);
         }
     }
 
@@ -1095,21 +1179,22 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         finally { Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", overriddenFolder); }
     }
 
-    private async Task WarmPreviewEnvironmentAsync()
+    private static async Task<CoreWebView2Environment> GetDocumentEnvironmentAsync(bool website)
     {
-        if (_disposed || _previewEnvironment is not null) return;
-        Task<CoreWebView2Environment>? preparation = null;
+        // Create only when a document is opened; HTML keeps its separate browser profile.
+        // 打开文档时才创建环境；HTML 继续使用独立的浏览器配置目录。
+        var preparation = website
+            ? _websiteEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspaceHtml"))
+            : _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
         try
         {
-            // Low-priority environment-only preparation creates no document controller and is never awaited by chat or startup.
-            // 低优先级仅准备共享环境，不创建文档控制器，也不进入聊天或启动的等待链路。
-            preparation = _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
-            await preparation;
+            return await preparation;
         }
-        catch (Exception error)
+        catch
         {
-            if (ReferenceEquals(_previewEnvironment, preparation)) _previewEnvironment = null;
-            Debug.WriteLine($"Workspace environment warmup: {error.GetType().Name}");
+            if (website && ReferenceEquals(_websiteEnvironment, preparation)) _websiteEnvironment = null;
+            if (!website && ReferenceEquals(_previewEnvironment, preparation)) _previewEnvironment = null;
+            throw;
         }
     }
     private static Button QuietIcon(string glyph, string label)
@@ -1144,6 +1229,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (_showingVerification) SetNotice(UiText.Get(_alternativeSearchAddress is null
             ? "此网页需要人工验证，请在网页中完成。" : "搜索服务需要人工验证，可在网页完成验证或切换搜索源。"));
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
+        ApplyAppearance();
     });
 
     private void ApplyAppearance()
@@ -1156,7 +1242,17 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _address.FocusVisualPrimaryBrush = border; _address.FocusVisualSecondaryBrush = border;
         _notice.Foreground = _loading.Foreground = new SolidColorBrush(AppearanceService.ParseColor(palette.Secondary));
         var appearance = new { type = "appearance", palette = new { main = palette.Main, soft = palette.Soft, accent = palette.Secondary,
-            text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar } };
+            text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar },
+            strings = new {
+                copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"),
+                copyBlock = UiText.Get("复制此内容块"), copyCurrentContent = UiText.Get("复制当前内容"), blockPlainText = UiText.Get("文本"),
+                blockWrap = UiText.Get("自动换行"), blockUnwrap = UiText.Get("原样显示"), blockExpand = UiText.Get("展开"), blockCollapse = UiText.Get("收起"),
+                blockLineCount = UiText.Get("{0} 行"), blockClearSelection = UiText.Get("请先取消文字选择，再调整显示。"),
+                tableBlockLabel = UiText.Get("表格"), copyTable = UiText.Get("复制表格（可粘贴到 Excel）"),
+                copyTableMarkdown = UiText.Get("复制为 Markdown"), tableCopyOptions = UiText.Get("更多复制格式"), tableEmpty = UiText.Get("空表格"),
+                diagramSource = UiText.Get("查看源码"), diagramHideSource = UiText.Get("收起源码"), diagramCopySource = UiText.Get("复制源码"),
+                diagramExportSvg = UiText.Get("导出 SVG"), diagramExportPng = UiText.Get("导出 PNG"), diagramExported = UiText.Get("图表已导出"),
+                diagramExportCancelled = UiText.Get("已取消导出"), diagramExportFailed = UiText.Get("导出失败，请重试。") } };
         foreach (var view in _views.Values)
         {
             view.Browser.DefaultBackgroundColor = AppearanceService.ParseColor(palette.Main);
@@ -1187,6 +1283,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         try
         {
             if (view.Closed || view.Active || view.Preparing || view.BackgroundPreparing || view.Browser.CoreWebView2 is not { } core) return;
+            core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
             await core.TrySuspendAsync();
             // A fast switch may select this view before its earlier suspend operation has completed.
             // 快速切回可能早于旧挂起完成；以最新选择恢复，不能让晚到的挂起冻结当前页面。
@@ -1207,6 +1304,10 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         if (!_views.Remove(key, out var view)) return;
         view.Closed = true; view.Ready.TrySetCanceled(); view.Rendered.TrySetCanceled(); view.Navigated.TrySetCanceled();
+        if (view.Work is { } work && ReferenceEquals(work.View, view)) work.View = null;
+        view.Work = null;
+        if (ReferenceEquals(_document, view.Browser)) _document = null;
+        if (ReferenceEquals(_website, view.Browser)) _website = null;
         _viewport.Children.Remove(view.Browser); view.Browser.Close();
     }
 
@@ -1222,7 +1323,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         };
         if (key is null) return;
         if (_documentWork.Remove(key, out var work)) CloseDocumentWork(work);
-        _documents.Remove(key); _viewStates.Remove(key); _navigationUris.Remove(key); CloseView(key);
+        _documents.Remove(key); _viewStates.Remove(key); _navigationUris.Remove(key); _pendingAnchors.Remove(key); CloseView(key);
         RemoveStateOrder(item => item == key);
         if (_chromeViews.Remove(key, out var chrome)) { _viewport.Children.Remove(chrome.View); CloseChromeView(chrome.View); }
     }

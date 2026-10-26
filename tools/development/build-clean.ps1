@@ -117,10 +117,10 @@ try {
     }
     Write-Host '[Build] Restoring NuGet dependencies and compiling the complete desktop and Rust runtime.'
 
-    # Discover MSVC/SDK paths from the installed toolset and use them only in the build subprocess.
-    # 从已安装工具集定位 MSVC/SDK，只在构建子进程使用，避免扩展脚本枚举失败；不修改注册表或系统环境。
-    # An ASCII command file carries paths through process environment variables, including Unicode and spaces.
-    # ASCII 命令文件通过进程环境传递中文及空格路径；开发环境只作用于此构建子进程。
+    # Discover MSVC/SDK paths for this build child without changing the system environment.
+    # 定位 MSVC/SDK 路径，仅供本次构建子进程使用，不改系统环境。
+    # Pass Unicode and spaced paths through environment variables in the ASCII command file.
+    # ASCII 命令文件通过环境变量传递中文及带空格的路径。
     $commandPath = Join-Path $cleanRoot 'build.cmd'
     $commandText = @'
 @echo off

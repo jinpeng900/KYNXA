@@ -1,5 +1,5 @@
-//! Model-facing evidence actions reuse formal scopes, native version checks and the existing evidence ledger.
-//! 面向模型的证据动作复用正式作用域、原生版本检查与既有证据账本，检索结果不是执行授权。
+//! Evidence tools reuse scopes, version checks and the ledger; results grant no execution authority.
+//! 证据工具复用范围、版本核验及账本，结果不授予执行权限。
 
 use super::{evidence::EvidenceLedger, gateway_index};
 use crate::{
@@ -16,6 +16,7 @@ use std::{
 #[derive(Default)]
 struct TaskEvidence {
     ledger: EvidenceLedger,
+    refinements_restored: bool,
     readings: HashMap<String, (Value, Vec<ReadFragment>)>,
 }
 #[derive(Clone)]
@@ -114,8 +115,8 @@ pub(crate) fn retire_memory_sources(context: &Value, invalid_sources: &Value) ->
     }
     Ok(json!({"retired":retired.len()}))
 }
-/// Removing a formal chat evicts only its derived task evidence; active holders still face final scope checks.
-/// 删除正式聊天仅撤出它的派生任务证据；已持有对象的调用仍必须通过最终范围核验。
+/// Remove only the chat's derived evidence; active callers must still pass final scope checks.
+/// 仅撤出该聊天的派生证据，活动调用仍须最终范围核验。
 pub(crate) fn release_conversation_tasks(conversation: &str) {
     if let Some(tasks) = TASKS.get() {
         if let Ok(mut tasks) = tasks.lock() {
@@ -443,6 +444,10 @@ fn read_current(config: &GatewayConfig, context: &Value, reference: &Value, scop
             if !current.iter().any(|message| {
                 message["Id"] == locator["messageId"]
                     && message["Status"] == "completed"
+                    && (message["Role"] != "assistant" || message["TaskContinues"] != true)
+                    && (locator["role"].is_null() || locator["role"] == message["Role"])
+                    && ["ReplyTo", "InReplyToUserMessageId", "OriginUserMessageId", "PreviousReplyMessageId"]
+                        .iter().all(|field| locator.get(*field).is_none_or(|value| value == &message[*field]))
                     && gateway_index::hash(message["Content"].as_str().unwrap_or(""))
                         == row["content_hash"]
             }) {
@@ -458,8 +463,8 @@ fn read_current(config: &GatewayConfig, context: &Value, reference: &Value, scop
     Ok(json!({"text":text,"row":row,"chunk":receipt["chunk"],"locator":locator}))
 }
 
-/// Revalidate only an archived original-text window; the caller must first verify its formal archive identity.
-/// 仅复核正式归档中实际读过的原文窗口；调用端必须先验证归档 ID、哈希、字节数及所属范围。
+/// Revalidate read windows only after archive ID, hash, size and scope checks.
+/// 先核验归档 ID、哈希、大小及范围，再复核已读原文窗口。
 pub(crate) fn verify_saved_read(
     config: &GatewayConfig,
     context: &Value,
@@ -622,13 +627,110 @@ fn register_read(
     let _ = config;
     Ok(receipt["result"]["decision"].clone())
 }
+/// Load formal gap-counter snapshots without holding a task mutex.
+/// 在任务锁外读取正式缺口次数快照；改写关键词、暂停和进程重启不能重置补搜余量。
+fn load_refinement_receipts(config:&GatewayConfig,context:&Value) -> Result<Vec<Value>,ContractError> {
+    let messages=gateway::read_model_messages(&config.data_root,context["conversationId"].as_str().unwrap_or(""))?;
+    let request=context["requestId"].as_str().unwrap_or("");
+    let mut seen=std::collections::HashSet::new();
+    let mut receipts=Vec::new();
+    for message in &messages {
+        if !message["RequestId"].as_str().is_some_and(|id|id.eq_ignore_ascii_case(request)) {continue;}
+        let references=std::iter::once(&message["RetrievalResultRef"])
+            .chain(message["ToolActivities"].as_array().into_iter().flatten()
+                .filter(|activity|activity["name"]=="knowledge.search").map(|activity|&activity["resultRef"]));
+        for reference in references {
+            let Some(id)=reference["id"].as_str() else {continue;};
+            if !seen.insert(id) {continue;}
+            let archive=gateway::load_private_tool_result(&config.data_root,context["conversationId"].as_str().unwrap_or(""),id)?;
+            if archive["requestId"].as_str()!=Some(request) || archive["toolName"]!="knowledge.search" {continue;}
+            let refinement=&archive["canonical"]["structuredContent"]["refinement"];
+            if refinement["gapKey"].as_str().is_some() {
+                receipts.push(refinement.clone());
+            }
+        }
+    }
+    Ok(receipts)
+}
+
+fn refinement_ticket(config:&GatewayConfig,context:&Value,input:&Value) -> Result<Value,ContractError> {
+    reserve_refinement(context,input,||load_refinement_receipts(config,context))
+}
+
+fn refinement_identity(context: &Value, input: &Value) -> Result<String, ContractError> {
+    let requirements = context["acceptanceRequirements"].as_array();
+    let Some(identity) = input["requirementId"].as_str().filter(|value| !value.is_empty()) else {
+        return Ok("original-user-question".into());
+    };
+    let valid = identity.strip_prefix("requirement-").and_then(|index| index.parse::<usize>().ok())
+        .is_some_and(|index| index > 0 && requirements.is_some_and(|items| {
+            items.get(index - 1).and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty())
+        }) && identity == format!("requirement-{index}"));
+    if !valid {
+        return Err(gateway::error("requirementId 必须对应本任务已有的验收要求；省略时共用原问题的补搜余量。", "INVALID_RETRIEVAL_INPUT", 400));
+    }
+    Ok(identity.to_owned())
+}
+
+fn refinement_key(context: &Value, identity: &str) -> String {
+    gateway_index::hash(&json!([context["requestId"],identity]).to_string())
+}
+
+fn reserve_refinement(
+    context:&Value,input:&Value,load:impl FnOnce()->Result<Vec<Value>,ContractError>,
+)->Result<Value,ContractError> {
+    if crate::service_cancellation::is_cancelled() {
+        return Err(gateway::error("检索已取消，未消耗新的补搜机会。", "TOOL_CANCELLED", 409));
+    }
+    let gap_identity = refinement_identity(context, input)?;
+    let task=task(context)?;
+    let needs_restore={ !task.lock().unwrap().refinements_restored };
+    // Finish catalog/archive I/O before the task lock to match revocation lock order.
+    // 目录及归档 I/O 在任务锁外完成，遵守撤销记忆的锁顺序。
+    let receipts=if needs_restore {Some(load()?)}else{None};
+    let mut task=task.lock().unwrap();
+    if let Some(receipts)=receipts {
+        // Two loaders may finish concurrently; max-restore must preserve reservations made in between.
+        // 两个恢复读取可并发完成；幂等max恢复不能覆盖其间已预留的次数。
+        for mut receipt in receipts {
+            // Legacy free-text gaps share the original allowance; only native requirement IDs split it.
+            // 旧版自由描述缺口归入原问题额度，仅原生已登记要求的身份可独立计数。
+            let identity = receipt["gapIdentity"].as_str()
+                .filter(|identity| identity.strip_prefix("requirement-")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .is_some_and(|index| index > 0 && *identity == format!("requirement-{index}")))
+                .unwrap_or("original-user-question").to_owned();
+            receipt["gapKey"] = json!(refinement_key(context, &identity));
+            task.ledger.apply("retrieval.refinement-restore",&receipt)
+                .map_err(|_|gateway::error("检索进度回执无效。","INVALID_RETRIEVAL_EVIDENCE",500))?;
+        }
+        task.refinements_restored=true;
+    }
+    // Descriptions and keywords are editable; budget belongs to the native task requirement.
+    // 描述和关键词允许改写，补搜余量绑定正式任务要求，不能由模型换句话重新申请。
+    let gap_key=refinement_key(context, &gap_identity);
+    task.ledger.apply("retrieval.refinement-reserve",&json!({"gapKey":gap_key}))
+        .map(|receipt| { let mut ticket = receipt["result"].clone(); ticket["gapIdentity"] = json!(gap_identity); ticket })
+        .map_err(|_|gateway::error("检索进度无效。","INVALID_RETRIEVAL_EVIDENCE",500))
+}
+
 pub fn handle_tool(
     name: &str,
     input: &Value,
     context: &Value,
     config: &GatewayConfig,
 ) -> Option<ContractResult> {
-    handle_tool_attempt(name, input, context, config, 0)
+    let mut ticket = None;
+    let mut result=handle_tool_attempt(name,input,context,config,0,&mut ticket);
+    if let Some(ticket) = ticket {
+      if let Some(Ok(value))=&mut result {
+        let mut refinement=ticket;refinement["state"]=json!(if value["items"].as_array().is_some_and(|items|!items.is_empty()) {"evidence-available"}else{"unresolved"});
+        value["refinement"]=refinement;
+      } else if ticket["executed"] == true && let Ok(task)=task(context) {
+        if let Ok(mut task)=task.lock(){let _=task.ledger.apply("retrieval.refinement-release",&ticket);}
+      }
+    }
+    result
 }
 
 fn retry_changed_search_scope(
@@ -637,11 +739,12 @@ fn retry_changed_search_scope(
     context: &Value,
     config: &GatewayConfig,
     attempt: u8,
+    refinement: &mut Option<Value>,
 ) -> Option<ContractResult> {
     match authorized(config, context) {
         Ok(current) if current == *scopes => None,
         Ok(_) if attempt < 2 => {
-            handle_tool_attempt("knowledge.search", input, context, config, attempt + 1)
+            handle_tool_attempt("knowledge.search", input, context, config, attempt + 1, refinement)
         }
         Ok(_) => Some(Err(gateway::error(
             "检索范围正在更新，请使用最新范围重试。",
@@ -652,12 +755,46 @@ fn retry_changed_search_scope(
     }
 }
 
+fn fallback_directory(input: &Value, context: &Value) -> Option<String> {
+    let constraints = format!("{} {}", input["query"].as_str().unwrap_or(""),
+        context["acceptanceRequirements"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).collect::<Vec<_>>().join(" "));
+    if regex::Regex::new(r"(?i)仅(?:在|限|搜索|查找)|只(?:在|搜索|查找)|不得(?:跨|搜索)|不要搜索|\b(?:only\s+(?:in|under|within|search)|exclusively|do\s+not\s+search)\b")
+        .expect("static scope constraint").is_match(&constraints) {
+        return None;
+    }
+    let path = input["path"].as_str().unwrap_or("").replace('\\', "/");
+    let path = path.trim_start_matches("./").trim_end_matches('/');
+    if path.is_empty() { return Some(String::new()); }
+    let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+    // A filename is a locator clue; its containing directory remains the fallback boundary.
+    // 文件名是定位线索；补充召回仍限于原目录，不将目录限定放宽为整个工作区。
+    Some(if name.contains('.') { parent } else { path }.to_lowercase())
+}
+
+fn restrict_fallback_directory(result: &mut Value, directory: &str) {
+    if directory.is_empty() { return; }
+    let directory = directory.trim_matches('/');
+    if let Some(items) = result["items"].as_array_mut() {
+        items.retain(|item| {
+            let path = item["locator"]["relativePath"].as_str()
+                .or_else(|| item["locator"]["path"].as_str())
+                .or_else(|| item["exactPath"].as_str()).unwrap_or("")
+                .replace('\\', "/").to_lowercase();
+            let path = path.trim_start_matches("./");
+            path == directory || path.starts_with(&format!("{directory}/"))
+                || path.contains(&format!("/{directory}/"))
+        });
+    }
+}
+
 fn handle_tool_attempt(
     name: &str,
     input: &Value,
     context: &Value,
     config: &GatewayConfig,
     scope_attempt: u8,
+    refinement: &mut Option<Value>,
 ) -> Option<ContractResult> {
     if name.starts_with("conversation.history.") {
         return Some(super::gateway_history::handle(config, name, input, context));
@@ -699,7 +836,8 @@ fn handle_tool_attempt(
                 query["scopeKeys"] = scopes.clone();
                 query["channelCandidates"] = budget["channelCandidates"].clone();
                 query["limit"] = budget["fusedCandidates"].clone();
-                query["retrievalIntent"] = json!({"domain":input["domain"].as_str().filter(|domain|*domain!="mixed"),"symbol":input["symbol"],"path":input["path"]});
+                query["retrievalIntent"] = json!({"domain":input["domain"].as_str().filter(|domain|*domain!="mixed"),
+                    "symbol":input["symbol"],"path":input["path"].as_str().map(storage::retrieval::normalize_path)});
                 let settings = super::gateway::effective(
                     config,
                     gateway::context_scopes(
@@ -711,19 +849,19 @@ fn handle_tool_attempt(
                 query["ann"] = settings["local"]["ann"].clone();
                 // Reuse inference only within the freshly authorized conversation scope.
                 // 推理缓存只在本次重新授权的会话范围内复用，最终来源和权限检查仍照常执行。
+                query["rrfK"] = settings["local"]["rrfK"].clone();
                 let cache_scope = json!({
                     "scopeKeys":scopes,"conversationId":context["conversationId"],
                     "permissionMode":context["permissionMode"]
                 });
-                // Exact locators first reuse the current-source check; cached headings alone cannot suppress semantic search.
-                // 精确路径和符号先核对当前原文；仅有缓存标题命中不能据此跳过语义补充。
+                // Prefer current exact evidence; missing or stale locators may use one scoped semantic lookup.
+                // 优先当前有效的精确证据；定位缺失或来源过期时，允许一次受限语义召回。
                 let targeted = ["path", "symbol"].iter().any(|field| input[*field].as_str().is_some_and(|value| !value.is_empty()));
                 let preliminary = if targeted {
                     let mut result = gateway_index::search(config, &query)?;
                     restrict_candidates(context, &mut result); Some(result)
                 } else { None };
                 let mut current_sources = HashMap::new();
-                let mut exact_current_target = false;
                 if let Some(preliminary) = &preliminary {
                     for item in preliminary["items"].as_array().into_iter().flatten()
                         .filter(|item| super::query::exact_target(item, &query["retrievalIntent"]))
@@ -733,11 +871,26 @@ fn handle_tool_attempt(
                             reference.as_object_mut().unwrap().remove("chunkId");
                             reference.as_object_mut().unwrap().remove("chunkHash");
                             let current = current_sources.entry(version).or_insert_with(|| read_current(config, context, &reference, &scopes).ok());
-                            exact_current_target |= current.is_some();
+                            let _ = current;
                         }
                     }
                 }
-                if !exact_current_target && settings["local"]["semantic"] != "off" {
+                let exact_current = preliminary.as_ref().is_some_and(|result| result["items"]
+                    .as_array().into_iter().flatten().any(|item| {
+                        super::query::exact_target(item, &query["retrievalIntent"])
+                            && resolve_reference(config, context, item["sourceRef"].as_str().unwrap_or(""))
+                                .is_ok_and(|reference| current_sources.get(&source_version(&reference)).is_some_and(Option::is_some))
+                    }));
+                let fallback = if targeted && !exact_current { fallback_directory(input, context) } else { None };
+                let use_semantic = !targeted || fallback.is_some();
+                if use_semantic {
+                    if refinement.is_none() { *refinement = Some(refinement_ticket(config,context,input)?); }
+                    if refinement.as_ref().is_some_and(|ticket| ticket["executed"] == false) {
+                        return Ok(json!({"items":[],"coverage":"unresolved",
+                            "notice":"The same requirement has used its initial lookup and two refinements. Read known evidence or use another evidence type; the task remains active."}));
+                    }
+                }
+                if use_semantic && settings["local"]["semantic"] != "off" {
                     let text = input["query"].as_str().unwrap_or("").to_string();
                     match super::gateway_embedding::embed_query_cached(
                         config,
@@ -761,63 +914,40 @@ fn handle_tool_attempt(
                         }
                     }
                 }
+                if crate::service_cancellation::is_cancelled() {
+                    return Err(gateway::error("检索已取消。", "TOOL_CANCELLED", 409));
+                }
                 // Scope changes during shared inference restart this lookup internally.
                 // 共享推理期间范围变化时，在内部按最新授权重查，不向模型交付旧范围内容。
-                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt, refinement) {
                     return retried;
                 }
                 let mut result = if query["queryVector"].is_null() && preliminary.is_some() {
                     preliminary.unwrap()
                 } else { gateway_index::search(config, &query)? };
                 restrict_candidates(context, &mut result);
-                if !exact_current_target && !settings["local"]["rerankProfileId"].is_null() {
-                    let count = budget["rerankCandidates"]
-                        .as_u64()
-                        .unwrap_or(20)
-                        .min(settings["local"]["rerankCandidates"].as_u64().unwrap_or(60))
-                        as usize;
-                    let plan = super::fusion::rerank_plan(result["items"].as_array().unwrap(), input, count);
-                    if !plan.texts.is_empty() {
-                        match super::gateway_embedding::rerank_cached(
-                            config,
-                            input["query"].as_str().unwrap_or(""),
-                            &plan.texts,
-                            &cache_scope,
-                            &settings["local"],
-                            crate::service_cancellation::current_token()
-                                .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-                        ) {
-                            Ok(ranked) => {
-                                let items = result["items"].as_array_mut().unwrap();
-                                let applied = super::fusion::fuse_reranked(items, &plan.indices, &ranked.scores, ranked.truncated_inputs_count);
-                                result["reranking"] = json!({"state":if applied {"applied"} else {"unavailable"},
-                                    "method":"weighted-reciprocal-rank","reason":plan.reason,
-                                    "retrievalWeight":1.0,"rerankerWeight":if ranked.truncated_inputs_count>0 {0.25} else {0.5},
-                                    "candidateCount":plan.texts.len(),"windowedInputsCount":plan.windowed_inputs,
-                                    "truncatedInputsCount":ranked.truncated_inputs_count,"inferenceBackend":ranked.inference_status});
-                            }
-                            Err(error) => {
-                                storage::sqlite_store::cancelled()?;
-                                result["reranking"] =
-                                    json!({"state":"unavailable","errorCode":error.code()});
-                            }
-                        }
-                    } else {
-                        result["reranking"] = json!({"state":"skipped","reason":plan.reason,"candidateCount":0});
-                    }
+                if let Some(directory) = &fallback { restrict_fallback_directory(&mut result, directory); }
+                else if targeted && fallback_directory(input, context).is_none() {
+                    restrict_fallback_directory(&mut result,
+                        &input["path"].as_str().unwrap_or("").replace('\\', "/").to_lowercase());
                 }
-                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt, refinement) {
                     return retried;
                 }
                 let selected = select_evidence(&result["items"], input, &budget)?;
                 result["items"] = selected["items"].clone();
+                super::fusion::diversify(result["items"].as_array_mut().unwrap());
                 result["selection"] = selected["selection"].clone();
                 result["evidenceAssessment"] = selected["evidenceAssessment"].clone();
+                let expand = automatic_expansion_allowed(&result["selection"], &budget);
+                let mut used_tokens = result["selection"]["usedTokens"].as_u64().unwrap_or(0);
+                let maximum_tokens = budget["maximumTokens"].as_u64().unwrap_or(0);
+                let mut expanded = 0;
                 for item in result["items"].as_array_mut().unwrap() {
-                    let reference =
+                    let mut reference =
                         resolve_reference(config, context, item["sourceRef"].as_str().unwrap())?;
-                    // Complete indexed fragments can be used directly after a current-source read; search headings alone cannot.
-                    // 经过当前来源复核的完整索引片段可直接使用；仅命中标题不能冒充已读正文。
+                    // Use complete fragments after current-source checks; headings alone do not prove reading.
+                    // 完整片段通过当前来源核验后可用，仅标题命中不代表已读正文。
                     let version = source_version(&reference);
                     if !current_sources.contains_key(&version) {
                         let mut source = reference.clone();
@@ -829,6 +959,13 @@ fn handle_tool_attempt(
                     if let Some(current) = current_sources.get(&version).and_then(Option::as_ref) {
                         let units: Vec<u16> =
                             current["text"].as_str().unwrap().encode_utf16().collect();
+                        if expand {
+                            if let Some(extra) = expand_evidence_window(context, &mut reference, item,
+                                &units, maximum_tokens.saturating_sub(used_tokens))? {
+                                used_tokens = used_tokens.saturating_add(extra);
+                                expanded += 1;
+                            }
+                        }
                         let start = item["startOffset"].as_u64().unwrap() as usize;
                         let end = item["endOffset"].as_u64().unwrap() as usize;
                         if end <= units.len() {
@@ -845,6 +982,8 @@ fn handle_tool_attempt(
                         }
                     }
                 }
+                result["selection"]["usedTokens"] = json!(used_tokens);
+                result["selection"]["automaticExpansion"] = json!({"eligible":expand,"expandedCount":expanded});
                 let before = result["items"].as_array().unwrap().len();
                 result["items"]
                     .as_array_mut()
@@ -858,9 +997,10 @@ fn handle_tool_attempt(
                 result["budgetAudit"] = budget["audit"].clone();
                 result["budgetAudit"]["actual"] = json!({"limit":result["items"].as_array().unwrap().len(),"usedTokens":result["selection"]["usedTokens"]});
                 result["semanticDiagnostic"] = query["semanticDiagnostic"].clone();
-                result["retrievalStrategy"] = json!(if exact_current_target { "verified-exact-target" }
+                result["retrievalStrategy"] = json!(if targeted && fallback.is_some() { "scoped-locator-fallback" }
+                    else if targeted { "exact-locator" }
                     else if query["queryVector"].is_array() { "hybrid" } else { "lexical-structure" });
-                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt, refinement) {
                     return retried;
                 }
                 Ok(result)
@@ -959,34 +1099,28 @@ fn handle_tool_attempt(
             "knowledge.assess" => {
                 final_validate(config, context)?;
                 let task = task(context)?;
-                let mut task = task.lock().unwrap();
                 let mut assessment = input.clone();
-                for claim in assessment["claims"].as_array_mut().ok_or_else(|| {
+                let mut checked = Vec::new();
+                // Resolve and reread under catalog authority before acquiring the evidence mutex.
+                // 先在任务锁外按正式目录核验引用和原文，再锁内匹配当前已读窗口，避免目录/任务锁逆序。
+                for (claim_index, claim) in assessment["claims"].as_array_mut().ok_or_else(|| {
                     gateway::error("证据评估缺少结论。", "INVALID_RETRIEVAL_ASSESSMENT", 400)
-                })? {
-                    for citation in claim["support"].as_array_mut().ok_or_else(|| {
+                })?.iter_mut().enumerate() {
+                    for (citation_index, citation) in claim["support"].as_array_mut().ok_or_else(|| {
                         gateway::error("结论引用格式无效。", "INVALID_RETRIEVAL_ASSESSMENT", 400)
-                    })? {
-                        let reference = resolve_reference(
-                            config,
-                            context,
-                            citation["sourceRef"].as_str().unwrap_or(""),
-                        )?;
+                    })?.iter_mut().enumerate() {
+                        let reference = resolve_reference(config, context, citation["sourceRef"].as_str().unwrap_or(""))?;
                         let current = read_current(config, context, &reference, &scopes).is_ok();
-                        citation["quotePresent"] = json!(
-                            current
-                                && task
-                                    .readings
-                                    .values()
-                                    .any(|(read, fragments)| source_version(read)
-                                        == source_version(&reference)
-                                        && fragments.iter().any(|fragment| fragment.reference
-                                            == reference
-                                            && fragment.text.contains(
-                                                citation["quote"].as_str().unwrap_or("")
-                                            )))
-                        );
+                        checked.push((claim_index, citation_index, reference, current));
                     }
+                }
+                let mut task = task.lock().unwrap();
+                for (claim_index, citation_index, reference, current) in checked {
+                    let citation = &mut assessment["claims"][claim_index]["support"][citation_index];
+                    citation["quotePresent"] = json!(current && task.readings.values().any(|(read, fragments)|
+                        source_version(read) == source_version(&reference)
+                        && fragments.iter().any(|fragment| fragment.reference == reference
+                            && fragment.text.contains(citation["quote"].as_str().unwrap_or("")))));
                 }
                 task.ledger
                     .apply(
@@ -1015,18 +1149,7 @@ fn synchronize_conversation(config: &GatewayConfig, context: &Value) -> Contract
     let chat = context["conversationId"].as_str().unwrap();
     let memory = storage::gateway_memory::context(&config.data_root, chat)?;
     let messages = gateway::read_model_messages(&config.data_root, chat)?;
-    let scope = format!("chat:{}", chat.to_ascii_lowercase());
-    let mut sources = Vec::new();
-    for message in messages.iter().filter(|message| {
-        message["Status"] == "completed"
-            && message["Content"]
-                .as_str()
-                .is_some_and(|text| !text.trim().is_empty())
-            && ["user", "assistant"].contains(&message["Role"].as_str().unwrap_or(""))
-    }) {
-        let text = message["Content"].as_str().unwrap();
-        sources.push(json!({"sourceId":gateway_index::hash(&json!(["message",chat,message["Id"]]).to_string()),"scopeKey":scope,"sourceType":"message","text":text,"contentHash":gateway_index::hash(text),"sourceRevision":gateway_index::hash(text),"title":message["Role"],"locator":{"conversationId":chat,"messageId":message["Id"],"role":message["Role"]}}));
-    }
+    let mut sources = super::gateway::conversation_message_sources(chat, &messages);
     for entry in memory["entries"].as_array().unwrap() {
         let scope = if entry["scope"] == "user" {
             "user".to_string()
@@ -1042,7 +1165,82 @@ fn synchronize_conversation(config: &GatewayConfig, context: &Value) -> Contract
     for batch in sources.chunks(100) {
         gateway_index::publish(config, batch)?;
     }
+    super::gateway::enqueue_conversation_semantic(config, chat);
     Ok(Value::Null)
+}
+
+fn automatic_expansion_allowed(selection: &Value, budget: &Value) -> bool {
+    let used = selection["usedTokens"].as_u64().unwrap_or(u64::MAX);
+    let maximum = budget["maximumTokens"].as_u64().unwrap_or(0);
+    used.saturating_mul(2) < maximum
+        && selection["earlyCutReasons"].as_array().into_iter().flatten()
+            .any(|cut| cut["reason"] == "selected-fragment-limit" && cut["count"].as_u64().unwrap_or(0) > 0)
+}
+
+fn evidence_window_cost(item: &Value) -> Result<u64, ContractError> {
+    let record = crate::models::gateway_protocol::retrieval_model_view(&json!({
+        "reference":1,"sourceRef":"s1","title":item["title"],"scope":item["scopeKey"],
+        "locator":item["locator"],"structure":item["structure"],"excerpt":item["excerpt"]}))
+        .map_err(|error| gateway::error(&error.message,"INVALID_RETRIEVAL_EVIDENCE",error.status_code))?;
+    Ok(crate::models::protocol::estimate_tokens(&record.to_string()) + 1)
+}
+
+/// Expand current authorized text only; explicit and automatic reads share the task ledger.
+/// 仅扩读当前已授权原文，显式与自动读取共用任务账本。
+fn expand_evidence_window(
+    context: &Value,
+    reference: &mut Value,
+    item: &mut Value,
+    units: &[u16],
+    remaining_tokens: u64,
+) -> Result<Option<u64>, ContractError> {
+    if item["navigationOnly"] == true || remaining_tokens == 0 { return Ok(None); }
+    let Some((old_start, old_end)) = item["startOffset"].as_u64().zip(item["endOffset"].as_u64()) else { return Ok(None); };
+    let (old_start, old_end) = (old_start as usize, old_end as usize);
+    if old_start > old_end || old_end > units.len() { return Ok(None); }
+    let unit = item["structure"]["unitStartOffset"].as_u64()
+        .zip(item["structure"]["unitEndOffset"].as_u64())
+        .map(|(start,end)|(start as usize,end as usize))
+        .filter(|(start,end)| *start <= old_start && *end >= old_end && *end <= units.len());
+    if item["structure"]["domain"] == "code" && unit.is_none() { return Ok(None); }
+    let (lower, upper) = unit.unwrap_or((0, units.len()));
+    let (mut start, mut end) = if upper.saturating_sub(lower) <= 4000 {
+        (lower, upper)
+    } else {
+        (old_start.saturating_sub(600).max(lower), old_end.saturating_add(600).min(upper))
+    };
+    let owner = task(context)?;
+    {
+        let evidence = owner.lock().unwrap();
+        let key = gateway_index::hash(&json!([reference["scopeKey"],reference["sourceId"]]).to_string());
+        if let Some((_, fragments)) = evidence.readings.get(&key)
+            .filter(|(previous,_)| source_version(previous) == source_version(reference)) {
+            for fragment in fragments {
+                if fragment.end_offset > start && fragment.start_offset < old_start {
+                    start = start.max(fragment.end_offset.min(old_start));
+                }
+                if fragment.start_offset < end && fragment.end_offset > old_end {
+                    end = end.min(fragment.start_offset.max(old_end));
+                }
+            }
+        }
+    }
+    if super::chunking::split_pair(units, start) { start = start.saturating_sub(1); }
+    if super::chunking::split_pair(units, end) { end = (end + 1).min(units.len()); }
+    if start == old_start && end == old_end { return Ok(None); }
+    let mut candidate = item.clone();
+    candidate["excerpt"] = json!(String::from_utf16_lossy(&units[start..end]));
+    let extra = evidence_window_cost(&candidate)?.saturating_sub(evidence_window_cost(item)?);
+    if extra > remaining_tokens { return Ok(None); }
+    reference.as_object_mut().unwrap().remove("chunkId");
+    reference.as_object_mut().unwrap().remove("chunkHash");
+    candidate["sourceRef"] = json!(gateway_index::reference(reference, None));
+    for field in ["chunkId", "chunkHash", "mergedChunks"] { candidate.as_object_mut().unwrap().remove(field); }
+    candidate["startOffset"] = json!(start);
+    candidate["endOffset"] = json!(end);
+    candidate["automaticReadRange"] = json!({"startOffset":start,"endOffset":end,"offsetUnit":"utf16-code-units"});
+    *item = candidate;
+    Ok(Some(extra))
 }
 
 fn select_evidence(items: &Value, input: &Value, budget: &Value) -> ContractResult {
@@ -1146,6 +1344,9 @@ pub fn project_evidence_result(value: &Value, archive_id: &str) -> ContractResul
         for field in fields.iter().filter_map(Value::as_str) {
             item.as_object_mut().unwrap().remove(field);
         }
+        // Merged chunk identities stay in the private receipt, never in model-facing evidence.
+        // 合并片段身份只保留在私有回执，面向模型仅交付已映射的来源级短引用。
+        item.as_object_mut().unwrap().remove("mergedChunks");
         item["reference"] = json!(index + 1);
         item["sourceRef"] = plan["references"][index].clone();
     }
@@ -1200,6 +1401,56 @@ fn resolve_canonical(text: &str) -> ContractResult {
 #[cfg(test)]
 mod gateway_tests {
     use super::*;
+
+    #[test]
+    fn automatic_expansion_requires_count_truncation_and_unused_budget() {
+        let budget = json!({"maximumTokens":1000});
+        let mut selection = json!({"usedTokens":100,"earlyCutReasons":[]});
+        assert!(!automatic_expansion_allowed(&selection, &budget));
+        selection["earlyCutReasons"] = json!([{"reason":"evidence-token-budget","count":4}]);
+        assert!(!automatic_expansion_allowed(&selection, &budget));
+        selection["earlyCutReasons"] = json!([{"reason":"selected-fragment-limit","count":4}]);
+        assert!(automatic_expansion_allowed(&selection, &budget));
+        selection["usedTokens"] = json!(500);
+        assert!(!automatic_expansion_allowed(&selection, &budget));
+    }
+
+    #[test]
+    fn automatic_expansion_reuses_verified_original_and_shared_task_readings() {
+        let workspace = ReadWorkspace::new();
+        let result = gateway_index::search(&workspace.config, &json!({
+            "query":"原文","scopeKeys":[workspace.source["scopeKey"]]})).unwrap();
+        let mut item = result["items"][0].clone();
+        assert!(item.is_object());
+        let mut reference = resolve_reference(&workspace.config, &workspace.context,
+            item["sourceRef"].as_str().unwrap()).unwrap();
+        let current = read_current(&workspace.config, &workspace.context, &reference,
+            &json!([workspace.source["scopeKey"]])).unwrap();
+        let units = current["text"].as_str().unwrap().encode_utf16().collect::<Vec<_>>();
+        let text = current["text"].as_str().unwrap();
+        let anchor = text[..text.find("第 10").unwrap()].encode_utf16().count();
+        item["startOffset"] = json!(anchor);
+        item["endOffset"] = json!(anchor + 4);
+        item["excerpt"] = json!(String::from_utf16_lossy(&units[anchor..anchor+4]));
+        item["structure"] = json!({"domain":"knowledge","unitStartOffset":0,"unitEndOffset":units.len()});
+        let original_item = item.clone();
+        let original_reference = reference.clone();
+        assert!(expand_evidence_window(&workspace.context, &mut reference, &mut item, &units, 0).unwrap().is_none());
+        assert_eq!(item, original_item);
+        assert_eq!(reference, original_reference);
+        assert!(expand_evidence_window(&workspace.context, &mut reference, &mut item, &units, 10_000).unwrap().is_some());
+        let start = item["startOffset"].as_u64().unwrap() as usize;
+        let end = item["endOffset"].as_u64().unwrap() as usize;
+        assert_eq!(item["excerpt"], String::from_utf16_lossy(&units[start..end]));
+        assert!(reference.get("chunkId").is_none());
+        assert_eq!(item["automaticReadRange"]["offsetUnit"], "utf16-code-units");
+        register_read(&workspace.config, &workspace.context, &reference, item["sourceRef"].as_str().unwrap(),
+            item["excerpt"].as_str().unwrap(), start, end, &current).unwrap();
+        let mut again = original_item;
+        let mut again_reference = original_reference;
+        assert!(expand_evidence_window(&workspace.context, &mut again_reference, &mut again, &units, 10_000).unwrap().is_none(),
+            "knowledge.read and automatic expansion must share the existing recorded ranges");
+    }
 
     #[test]
     fn retiring_revoked_memory_keeps_other_sources_and_other_request_evidence() {
@@ -1407,6 +1658,112 @@ mod gateway_tests {
     }
 
     #[test]
+    fn refinement_receipt_loading_releases_task_lock_and_stale_snapshots_keep_reservations() {
+        let chat = gateway::new_id(); let request = gateway::new_id();
+        let context = json!({"conversationId":chat,"requestId":request});
+        let state = task(&context).unwrap();
+        let gap = gateway_index::hash(&json!([request,"original-user-question"]).to_string());
+        let saved = vec![json!({"gapKey":gap,"attempt":1})];
+        // Interleave a second recovery while the first loader is outstanding, without timing-sensitive threads.
+        // 在首个快照尚未返回时穿插第二次恢复，确定性验证读盘锁边界和旧快照不能回滚新预约。
+        let outer = reserve_refinement(&context,&json!({}),|| {
+            assert!(state.try_lock().is_ok(),"formal receipt I/O must not hold the task mutex");
+            let inner = reserve_refinement(&context,&json!({}),|| Ok(saved.clone())).unwrap();
+            assert_eq!(inner["attempt"],2);
+            Ok(saved.clone())
+        }).unwrap();
+        assert_eq!(outer["attempt"],3);
+        let exhausted = reserve_refinement(&context,&json!({}),||panic!("already restored; no additional I/O")).unwrap();
+        assert_eq!(exhausted["executed"],false);
+        assert_eq!(exhausted["remainingSupplementalSearches"],0);
+        release_task(&chat,&request);
+    }
+
+    #[test]
+    fn semantic_refinements_restore_after_restart_and_do_not_charge_new_gaps() {
+        let workspace=ReadWorkspace::new();
+        let first=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"initial wording"})).unwrap();
+        assert_eq!(first["attempt"],1);
+        let second=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"rewritten keywords"})).unwrap();
+        assert_eq!(second["attempt"],2);
+        let request=workspace.context["requestId"].as_str().unwrap();
+        let chat=workspace.context["conversationId"].as_str().unwrap();
+        let call=gateway::new_id();
+        let reference=gateway::save_tool_result(&workspace.config.data_root,chat,request,
+            &json!({"id":call,"name":"knowledge.search","arguments":{"query":"rewritten keywords"}}),
+            &json!({"structuredContent":{"items":[],"refinement":second},"content":[]}),None).unwrap();
+        gateway::upsert_message(&workspace.config.data_root,chat,&json!({"Id":request,"RequestId":request,
+            "Role":"assistant","Status":"streaming","Content":"Working",
+            "ToolActivities":[{"toolCallId":call,"name":"knowledge.search","arguments":{"query":"rewritten keywords"},"status":"completed","resultRef":reference}]})).unwrap();
+        release_task(chat,request);
+        let recovered=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"yet another rewrite"})).unwrap();
+        assert_eq!(recovered["attempt"],3);
+        assert_eq!(recovered["remainingSupplementalSearches"],0);
+        let exhausted=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"fourth rewrite"})).unwrap();
+        assert_eq!(exhausted["state"],"unresolved"); assert_eq!(exhausted["executed"],false);
+        let renamed=refinement_ticket(&workspace.config,&workspace.context,&json!({"query":"different words","gap":" new wording  "})).unwrap();
+        assert_eq!(renamed["executed"],false,"editable wording cannot mint a new allowance");
+        let mut registered = workspace.context.clone();
+        registered["acceptanceRequirements"] = json!(["Read the source", "Find an independent fact"]);
+        let independent=refinement_ticket(&workspace.config,&registered,&json!({"query":"different fact","gap":"new independent fact","requirementId":"requirement-2"})).unwrap();
+        assert_eq!(independent["attempt"],1);
+        let continuing=gateway::read_model_messages(&workspace.config.data_root,chat).unwrap();
+        assert_eq!(continuing.iter().find(|message|message["Id"]==request).unwrap()["Status"],"streaming");
+    }
+
+    #[test]
+    fn registered_refinement_identity_survives_wording_restart_and_rejects_invented_ids() {
+        let chat = gateway::new_id(); let request = gateway::new_id();
+        let context = json!({"conversationId":chat,"requestId":request,
+            "acceptanceRequirements":["Read A", "Read B"]});
+        let first = reserve_refinement(&context, &json!({"requirementId":"requirement-1","gap":"missing A"}), ||Ok(vec![])).unwrap();
+        let second = reserve_refinement(&context, &json!({"requirementId":"requirement-1","gap":"  rewritten A  ","query":"new keywords"}), ||panic!("already restored")).unwrap();
+        assert_eq!(second["attempt"],2); assert_eq!(first["gapKey"],second["gapKey"]);
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-3"}), ||panic!("invalid before I/O")).unwrap_err().code(), "INVALID_RETRIEVAL_INPUT");
+        release_task(&chat,&request);
+        let third = reserve_refinement(&context, &json!({"requirementId":"requirement-1","gap":"another label"}), ||Ok(vec![second])).unwrap();
+        assert_eq!(third["attempt"],3);
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-2"}), ||panic!("already restored")).unwrap()["attempt"],1);
+        let owner = task(&context).unwrap();
+        owner.lock().unwrap().ledger.apply("retrieval.refinement-release",&third).unwrap();
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-1"}), ||panic!("already restored")).unwrap()["attempt"],3);
+        let lease = crate::service_cancellation::CancellationLease::acquire(&gateway::new_id()).unwrap();
+        let scope = lease.enter();
+        lease.token.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(reserve_refinement(&context,&json!({"requirementId":"requirement-2"}),||panic!("cancelled before I/O")).unwrap_err().code(),"TOOL_CANCELLED");
+        drop(scope);
+        assert_eq!(reserve_refinement(&context, &json!({"requirementId":"requirement-2"}), ||panic!("already restored")).unwrap()["attempt"],2);
+        release_task(&chat,&request);
+    }
+
+    #[test]
+    fn locator_fallback_keeps_directory_scope_and_exact_lookup_skips_refinement() {
+        assert_eq!(fallback_directory(&json!({"path":"src\\indexre.rs"}),&json!({})),Some("src".into()));
+        assert_eq!(fallback_directory(&json!({"path":"src/config/"}),&json!({})),Some("src/config".into()));
+        assert!(fallback_directory(&json!({"path":"src/typo.rs","query":"only under src/typo.rs"}),&json!({})).is_none());
+        assert!(fallback_directory(&json!({"path":"src/typo.rs"}),&json!({"acceptanceRequirements":["仅在 src/typo.rs 查找"]})).is_none());
+        let mut result = json!({"items":[{"locator":{"relativePath":"src/indexer.rs"}},
+            {"locator":{"relativePath":"src/private/next.rs"}},{"locator":{"relativePath":"src2/secret.rs"}}]});
+        restrict_fallback_directory(&mut result,"src");
+        assert_eq!(result["items"].as_array().unwrap().len(),2);
+        let workspace = ReadWorkspace::new();
+        let mut settings = storage::settings::apply("storage.settings.defaults",&json!({})).unwrap();
+        settings["local"]["semantic"] = json!("off");
+        std::fs::create_dir_all(workspace.config.data_root.join("Retrieval")).unwrap();
+        std::fs::write(workspace.config.data_root.join("Retrieval/settings.json"),settings.to_string()).unwrap();
+        let exact = handle_tool("knowledge.search",&json!({"query":"原文","path":"original.txt"}),&workspace.context,&workspace.config).unwrap().unwrap();
+        assert_eq!(exact["retrievalStrategy"],"exact-locator");
+        assert!(exact.get("refinement").is_none(),"a current exact match must not reserve semantic work");
+        let miss = handle_tool("knowledge.search",&json!({"query":"原文","path":"originla.txt"}),&workspace.context,&workspace.config).unwrap().unwrap();
+        assert_eq!(miss["retrievalStrategy"],"scoped-locator-fallback");
+        assert_eq!(miss["refinement"]["attempt"],1);
+        assert!(!miss["items"].as_array().unwrap().is_empty());
+        let restricted = handle_tool("knowledge.search",&json!({"query":"只在 originla.txt 搜索原文","path":"originla.txt"}),&workspace.context,&workspace.config).unwrap().unwrap();
+        assert!(restricted["items"].as_array().unwrap().is_empty());
+        assert!(restricted.get("refinement").is_none());
+    }
+
+    #[test]
     fn changed_or_deleted_originals_cannot_use_saved_window_recovery() {
         let workspace = ReadWorkspace::new();
         workspace.refit_chunks();
@@ -1562,11 +1919,6 @@ pub fn prepare_request(
         result["items"].as_array_mut().unwrap().pop();
         cuts += 1;
     }
-    if result["items"].as_array().unwrap().is_empty() {
-        return Ok(
-            json!({"items":[],"systemNotice":"","audit":{"requestedTokens":budget,"actualTokens":0,"coldEmbeddingStarted":false,"earlyCutReason":if cuts>0{json!("remaining-context-limit")}else{Value::Null}}}),
-        );
-    }
     let canonical =
         json!({"structuredContent":result,"content":[{"type":"text","text":result.to_string()}]});
     let reference = gateway::save_tool_result(
@@ -1578,7 +1930,7 @@ pub fn prepare_request(
         None,
     )?;
     let view = project_evidence_result(&result, reference["id"].as_str().unwrap())?;
-    let prompt = notice(&view);
+    let prompt = if result["items"].as_array().unwrap().is_empty() { String::new() } else { notice(&view) };
     let occupied = crate::models::protocol::estimate_tokens(&prompt);
     result["resultRef"] = reference;
     result["modelView"] = view;

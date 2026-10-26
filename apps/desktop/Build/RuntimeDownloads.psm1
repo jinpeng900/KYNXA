@@ -154,8 +154,8 @@ function Save-KynxaPinnedDownload {
                     $contentLength = $response.Content.Headers.ContentLength
                     if ($statusCode -eq 206) {
                         $range = $response.Content.Headers.ContentRange
-                        # Append only an exact range of the same entity; a pinned hash is still required at completion.
-                        # 只追加同一文件身份的精确范围；下载完成后仍必须通过固定哈希校验。
+                        # Resume only matching file ranges, then verify the pinned hash.
+                        # 仅续传同一文件的匹配范围，完成后核对固定哈希。
                         if (-not $range -or $range.Unit -ne 'bytes' -or $range.From -ne $offset -or -not $range.HasLength -or
                             $range.To -lt $range.From -or $range.To -ge $range.Length -or
                             ($ExpectedBytes -gt 0 -and $range.Length -ne $ExpectedBytes) -or

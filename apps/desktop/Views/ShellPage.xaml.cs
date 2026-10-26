@@ -19,6 +19,7 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage : Page
 {
     private readonly LayoutStateService _layoutStateService = new();
+    private readonly TextBlock _promptMeasure = new() { TextWrapping = TextWrapping.Wrap };
     private LayoutState _layout = LayoutState.CreateDefault();
     private double _dragStartValue;
     private double _autoComposerHeight = ComposerHeightDefault;
@@ -551,19 +552,15 @@ public sealed partial class ShellPage : Page
         // Match the editor's reserved scrollbar lane so wrapping never runs beneath it.
         // 与输入区预留的滚动条通道对齐，避免换行文本延伸到滚动条下。
         double availableTextWidth = Math.Max(120, PromptTextBox.ActualWidth - 88);
-        TextBlock measure = new()
-        {
-            Text = string.IsNullOrEmpty(PromptTextBox.Text) ? " " : PromptTextBox.Text,
-            FontFamily = PromptTextBox.FontFamily,
-            FontSize = PromptTextBox.FontSize,
-            FontStyle = PromptTextBox.FontStyle,
-            FontWeight = PromptTextBox.FontWeight,
-            TextWrapping = TextWrapping.Wrap,
-            Width = availableTextWidth
-        };
-        measure.Measure(new Windows.Foundation.Size(availableTextWidth, double.PositiveInfinity));
+        _promptMeasure.Text = string.IsNullOrEmpty(PromptTextBox.Text) ? " " : PromptTextBox.Text;
+        _promptMeasure.FontFamily = PromptTextBox.FontFamily;
+        _promptMeasure.FontSize = PromptTextBox.FontSize;
+        _promptMeasure.FontStyle = PromptTextBox.FontStyle;
+        _promptMeasure.FontWeight = PromptTextBox.FontWeight;
+        _promptMeasure.Width = availableTextWidth;
+        _promptMeasure.Measure(new Windows.Foundation.Size(availableTextWidth, double.PositiveInfinity));
 
-        double extraContentHeight = Math.Max(0, measure.DesiredSize.Height - 24);
+        double extraContentHeight = Math.Max(0, _promptMeasure.DesiredSize.Height - 24);
         double maximumComposerHeight = GetComposerHeightMaximum();
         double minimumAutoHeight = Math.Min(ComposerHeightDefault, maximumComposerHeight);
         double maximumAutoHeight = Math.Max(

@@ -13,7 +13,7 @@ use std::sync::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-pub(crate) use super::gateway_mcp::{foreground, prewarm, reusable_catalog as reusable_mcp_catalog};
+pub(crate) use super::gateway_mcp::{explicit_tool_error, foreground, reusable_catalog as reusable_mcp_catalog};
 pub(crate) use super::gateway_tool_memory::rank_tool_hints;
 use super::service::ToolSession;
 use crate::gateway_contract::GatewayError;
@@ -43,6 +43,8 @@ pub struct ToolRuntime {
     pub(crate) jobs: tokio::sync::Mutex<HashMap<String, super::gateway_process::HostJob>>,
     pub(crate) schemas: tokio::sync::RwLock<Vec<Value>>,
     pub(crate) tool_memory: super::gateway_tool_memory::ToolMemoryRuntime,
+    pub(crate) semantic: super::gateway_semantic::SemanticRuntime,
+    pub(crate) experience_repository: std::sync::OnceLock<crate::storage::task_repository::TaskRepository>,
     searches: Mutex<HashMap<String, Arc<Mutex<ToolSession>>>>,
     code_versions: Mutex<HashMap<String, Arc<Mutex<super::service_code_versions::CodeVersions>>>>,
     skill_headers: Mutex<HashMap<PathBuf, CachedSkillHeader>>,
@@ -50,6 +52,9 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
+    /// Model connection home for built-in sources that reuse a configured provider key.
+    /// 模型连接目录，供复用已配置供应商密钥的内置来源按需读取。
+    pub(crate) model_home: std::sync::OnceLock<PathBuf>,
     pub(crate) web_fetch: super::gateway_web_snapshot::FetchState,
     pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
     pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
@@ -70,6 +75,8 @@ impl Default for ToolRuntime {
             jobs: Default::default(),
             schemas: Default::default(),
             tool_memory: Default::default(),
+            semantic: Default::default(),
+            experience_repository: Default::default(),
             searches: Default::default(),
             code_versions: Default::default(),
             skill_headers: Default::default(),
@@ -77,6 +84,7 @@ impl Default for ToolRuntime {
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
             web_search: Default::default(),
+            model_home: Default::default(),
             web_fetch: Default::default(),
             preview_grants: Default::default(),
             terminals: Default::default(),
@@ -84,6 +92,29 @@ impl Default for ToolRuntime {
             configuration_generation: AtomicU64::new(0),
         }
     }
+}
+
+impl ToolRuntime {
+    pub(crate) fn with_gateway_config(config: &crate::gateway_contract::GatewayConfig) -> Self {
+        let runtime = Self::default();
+        runtime.semantic.install(config);
+        let _ = runtime.model_home.set(config.data_home.clone());
+        runtime
+    }
+}
+
+pub(crate) fn prewarm(context: &GatewayToolContext) -> Value {
+    super::gateway_semantic::prewarm(context);
+    super::gateway_mcp::prewarm(context)
+}
+
+pub(crate) fn experience_identities(context: &GatewayToolContext, names: &[String]) -> Result<Value,GatewayError> {
+    super::gateway_tool_memory::experience_identities(context,names)
+}
+
+pub(crate) async fn verified_experience_hint(context: &GatewayToolContext, query: &str) -> Value {
+    super::gateway_experience::hint(query,context).await
+        .unwrap_or_else(|_|json!({"entries":[],"navigationOnly":true}))
 }
 
 /// Approval belongs to this invocation, never to a model-supplied explanation.
@@ -119,8 +150,8 @@ pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch:
     }
 }
 
-/// Own the bridge for a blocking reader; dropping the caller cancels parsing and retires its monitor.
-/// 持有阻塞读取的取消桥；调用方退出时停止解析并释放监听任务，不能只在正常返回后清理。
+/// Cancel parsing and release the blocking reader's monitor when its caller drops.
+/// 调用方退出时取消解析并释放阻塞读取的监听任务。
 pub(super) struct WorkerCancellation {
     pub signal: Arc<AtomicBool>,
     monitor: tokio::task::JoinHandle<()>,
@@ -214,8 +245,8 @@ pub(crate) async fn native(
 fn cancellation_lease(
     ctx: &GatewayToolContext,
 ) -> Result<crate::service_cancellation::CancellationLease, GatewayError> {
-    // Only enter cancellation TLS on its blocking worker; a Tokio thread can run unrelated requests between awaits.
-    // 取消 TLS 仅在对应阻塞 worker 内进入；Tokio 线程在 await 之间可能执行其他请求。
+    // Set cancellation TLS only on the blocking worker; Tokio threads can switch requests at await.
+    // 取消 TLS 仅设在阻塞 worker 内；Tokio 线程在 await 时可能切换请求。
     let id = ctx.config["nativeCancellationId"]
         .as_str()
         .map(str::to_owned)
@@ -516,8 +547,8 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","document.create","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
-        || name == "artifact.open" && !arguments["url"].is_string()
+    name.starts_with("filesystem.") || ["document.read","document.create","image.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+        || name == "artifact.open" && !arguments["url"].is_string() && !arguments["resultId"].is_string()
 }
 
 pub(crate) fn operation_mount_binding(ctx: &GatewayToolContext, arguments: &Value) -> Result<Value, GatewayError> {
@@ -720,9 +751,12 @@ pub(super) async fn filesystem(
         return Ok(approval(name, &args, ctx));
     }
     let binding = json!({"requestedPath":super::local_files::path_text(&requested),"path":super::local_files::path_text(&path),
-        "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "artifact.open"});
+        "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "image.read" || name == "artifact.open"});
     if name == "artifact.open" {
         return super::gateway_workspace_preview::open(args, path, binding, ctx).await;
+    }
+    if name == "image.read" {
+        return super::gateway_image::read(args, path, binding, ctx).await;
     }
     if name == "document.read" {
         let result = super::gateway_document_read::read(args, path, binding.clone(), ctx).await?;
@@ -892,8 +926,8 @@ async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, Gatew
     let Some(execute) = &ctx.external_execute else {
         return Err(failure("TOOL_NOT_IMPLEMENTED", "工作关联服务未接线。", 503));
     };
-    // Binding is a persistent relationship change; this turn retains its original authorized roots.
-    // 关联只变更持久工作关系，本轮仍保持原授权根，不通过绑定偷偷扩大文件权限。
+    // Binding changes the saved relationship, not this turn's authorized roots.
+    // 关联只改变持久关系，不扩大本轮授权根目录。
     let mut normalized = args;
     normalized["path"] = json!(path);
     execute("work.folder.bind".into(), normalized).await
@@ -989,11 +1023,20 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "document.create", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
         return Ok(approval(tool_name, &args, ctx));
+    }
+    if tool_name == "artifact.open" {
+        if ["path", "url", "resultId"].iter().filter(|key| args[*key].as_str().is_some_and(|value| !value.trim().is_empty())).count() != 1 {
+            return Err(failure("INVALID_TOOL_ARGUMENTS", "请仅指定文件路径、网页地址或已有图片回执之一。", 400));
+        }
+        if args["resultId"].is_string() {
+            let execute = ctx.external_execute.as_ref().ok_or_else(|| failure("TOOL_NOT_IMPLEMENTED", "图片归档展示服务未接线。", 503))?;
+            return execute(tool_name.to_owned(), args).await;
+        }
     }
     if tool_name == "artifact.open" && args["url"].is_string() {
         let target = super::gateway_workspace_preview::web_target(&args)?;
@@ -1018,7 +1061,10 @@ async fn execute_inner(
         target["_metadataOnly"] = json!(true);
         return filesystem(tool_name, target, ctx).await;
     }
-    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "artifact.open"].contains(&tool_name) {
+    if tool_name == "knowledge.experience" {
+        return super::gateway_experience::query(args,ctx).await;
+    }
+    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.workspace.") {
@@ -1127,6 +1173,7 @@ async fn execute_inner(
         )
         .map_err(|message| failure("TOOL_DISCOVERY_FAILED", &message, 500))?;
         let mut indexes = indexes.as_array().cloned().unwrap_or_default();
+        let semantic = super::gateway_semantic::supplement(ctx,&all,args["query"].as_str().unwrap_or(""),&mut indexes).await;
         rank_tool_hints(ctx, &all, &mut indexes);
         let matching = indexes.iter()
             .filter_map(|hit| hit.as_u64().or_else(|| hit["index"].as_u64()))
@@ -1136,7 +1183,7 @@ async fn execute_inner(
         let limit = args["limit"].as_u64().unwrap_or(20).min(20) as usize;
         return Ok(
             json!({"tools":matching.iter().skip(offset).take(limit).map(|tool|json!({"name":tool["name"],"description":tool["description"],"source":tool["source"],"state":tool["state"],"runtimeCompatible":tool["runtimeCompatible"],"code":tool["code"]})).collect::<Vec<_>>(),
-            "total":matching.len(),"nextOffset":if offset+limit<matching.len(){json!(offset+limit)}else{Value::Null}}),
+            "total":matching.len(),"nextOffset":if offset+limit<matching.len(){json!(offset+limit)}else{Value::Null},"discovery":semantic}),
         );
     }
     if let Some(execute) = &ctx.external_execute {
@@ -1156,8 +1203,8 @@ fn execution_environment(
 ) -> Result<Value, GatewayError> {
     let descriptor =
         json!({"name":tool_name,"source":if tool_name.starts_with("mcp."){"mcp"}else{"builtin"}});
-    // Only native browser/search adapters produce trusted top-level provenance; an MCP result cannot choose its host.
-    // 仅原生浏览器和搜索适配器产生可信顶层来源；外部 MCP 的结果不能自行选择执行主机。
+    // Trust provenance only from native browser/search adapters; MCP results cannot select a host.
+    // 仅信任原生浏览器和搜索来源信息；MCP 结果不能选择执行主机。
     if (tool_name.starts_with("browser.") || tool_name == "web.search")
         && result["executionEnvironment"].is_object()
     {
@@ -1195,7 +1242,7 @@ fn execution_environment(
 
 /// Saved request snapshots can lose capabilities, but configuration changes cannot grant them new ones.
 /// 已保存的请求快照可以被撤销能力，配置更新不能给旧请求扩大能力。
-async fn checked_configuration(
+pub(crate) async fn checked_configuration(
     ctx: &GatewayToolContext,
 ) -> Result<GatewayToolContext, GatewayError> {
     let mut checked = ctx.clone();
@@ -1348,8 +1395,8 @@ pub async fn execute(
     };
     let ctx = checked.as_ref().unwrap_or(ctx);
     let approval_arguments = args.clone();
-    // A decision cannot silently move to another canonical target or a changed configuration while waiting.
-    // 等待期间目标或配置改变时，旧决定不能静默授权新绑定；原生执行仍会再次做完整安全校验。
+    // Invalidate approval if its target or configuration changes while waiting; execution checks again.
+    // 等待时目标或配置变化使旧审批失效；执行前再次核验。
     if ctx.approved && ctx.config["approvedInvocation"]["taskApproval"].is_object() {
         let binding = task_approval_binding(tool_name, &approval_arguments, ctx, &ctx.config["approvedInvocation"]).await?;
         if binding["fingerprint"] != ctx.config["approvedInvocation"]["taskApproval"]["fingerprint"] {
@@ -1856,8 +1903,8 @@ pub fn mcp_presets(ctx: &GatewayToolContext) -> Vec<Value> {
 }
 
 pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    // Resolve installed preset files off the async runtime, then initialize/read under one native lock acquisition.
-    // 随包工具文件检查移至阻塞线程；配置初始化与读取在同一次原生加锁中完成，避免重复排队。
+    // Inspect preset files on a blocking thread; initialize and read configuration under one lock.
+    // 在阻塞线程检查预设文件；一次加锁完成配置初始化和读取。
     let preset_context = ctx.clone();
     let presets = tokio::task::spawn_blocking(move || mcp_presets(&preset_context))
         .await
@@ -1877,6 +1924,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     ctx.runtime
         .configuration_generation
         .fetch_add(1, Ordering::AcqRel);
+    ctx.runtime.semantic.clear();
     let result = native(ctx, "config.update", json!({"input":input})).await?;
     ctx.runtime.web_search.clear_queries();
     ctx.runtime.web_fetch.clear();
@@ -1885,16 +1933,16 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     let mut updated = ctx.clone();
     updated.config = result.clone();
     super::gateway_tool_memory::synchronize(&updated).await;
-    super::gateway_mcp::prewarm(&updated);
+    prewarm(&updated);
     Ok(result)
 }
 
-/// Read resolved MCP state only; a settings page must never initiate a connection handshake.
-/// 只读取已完成的 MCP 连接状态；打开设置不能发起握手，也不能把默认启用说成已就绪。
+/// Read saved source credentials and resolved MCP state; settings never initiate a connection handshake.
+/// 只读取来源已存凭据及已有 MCP 状态；打开设置不握手，也不把已配置说成网络已经连通。
 pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     let diagnostics = super::gateway_mcp::diagnostics(ctx).await;
     let loaded = ctx.runtime.schemas.read().await;
-    let rows=ctx.config["mcpServers"].as_array().into_iter().flatten().filter(|server|{
+    let mut rows=ctx.config["mcpServers"].as_array().into_iter().flatten().filter(|server|{
         super::service_web::search_server(server)
             || loaded.iter().any(|tool|tool["serverId"]==server["id"]&&super::service_web::provider_kind(tool).is_some())
     }).map(|server|{
@@ -1907,6 +1955,17 @@ pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
             "retryAfterMs":cooling.as_ref().and_then(|error|error.retry_after_ms),
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
+    drop(loaded);
+    // Reuse official model credentials without copying keys or searching when settings opens.
+    // 复用官方模型凭据，不复制密钥，也不因打开设置发起搜索。
+    let builtin = super::gateway_deepseek_search::source(ctx).await;
+    let has_credential = builtin.is_some();
+    let cooling = builtin.as_ref().and_then(|source| ctx.runtime.web_search.cooling(source));
+    rows.push(json!({"id":super::gateway_deepseek_search::SOURCE_ID,"name":"DeepSeek Search",
+        "origin":"builtin","enabled":true,"ready":has_credential && cooling.is_none(),
+        "state":if !has_credential{"credential-required"}else if cooling.is_some(){"cooldown"}else{"configured"},
+        "credentialState":if has_credential{"configured"}else{"unavailable"},
+        "retryAfterMs":cooling.as_ref().and_then(|error|error.retry_after_ms)}));
     json!({"selectedId":selected_id,"providers":rows})
 }
 
@@ -2214,6 +2273,33 @@ pub(crate) fn test_context() -> (GatewayToolContext, watch::Sender<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_providers_describe_builtin_credentials_without_connecting_or_exposing_them() {
+        let (ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let missing = providers(&ctx, "deepseek-search").await;
+        let row = missing["providers"].as_array().unwrap().iter()
+            .find(|row| row["id"] == "deepseek-search").unwrap();
+        assert_eq!(row["ready"], false);
+        assert_eq!(row["credentialState"], "unavailable");
+        let home = root.join("models-home");
+        std::fs::create_dir_all(&home).unwrap();
+        ctx.runtime.model_home.set(home.clone()).unwrap();
+        std::fs::write(home.join("connections.json"), json!({"version":1,"providers":[{
+            "providerId":"deepseek","displayName":"DeepSeek","baseUrl":"https://api.deepseek.com",
+            "apiKey":"fixture-provider-list-secret","models":["deepseek-flash"],"protocol":"openai-completions"
+        }]}).to_string()).unwrap();
+        let configured = providers(&ctx, "deepseek-search").await;
+        let row = configured["providers"].as_array().unwrap().iter()
+            .find(|row| row["id"] == "deepseek-search").unwrap();
+        assert_eq!(row["state"], "configured");
+        assert_eq!(row["credentialState"], "configured");
+        assert_eq!(row["origin"], "builtin");
+        assert!(!configured.to_string().contains("fixture-provider-list-secret"));
+        assert!(super::super::gateway_mcp::diagnostics(&ctx).await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn task_file_write_binding_preserves_live_hash_protection_and_rejects_target_or_configuration_changes() {
@@ -2893,6 +2979,30 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
+    async fn archived_image_display_uses_scoped_executor_without_file_or_browser_dispatch() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let displayed = Arc::new(Mutex::new(Vec::new()));
+        let captured = displayed.clone();
+        ctx.external_execute = Some(Arc::new(move |name, args| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                captured.lock().unwrap().push((name, args.clone()));
+                Ok(json!({"kind":"screenshot","presentation":"workspace","sourceResultRef":{"id":args["resultId"]}}))
+            })
+        }));
+        let input = json!({"resultId":uuid::Uuid::new_v4().to_string(),"title":"Final result"});
+        assert!(!workspace_path_tool("artifact.open", &input));
+        assert_eq!(execute("artifact.open", input.clone(), &ctx).await.unwrap()["kind"], "screenshot");
+        assert_eq!(displayed.lock().unwrap().as_slice(), &[("artifact.open".to_owned(), input)]);
+        for invalid in [json!({}), json!({"path":"report.png","resultId":"saved"}),
+            json!({"url":"https://example.org","resultId":"saved"}), json!({"path":"report.png","url":"https://example.org"})] {
+            assert_eq!(execute("artifact.open", invalid, &ctx).await.unwrap_err().code, "INVALID_TOOL_ARGUMENTS");
+        }
+        assert_eq!(displayed.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
     async fn persistent_work_binding_requires_authority_and_keeps_current_roots() {
         let (mut ctx, _sender) = test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
@@ -2988,15 +3098,26 @@ mod tests {
                 .code,
             "APP_SKILL_NOT_FOUND"
         );
+        // A task grant bound to the skill call cannot be reused for another tool.
+        // 绑定到技能调用的任务授权不能挪用于其他工具。
         assert_eq!(
             execute("mcp.fixture.echo", json!({}), &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "TOOL_APPROVAL_SCOPE_CHANGED"
+        );
+        let mut approved_without_grant = approved.clone();
+        approved_without_grant.config["approvedInvocation"] = Value::Null;
+        assert_eq!(
+            execute("mcp.fixture.echo", json!({}), &approved_without_grant)
                 .await
                 .unwrap_err()
                 .code,
             "MCP_SERVER_NOT_FOUND"
         );
         assert_eq!(
-            execute("mcp.replacement.echo", json!({}), &approved)
+            execute("mcp.replacement.echo", json!({}), &approved_without_grant)
                 .await
                 .unwrap_err()
                 .code,

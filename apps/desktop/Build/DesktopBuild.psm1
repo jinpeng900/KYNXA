@@ -95,10 +95,10 @@ function Invoke-KynxaBuildCommand {
     $start = [Diagnostics.ProcessStartInfo]::new($FilePath)
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
-    # Module paths belong to the PowerShell engine, including nested WinPS launched by MSBuild.
-    # 模块路径属于各自 PowerShell 运行时；MSBuild 内再启动 WinPS 时也应重新建立匹配路径。
-    # Remove only the child's inherited snapshot; the caller's environment and build caches stay intact.
-    # 仅清除子进程继承快照，保留调用者环境及已有构建缓存。
+    # Rebuild module paths for the child's PowerShell version, including nested MSBuild calls.
+    # 按子进程的 PowerShell 版本重建模块路径，兼容 MSBuild 嵌套调用。
+    # Clear only the child's inherited paths; preserve the caller's environment and caches.
+    # 仅清除子进程继承的路径，保留调用者环境和缓存。
     $start.EnvironmentVariables.Remove('PSModulePath')
     $start.WorkingDirectory = $WorkingDirectory
     $start.Arguments = (@($Arguments | ForEach-Object { ConvertTo-KynxaProcessArgument $_ }) -join ' ')

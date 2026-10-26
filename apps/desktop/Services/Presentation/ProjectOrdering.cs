@@ -11,7 +11,7 @@ public static class ProjectOrdering
         if (index <= 0) return false;
         projects.RemoveAt(index);
         projects.Insert(0, project); // Display always groups pinned projects first.
-        // 展示时始终先分组列出置顶项目。
+        // 置顶项目优先分组显示。
         return true;
     }
 

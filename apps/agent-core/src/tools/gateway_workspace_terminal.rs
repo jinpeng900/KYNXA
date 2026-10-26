@@ -198,10 +198,8 @@ impl TerminalOutput {
             // 协议标记在编码脚本运行时生成；不把 PS>/>> 文本或输入回显当作执行证明。
             let mut pending = std::mem::take(&mut state.pending_protocol);
             pending.push_str(&text);
-            // ConPTY may insert title or cursor sequences inside the frame, including their own BEL, so the
-            // frame ends at the first BEL outside nested escapes and the owned identity is checked afterwards.
-            // ConPTY 可能在帧内插入带 BEL 的标题或光标序列；帧在嵌套转义之外的第一个 BEL 处结束，
-            // 去除这些控制序列后再核对自有标记身份，避免完成标记被截断而丢失。
+            // End at the first BEL outside nested title/cursor escapes, then verify the frame identity.
+            // 取嵌套标题/光标转义之外的首个 BEL 作为帧尾，再核验标记身份，避免截断。
             let identity = &self.marker_prefix[PROTOCOL_OPENER.len()..];
             loop {
                 if let Some(start) = pending.find(PROTOCOL_OPENER) {
@@ -852,7 +850,8 @@ mod command_contract_tests {
         output.begin_command("titled", "Write-Output done").unwrap().unwrap();
         let token = output.state.lock().unwrap().commands[0].token.clone();
         let cwd = BASE64.encode("D:\\fixture 中文");
-        // ConPTY may put a title update (with its own BEL) and cursor toggles inside the owned frame.
+        // ConPTY may nest title updates with BEL and cursor toggles inside the frame.
+        // ConPTY 可能在帧内嵌入带 BEL 的标题更新和光标切换。
         let frame = format!("{}DONE:{token}:\u{1b}]0;Windows PowerShell\u{7}\u{1b}[?25l0:{}\u{1b}[?25h{}\u{7}",
             output.marker_prefix, &cwd[..4], &cwd[4..]);
         for character in frame.chars() { output.append(character.to_string()); }
@@ -861,7 +860,8 @@ mod command_contract_tests {
         assert_eq!(receipt["exitCode"], 0);
         let page = output.read(0).unwrap();
         assert!(!page["output"].as_str().unwrap().contains("DONE:"), "{page}");
-        // A frame owned by another terminal identity stays ordinary output and settles nothing.
+        // Foreign terminal frames remain ordinary output and cannot settle this command.
+        // 其他终端的帧只算普通输出，不能结算当前命令。
         let foreign = TerminalOutput::default();
         ready(&foreign);
         foreign.begin_command("foreign", "Write-Output done").unwrap().unwrap();

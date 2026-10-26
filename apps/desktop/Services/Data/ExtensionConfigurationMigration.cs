@@ -104,7 +104,7 @@ internal static class ExtensionConfigurationMigration
     // uv-managed Windows environments keep their base interpreter in pyvenv.cfg.
     // Only these known text metadata fields change: wheel contents, launchers,
     // requirements, arbitrary package configuration and external paths remain exact.
-    // uv 管理的 Windows 环境在 pyvenv.cfg 保存基础解释器；只改已知路径元数据，wheel、启动器、依赖、任意配置与外部路径原样保留。
+    // uv 的 Windows 基础解释器路径位于 pyvenv.cfg；仅改已知路径字段，包、启动器、依赖、其他配置和外部路径不变。
     private static async Task RelocateUvRuntimeConfigAsync(string sourceRoot, string targetRoot, CancellationToken cancellationToken)
     {
         string sourceMcp = Path.Combine(sourceRoot, "MCP");
@@ -211,8 +211,8 @@ internal static class ExtensionConfigurationMigration
                 catch (JsonException error) { throw new InvalidDataException(UiText.Get("工具配置文件损坏，原文件已保留。"), error); }
                 string? relocated = RelocateRuntimePath(value);
                 if (relocated is null) return;
-                // JSON basic strings are valid TOML basic strings; never substitute inside a binary or arbitrary string.
-                // JSON 基本字符串也符合 TOML 基本字符串语法；绝不替换二进制或任意字符串内部内容。
+                // JSON strings are valid TOML basic strings; replace only known text fields.
+                // JSON 字符串符合 TOML 基本字符串语法；仅替换已知文本字段。
                 replacements.Add((token.Start, token.Value.Length, JsonSerializer.Serialize(relocated.Replace('\\', '/'))));
             }
         }

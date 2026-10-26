@@ -16,8 +16,8 @@ fn exact_official_endpoint(endpoint: &Value) -> bool {
         && ["", "/", "/v1", "/v1/"].contains(&string(&endpoint["pathname"]))
 }
 
-/// Auxiliary summaries may use a declared provider mode; this never establishes proxy quotas or changes normal replies.
-/// 辅助摘要可使用明确供应商的专用模式；不据此认定代理额度，也不改变正常回复的思考设置。
+/// Summary modes do not establish proxy quotas or change normal reply settings.
+/// 摘要专用模式不代表代理额度，也不改变正常回复设置。
 fn summary_controls(args: &Value) -> Value {
     let endpoint = &args["endpoint"];
     let known_model = ["deepseek-flash", "deepseek-v4-pro"].contains(&string(&args["model"]));
@@ -197,7 +197,12 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
         return Ok(summary_controls(args));
     }
     if operation == "models.capabilities.lookup" {
-        if !exact_official_endpoint(endpoint) || !args["model"].is_string() {
+        // DeepSeek's Messages route serves the same official models under /anthropic.
+        // DeepSeek 的 Messages 路线在 /anthropic 下提供同一批官方模型，窗口与输出上限保持一致。
+        let deepseek_messages = endpoint["hostname"] == "api.deepseek.com"
+            && ["/anthropic", "/anthropic/"].contains(&string(&endpoint["pathname"]))
+            && exact_official_endpoint(&{ let mut root = endpoint.clone(); root["pathname"] = json!("/"); root });
+        if !(exact_official_endpoint(endpoint) || deepseek_messages) || !args["model"].is_string() {
             return Ok(json!({}));
         }
         return Ok(
@@ -285,8 +290,8 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
             value["capabilitySource"] = source.clone();
         }
     }
-    // Keep independent verified input/output caps alongside the total window; callers must not infer one from another.
-    // 将独立输入、输出上限与总窗口一起返回，调用方不能把其中一个额度当成另一个额度。
+    // Return input, output and total limits separately; they are not interchangeable.
+    // 分别返回输入、输出和总窗口上限，三者不能互相代替。
     for (source, target) in [("maxInputTokens", "providerMaxInputTokens"), ("maxOutputTokens", "providerMaxOutputTokens")] {
         let mut limits = Vec::new();
         if let Some(limit) = valid_limit(&args["connection"][source]) { limits.push(limit); }
