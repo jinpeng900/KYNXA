@@ -8,14 +8,15 @@ param(
     [switch]$AssetsOnly,
     [switch]$Offline,
     [switch]$VerifyResources,
-    [switch]$Rebuild
+    [switch]$Rebuild,
+    [string]$BundleRoot
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1') -Force
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
-$runtimeRoot = Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64'
+$runtimeRoot = if ($BundleRoot) { [IO.Path]::GetFullPath([IO.Path]::Combine($BundleRoot, '.')) } else { Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64' }
 $utf8 = [Text.UTF8Encoding]::new($false)
 if ($RuntimeIdentifier -ne 'win-x64' -or -not [Environment]::Is64BitProcess) {
     throw 'The native gateway payload is currently verified only on Windows x64.'

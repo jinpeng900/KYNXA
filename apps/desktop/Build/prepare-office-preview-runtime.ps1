@@ -64,7 +64,14 @@ if (-not $ready) {
         Save-KynxaPreparedComponent -Root $staging -Component 'office-source' -InputHash $sourceInput -Files $sourceRecords
         $sourceState = Read-KynxaPreparedComponent -Root $staging -Component 'office-source'
     }
-    $sourceEntry = @($sourceState['files'] | Where-Object { $_['path'].Replace('\','/').EndsWith('/' + $specification.executable.Replace('\','/'), [StringComparison]::OrdinalIgnoreCase) })[0]
+    # Administrative extraction may place program/ at the staging root or inside a product folder.
+    # 管理提取可能将 program/ 直接放在暂存根目录，也可能放在产品子目录中。
+    $relativeExecutable = $specification.executable.Replace('\','/')
+    $sourceEntry = @($sourceState['files'] | Where-Object {
+        $relativePath = $_['path'].Replace('\','/')
+        $relativePath.Equals($relativeExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+            $relativePath.EndsWith('/' + $relativeExecutable, [StringComparison]::OrdinalIgnoreCase)
+    })[0]
     $sourceRoot = [IO.Directory]::GetParent([IO.Path]::GetDirectoryName([IO.Path]::Combine($staging, $sourceEntry['path']))).FullName
     [IO.Directory]::CreateDirectory($officeRoot) | Out-Null
     foreach ($file in $sourceState['files']) {
