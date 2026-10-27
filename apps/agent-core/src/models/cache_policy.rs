@@ -298,7 +298,7 @@ pub(crate) fn include_stream_usage(
     let (policy, provider_name) = provider(connection, model, protocol);
     // The pinned local llama.cpp stream reports its measured KV reuse only when usage is requested.
     // 固定本地 llama.cpp 仅在请求 usage 时回传实测 KV 复用量；这不改变缓存或推理策略。
-    let managed_local = super::gateway_local_engine::is_managed(connection);
+    let managed_local = super::connections::is_managed_local(connection);
     if !matches!(
         policy,
         ProviderCache::OpenAiLegacy | ProviderCache::OpenAiModern

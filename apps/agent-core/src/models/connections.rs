@@ -9,6 +9,12 @@ use super::{
     protocol::{array, string, truthy},
 };
 
+/// Identify application-managed local providers without starting an engine.
+/// 仅判断自管本地连接，不触发引擎或进程操作。
+pub fn is_managed_local(connection: &Value) -> bool {
+    connection["providerId"].as_str().is_some_and(|id| id.starts_with("kynxa-local-"))
+}
+
 fn error(message: &str) -> Value {
     json!({"error": {"message": message}})
 }

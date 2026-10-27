@@ -118,7 +118,8 @@
         "rtf-grimoire",
         "tar",
         "flate2",
-        "bzip2"
+        "bzip2",
+        "zstd"
       ],
       "pureDomains": [
         "orchestration",
@@ -195,6 +196,10 @@
         "tools/gateway_image.rs",
         "tools/gateway_document_create.rs",
         "tools/gateway_workspace_preview.rs",
+        "tools/gateway_workspace_blend.rs",
+        "tools/gateway_workspace_media.rs",
+        "tools/gateway_workspace_transcription.rs",
+        "tools/gateway_workspace_workbench.rs",
         "tools/gateway_attachment_read.rs",
         "tools/gateway_workspace_changes.rs",
         "tools/gateway_workspace_terminal.rs",
@@ -308,7 +313,8 @@
         "rtf-grimoire": "=0.2.1",
         "tar": "=0.4.46",
         "flate2": "=1.1.10",
-        "bzip2": "=0.6.1"
+        "bzip2": "=0.6.1",
+        "zstd": "=0.13.3"
       },
       "integrationModules": [
         {
@@ -363,6 +369,26 @@
           "path": "tools/gateway_workspace_changes.rs",
           "allowedDomains": [],
           "purpose": "Read-only Git changes in the authorized work directory / 授权工作目录内的只读 Git 变更"
+        },
+        {
+          "path": "tools/gateway_workspace_media.rs",
+          "allowedDomains": [],
+          "purpose": "Authorized 3D asset resolution and local Blender preview execution / 授权三维资源解析与本机 Blender 预览执行"
+        },
+        {
+          "path": "tools/gateway_workspace_transcription.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Scoped media transcription with managed source versions and local process ownership / 限定范围媒体转录，复用源版本与本机进程归属"
+        },
+        {
+          "path": "tools/gateway_workspace_workbench.rs",
+          "allowedDomains": [
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Authorized workspace versions and tools composed with existing task and history storage / 授权工作区版本与工具，组合已有任务和历史存储"
         },
         {
           "path": "gateway.rs",
