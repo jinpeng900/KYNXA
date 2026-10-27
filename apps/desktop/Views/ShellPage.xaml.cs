@@ -596,9 +596,9 @@ public sealed partial class ShellPage : Page
     private void UpdateComposerExpandVisual()
     {
         ComposerExpandIcon.Glyph = _composerExpanded ? "\uE73F" : "\uE740";
-        ToolTipService.SetToolTip(
-            ComposerExpandButton,
-            _composerExpanded ? UiText.Get("收起输入区") : UiText.Get("展开输入区"));
+        string label = UiText.Get(_composerExpanded ? "收起输入区" : "展开输入区");
+        ToolTipService.SetToolTip(ComposerExpandButton, label);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ComposerExpandButton, label);
     }
 
     private void NewPrimaryAction_Click(object sender, RoutedEventArgs e)

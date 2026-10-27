@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>1.8.1</Version>
+    <Version>1.8.5</Version>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>KYNXA_Desktop</RootNamespace>
@@ -34,6 +34,8 @@
     <Content Include="Resources\Diagrams\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Transcript\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Workspace\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\tools\workbench-remote.mjs" Link="tools\workbench-remote.mjs" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\tools\workbench-remote\**\*" Link="tools\workbench-remote\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Terminal\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <!-- Publish UI images as well as generated XAML; an unpackaged installer cannot read development output.
          界面图片与生成的 XAML 一起发布；未打包安装程序不能依赖开发输出目录。 -->
@@ -92,5 +94,20 @@
          Release 随包提供 Windows App SDK；仅启用 .NET 自包含并不会包含 WinUI 运行库。 -->
     <WindowsAppSDKSelfContained Condition="'$(Configuration)' == 'Release'">True</WindowsAppSDKSelfContained>
   </PropertyGroup>
+  <!-- Reuse an immutable runtime bundle for desktop-only offline builds.
+       仅重建桌面时可复用独立的完整运行时载荷，不重新准备原生服务或 ToolHost。 -->
+  <PropertyGroup Condition="'$(KynxaPreparedRuntimeRoot)' != ''">
+    <_KynxaPreparedRuntimeRoot>$([System.IO.Path]::GetFullPath('$(KynxaPreparedRuntimeRoot)'))</_KynxaPreparedRuntimeRoot>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(KynxaPreparedRuntimeRoot)' != ''">
+    <_KynxaPreparedRuntimeFiles Include="$(_KynxaPreparedRuntimeRoot)\runtime\**\*"
+        Exclude="$(_KynxaPreparedRuntimeRoot)\runtime\rerank\**\*;$(_KynxaPreparedRuntimeRoot)\runtime\**\*.pdb;$(_KynxaPreparedRuntimeRoot)\runtime\**\*.tmp" />
+    <_KynxaPreparedToolHostFiles Include="$(_KynxaPreparedRuntimeRoot)\ToolHost\**\*"
+        Exclude="$(_KynxaPreparedRuntimeRoot)\ToolHost\**\*.pdb;$(_KynxaPreparedRuntimeRoot)\ToolHost\**\*.tmp" />
+    <Content Include="@(_KynxaPreparedRuntimeFiles)" Link="runtime\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="@(_KynxaPreparedToolHostFiles)" Link="ToolHost\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
   <Import Project="Build\RuntimePackaging.targets" />
 </Project>

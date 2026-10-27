@@ -182,7 +182,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
             return new()
             {
                 Id = chat.Id, Title = chat.Title, Draft = chat.Draft, IsSample = chat.IsSample,
-                IsPinned = chat.IsPinned, IsArchived = chat.IsArchived,
+                IsPinned = chat.IsPinned, IsArchived = chat.IsArchived, KeepWorkspace = chat.KeepWorkspace,
                 // Runtime owns assistant content. Metadata updates send only new submitted user messages.
                 // 助手内容由运行时负责；元数据更新只发送新提交的用户消息。
                 Messages = chat.Messages.Where(message => message.Role == "user" && !_knownUserMessages.Contains((chat.Id, message.Id))).ToList()
@@ -290,7 +290,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     private static JsonElement CatalogMetadata(ConversationCatalog catalog, bool includeFolders = false)
     {
         static object ChatMetadata(ProjectChatState chat) => new
-        { chat.Id, chat.Title, chat.Draft, chat.IsSample, chat.IsPinned, chat.IsArchived };
+        { chat.Id, chat.Title, chat.Draft, chat.IsSample, chat.IsPinned, chat.IsArchived, chat.KeepWorkspace };
         return JsonSerializer.SerializeToElement(new
         {
             Projects = catalog.Projects.Select(project => new

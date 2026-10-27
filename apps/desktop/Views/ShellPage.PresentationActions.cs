@@ -198,6 +198,8 @@ public sealed partial class ShellPage
         Add("聚焦输入 Ctrl+L", () => PromptTextBox.Focus(FocusState.Programmatic));
         Add("键盘操作", () => _ = ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 查找会话正文，Ctrl+Shift+K 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。查找框内 Enter／↓ 下一处、Shift+Enter／↑ 上一处；F3／Shift+F3 在任意区域切换，Esc 关闭。生成期间点击停止可取消当前回复。"));
         menu.Items.Add(new MenuFlyoutSeparator());
+        Add("工作台", OpenExpansionWorkbench);
+        Add(ExpansionNotifications.Enabled ? "关闭回复完成通知" : "开启回复完成通知", ToggleCompletionNotifications);
         Add("模型管理", () => RunAfterFlyoutClosed(menu, () => OpenModelManagement()));
         Add("工具与技能", () => RunAfterFlyoutClosed(menu, () => OpenAgentTools()));
         Add("设置", () => RunAfterFlyoutClosed(menu, () => StorageSettings_Click(anchor, new RoutedEventArgs())));

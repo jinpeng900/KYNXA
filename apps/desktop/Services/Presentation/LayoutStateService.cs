@@ -15,7 +15,8 @@ public sealed class LayoutStateService
         {
             string? json = null;
             if (File.Exists(SettingsPath)) json = File.ReadAllText(SettingsPath);
-            else if (ApplicationData.Current.LocalSettings.Values[SettingsKey] is string legacy) json = legacy;
+            else if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT"))
+                && ApplicationData.Current.LocalSettings.Values[SettingsKey] is string legacy) json = legacy;
             if (json is not null)
             {
                 LayoutState? state = JsonSerializer.Deserialize<LayoutState>(json);

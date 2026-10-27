@@ -3,6 +3,26 @@
     <KynxaOffline Condition="'$(KynxaOffline)' == ''">false</KynxaOffline>
     <KynxaRuntimeProfile Condition="'$(KynxaRuntimeProfile)' == ''">Full</KynxaRuntimeProfile>
   </PropertyGroup>
+  <!-- Prepared inputs are copied as a complete immutable payload, never rebuilt in place.
+       预制运行时作为完整只读输入复制，不能与应用输出共用目录。 -->
+  <Target Name="ValidateKynxaPreparedRuntime" BeforeTargets="AssignTargetPaths"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(KynxaPreparedRuntimeRoot)' != ''">
+    <PropertyGroup>
+      <_KynxaPreparedSourceDirectory>$([System.IO.Path]::GetFullPath('$(_KynxaPreparedRuntimeRoot)\.'))</_KynxaPreparedSourceDirectory>
+      <_KynxaPreparedTargetDirectory>$([System.IO.Path]::GetFullPath('$(TargetDir).'))</_KynxaPreparedTargetDirectory>
+    </PropertyGroup>
+    <Error Condition="'$(_KynxaPreparedSourceDirectory)' == '$(_KynxaPreparedTargetDirectory)'"
+           Text="Prepared runtime input must be a separate immutable bundle, not the application output being rebuilt." />
+    <ItemGroup>
+      <_KynxaRequiredPreparedFile Include="runtime\agent\kynxa-gateway.exe;runtime\resource\kynxa-resource-service.exe;runtime\native\onnxruntime.dll;runtime\native\vec0.dll;runtime\native\DirectML.dll;ToolHost\KYNXA.ToolHost.exe;ToolHost\KYNXA.ToolHost.dll" />
+      <_KynxaRequiredPreparedFile Include="runtime\mcp\node\node.exe;runtime\mcp\manifest.json;runtime\mcp\payload-integrity.json;runtime\office\program\soffice.exe;runtime\office\program\soffice.bin;runtime\office\runtime.json;runtime\embedding\builtin-multilingual\manifest.json;runtime\local-llm\manifest.json"
+                                  Condition="'$(KynxaRuntimeProfile)' == 'Full'" />
+      <_KynxaRequiredPreparedFile Include="runtime\transcription\whisper-cli.exe;runtime\transcription\whisper.dll;runtime\transcription\ggml.dll;runtime\transcription\ggml-base.dll;runtime\transcription\ggml-cpu.dll;runtime\transcription\ggml-tiny.bin;runtime\transcription\LICENSE-whisper.cpp-MIT.txt;runtime\transcription\LICENSE-whisper-model-MIT.txt;runtime\transcription\README-KYNXA.txt;runtime\transcription\manifest.json"
+                                  Condition="'$(KynxaRuntimeProfile)' == 'Full'" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(_KynxaPreparedRuntimeRoot)\%(_KynxaRequiredPreparedFile.Identity)')"
+           Text="Prepared runtime is incomplete: $(_KynxaPreparedRuntimeRoot)\%(_KynxaRequiredPreparedFile.Identity)" />
+  </Target>
   <!-- Resolve runtime options after SDK user settings have been imported.
        SDK 导入本机用户设置后再计算运行参数，确保直接打开解决方案时使用最终配置。 -->
   <Target Name="ConfigureKynxaRuntimeOptions">
@@ -16,6 +36,9 @@
       <_KynxaVisualCppOptions Condition="'$(KynxaOffline)' == 'true'">-Offline</_KynxaVisualCppOptions>
       <_KynxaVisualCppOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaVisualCppOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaVisualCppOptions>
       <_KynxaVisualCppOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaVisualCppOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaVisualCppOptions>
+      <_KynxaTranscriptionOptions Condition="'$(KynxaOffline)' == 'true'">-Offline</_KynxaTranscriptionOptions>
+      <_KynxaTranscriptionOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaTranscriptionOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaTranscriptionOptions>
+      <_KynxaTranscriptionOptions Condition="'$(KynxaVerifyResources)' == 'true'">$(_KynxaTranscriptionOptions) -VerifyResources</_KynxaTranscriptionOptions>
       <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
       <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
            离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
@@ -35,7 +58,7 @@
   </PropertyGroup>
   <!-- Prepare pinned native files using PowerShell and Cargo on the build machine only.
        仅在构建机准备原生文件及固定 MCP 依赖；用户无需安装开发工具或系统 Node。 -->
-  <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true' and '$(KynxaPreparedRuntimeRoot)' == ''">
     <PropertyGroup>
       <!-- A local short cache keeps pinned MCP paths readable by Windows PowerShell.
            本机可选短缓存让 Windows PowerShell 能读取完整 MCP 路径，默认仍使用仓库缓存。 -->
@@ -47,6 +70,8 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
           EnvironmentVariables="$(KynxaNativeBuildEnvironment)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot; -BundleRoot &quot;$(_KynxaNativeCacheDirectory)&quot; $(_KynxaRuntimeOptions) &lt; NUL" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.." Condition="'$(KynxaRuntimeProfile)' == 'Full'"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-transcription-runtime.ps1&quot; -BundleRoot &quot;$(_KynxaNativeCacheDirectory)&quot; $(_KynxaTranscriptionOptions) &lt; NUL" />
     <ReadLinesFromFile File="$(_KynxaNativeCacheDirectory)\bundle-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaNativeRuntimeFiles" />
     </ReadLinesFromFile>
@@ -58,7 +83,7 @@
                CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
-  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="IncludeNativeGatewayRuntime" Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="IncludeNativeGatewayRuntime" Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(DesignTimeBuild)' != 'true' and '$(KynxaPreparedRuntimeRoot)' == ''">
     <PropertyGroup>
       <_KynxaVisualCppCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\vc\win-x64'))</_KynxaVisualCppCacheDirectory>
     </PropertyGroup>
@@ -79,7 +104,7 @@
   </Target>
   <!-- Design-time evaluation must not restore or build executable payloads.
        设计时求值不能还原或构建可执行载荷，避免阻塞 IDE 的项目元数据采集。 -->
-  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true' and '$(KynxaPreparedRuntimeRoot)' == ''">
     <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="$(_KynxaToolHostTargets)" RemoveProperties="OutDir"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
     <PropertyGroup>
@@ -99,17 +124,45 @@
                CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
     </ItemGroup>
   </Target>
+  <!-- Full bundles also carry the optional external transcription payload.
+       Full 运行时同时复制已准备好的外部转录组件。 -->
+  <Target Name="IncludeKynxaOptionalRuntime" BeforeTargets="AssignTargetPaths"
+          DependsOnTargets="IncludeNativeGatewayRuntime"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(KynxaPreparedRuntimeRoot)' == '' and '$(KynxaRuntimeProfile)' == 'Full'">
+    <ReadLinesFromFile File="$(_KynxaNativeCacheDirectory)\transcription-files.txt">
+      <Output TaskParameter="Lines" ItemName="_KynxaOptionalRuntimeFiles" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <Content Include="@(_KynxaOptionalRuntimeFiles)"
+               Link="$([MSBuild]::MakeRelative('$(_KynxaNativeCacheDirectory)', '%(_KynxaOptionalRuntimeFiles.Identity)'))"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+  <!-- WinUI uses OutputPath for generated XBF destinations; an explicit OutDir needs the same files.
+       WinUI 生成的 XBF 默认按 OutputPath 复制，显式 OutDir 也要包含本轮界面文件。 -->
+  <Target Name="CopyKynxaWinUiResources" AfterTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="Prep_ComputeProcessXamlFiles"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(WindowsPackageType)' == 'None'">
+    <AssignTargetPath Files="@(GeneratedXamlSrc->'%(FullPath)')" RootFolder="$(XamlGeneratedOutputPath)">
+      <Output TaskParameter="AssignedFiles" ItemName="_KynxaWinUiXamlFiles" />
+    </AssignTargetPath>
+    <Copy SourceFiles="@(_KynxaWinUiXamlFiles)"
+          DestinationFiles="@(_KynxaWinUiXamlFiles->'$(TargetDir)%(TargetPath)')" SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <FileWrites Include="@(_KynxaWinUiXamlFiles->'$(TargetDir)%(TargetPath)')" />
+    </ItemGroup>
+  </Target>
   <Target Name="ExcludeToolHostLibrariesFromWinUiPri" BeforeTargets="_GeneratePrisForPortableLibraries">
+    <ItemGroup>
+      <_KynxaExecutablePriPayload Include="@(_KynxaToolHostFiles);@(_KynxaNativeRuntimeFiles);@(_KynxaVisualCppFiles);@(_KynxaPreparedRuntimeFiles);@(_KynxaPreparedToolHostFiles);@(_KynxaOptionalRuntimeFiles)" />
+    </ItemGroup>
     <ItemGroup Condition="'@(_LibrariesUnfiltered)' == '' and '@(CreatedResWFiles)' == '' and '$(NetCoreGeneratePrisForPortableLibraries)' != 'true'">
-      <_LibrariesUnfiltered Include="@(PackagingOutputs)" Exclude="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" Condition="'%(Extension)' == '.dll'" />
+      <_LibrariesUnfiltered Include="@(PackagingOutputs)" Exclude="@(_KynxaExecutablePriPayload);@(_KynxaExecutablePriPayload->'%(FullPath)')" Condition="'%(Extension)' == '.dll'" />
     </ItemGroup>
     <ItemGroup>
-      <_LibrariesUnfiltered Remove="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" />
-      <!-- Native Rust/ONNX DLLs are not WinUI assemblies and must not be parsed by PRI.
-           Rust/ONNX 原生运行库不是 WinUI 程序集，不能参与 PRI 可移植资源程序集提取。
-      -->
-      <_LibrariesUnfiltered Remove="@(_KynxaNativeRuntimeFiles);@(_KynxaNativeRuntimeFiles->'%(FullPath)')" />
-      <_LibrariesUnfiltered Remove="@(_KynxaVisualCppFiles);@(_KynxaVisualCppFiles->'%(FullPath)')" />
+      <!-- Executable payload DLLs are not WinUI resource assemblies.
+           可执行载荷中的 DLL 不作为 WinUI 资源程序集解析。 -->
+      <_LibrariesUnfiltered Remove="@(_KynxaExecutablePriPayload);@(_KynxaExecutablePriPayload->'%(FullPath)')" />
     </ItemGroup>
   </Target>
   <Target Name="KeepExecutableRuntimePayloadsOutsideWinUiPri"

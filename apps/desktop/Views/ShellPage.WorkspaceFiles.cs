@@ -1,6 +1,7 @@
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using KYNXA.Contracts;
+using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop.Views;
 
@@ -15,6 +16,44 @@ public sealed partial class ShellPage
     private int _attachmentOffset;
     private CancellationTokenSource? _workspaceFileRead;
     private string? _retrievalActivationKey;
+    private bool _pickingLocalWorkspaceFile;
+
+    private async Task PickLocalWorkspaceFileAsync()
+    {
+        if (_pickingLocalWorkspaceFile || _chatClosing || !IsLoaded || HasPresentationModal()
+            || ActiveChatId is not Guid conversation) return;
+        _pickingLocalWorkspaceFile = true;
+        try
+        {
+            var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
+            var file = await picker.PickSingleFileAsync();
+            if (file is null || _chatClosing || !IsLoaded || ActiveChatId != conversation) return;
+            if (!Path.IsPathFullyQualified(file.Path))
+            {
+                ShowActionFeedback(UiText.Get("所选文件没有可用的本机路径。"));
+                return;
+            }
+            var (chat, project) = FindChat(conversation);
+            if (chat is null) return;
+            chat.KeepWorkspace = true;
+            if (!chat.IsPersisted) await SaveChatChangesAsync(project);
+            if (_chatClosing || !IsLoaded || ActiveChatId != conversation) return;
+            // The picker grants this file's preview, never another folder or model-wide access.
+            // 选择器只授权预览此文件，不增加工作文件夹或模型的目录权限。
+            WorkspaceHome.CancelFolderEditor();
+            AddWorkspaceTab(conversation, ConversationWorkspaceSources.File(file.Path, file.Name, userSelected: true) with
+                { PresentationPriority = WorkspacePresentationPriority.Requested }, select: true);
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.COMException or IOException or HttpRequestException
+            or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            if (!_chatClosing && ActiveChatId == conversation)
+                ShowActionFeedback(UiText.Get("本机文件打开失败，请重试。"));
+        }
+        finally { _pickingLocalWorkspaceFile = false; }
+    }
 
     private void NotifyActiveRetrievalProject(ProjectState? project)
     {

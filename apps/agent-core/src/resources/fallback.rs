@@ -2,6 +2,8 @@ use serde_json::{Value, json};
 
 const MIB: f64 = 1024.0 * 1024.0;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const MAX_TRANSPORT_MEMORY_BYTES: f64 = 64.0 * MIB;
+const TRANSPORT_SYSTEM_HEADROOM_BYTES: f64 = 64.0 * MIB;
 
 fn number(value: &Value) -> f64 {
     value.as_f64().unwrap_or(0.0)
@@ -23,15 +25,20 @@ fn cpu_capacity(hardware: &Value) -> f64 {
         .clamp(1.0, 8.0)
 }
 fn memory_capacity(hardware: &Value, workload: &str) -> f64 {
-    let fraction = if workload == "model-transport" {
-        1.0
-    } else {
-        0.6
-    };
-    (number(&hardware["memory"]["availableBytes"]) * fraction - 512.0 * MIB)
+    if workload == "model-transport" {
+        return (number(&hardware["memory"]["availableBytes"]) - TRANSPORT_SYSTEM_HEADROOM_BYTES)
+            .min(MAX_TRANSPORT_MEMORY_BYTES).floor().max(0.0);
+    }
+    (number(&hardware["memory"]["availableBytes"]) * 0.6 - 512.0 * MIB)
         .min(number(&hardware["memory"]["totalBytes"]) * 0.4)
         .floor()
         .max(0.0)
+}
+fn valid_transport_request(request: &Value) -> bool {
+    request["kind"] == "foreground"
+        && integer(&request["cpuThreads"], 0.0, 1.0)
+        && integer(&request["memoryBytes"], 1.0, 32.0 * MIB)
+        && request["gpuMemoryBytes"] == 0
 }
 fn valid_request(request: &Value) -> bool {
     let utf16 = |value: &Value| value.as_str().map(|value| value.encode_utf16().count());
@@ -40,11 +47,7 @@ fn valid_request(request: &Value) -> bool {
         && ["foreground", "background"].contains(&string(&request["kind"]))
         && ["compute", "model-transport"].contains(&string(&request["workload"]))
         && (request["workload"] != "model-transport"
-            || request["kind"] == "foreground"
-                && number(&request["cpuThreads"]) <= 1.0
-                && number(&request["memoryBytes"]) > 0.0
-                && number(&request["memoryBytes"]) <= 32.0 * MIB
-                && request["gpuMemoryBytes"] == 0)
+            || valid_transport_request(request))
         && integer(&request["cpuThreads"], 0.0, 4096.0)
         && integer(&request["memoryBytes"], 0.0, MAX_SAFE_INTEGER)
         && integer(&request["gpuMemoryBytes"], 0.0, MAX_SAFE_INTEGER)
@@ -252,9 +255,14 @@ fn suggestions(args: &Value, threads: f64, memory_bytes: f64, fraction: f64) -> 
 }
 fn grant(args: &Value) -> Value {
     let request = &args["request"];
+    if request["workload"] == "model-transport" && !valid_transport_request(request) {
+        return json!({"status":"denied","reason":"RESOURCE_INVALID_REQUEST","mode":"fallback"});
+    }
     let hardware = &args["hardware"];
     let reserved = &args["reserved"];
     let threads = (cpu_capacity(hardware) - number(&reserved["cpuThreads"])).max(0.0);
+    // Without native measurements every reservation remains unresolved, including resident models.
+    // 缺少原生观测时所有预约都视为未兑现；小额通信池仍扣除这些债务。
     let memory = (memory_capacity(hardware, string(&request["workload"]))
         - number(&reserved["memoryBytes"]))
     .max(0.0);
@@ -308,4 +316,59 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
         "resources.feedbackUpdate" => feedback_update(args),
         _ => return Err("AGENT_CORE_UNKNOWN_OPERATION".into()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hardware(available_mib: u64) -> Value {
+        json!({"cpu":{"logicalCores":8,"usagePercent":10},
+            "memory":{"totalBytes":16_u64 << 30,"availableBytes":available_mib << 20}})
+    }
+
+    fn transport_request() -> Value {
+        json!({"taskId":"transport","workspaceId":"test","kind":"foreground","workload":"model-transport",
+            "cpuThreads":1,"memoryBytes":16 << 20,"gpuMemoryBytes":0,"ttlMs":1000,"waitMs":0})
+    }
+
+    fn args() -> Value {
+        json!({"request":transport_request(),"hardware":hardware(480),
+            "reserved":{"cpuThreads":0,"memoryBytes":0},"leasesCount":0,"policyFraction":1,"feedback":{}})
+    }
+
+    #[test]
+    fn low_memory_transport_uses_a_small_pool_without_relaxing_compute() {
+        assert_eq!(grant(&args())["status"], "granted");
+        assert_eq!(memory_capacity(&hardware(480), "compute"), 0.0);
+        assert_eq!(memory_capacity(&hardware(480), "model-transport"), MAX_TRANSPORT_MEMORY_BYTES);
+        assert_eq!(memory_capacity(&hardware(70), "model-transport"), 6.0 * MIB);
+        let mut request = args(); request["request"]["workload"] = json!("compute");
+        assert_eq!(grant(&request)["reason"], "RESOURCE_PRESSURE");
+        request["request"]["workload"] = json!("model-transport");
+        request["hardware"] = hardware(79);
+        assert_eq!(grant(&request)["reason"], "RESOURCE_PRESSURE");
+    }
+
+    #[test]
+    fn fallback_keeps_unknown_debt_and_bounds_aggregate_transport_reservations() {
+        let mut request = args();
+        request["reserved"]["memoryBytes"] = json!(48 << 20);
+        assert_eq!(grant(&request)["status"], "granted");
+        request["reserved"]["memoryBytes"] = json!(64 << 20);
+        assert_eq!(grant(&request)["reason"], "RESOURCE_PRESSURE");
+        request["reserved"]["memoryBytes"] = json!(8_u64 << 30);
+        assert_eq!(grant(&request)["reason"], "RESOURCE_PRESSURE");
+    }
+
+    #[test]
+    fn direct_fallback_transport_cannot_bypass_the_small_foreground_contract() {
+        assert!(valid_request(&transport_request()));
+        for (field, value) in [("kind",json!("background")),("cpuThreads",json!(2)),
+            ("memoryBytes",json!(33 << 20)),("memoryBytes",json!(0)),("gpuMemoryBytes",json!(1))] {
+            let mut request = args(); request["request"][field] = value;
+            assert!(!valid_request(&request["request"]));
+            assert_eq!(grant(&request)["reason"], "RESOURCE_INVALID_REQUEST");
+        }
+    }
 }

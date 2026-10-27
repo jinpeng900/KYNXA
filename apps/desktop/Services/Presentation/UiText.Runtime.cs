@@ -4,6 +4,19 @@ public static partial class UiText
 {
     internal static IReadOnlyDictionary<string, string> RuntimeTranslations { get; } = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["存储位置由启动配置管理。"] = "Storage locations are managed by the launch settings.",
+        ["选择本机文件"] = "Choose a local file",
+        ["所选文件没有可用的本机路径。"] = "The selected file has no local path.",
+        ["本机文件打开失败，请重试。"] = "The local file could not be opened. Try again.",
+        ["查看文件、网页与工作成果"] = "View files, websites and project outputs",
+        ["更多预览操作"] = "More preview actions",
+        ["宽屏预览"] = "Wide preview",
+        ["手机尺寸预览"] = "Mobile preview",
+        ["打开工作台"] = "Open workbench",
+        ["工作台"] = "Workbench",
+        ["宽屏"] = "Wide",
+        ["手机"] = "Mobile",
+        ["缺少运行文件：{0}。请重新构建或安装 KYNXA。"] = "Runtime file missing: {0}. Rebuild or reinstall KYNXA.",
         ["答复显示数据有误，已保留原文和任务记录。"] = "The reply display data is invalid. Original content and task records have been retained.",
         ["KYNXA · 检索与网页搜索"] = "KYNXA · Retrieval and web search",
         ["KYNXA  /  检索与网页搜索"] = "KYNXA  /  Retrieval and web search",

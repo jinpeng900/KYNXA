@@ -1,0 +1,52 @@
+{
+  "integrity": "sha512-o+qycAMZrh+TsE01GqWUxUIKR1AL0S8pq7zDkYOQw8GqfX8b8VoCKYUoHbhiX5j+7hr8XsuHDVU6+gkQJQKg9w==",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "bfe119ea4fd413f5f7ca3fcd63adb0c4a073ed39daa2fe7d3e6b769e21272601"
+    },
+    {
+      "path": "README.md",
+      "sha256": "cef18e46ebe4a2b6349395afe0ed70d591cc0672f63f62f0799e317412df62a5"
+    },
+    {
+      "path": "addons/controls/OrbitControls.js",
+      "sha256": "42d3af016a677369df9f4d3cc37408d3e618f6209c575809d406512f18312978"
+    },
+    {
+      "path": "addons/environments/RoomEnvironment.js",
+      "sha256": "3c163b84fb3c6e2d3e0a60dff9633332c2c9393ee748756b3f9b94a3fc275139"
+    },
+    {
+      "path": "addons/loaders/GLTFLoader.js",
+      "sha256": "fa43e98a9c5c017c1dbdb1531f3d7e10840b26f70f95ba7843a2968a0470d348"
+    },
+    {
+      "path": "addons/loaders/MTLLoader.js",
+      "sha256": "ec28e0f9b61df6f4a9579765a297764dfee62d92992453f111b5bdfd59b010ff"
+    },
+    {
+      "path": "addons/loaders/OBJLoader.js",
+      "sha256": "9ef995d9a7fef55ad538506cc22b5e588fa68f9ebef426d0c2dcfb39046dae51"
+    },
+    {
+      "path": "addons/loaders/STLLoader.js",
+      "sha256": "af7a8262fda064556b2d2db47a492333cfa1f4b3077a8059b95f753b8a23b28e"
+    },
+    {
+      "path": "addons/utils/BufferGeometryUtils.js",
+      "sha256": "b3d4309299a79595f1b48792aafbf183ca5bb60df0362d97482e66a18f28b773"
+    },
+    {
+      "path": "build/three.core.min.js",
+      "sha256": "61ba0df005b05991361d040d8ff670e1aadfd0ce7aeebd1fdb0725957a8957de"
+    },
+    {
+      "path": "build/three.module.min.js",
+      "sha256": "e2b5ee6bccd38fd6d8a2428546b83c5f2426d84b152ef82be8055556e3b40eb6"
+    }
+  ],
+  "version": "0.180.0",
+  "package": "three",
+  "tarball": "https://registry.npmjs.org/three/-/three-0.180.0.tgz"
+}

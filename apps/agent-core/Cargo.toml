@@ -1,6 +1,6 @@
 [package]
 name = "kynxa-agent-core"
-version = "1.8.1"
+version = "1.8.5"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -46,6 +46,7 @@ rtf-grimoire = "=0.2.1"
 tar = { version = "=0.4.46", default-features = false }
 flate2 = "=1.1.10"
 bzip2 = "=0.6.1"
+zstd = { version = "=0.13.3", default-features = false }
 tree-sitter = "=0.25.10"
 tree-sitter-c-sharp = "=0.23.1"
 tree-sitter-javascript = "=0.23.1"

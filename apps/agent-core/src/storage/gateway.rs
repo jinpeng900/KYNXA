@@ -1159,7 +1159,7 @@ fn migrate_legacy_at(root: &Path, legacy: &Path, models: &Path) -> ContractResul
         }
     }
     document["Chats"].as_array_mut().unwrap().retain(|chat| {
-        chat["IsSample"] == true
+        chat["IsSample"] == true || chat["KeepWorkspace"] == true
             || chat["Messages"]
                 .as_array()
                 .is_some_and(|messages| !messages.is_empty())
@@ -1176,7 +1176,7 @@ fn migrate_legacy_at(root: &Path, legacy: &Path, models: &Path) -> ContractResul
             }
         }
         project["Chats"].as_array_mut().unwrap().retain(|chat| {
-            chat["IsSample"] == true
+            chat["IsSample"] == true || chat["KeepWorkspace"] == true
                 || chat["Messages"]
                     .as_array()
                     .is_some_and(|messages| !messages.is_empty())

@@ -269,6 +269,7 @@ const PARALLEL_READS: &[&str] = &[
 ];
 
 const READ_TOOLS: &[&str] = &[
+    "media.transcribe",
     "image.read",
     "image.retain",
     "attachment.read",

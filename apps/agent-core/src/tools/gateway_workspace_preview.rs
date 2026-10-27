@@ -17,9 +17,10 @@ const PPTX_MIME: &str = "application/vnd.openxmlformats-officedocument.presentat
 const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 pub(crate) struct PreviewGrant {
-    conversation: String,
-    path: PathBuf,
-    version: String,
+    pub(super) conversation: String,
+    pub(super) path: PathBuf,
+    pub(super) version: String,
+    pub(super) dependency: bool,
 }
 
 pub(crate) struct WorkspaceContent {
@@ -28,7 +29,7 @@ pub(crate) struct WorkspaceContent {
     pub version: String,
 }
 
-fn extension(path: &Path) -> String {
+pub(super) fn extension(path: &Path) -> String {
     path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase()
 }
 
@@ -36,7 +37,8 @@ fn document_kind(path: &Path) -> String {
     crate::document_formats::detect(path).map(|format| format.name.to_owned()).unwrap_or_else(|| extension(path))
 }
 
-fn format(path: &Path) -> (&'static str, &'static str) {
+pub(super) fn format(path: &Path) -> (&'static str, &'static str) {
+    if let Some(media) = super::gateway_workspace_media::format(path) { return media; }
     match document_kind(path).as_str() {
         "md" | "markdown" | "mdown" => ("markdown", "text/markdown; charset=utf-8"),
         "mmd" | "mermaid" => ("mermaid", "text/plain; charset=utf-8"),
@@ -245,7 +247,7 @@ pub(crate) fn web_target(arguments: &Value) -> Result<Value, GatewayError> {
     Ok(json!({"kind":"browser","title":title,"path":url.as_str(),"url":url.as_str(),"version":"","mimeType":"text/html"}))
 }
 
-fn checked_bytes(path: &Path, binding: &Value) -> Result<Vec<u8>, GatewayError> {
+pub(super) fn checked_bytes(path: &Path, binding: &Value) -> Result<Vec<u8>, GatewayError> {
     super::service_filesystem::revalidate(binding)
         .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
     let bytes = super::local_files::read_checked(path, MAX_PREVIEW_BYTES, true, "TOOL_FILE_CONFLICT")
@@ -255,7 +257,7 @@ fn checked_bytes(path: &Path, binding: &Value) -> Result<Vec<u8>, GatewayError> 
     Ok(bytes)
 }
 
-fn content_url(context: &GatewayToolContext, path: &Path, version: &str, converted: bool) -> String {
+pub(super) fn content_url(context: &GatewayToolContext, path: &Path, version: &str, converted: bool) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     query.append_pair("conversationId", &context.conversation_id)
         .append_pair("path", &super::local_files::path_text(path))
@@ -515,7 +517,11 @@ pub(super) async fn open(arguments: Value, path: PathBuf, binding: Value, contex
         result["notice"] = json!("文件已登记到工作区，尚未加载或完成渲染；最终显示格式由活动预览决定。");
         return Ok(result);
     }
-    if matches!(kind, "pdf" | "image" | "html") || matches!(kind, "docx" | "pptx" | "xlsx")
+    result["downloadUrl"] = json!(format!("{}&representation=source", content_url(context, &path, &version, false)));
+    if kind == "model3d" {
+        return super::gateway_workspace_media::model_preview(result, &path, &bytes, context).await;
+    }
+    if matches!(kind, "pdf" | "image" | "html" | "audio" | "video") || matches!(kind, "docx" | "pptx" | "xlsx")
         && direct_fallback.is_none() && arguments["representation"] != "pdf" {
         let mut address = content_url(context, &path, &version, false);
         if matches!(extension(&path).as_str(), "tif" | "tiff") {
@@ -583,17 +589,19 @@ pub(crate) async fn preview(arguments: Value, context: &GatewayToolContext) -> R
     if result["requiresApproval"] == true {
         return Err(failure("WORKSPACE_PREVIEW_FORBIDDEN", "此文件不在当前工作范围，请通过文件选择器打开。", 403));
     }
-    if selected && result["contentUrl"].is_string() {
+    if selected && (result["contentUrl"].is_string() || result["downloadUrl"].is_string()) {
         let token = uuid::Uuid::new_v4().to_string();
         let grant = PreviewGrant { conversation:context.conversation_id.clone(),
-            path:PathBuf::from(result["path"].as_str().unwrap_or("")), version:result["version"].as_str().unwrap_or("").into() };
+            path:PathBuf::from(result["path"].as_str().unwrap_or("")), version:result["version"].as_str().unwrap_or("").into(), dependency:false };
         let mut grants = context.runtime.preview_grants.lock()
             .map_err(|_| failure("PREVIEW_STATE_FAILED", "预览许可状态不可用。", 500))?;
         if grants.len() >= 4096 {
             if let Some(oldest) = grants.keys().next().cloned() { grants.remove(&oldest); }
         }
         grants.insert(token.clone(), grant);
-        result["contentUrl"] = json!(format!("{}&grant={token}", result["contentUrl"].as_str().unwrap()));
+        for field in ["contentUrl", "downloadUrl"] {
+            if let Some(address) = result[field].as_str() { result[field] = json!(format!("{address}&grant={token}")); }
+        }
     }
     Ok(result)
 }
@@ -697,6 +705,10 @@ pub(crate) async fn content(arguments: &Value, context: &GatewayToolContext) -> 
     let expected = arguments["version"].as_str().filter(|value| !value.is_empty())
         .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "缺少预览文件版本。", 400))?;
     let (path, _) = super::gateway::canonical_authorized(context, requested, false)?;
+    let dependency = arguments["grant"].as_str().is_some_and(|token| {
+        context.runtime.preview_grants.lock().ok().and_then(|grants| grants.get(token).map(|grant|
+            grant.dependency && grant.conversation == context.conversation_id && grant.path == path && grant.version == expected)).unwrap_or(false)
+    });
     let approved = arguments["grant"].as_str().is_some_and(|token| {
         context.runtime.preview_grants.lock().ok().and_then(|grants| grants.get(token).map(|grant|
             grant.conversation == context.conversation_id && grant.path == path && grant.version == expected)).unwrap_or(false)
@@ -717,6 +729,10 @@ pub(crate) async fn content(arguments: &Value, context: &GatewayToolContext) -> 
         .map_err(|_| failure("PREVIEW_WORKER_FAILED", "预览内容读取未完成。", 500))??;
     if version != expected { return Err(failure("TOOL_FILE_CONFLICT", "文件已变化，请刷新预览。", 409)); }
     let (kind, mime_type) = format(&path);
+    if arguments["representation"] == "source" { return Ok(WorkspaceContent { bytes, mime_type, version }); }
+    if arguments["representation"] == "glb" && extension(&path) == "blend" {
+        return super::gateway_workspace_media::blend_content(&path, &version, &bytes, context).await;
+    }
     if kind == "image" && (matches!(extension(&path).as_str(), "tif" | "tiff") || arguments["representation"] == "png") {
         let bytes = convert_image(bytes, context).await?;
         return Ok(WorkspaceContent { bytes, mime_type:"image/png", version });
@@ -730,9 +746,11 @@ pub(crate) async fn content(arguments: &Value, context: &GatewayToolContext) -> 
     if kind == "docx" && bytes.len() > MAX_DIRECT_DOCX_BYTES {
         return Err(failure("PREVIEW_DIRECT_LIMIT", "此文档超过直接预览大小，请使用 PDF 页面预览。", 413));
     }
-    if !matches!(kind, "pdf" | "image" | "html" | "docx" | "pptx" | "xlsx") {
+    if !dependency && !matches!(kind, "pdf" | "image" | "html" | "docx" | "pptx" | "xlsx" | "model3d" | "audio" | "video") {
         return Err(failure("PREVIEW_FORMAT_UNSUPPORTED", "此文件通过文本预览读取。", 422));
     }
+    let mime_type = if dependency { super::gateway_workspace_media::dependency_mime(&path) } else { mime_type };
+    if extension(&path) == "blend" { return Err(failure("PREVIEW_FORMAT_UNSUPPORTED", "Blender 源文件须使用派生 GLB 预览。", 422)); }
     Ok(WorkspaceContent { bytes, mime_type, version })
 }
 
@@ -916,6 +934,13 @@ mod tests {
         assert_eq!(content(&arguments, &other).await.err().unwrap().code, "WORKSPACE_PREVIEW_FORBIDDEN");
         std::fs::write(&external, "<svg>changed</svg>").unwrap();
         assert_eq!(content(&arguments, &context).await.err().unwrap().code, "TOOL_FILE_CONFLICT");
+        let external_text = context.workdir.parent().unwrap().join("outside.txt");
+        std::fs::write(&external_text,"exact source download").unwrap();
+        let text_preview=preview(json!({"path":external_text,"userSelected":true}),&context).await.unwrap();
+        let download=url::Url::parse(&format!("http://localhost{}",text_preview["downloadUrl"].as_str().unwrap())).unwrap();
+        let mut input=json!({});for(key,value)in download.query_pairs(){input[key.as_ref()]=json!(value);}
+        assert_eq!(content(&input,&context).await.unwrap().bytes,b"exact source download");
+        assert_eq!(content(&input,&other).await.err().unwrap().code,"WORKSPACE_PREVIEW_FORBIDDEN");
         let protected = context.data_home.join("private.txt");
         std::fs::write(&protected, "private").unwrap();
         assert_eq!(preview(json!({"path":protected,"userSelected":true}), &context).await.unwrap_err().code, "PROTECTED_APP_DATA");

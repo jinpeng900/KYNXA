@@ -33,6 +33,7 @@ public sealed partial class ShellPage
             CaptureProjectDraft();
             CaptureStandaloneDraft();
             _ = SaveExitDraftsAsync();
+            await ExpansionRemoteService.StopAsync();
             await ModelGatewayService.RequestShutdownAsync();
         }
         catch (Exception error)

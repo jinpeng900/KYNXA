@@ -547,7 +547,7 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","document.create","image.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.") || ["document.read","document.create","image.read","media.transcribe","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
         || name == "artifact.open" && !arguments["url"].is_string() && !arguments["resultId"].is_string()
 }
 
@@ -705,6 +705,14 @@ pub(super) async fn filesystem(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    filesystem_bound(name, args, ctx, None).await
+}
+
+pub(super) async fn filesystem_binary_write(args: Value, bytes: Vec<u8>, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    filesystem_bound("filesystem.write", args, ctx, Some(bytes)).await
+}
+
+async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, binary: Option<Vec<u8>>) -> Result<Value, GatewayError> {
     let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create");
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
@@ -757,6 +765,14 @@ pub(super) async fn filesystem(
     }
     let binding = json!({"requestedPath":super::local_files::path_text(&requested),"path":super::local_files::path_text(&path),
         "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "image.read" || name == "artifact.open"});
+    if let Some(bytes) = binary {
+        let expected = args["expectedHash"].clone();
+        let cancellation = WorkerCancellation::new(ctx);
+        let signal = cancellation.signal.clone();
+        return tokio::task::spawn_blocking(move || super::service_filesystem::commit_binary(&path, &bytes, &expected, &binding, &Some(signal))
+            .map_err(|error| failure(&error.code, &error.message, error.status_code)))
+            .await.map_err(|_| failure("TOOL_WORKER_FAILED", "文件保存未完成。", 500))?;
+    }
     if name == "artifact.open" {
         return super::gateway_workspace_preview::open(args, path, binding, ctx).await;
     }
@@ -1057,6 +1073,9 @@ async fn execute_inner(
     }
     if tool_name == "attachment.read" {
         return super::gateway_attachment_read::read(args, ctx).await;
+    }
+    if tool_name == "media.transcribe" {
+        return super::gateway_workspace_transcription::tool(args, ctx).await;
     }
     if tool_name == "artifact.open" {
         if !args["path"].as_str().is_some_and(|path| !path.trim().is_empty()) {

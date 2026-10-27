@@ -74,7 +74,7 @@ pub(super) fn category(tool: &Value) -> &'static str {
     ) {
         return "web-search";
     }
-    if name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "image.retain", "attachment.read", "artifact.open"].contains(&name.as_str()) {
+    if name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "image.retain", "attachment.read", "artifact.open", "media.transcribe"].contains(&name.as_str()) {
         return "filesystem";
     }
     "other"

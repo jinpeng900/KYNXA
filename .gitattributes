@@ -17,6 +17,10 @@ apps/desktop/Resources/Diagrams/Mermaid/** -text whitespace=cr-at-eol
 # 保留第三方浏览器包原文内的空白，不为提交检查改写发行文件。
 apps/desktop/Resources/Diagrams/Mermaid/mermaid.min.js whitespace=-blank-at-eol,cr-at-eol
 
+# Preserve pinned 3D viewer assets and their integrity hashes.
+# 保留三维预览资源原始字节，避免换行转换破坏哈希。
+apps/desktop/Resources/Workspace/vendor/three-0.180.0/** -text whitespace=-blank-at-eol,-space-before-tab,cr-at-eol
+
 # Preserve pinned upstream license bytes, including their original line endings and whitespace.
 # 保留固定第三方许可的原始字节、换行与空白，避免检出后破坏随包哈希。
 apps/desktop/Build/licenses/windows-sdk-license.md -text whitespace=-blank-at-eol,cr-at-eol

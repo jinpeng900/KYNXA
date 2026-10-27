@@ -202,8 +202,10 @@
     const formatted = streaming ? uiStrings.timeNotRecorded : formatMessageTime(value);
     const label = user ? uiStrings.messageSentAt : message.status === 'completed' ? uiStrings.replyCompletedAt : uiStrings.replyEndedAt;
     const phases = english
-      ? {saving:'Saving…',reviewing:'Verifying…','waiting-verification':'Waiting for verification…',recovering:'Recovering…','waiting-config':'Waiting for configuration…'}
-      : {saving:'正在保存',reviewing:'正在核验','waiting-verification':'等待核验',recovering:'正在恢复','waiting-config':'等待配置'};
+      ? {saving:'Saving…',reviewing:'Verifying…','waiting-verification':'Waiting for verification…',recovering:'Recovering…','waiting-config':'Waiting for configuration…',
+        'preparing-model':'Preparing model…','waiting-model':'Waiting for model slot…','waiting-resource':'Waiting for resources…'}
+      : {saving:'正在保存',reviewing:'正在核验','waiting-verification':'等待核验',recovering:'正在恢复','waiting-config':'等待配置',
+        'preparing-model':'正在准备模型','waiting-model':'等待模型空闲','waiting-resource':'等待资源'};
     const text = streaming ? phases[message.executionPhase]
       || (message.generationTimingState === 'paused' ? (english ? 'Waiting for task status…' : '等待任务状态') : uiStrings.generating)
       : label + separator + formatted;

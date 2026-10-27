@@ -406,7 +406,10 @@ public sealed partial class ShellPage
                     RenderProjects();
                     RefreshPromptQueue();
                     if (pending.Message.Status == "completed" && !pending.StopRequested && !pending.PauseConfirmed)
+                    {
+                        ExpansionNotifications.ReplyCompleted(FindChat(pending.ConversationId).Chat?.Title);
                         _ = DrainQueuedPromptsAsync(pending.ConversationId);
+                    }
                 }
             }
             // Formal terminal state releases execution first; display-cache maintenance cannot hold the queue.

@@ -124,6 +124,12 @@ public sealed partial class ShellPage
         var storagePage = new StackPanel { Spacing = 14 };
         storagePage.Children.Add(row);
         storagePage.Children.Add(extensionRow);
+        if (StoragePaths.EnvironmentControlled || ExtensionPaths.EnvironmentControlled)
+        {
+            var locationHint = LocalizedLabel("存储位置由启动配置管理。", 12);
+            locationHint.Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush");
+            storagePage.Children.Add(locationHint);
+        }
         workspace.AddPage("general", "通用", "\uE713", () => SettingsWorkspace.ScrollPage(generalPage), font);
         workspace.AddPage("appearance", "外观", "\uE790", () => SettingsWorkspace.ScrollPage(appearanceSection.Root), font,
             headerAction: appearanceSection.HeaderAction);
@@ -216,8 +222,6 @@ public sealed partial class ShellPage
             }
         };
         storageControls.SetBusy(false);
-        if (StoragePaths.EnvironmentControlled) Message(UiText.Get("数据目录由启动环境变量指定，请移除 KYNXA_DATA_HOME / KYNXA_MODEL_HOME 后再通过设置修改。"), InfoBarSeverity.Warning);
-        else if (ExtensionPaths.EnvironmentControlled) Message(UiText.Get("工具与技能目录由启动环境变量指定，请移除 KYNXA_EXTENSION_HOME 后再通过设置修改。"), InfoBarSeverity.Warning);
         void PreventClose(Microsoft.UI.Windowing.AppWindow window, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
         { if (StoragePaths.IsMigrating) e.Cancel = true; }
         bool ownerClosing = false;

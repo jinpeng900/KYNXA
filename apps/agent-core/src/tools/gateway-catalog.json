@@ -1,6 +1,22 @@
 {
   "tools": [
     {
+      "name": "media.transcribe",
+      "description": "Transcribe requested speech from an authorized local audio/video file with the bundled offline multilingual model. 返回真实语音文字和时间片段，用于音频转录、字幕、会议笔记。Does not open a player, record a microphone, display intermediate files or require screenshots. WAV/MP3/FLAC/OGG work locally; other containers need an available FFmpeg audio decoder. Returns explicit dependency status when unavailable, never invents speech. Optional version is source SHA-256. Run only when speech content is relevant to the request, not as extra validation. Large media waits in a cancellable low-priority queue; use returned time coverage and do not claim unprocessed content was heard.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "Audio/video path within an authorized work folder." },
+          "version": { "type": "string", "description": "Expected SHA-256 when known." },
+          "language": { "type": "string", "enum": ["auto", "zh", "en"], "default": "auto" },
+          "mountId": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "document.create",
       "description": "Generate a real editable DOCX, PPTX or XLSX, or a PDF exported through the installed Office converter. No user Python/Node/Word setup is required. DOCX/PDF use content (headings/paragraphs) or explicit blocks; PPTX uses slides; XLSX uses typed sheet rows and optional formulas. PDF availability depends on the packaged converter. Formulas are stored, not calculated. Read/stat an existing target and supply its expectedHash; null expects a new file. Parent directory must exist. Validates package structure before an authorized atomic save and returns an actual file/hash receipt. Does not automatically open every intermediate file: artifact.open useful final outputs. For MD/TXT/CSV/JSON/HTML/SVG/Mermaid use filesystem.write; never rename text to an Office extension.",
       "inputSchema": {
@@ -279,7 +295,7 @@
     },
     {
       "name": "artifact.open",
-      "description": "Present a selected final report, useful result or explicitly requested resource in the user's right workspace. Use exactly one of path, url or resultId and an optional natural title. resultId displays an existing image/screenshot receipt from this conversation without copying the image; choose meaningful conclusions or key results, never routine analysis captures. Background webpage analysis uses browser.open, not this presentation tool. For a URL, returns the actual sidebar browser sessionId and tabId. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching; only unsupported content or an actual rendering failure uses a cached PDF fallback. Spreadsheet previews display stored formula caches, not recalculated results. Claim final appearance only from actual image observation, never from this registration receipt alone. Does not create files, retain temporary images permanently, or grant broader file access.",
+      "description": "Present a selected final report, useful result or explicitly requested resource in the user's right workspace. Use exactly one of path, url or resultId and an optional natural title. resultId displays an existing image/screenshot receipt from this conversation without copying the image; choose meaningful conclusions or key results, never routine analysis captures. Background webpage analysis uses browser.open, not this presentation tool. For a URL, returns the actual sidebar browser sessionId and tabId. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching; only unsupported content or an actual rendering failure uses a cached PDF fallback. Spreadsheet previews display stored formula caches, not recalculated results. GLB/glTF, OBJ and STL have interactive model viewers; export a textured GLB from Blender for orbit/zoom and provide rendered images separately for final lighting. A still render cannot rotate, and the interactive viewer does not make its pixels visible to this model. Common audio/video files have playback controls; CSV/TSV support filtering, editable working copies and charts. These capabilities do not add work or acceptance requirements to ordinary tasks. Claim final appearance only from actual image observation, never from this registration receipt alone. Does not create files, retain temporary images permanently, or grant broader file access.",
       "inputSchema": {
         "type": "object",
         "properties": {

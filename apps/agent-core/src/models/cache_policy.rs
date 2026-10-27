@@ -296,10 +296,13 @@ pub(crate) fn include_stream_usage(
         return;
     }
     let (policy, provider_name) = provider(connection, model, protocol);
+    // The pinned local llama.cpp stream reports its measured KV reuse only when usage is requested.
+    // 固定本地 llama.cpp 仅在请求 usage 时回传实测 KV 复用量；这不改变缓存或推理策略。
+    let managed_local = super::gateway_local_engine::is_managed(connection);
     if !matches!(
         policy,
         ProviderCache::OpenAiLegacy | ProviderCache::OpenAiModern
-    ) && provider_name != "deepseek"
+    ) && provider_name != "deepseek" && !managed_local
     {
         return;
     }
@@ -334,6 +337,28 @@ mod tests {
 
     fn connection(host: &str, protocol: &str) -> Value {
         json!({"providerId":"configured","baseUrl":format!("https://{host}/v1"),"protocol":protocol,"apiKey":"never-key-material"})
+    }
+
+    #[test]
+    fn owned_local_streams_request_reported_usage_without_changing_generation_or_cache_policy() {
+        let local = json!({"providerId":"kynxa-local-test", "baseUrl":"http://127.0.0.1:59123/v1", "protocol":"openai-completions"});
+        let original = json!({"model":"test", "stream":true, "max_tokens":32,
+            "messages":[{"role":"user","content":"hello"}], "tools":[]});
+        let mut body = original.clone();
+        include_stream_usage(&local, "test", "openai-completions", &mut body);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        body.as_object_mut().unwrap().remove("stream_options");
+        assert_eq!(body, original);
+
+        let mut external = local.clone(); external["providerId"] = json!("configured-local-api");
+        include_stream_usage(&external, "test", "openai-completions", &mut body);
+        assert_eq!(body, original);
+        body["stream"] = json!(false);
+        include_stream_usage(&local, "test", "openai-completions", &mut body);
+        assert!(body.get("stream_options").is_none());
+        body["stream"] = json!(true); body["stream_options"] = json!({"include_usage":false,"other":true});
+        include_stream_usage(&local, "test", "openai-completions", &mut body);
+        assert_eq!(body["stream_options"], json!({"include_usage":false,"other":true}));
     }
 
     #[test]

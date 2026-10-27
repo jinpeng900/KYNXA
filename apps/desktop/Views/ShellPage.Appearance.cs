@@ -155,7 +155,8 @@ public sealed partial class ShellPage
             accentRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             accentRow.Children.Add(_accentInput);
             var chooseColor = new Button { FontFamily = font, MinHeight = 34, CornerRadius = new CornerRadius(9),
-                Padding = new Thickness(12, 5, 12, 5) };
+                Padding = new Thickness(12, 5, 12, 5),
+                Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
             UiLocalization.Bind(chooseColor, Button.ContentProperty, "选择颜色");
             UiLocalization.Bind(chooseColor, AutomationProperties.NameProperty, "选择颜色");
             AutomationProperties.SetAutomationId(chooseColor, "AppearanceColorPickerButton");
@@ -185,11 +186,13 @@ public sealed partial class ShellPage
             accentGroup.Children.Add(BuildSettingRow(font, "自定义强调色", accentRow));
             var accentActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
                 Margin = new Thickness(16, 0, 16, 12) };
-            var applyAccent = new Button { FontFamily = font, CornerRadius = new CornerRadius(8) };
+            var applyAccent = new Button { FontFamily = font, CornerRadius = new CornerRadius(8),
+                Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
             UiLocalization.Bind(applyAccent, Button.ContentProperty, "应用颜色");
             AutomationProperties.SetAutomationId(applyAccent, "AppearanceAccentApplyButton");
             applyAccent.Click += (_, _) => ApplyAccent();
-            _accentReset = new Button { FontFamily = font, CornerRadius = new CornerRadius(8) };
+            _accentReset = new Button { FontFamily = font, CornerRadius = new CornerRadius(8),
+                Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
             UiLocalization.Bind(_accentReset, Button.ContentProperty, "使用预设颜色");
             AutomationProperties.SetAutomationId(_accentReset, "AppearanceAccentResetButton");
             _accentReset.Click += (_, _) => Save(CurrentPreferences() with { Accent = null }, resetAccentDraft: true);

@@ -19,8 +19,8 @@ public sealed partial class ShellPage
         TaskPanel.SetAvailableHeight(Math.Max(72, height * ratio));
         // The native webpage owns only the remaining preview row; shell task and file rows keep their space.
         // 原生网页只使用剩余预览行，任务标题和文件标签始终保留各自的布局空间。
-        WorkTaskRow.MinHeight = ActiveChatId is not null ? 28 : 0;
-        WorkFileTabsRow.MinHeight = 26;
+        WorkTaskRow.MinHeight = ActiveChatId is not null ? 34 : 0;
+        WorkFileTabsRow.MinHeight = 42;
         TaskPanel.Visibility = ActiveChatId is not null ? Visibility.Visible : Visibility.Collapsed;
         TaskRegionGrip.Visibility = ActiveChatId is not null && TaskPanel.IsExpanded ? Visibility.Visible : Visibility.Collapsed;
     }

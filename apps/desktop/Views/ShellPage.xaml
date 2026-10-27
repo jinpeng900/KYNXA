@@ -655,7 +655,7 @@
                                          操作行按控件和留白的实际高度布局，避免圆形发送按钮被裁切。 -->
                                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <controls:ConversationAttachmentDrafts x:Name="ComposerAttachments" />
-                                    <TextBox x:Name="PromptTextBox" Grid.Row="1" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
+                                    <TextBox x:Name="PromptTextBox" Grid.Row="1" MinWidth="0" MinHeight="0" Margin="46,8,10,4" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" AutomationProperties.Name="{Binding PlaceholderText, ElementName=PromptTextBox}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
                                         <TextBox.Resources>
                                             <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
                                             <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
@@ -668,7 +668,7 @@
                                         </TextBox.Resources>
                                     </TextBox>
 
-                                    <Button x:Name="ComposerExpandButton" Grid.Row="1" Style="{StaticResource KynxaCompactIconButtonStyle}" Margin="12,8,0,0" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Top" Click="ComposerExpandButton_Click" CornerRadius="7" ToolTipService.ToolTip="{services:UiText Key='展开输入区'}">
+                                    <Button x:Name="ComposerExpandButton" Grid.Row="1" Style="{StaticResource KynxaCompactIconButtonStyle}" Margin="12,8,0,0" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Top" Click="ComposerExpandButton_Click" CornerRadius="8" services:UiLocalization.AutomationName="展开输入区" ToolTipService.ToolTip="{services:UiText Key='展开输入区'}">
                                         <FontIcon x:Name="ComposerExpandIcon" FontSize="14" Glyph="" />
                                     </Button>
 
@@ -691,7 +691,7 @@
                                         <Grid x:Name="ComposerModelArea" Grid.Column="1" Margin="12,0,0,0" ColumnSpacing="4">
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                             <Button x:Name="ModelPickerButton" Style="{StaticResource KynxaPickerButtonStyle}"
-                                                    HorizontalAlignment="Right"
+                                                    HorizontalAlignment="Right" HorizontalContentAlignment="Stretch"
                                                     Click="ModelPickerButton_Click" AutomationProperties.Name="{services:UiText Key='模型选择'}" ToolTipService.ToolTip="{services:UiText Key='模型选择'}">
                                                 <Grid ColumnSpacing="6" MaxWidth="220" VerticalAlignment="Center">
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -758,15 +758,22 @@
                                      DragCompleted="LayoutGrip_DragCompleted" CancelRequested="WorkPanelGrip_CancelRequested"
                                      ResetRequested="WorkPanelGrip_ResetRequested" />
                 <Border x:Name="WorkContextPanel" Grid.Column="2" Canvas.ZIndex="14" Visibility="Collapsed"
-                        Background="{StaticResource KynxaSurfaceBrush}" services:UiLocalization.AutomationName="工作右侧栏">
+                        Background="{StaticResource KynxaSurfaceBrush}" BorderBrush="{StaticResource KynxaDividerBrush}"
+                        BorderThickness="1" CornerRadius="16" Margin="0,0,6,6"
+                        services:UiLocalization.AutomationName="工作右侧栏">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                        <controls:MountedWorkspaceHeader x:Name="MountedWorkspace" Margin="10,3,40,0" />
-                        <Grid x:Name="WorkContextModulesHost" Grid.Row="1" Margin="14,10,14,14" SizeChanged="WorkContextModulesHost_SizeChanged">
+                        <Grid.RowDefinitions><RowDefinition Height="44" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <controls:MountedWorkspaceHeader x:Name="MountedWorkspace" Margin="8,6,124,6" />
+                        <Button Content="工作台" Click="ExpansionWorkbench_Click" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                Margin="0,0,42,0" Padding="10,5" FontSize="12" Height="32" MinWidth="0" MinHeight="0" CornerRadius="10"
+                                Background="{StaticResource KynxaSelectionBrush}" Foreground="{StaticResource KynxaAccentTextBrush}"
+                                Style="{StaticResource KynxaQuietButtonStyle}"
+                                services:UiLocalization.AutomationName="打开工作台" services:UiLocalization.ToolTip="打开工作台" />
+                        <Grid x:Name="WorkContextModulesHost" Grid.Row="1" Margin="10,2,10,10" SizeChanged="WorkContextModulesHost_SizeChanged">
                             <Grid.RowDefinitions>
                                 <RowDefinition x:Name="WorkTaskRow" Height="Auto" />
                                 <RowDefinition Height="Auto" />
-                                <RowDefinition x:Name="WorkFileTabsRow" Height="Auto" MinHeight="26" />
+                                <RowDefinition x:Name="WorkFileTabsRow" Height="Auto" MinHeight="42" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
                             <controls:ConversationTaskPanel x:Name="TaskPanel" Visibility="Collapsed" />
@@ -776,16 +783,17 @@
                                                  DragStarted="TaskRegionGrip_DragStarted" DragDelta="TaskRegionGrip_DragDelta"
                                                  DragCompleted="LayoutGrip_DragCompleted" CancelRequested="TaskRegionGrip_CancelRequested"
                                                  ResetRequested="TaskRegionGrip_ResetRequested" />
-                            <controls:ConversationWorkTabs x:Name="WorkTabs" Grid.Row="2" />
-                            <Grid Grid.Row="3">
+                            <controls:ConversationWorkTabs x:Name="WorkTabs" Grid.Row="2" Margin="0,4,0,4" />
+                            <Grid Grid.Row="3" CornerRadius="14" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1"
+                                  Background="{StaticResource KynxaMainBrush}">
                                 <controls:ConversationScreenshotsPanel x:Name="ScreenshotPanel" />
                                 <controls:ConversationDocumentPanel x:Name="DocumentPanel" Visibility="Collapsed" />
                                 <controls:ConversationWorkspaceTerminal x:Name="WorkspaceTerminal" Visibility="Collapsed" />
                                 <controls:ConversationWorkspaceHome x:Name="WorkspaceHome" Visibility="Collapsed" />
                             </Grid>
                         </Grid>
-                        <Button x:Name="CloseWorkPanelButton" HorizontalAlignment="Right" VerticalAlignment="Top"
-                                Margin="0,7,7,0"
+                        <Button x:Name="CloseWorkPanelButton" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                Margin="0,0,8,0" Width="30" Height="30" CornerRadius="10"
                                 Style="{StaticResource KynxaCompactIconButtonStyle}" Click="CloseWorkPanelButton_Click"
                                 services:UiLocalization.AutomationName="收起右侧栏" services:UiLocalization.ToolTip="收起右侧栏">
                             <controls:ThemeIcon Width="18" Height="18" IconKey="IconSidebarToggle" RenderTransformOrigin="0.5,0.5">

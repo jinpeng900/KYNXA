@@ -27,6 +27,29 @@ use std::{
 
 mod startup;
 
+#[cfg(test)]
+mod workspace_range_tests {
+    use super::*;
+    #[test]
+    fn media_byte_ranges_return_explicit_partial_and_unsatisfied_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=2-5".parse().unwrap());
+        let response = binary_content_response(vec![0; 10], "video/mp4", "version", &headers);
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
+        headers.insert(header::RANGE, "bytes=-3".parse().unwrap());
+        assert_eq!(binary_content_response(vec![0;10],"audio/mpeg","version",&headers).headers()[header::CONTENT_RANGE],"bytes 7-9/10");
+        for range in ["bytes=20-", "bytes=5-2", "bytes=0-1,3-4", "bytes=-0"] {
+            headers.insert(header::RANGE, range.parse().unwrap());
+            let response = binary_content_response(vec![0;10],"video/mp4","version",&headers);
+            assert_eq!(response.status(),StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(response.headers()[header::CONTENT_RANGE],"bytes */10");
+            assert_eq!(response.headers()[header::ACCEPT_RANGES],"bytes");
+        }
+    }
+}
+
 fn response(result: Result<(u16, Value), GatewayError>) -> Response {
     let (status, value) = match result {
         Ok(result) => result,
@@ -174,6 +197,9 @@ fn binary_content_response(bytes: Vec<u8>, mime_type: &str, version: &str, heade
         return Response::builder()
             .status(StatusCode::RANGE_NOT_SATISFIABLE)
             .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::ETAG, format!("\"{}\"", version))
             .body(axum::body::Body::empty())
             .unwrap();
     };
@@ -245,7 +271,7 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
 pub fn router_with_lifecycle(lifecycle: Arc<crate::gateway_storage::StorageLifecycle>) -> Router {
     Router::new()
         .fallback(any(handle))
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(96 * 1024 * 1024))
         .with_state(lifecycle)
 }
 
@@ -603,13 +629,15 @@ async fn handle_request(
             Ok(context) => context,
             Err(error) => return response(Err(error)),
         };
-        let context = if matches!(workspace_path, "/agent/workspace/preview" | "/agent/workspace/content" | "/agent/workspace/changes") {
+        let context = if matches!(workspace_path, "/agent/workspace/preview" | "/agent/workspace/content" | "/agent/workspace/changes" | "/agent/workspace/workbench") {
             match crate::tools::gateway::select_workspace_context(&context, &arguments).await {
                 Ok(selected) => selected,
                 Err(error) => return response(Err(error)),
             }
         } else { context };
         return match (method.as_str(), workspace_path) {
+            ("POST", "/agent/workspace/workbench") => response(
+                crate::tools::gateway_workspace_workbench::handle(&arguments, &context, &runtime.config).await.map(|value| (200, value))),
             ("GET" | "POST", "/agent/workspace/files") => response(
                 crate::tools::gateway::workspace_files(&arguments, &context).await.map(|value| (200, value))),
             ("POST", "/agent/workspace/preview") => response(

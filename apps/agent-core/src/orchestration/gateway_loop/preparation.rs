@@ -255,6 +255,7 @@ async fn prepare_session(
     if crate::models::gateway_local_engine::is_managed(&connection) {
         let local_id = connection["providerId"].as_str().unwrap_or("").trim_start_matches("kynxa-local-").to_owned();
         let requested = input["model"].as_str().filter(|model| !model.is_empty()).unwrap_or(&local_id);
+        run.emit(json!({"type":"task_progress","phase":"preparing-model"})).await;
         prepare_managed_connection(&runtime, &mut connection, requested, cancellation.clone(),
             !run.is_background_recovery.load(std::sync::atomic::Ordering::Acquire)).await?;
     }
