@@ -1,4 +1,4 @@
-# KYNXA 1.8.5
+# KYNXA 1.8.6
 
 <p align="center">English | <a href="./README.zh.md">中文</a></p>
 
@@ -16,11 +16,11 @@ KYNXA is a personal agent assistant for Windows, bringing chat, files, tools, an
 
 ## Download
 
-**Version 1.8.5 · Windows x64**
+**Version 1.8.6 · Windows x64**
 
-- [Download the EXE installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.5/KYNXA-1.8.5-windows-x64-setup.exe)
+- [Download the EXE installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.6/KYNXA-1.8.6-windows-x64-setup.exe)
 - [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.5/KYNXA-1.8.5-windows-x64-resources.zip)
-- [Release page and changes](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.5)
+- [Release page and changes](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.6)
 
 Run the EXE directly. The resource ZIP is for preparing a source build, not a standalone application.
 A complete installation does not require development SDKs or manual PATH configuration. Cloud providers and external services may require your own account or credentials.
@@ -32,7 +32,7 @@ Use Windows x64 with Git, .NET 10 SDK (10.0.100 or a later 10.0 SDK), Rust 1.88+
 ```powershell
 git clone https://github.com/jinpeng900/KYNXA.git
 cd KYNXA
-git checkout v1.8.5
+git checkout v1.8.6
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Run -Configuration Debug -Profile Full
 ```
 

@@ -1,4 +1,4 @@
-# KYNXA 1.8.5
+# KYNXA 1.8.6
 
 <p align="center"><a href="./README.md">English</a> | 中文</p>
 
@@ -16,11 +16,11 @@ KYNXA 是 Windows 个人智能体助手，将聊天、文件、工具和持续�
 
 ## 下载
 
-**版本 1.8.5 · Windows x64**
+**版本 1.8.6 · Windows x64**
 
-- [下载 EXE 安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.5/KYNXA-1.8.5-windows-x64-setup.exe)
+- [下载 EXE 安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.6/KYNXA-1.8.6-windows-x64-setup.exe)
 - [运行资源包](https://github.com/jinpeng900/KYNXA/releases/download/v1.8.5/KYNXA-1.8.5-windows-x64-resources.zip)
-- [发布页与更新内容](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.5)
+- [发布页与更新内容](https://github.com/jinpeng900/KYNXA/releases/tag/v1.8.6)
 
 直接运行 EXE 安装。资源 ZIP 用于准备源码构建环境，不是独立软件。
 完整安装后无需安装开发 SDK 或手动配置 PATH。云端模型和部分外部服务需要自行配置账号或凭据。
@@ -32,7 +32,7 @@ KYNXA 是 Windows 个人智能体助手，将聊天、文件、工具和持续�
 ```powershell
 git clone https://github.com/jinpeng900/KYNXA.git
 cd KYNXA
-git checkout v1.8.5
+git checkout v1.8.6
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Run -Configuration Debug -Profile Full
 ```
 

@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
+using Windows.Storage.Pickers;
 using Windows.System;
 
 namespace KYNXA_Desktop.Controls;
@@ -18,10 +19,10 @@ public sealed class WorkspaceFolderEditor : StackPanel
     private readonly SubmitTextBox _name, _path;
     private readonly TextBlock _error;
     private readonly Grid _errorRow;
-    private readonly Button _submit, _cancel, _withoutFolder;
+    private readonly Button _submit, _cancel, _withoutFolder, _pickFolder;
     private readonly Func<WorkspaceFolderEdit, Task> _commit;
     private readonly bool _creating;
-    private bool _busy, _closed;
+    private bool _busy, _picking, _closed;
     private UIElement? _pointerRoot;
     private readonly PointerEventHandler _outsidePointer;
 
@@ -46,19 +47,19 @@ public sealed class WorkspaceFolderEditor : StackPanel
         _path.AllowDrop = true;
         _path.DragOver += (_, args) =>
         {
-            args.AcceptedOperation = !_busy && args.DataView.Contains(StandardDataFormats.StorageItems)
+            args.AcceptedOperation = !_busy && !_picking && !_closed && args.DataView.Contains(StandardDataFormats.StorageItems)
                 ? DataPackageOperation.Copy : DataPackageOperation.None;
             args.Handled = true;
         };
         _path.Drop += async (_, args) =>
         {
             args.Handled = true;
-            if (_busy || !args.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            if (_busy || _picking || _closed || !args.DataView.Contains(StandardDataFormats.StorageItems)) return;
             var deferral = args.GetDeferral();
             try
             {
                 var items = await args.DataView.GetStorageItemsAsync();
-                if (_closed) return;
+                if (_closed || _busy || _picking) return;
                 if (items.Count != 1 || items[0] is not StorageFolder folder)
                 { ShowError(UiText.Get("一次只能关联一个文件夹。")); return; }
                 _path.Text = folder.Path;
@@ -67,7 +68,15 @@ public sealed class WorkspaceFolderEditor : StackPanel
             catch (Exception error) { if (!_closed) ShowError(error.Message); }
             finally { deferral.Complete(); }
         };
-        Children.Add(_path);
+        var folderRow = new Grid { ColumnSpacing = 8 };
+        folderRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        folderRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        folderRow.Children.Add(_path);
+        _pickFolder = Button("选择文件夹", "WorkspaceFolderPick");
+        _pickFolder.MinHeight = 36;
+        _pickFolder.Click += async (_, _) => await PickFolderAsync();
+        Grid.SetColumn(_pickFolder, 1); folderRow.Children.Add(_pickFolder);
+        Children.Add(folderRow);
         var errorBrush = new SolidColorBrush(Microsoft.UI.Colors.IndianRed);
         _error = new TextBlock { FontSize = 12, Foreground = errorBrush, TextWrapping = TextWrapping.NoWrap,
             TextTrimming = TextTrimming.CharacterEllipsis, MaxLines = 1, VerticalAlignment = VerticalAlignment.Center };
@@ -121,9 +130,30 @@ public sealed class WorkspaceFolderEditor : StackPanel
         _closed = true; DetachPointerListener(); Closed?.Invoke(this, false);
     }
 
+    private async Task PickFolderAsync()
+    {
+        if (_busy || _picking || _closed) return;
+        HideError();
+        _picking = true; SetEnabled(false);
+        try
+        {
+            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
+            var folder = await picker.PickSingleFolderAsync();
+            if (_closed || folder is null) return;
+            if (!Path.IsPathFullyQualified(folder.Path))
+            { ShowError(UiText.Get("所选文件夹没有可用的本机路径。")); return; }
+            _path.Text = folder.Path;
+            if (_creating && string.IsNullOrWhiteSpace(_name.Text)) _name.Text = folder.DisplayName;
+        }
+        catch (Exception error) { if (!_closed) ShowError(error.Message); }
+        finally { _picking = false; if (!_closed) SetEnabled(true); }
+    }
+
     private async Task SubmitAsync(bool withoutFolder = false)
     {
-        if (_busy || _closed) return;
+        if (_busy || _picking || _closed) return;
         HideError();
         _busy = true; SetEnabled(false);
         try
@@ -158,7 +188,7 @@ public sealed class WorkspaceFolderEditor : StackPanel
 
     private void SetEnabled(bool enabled)
     {
-        _name.IsEnabled = _path.IsEnabled = _submit.IsEnabled = _withoutFolder.IsEnabled = enabled;
+        _name.IsEnabled = _path.IsEnabled = _submit.IsEnabled = _withoutFolder.IsEnabled = _pickFolder.IsEnabled = enabled;
         _cancel.IsEnabled = enabled;
     }
     public void ShowError(string message)

@@ -6,6 +6,8 @@ public static partial class UiText
     {
         ["存储位置由启动配置管理。"] = "Storage locations are managed by the launch settings.",
         ["选择本机文件"] = "Choose a local file",
+        ["选择文件夹"] = "Choose folder",
+        ["所选文件夹没有可用的本机路径。"] = "The selected folder has no local path.",
         ["所选文件没有可用的本机路径。"] = "The selected file has no local path.",
         ["本机文件打开失败，请重试。"] = "The local file could not be opened. Try again.",
         ["查看文件、网页与工作成果"] = "View files, websites and project outputs",
