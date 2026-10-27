@@ -203,10 +203,14 @@ function Update-KynxaDesktopLayout {
     [xml]$manifest = Get-Content -LiteralPath (Join-Path $Layout.output 'AppxManifest.xml') -Raw -Encoding UTF8
     $identity = $manifest.SelectSingleNode('//*[local-name()="Identity"]')
     $installed = Get-AppxPackage -Name $identity.Name | Select-Object -First 1
+    $installedLocation = if ($installed) { [string]$installed.InstallLocation } else { '' }
     # Keep an existing development registration inside this checkout; never overwrite another checkout or signed install.
     # 复用本项目已有开发包注册目录；不覆盖其他项目副本或正式安装包。
-    if ($installed -and $installed.IsDevelopmentMode -and $installed.InstallLocation.StartsWith($RepositoryRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        $Layout.applicationRoot = $installed.InstallLocation
+    # Removed checkouts can leave registration metadata without an installation path; use an isolated identity instead.
+    # 已删除源码可能留下无安装路径的注册信息；转用独立开发身份，不复用失效目录。
+    if ($installed -and $installed.IsDevelopmentMode -and -not [string]::IsNullOrWhiteSpace($installedLocation) -and
+        $installedLocation.StartsWith($RepositoryRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        $Layout.applicationRoot = $installedLocation
     }
     elseif ($installed) {
         $name = 'KYNXA.Dev.' + (Get-KynxaBuildSignature $RepositoryRoot @() @() @($RepositoryRoot)).Substring(0, 16)
