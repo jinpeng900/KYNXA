@@ -338,6 +338,19 @@ impl ChildModelSession {
         response: std::result::Result<protocol::ModelResponse, crate::models::gateway::ModelError>) -> Result<Option<protocol::ModelResponse>> {
         match response {
             Ok(response) => Ok(Some(response)),
+            Err(error) if budget::resume_execution_after_truncated_review(
+                &mut state.review_pending, &error.code, &error.details,
+            ) => {
+                self.retry_next_request = true;
+                state.acceptance_reviewed = false;
+                state.acceptance_review = Value::Null;
+                state.review_checkpoint["pending"] = json!(false);
+                let _ = effects.apply("effects.protect", &json!({"includeCurrent":true}));
+                state.history.push(json!({"role":"user","content":budget::TRUNCATED_REVIEW_EXECUTION_NOTICE}));
+                journal.emit_control("task.model.recovery", &json!({"code":error.code,"phase":"execution","reason":"review-tool-output-truncated"}))?;
+                checkpoint(run,journal,state,"review-returned-to-execution").await?;
+                Ok(None)
+            }
             Err(error)
                 if error.details["contextRejection"].is_object() && self.context_repairs < 2 =>
             {
@@ -383,6 +396,7 @@ impl ChildModelSession {
                 if [
                         "MODEL_TOOL_CALL_INVALID",
                         "MODEL_TOOL_ARGUMENT_INVALID",
+                        "MODEL_TOOL_OUTPUT_TRUNCATED",
                         "MODEL_RESPONSE_INCOMPLETE",
                         "MODEL_TOOL_SCHEMA_REJECTED",
                         "MODEL_LOCAL_TOOL_GRAMMAR_REJECTED",
@@ -403,7 +417,9 @@ impl ChildModelSession {
                 Ok(None)
             }
             Err(mut error) => {
-                if error.details["type"] == "interrupted" {
+                if error.details["type"] == "interrupted"
+                    && error.details["outputTruncated"] != true
+                    && error.code != "MODEL_TOOL_OUTPUT_TRUNCATED" {
                     error.code = "MODEL_STREAM_INCOMPLETE".into();
                 }
                 return Err(error.into());

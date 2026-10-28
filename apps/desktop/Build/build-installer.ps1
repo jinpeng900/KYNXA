@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [string]$PackageVersion = '1.8.6',
+    [string]$PackageVersion = '1.8.7',
     [string]$CompilerPath,
     [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
     [string]$ModelDownloadSourcesPath,

@@ -79,7 +79,10 @@ pub(super) async fn execute(mut round: ToolRound<'_>) -> Result<()> {
         discovery_calls: results.iter().filter(|pair|matches!(pair["call"]["name"].as_str(),
             Some("tool.search" | "tool.load"))).count() as u64,
         source_reads: results.iter().filter(|pair|pair["observation"] == true
-            && !matches!(pair["call"]["name"].as_str(),Some("tool.search" | "tool.load"))).count() as u64,
+            && !matches!(pair["call"]["name"].as_str(),Some("tool.search" | "tool.load"))
+            && (pair["call"]["name"] != "attachment.read"
+                || task::successful_completion_receipt(&pair["result"])
+                    && crate::orchestration::task::attachment_read_has_content(&pair["result"]["content"]))).count() as u64,
         artifact_updated: round.state.receipts.iter().rev().take(results.len()).any(|saved|
             saved["mutating"] == true && gateway_tool_execution::artifact_version_changed(
                 &saved["call"], &saved["result"], &saved["beforeVersion"], &saved["afterVersion"])),
@@ -139,7 +142,7 @@ pub(super) fn check_write_target(ctx: &GatewayToolContext, input: &Value, call: 
             "Declared target exceeds the parent's scope. / 声明目标超出父任务范围。",
         ));
     }
-    if ["filesystem.write", "filesystem.edit", "filesystem.delete", "document.create"].contains(&name) {
+    if ["filesystem.write", "filesystem.edit", "filesystem.delete", "document.create", "attachment.export"].contains(&name) {
         let path = call["arguments"]["path"].as_str().ok_or_else(|| {
             failure(
                 "INVALID_CHILD_WRITE_TARGET",
@@ -194,7 +197,7 @@ pub(super) fn operation_intent(call: &Value, observation: bool, round: u64) -> O
         input_reference: None,
         effect: if observation {
             OperationEffect::Observation
-        } else if ["filesystem.write", "filesystem.edit", "filesystem.delete", "document.create"]
+        } else if ["filesystem.write", "filesystem.edit", "filesystem.delete", "document.create", "attachment.export"]
             .contains(&call["name"].as_str().unwrap_or(""))
         {
             OperationEffect::FileMutation

@@ -441,6 +441,11 @@ async fn select_capabilities(
     ]);
     if formal.iter().any(|message| message["Attachments"].as_array().is_some_and(|items| !items.is_empty())) {
         names.insert("attachment.read".to_owned());
+        names.insert("attachment.export".to_owned());
+    }
+    if formal.iter().any(|message| message["Attachments"].as_array().into_iter().flatten().any(|item|
+        item["ContentType"].as_str().is_some_and(|mime| mime.starts_with("image/")))) {
+        names.insert("image.read".to_owned());
     }
     if formal.iter().any(|message| {
         message["ToolActivities"]

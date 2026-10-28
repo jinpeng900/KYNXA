@@ -161,7 +161,8 @@ fn failure_plan(arguments: &Value) -> ServiceResult<Value> {
             "skill.run",
         ]
         .contains(&name)
-        || name.starts_with("filesystem.") && !file_read;
+        || name.starts_with("filesystem.") && !file_read
+        || name == "attachment.export";
     let not_dispatched = arguments["executionStarted"] != true
         || name.starts_with("mcp.")
             && (arguments["mcpDispatchAttempted"] != true || arguments["mcpNotDispatched"] == true);
@@ -216,6 +217,19 @@ mod lifecycle_regression_tests {
         let issued = failure_plan(&facts).unwrap();
         assert_eq!(issued["code"], "TOOL_CANCELLED");
         assert_eq!(issued["unknown"], true);
+    }
+
+    #[test]
+    fn attachment_export_cancellation_preserves_unknown_dispatched_effects() {
+        let mut facts = json!({"name":"attachment.export","signalAborted":true,"executionStarted":true,
+            "error":{"name":"AbortError","code":"TOOL_CANCELLED","codeIsString":true}});
+        assert_eq!(failure_plan(&facts).unwrap()["unknown"], true);
+        facts["executionStarted"] = json!(false);
+        assert_eq!(failure_plan(&facts).unwrap()["unknown"], false);
+        facts["executionStarted"] = json!(true);
+        facts["name"] = json!("attachment.read");
+        assert_eq!(failure_plan(&facts).unwrap()["unknown"], false);
+        assert_eq!(super::apply("broker.completion.trackVersion", &json!({"name":"attachment.export"})).unwrap(), true);
     }
 }
 
@@ -489,7 +503,8 @@ pub(super) fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> 
             json!({"checkedBy":"kynxa-runtime","discoveryRequiresApproval":false,"discoveryExecutesCommands":false,"scope":"gateway-host","userDeviceRelationship":"unverified","tools":array(&arguments["tools"]).iter().map(|tool|{let availability=&tool["availability"];let mut value=json!({"name":tool["name"],"state":if tool["discovered"]==true{"available"}else if availability["available"]==false{"unavailable"}else if arguments["hasSnapshot"]==true{"disabled"}else{"not-discovered"},"executionEnvironment":tool["executionEnvironment"],"schema":if arguments["hasModel"]!=true{"selection-pending"}else if tool["selected"]==true{"loaded"}else{"deferred"},"approval":if arguments["permissionMode"]=="full" || ["web.fetch","computer.windows"].contains(&string(&tool["name"])){"not-required-by-current-mode"}else{"execution-policy-applies"}});if truthy(&availability["unavailableCode"]){value["code"]=availability["unavailableCode"].clone();}value}).collect::<Vec<_>>()}),
         ),
         "broker.completion.trackVersion" => Ok(json!(
-            string(&arguments["name"]).starts_with("filesystem.")
+            string(&arguments["name"]) == "attachment.export"
+                || string(&arguments["name"]).starts_with("filesystem.")
                 && ![
                     "filesystem.read",
                     "filesystem.list",

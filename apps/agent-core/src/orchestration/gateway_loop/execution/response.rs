@@ -65,8 +65,10 @@ impl Execution {
             return Ok(PhaseOutcome::Stop);
         }
         if unresolved_user_steering(&self.prepared.state) {
-            let work_plan = observe_work_progress(&mut self.prepared.state.work_progress, &mut self.prepared.state.progress,
-                &RoundProgress { execution_without_action:true, ..Default::default() });
+            let repair = crate::orchestration::task::steering_format_repair(
+                &mut self.prepared.state.completion.review_checkpoint, &response.content,
+                response.output_truncated, response.usage["completion_tokens"].as_u64()
+                    .or_else(|| response.usage["output_tokens"].as_u64()).unwrap_or(0));
             // Pair skipped proposals for protocol continuity; they are not execution receipts.
             // 跳过的提议仍配对协议结果，但不能记为执行回执。
             let skipped = response.calls.iter().map(|call| json!({"call":call,"result":{
@@ -75,17 +77,26 @@ impl Execution {
             }})).collect::<Vec<_>>();
             self.prepared.state.context.history = protocol::append_results(&self.prepared.protocol_name, &self.prepared.state.context.history, &response, &skipped)?;
             self.prepared.state.push_transcript_round(json!({"round":round,"text":inspected["content"],"calls":[],
-                "unexecutedCallCount":response.calls.len(),"awaitingUserDirective":true}));
-            self.prepared.state.append("", "", round, &segment);
+                "unexecutedCallCount":response.calls.len(),"awaitingUserDirective":true,
+                "outputTruncated":response.output_truncated,"reviewing":reviewing,
+                "taskState":inspected["state"],"taskStateSource":inspected["source"]}));
+            // A missing control field cannot erase an otherwise visible reply or count as failed execution.
+            // 缺少控制字段不能抹掉正常回复，也不计作执行空转。
+            let public_text = if !reviewing && !buffered_delivery && response.calls.is_empty() {
+                inspected["content"].as_str().unwrap_or("")
+            } else { "" };
+            self.prepared.state.append(public_text, "", round, &segment);
             self.run.emit(json!({"type":"assistant_segment","segment":self.prepared.state.segment(&segment),"toolStreamProtocol":3})).await;
             self.rounds.review_pending = true;
             let notice = completion_review_instruction(&self.prepared.state);
             append_control_notice(&mut self.prepared.state, "completionReviewNotice", Some(&notice));
             self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
-            if let Some(error) = crate::orchestration::gateway_tool_execution::progress_interruption(&work_plan) {
-                self.rounds.stopped = Some(error);
+            if !response.output_truncated && repair["action"] == "wait" {
+                self.rounds.stopped = Some(GatewayError::new("TASK_COMPLETION_REVIEW_INVALID",
+                    "本次回复的控制信息未能解析，原任务和已完成操作已保留。", 502));
                 return Ok(PhaseOutcome::Stop);
             }
+            if response.output_truncated { self.rounds.review_attempts = self.rounds.review_attempts.saturating_add(1); }
             return Ok(PhaseOutcome::Continue);
         }
         let text = inspected["content"].as_str().unwrap_or(&response.content);
@@ -460,7 +471,9 @@ impl Execution {
                     return Ok(PhaseOutcome::Continue);
                 }
             }
-            self.prepared.state.push_transcript_round(json!({"round":round,"text":text,"calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
+            self.prepared.state.push_transcript_round(json!({"round":round,"text":text,"calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint,
+                "outputTruncated":response.output_truncated,"reviewing":false,
+                "taskState":self.rounds.task_status["state"],"taskStateSource":self.rounds.task_status["source"]}));
             let mut decision = self.prepared.state.task.decide_typed(&TaskDecisionInput {
                 reply: self.rounds.task_status.clone(), has_calls: false, output_truncated: response.output_truncated,
                 output_continuations: self.rounds.output_continuations, supports_task_markers: self.prepared.supports_tools,

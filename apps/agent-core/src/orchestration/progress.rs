@@ -510,6 +510,9 @@ impl RunProgress {
             .filter(|value| value.is_object())
             .or_else(|| canonical.get("value").filter(|value| value.is_object()))
             .unwrap_or(canonical);
+        if name == "attachment.export" && (output["reused"] == true || output["executed"] == false) {
+            return;
+        }
         let uncertain = uncertain || result["outcomeUnknown"] == true || output["outcomeUnknown"] == true
             || output["cancelled"] == true || output["timedOut"] == true
             || result["code"] == "TOOL_TIMED_OUT";
@@ -529,11 +532,21 @@ impl RunProgress {
             "filesystem.move",
             "filesystem.delete",
             "document.create",
+            "attachment.export",
         ]
         .contains(&name)
         {
             if completed || uncertain {
                 self.mutation_revision += 1;
+            }
+            if name == "attachment.export" && completed {
+                if output["codeTarget"] == true { self.code_mutation_revision = self.mutation_revision; }
+                else if self.artifact_revisions.len() < MAX_DOCUMENT_TARGETS {
+                    self.artifact_revisions.insert(self.mutation_revision);
+                }
+                // Copying an original is not a new quality claim or a document readback requirement.
+                // 导出原件不新增质量声明，也不因此要求再次回读文档。
+                return;
             }
             if completed && matches!(name, "filesystem.write" | "filesystem.edit" | "document.create") {
                 self.observe_document_write(output);

@@ -354,7 +354,7 @@ pub(crate) fn record_dispatch(
         input_reference: Some(input_reference),
         effect: if is_observation {
             OperationEffect::Observation
-        } else if name.starts_with("filesystem.") || name == "document.create" {
+        } else if name.starts_with("filesystem.") || matches!(name, "document.create" | "attachment.export") {
             OperationEffect::FileMutation
         } else {
             OperationEffect::Irreversible
@@ -498,6 +498,19 @@ mod tests {
             call("g", "filesystem.stat", json!({"path":"a.txt"})),
         ];
         assert_eq!(plan(&calls), vec![0..3, 4..7]);
+    }
+
+    #[test]
+    fn attachment_export_is_an_ordered_mutation_between_independent_reads() {
+        let calls = vec![
+            call("a", "attachment.read", json!({"messageId":"one","attachmentId":"a"})),
+            call("b", "image.read", json!({"messageId":"one","attachmentId":"b"})),
+            call("copy", "attachment.export", json!({"messageId":"one","attachmentId":"a","path":"copy.png"})),
+            call("c", "filesystem.read", json!({"path":"c.txt"})),
+            call("d", "filesystem.read", json!({"path":"d.txt"})),
+        ];
+        assert_eq!(plan(&calls), vec![0..2, 3..5]);
+        assert!(parallel_resource(&calls[2]).is_none());
     }
 
     #[test]

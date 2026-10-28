@@ -74,7 +74,7 @@ pub(super) fn category(tool: &Value) -> &'static str {
     ) {
         return "web-search";
     }
-    if name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "image.retain", "attachment.read", "artifact.open", "media.transcribe"].contains(&name.as_str()) {
+    if name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "image.retain", "attachment.read", "attachment.export", "artifact.open", "media.transcribe"].contains(&name.as_str()) {
         return "filesystem";
     }
     "other"
@@ -132,6 +132,9 @@ fn aliases(tool: &Value) -> String {
     }
     if name == "attachment.read" {
         return "attachment upload attached document image read paginate 附件 上传文件 读取附件 正文 分页".to_owned();
+    }
+    if name == "attachment.export" {
+        return "attachment upload original bytes export copy processing script crop pixelate 附件 原图 原件 导出 下载 附件落盘 复制附件 图像处理 图片处理 裁剪 像素化 拼豆 脚本处理".to_owned();
     }
     if name == "artifact.open" {
         return "artifact preview display open sidebar file document markdown mermaid pdf word powerpoint website browser 产物 文件 预览 展示 侧栏 文档 网页".to_owned();

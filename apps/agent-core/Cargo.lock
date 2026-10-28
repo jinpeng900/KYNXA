@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "kynxa-agent-core"
-version = "1.8.5"
+version = "1.8.7"
 dependencies = [
  "axum",
  "base64 0.22.1",

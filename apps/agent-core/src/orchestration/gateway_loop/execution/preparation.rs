@@ -123,7 +123,7 @@ impl Execution {
                 && source["executed"] != false
                 && matches!(
                     source["name"].as_str(),
-                    Some("filesystem.write" | "filesystem.edit" | "document.create")
+                    Some("filesystem.write" | "filesystem.edit" | "document.create" | "attachment.export")
                 )
         });
         let delivery_version = json!({"revision":verification["mutationRevision"],

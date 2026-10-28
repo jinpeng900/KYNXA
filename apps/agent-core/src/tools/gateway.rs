@@ -547,7 +547,8 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","document.create","image.read","media.transcribe","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.") || ["document.read","document.create","attachment.export","media.transcribe","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+        || name == "image.read" && arguments["path"].is_string()
         || name == "artifact.open" && !arguments["url"].is_string() && !arguments["resultId"].is_string()
 }
 
@@ -712,8 +713,12 @@ pub(super) async fn filesystem_binary_write(args: Value, bytes: Vec<u8>, ctx: &G
     filesystem_bound("filesystem.write", args, ctx, Some(bytes)).await
 }
 
+pub(super) async fn filesystem_binary_export(args: Value, bytes: Vec<u8>, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    filesystem_bound("attachment.export", args, ctx, Some(bytes)).await
+}
+
 async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, binary: Option<Vec<u8>>) -> Result<Value, GatewayError> {
-    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create");
+    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create" | "attachment.export");
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -769,7 +774,19 @@ async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, bin
         let expected = args["expectedHash"].clone();
         let cancellation = WorkerCancellation::new(ctx);
         let signal = cancellation.signal.clone();
-        return tokio::task::spawn_blocking(move || super::service_filesystem::commit_binary(&path, &bytes, &expected, &binding, &Some(signal))
+        let attachment_export = name == "attachment.export";
+        if attachment_export && super::intent::path_domain(&super::local_files::path_text(&path)) == "code" {
+            observe_code_target(ctx, &binding)?;
+        }
+        return tokio::task::spawn_blocking(move || (if attachment_export {
+            super::service_filesystem::commit_binary_new(&path, &bytes, &binding, &Some(signal),
+                crate::storage::message_attachments::MAXIMUM_FILE_BYTES)
+        } else {
+            super::service_filesystem::commit_binary(&path, &bytes, &expected, &binding, &Some(signal))
+        }).map(|mut result| {
+            if attachment_export { result["codeTarget"] = json!(super::intent::path_domain(result["path"].as_str().unwrap_or("")) == "code"); }
+            result
+        })
             .map_err(|error| failure(&error.code, &error.message, error.status_code)))
             .await.map_err(|_| failure("TOOL_WORKER_FAILED", "文件保存未完成。", 500))?;
     }
@@ -1044,7 +1061,7 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "image.read", "attachment.export", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
@@ -1073,6 +1090,19 @@ async fn execute_inner(
     }
     if tool_name == "attachment.read" {
         return super::gateway_attachment_read::read(args, ctx).await;
+    }
+    if tool_name == "attachment.export" {
+        return super::gateway_attachment_read::export(args, ctx).await;
+    }
+    if tool_name == "image.read" {
+        let has_path = args["path"].as_str().is_some_and(|path| !path.trim().is_empty());
+        let has_message = args["messageId"].as_str().is_some_and(|id| !id.is_empty());
+        let has_attachment = args["attachmentId"].as_str().is_some_and(|id| !id.is_empty());
+        if has_path && (args.get("messageId").is_some() || args.get("attachmentId").is_some())
+            || !has_path && (!has_message || !has_attachment || args.get("path").is_some() || args.get("mountId").is_some()) {
+            return Err(failure("INVALID_TOOL_ARGUMENTS", "请仅指定图片 path，或同时指定 messageId 和 attachmentId；附件读取不使用 mountId。", 400));
+        }
+        if !has_path { return super::gateway_image::read_attachment(args, ctx).await; }
     }
     if tool_name == "media.transcribe" {
         return super::gateway_workspace_transcription::tool(args, ctx).await;

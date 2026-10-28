@@ -235,7 +235,7 @@
     },
     {
       "name": "attachment.read",
-      "description": "Read extracted text from a file attached to a saved user message in this conversation. Use messageId and attachmentId from the attachment manifest; no private filesystem path is needed. Continue with nextOffset while hasMore. Returns original snapshot version and extraction coverage; unsupported or failed extraction is explicit, not empty evidence.",
+      "description": "Read extracted text/OCR from a saved attachment in this conversation using messageId and attachmentId. This is text extraction, not access to image pixels or a file for scripts. An image with no recognized text returns textState=empty and originalAvailable=true; this does not mean the original is missing. Use image.read with the same IDs for pixels, or attachment.export to copy original bytes to the work folder for scripting, cropping or pixelation; do not search private storage or ask for reupload of an available attachment. Continue nextOffset while hasMore. Original version, coverage and actual parsing failures remain explicit.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -252,11 +252,31 @@
       "source": "builtin"
     },
     {
-      "name": "image.read",
-      "description": "Read actual pixels from an authorized local PNG, JPEG, GIF, WebP, BMP or TIFF for visual analysis; GIF uses its first frame and BMP/TIFF are converted for model input. Use the path directly, without launching a viewer or taking a desktop screenshot. Sources are limited to 32 MiB, 64 million pixels and bounded decoding memory. The default output fits a 2048-pixel longest edge; maxDimension may raise this to 4096. crop selects a rectangle in original image coordinates after orientation, before resizing. Returns source SHA-256/original dimensions and actual sent image SHA-256/dimensions. Original files remain unchanged. expectedSha256 rejects changed sources. Reading does not open or switch the right workspace; artifact.open is for requested display. A text-only model cannot inspect pixels; metadata/OCR is not visual evidence.",
+      "name": "attachment.export",
+      "description": "Copy the original bytes of an attachment from this conversation to an authorized work file for scripts or other processing. Supply its messageId and attachmentId plus a destination path; no private storage path is needed. All file types keep their original bytes and SHA-256, up to the existing 256 MiB attachment limit. The destination parent must exist. Never overwrites different existing content; an identical file is reused. Returns destination path, size, original name/source identity and verified hash. expectedSha256 checks the source snapshot. Normal work-folder authorization applies; this grants no other file or conversation access. Exporting does not inspect pixels, create a preview or certify output quality.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "messageId": { "type": "string", "minLength": 1 },
+          "attachmentId": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "mountId": { "type": "string" },
+          "expectedSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "reason": { "type": "string" }
+        },
+        "required": ["messageId", "attachmentId", "path"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "image.read",
+      "description": "Read actual image pixels for visual analysis. Supply exactly one source: an authorized local path, OR messageId and attachmentId of an image uploaded in this conversation (no path or mountId in attachment mode). No image viewer, screenshot or reupload is needed. For scripts needing a real file, use attachment.export instead. PNG/JPEG/GIF/WebP/BMP/TIFF are supported; GIF uses its first frame. Sources are limited to 32 MiB, 64 million pixels and bounded decoding memory. Output fits maxDimension (default 2048, maximum 4096); crop uses oriented original coordinates before resizing. Returns source identity/version/dimensions and actual delivered image hash/dimensions. Original bytes remain unchanged; expectedSha256 rejects changed sources. Reading is background only and never opens the right workspace. A text-only model cannot inspect pixels; OCR is not visual evidence.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string", "minLength": 1, "description": "Owning user message ID, paired with attachmentId instead of path." },
+          "attachmentId": { "type": "string", "minLength": 1, "description": "Image attachment ID in this conversation, paired with messageId instead of path." },
           "mountId": { "type": "string", "description": "Authorized work folder mount ID; omitted uses the task default." },
           "path": { "type": "string", "minLength": 1, "description": "Existing image path, relative to the selected workspace or an authorized absolute path." },
           "reason": { "type": "string", "description": "Explanation for access outside the linked work folder; does not itself grant permission." },
@@ -274,7 +294,6 @@
             "additionalProperties": false
           }
         },
-        "required": ["path"],
         "additionalProperties": false
       },
       "source": "builtin"

@@ -174,10 +174,11 @@ fn actual_targets(body: &Value) -> Vec<Value> {
                 .unwrap_or(Value::Null);
             let start = owner["offset"].as_u64().or(owner["startOffset"].as_u64());
             let end = owner["nextOffset"].as_u64().or(owner["endOffset"].as_u64());
-            let total = owner["totalCharacters"].as_u64();
+            let total = owner["totalCharacters"].as_u64().or_else(|| owner["totalChars"].as_u64());
             // Extraction status does not prove that this page contains the whole source.
             // 解析完成不代表本页覆盖全文，已给出的分页范围优先。
-            let complete = if start.is_some() || end.is_some() || total.is_some() {
+            let complete = owner["complete"] != false && owner["documentComplete"] != false
+                && owner["extraction"]["complete"] != false && if start.is_some() || end.is_some() || total.is_some() {
                 start == Some(0) && end.is_some() && end == total && owner["hasMore"] != true && owner["truncated"] != true
             } else { (owner["documentComplete"] == true || owner["complete"] == true) && owner["hasMore"] != true && owner["truncated"] != true };
             let mut target = json!({"kind":kind,"identity":identity,"version":version,
@@ -210,7 +211,8 @@ pub(super) fn from_receipt(call: &Value, receipt: &Value) -> Value {
         if !references.contains(&path) { references.push(path); }
     }
     if matches!(name, "filesystem.read" | "document.read" | "image.read" | "knowledge.read" | "web.fetch"
-        | "web.search" | "knowledge.search" | "browser.read" | "browser.snapshot") {
+        | "web.search" | "knowledge.search" | "browser.read" | "browser.snapshot")
+        || name == "attachment.read" && super::task::attachment_read_has_content(body) {
         kinds.push(EvidenceKind::ObservedContent);
     } else if matches!(name, "filesystem.stat" | "process.list" | "computer.read" | "computer.windows")
         || name == "artifact.open" && body["previewAvailable"] == true
@@ -220,7 +222,7 @@ pub(super) fn from_receipt(call: &Value, receipt: &Value) -> Value {
     }
     // A terminal exit code alone is not quality proof; the broker adds version-checked validation.
     // 终端退出码不单独证明质量，由调用端补入已核验版本的检查记录。
-    let images = task::receipt_visual_hashes(canonical);
+    let images = if name == "attachment.export" { Vec::new() } else { task::receipt_visual_hashes(canonical) };
     if !images.is_empty() { kinds.push(EvidenceKind::Visual); }
     json!(CompletionProof { version:1, id:id.to_owned(), references, tool:name.to_owned(), kinds,
         targets:actual_targets(body), visual_hashes:images, visual_observed:false })
@@ -597,6 +599,37 @@ mod tests {
         from_receipt(&json!({"name":name,"id":id,"arguments":{}}), &json!({"status":"completed","isError":false,"content":content}))
     }
     fn claim(ids: &[&str]) -> Value { json!({"evidence":ids}) }
+
+    #[test]
+    fn attachment_exports_prove_committed_outputs_without_readback_or_visual_evidence() {
+        let proof = receipt("attachment.export", "copy-original", json!({
+            "path":"C:/work/copy.png","sha256":"a".repeat(64),"bytes":20,
+            "sourceId":"attachment:chat:message:image","sourceVersion":"a".repeat(64),
+            "content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]}));
+        assert_eq!(proof["kinds"], json!(["execution","committed-output"]));
+        assert_eq!(proof["visualHashes"], json!([]));
+        assert_eq!(proof["visualObserved"], false);
+        assert!(proof["references"].as_array().unwrap().contains(&json!("C:/work/copy.png")));
+    }
+
+    #[test]
+    fn attachment_text_requires_real_versioned_ranges_and_legacy_totals_remain_usable() {
+        let body = json!({"sourceId":"attachment:chat:message:document","sourceVersion":"a".repeat(64),
+            "text":"A😀B","offset":0,"nextOffset":4,"totalChars":4,"hasMore":false,"complete":true});
+        let proof = receipt("attachment.read", "read-original", body.clone());
+        assert!(proof["kinds"].as_array().unwrap().contains(&json!("observed-content")));
+        assert_eq!(proof["targets"][0]["range"]["total"], 4);
+        assert_eq!(proof["targets"][0]["range"]["complete"], true);
+        let mut incomplete = body.clone();
+        incomplete["complete"] = json!(false);
+        assert_eq!(receipt("attachment.read", "partial-extraction", incomplete)["targets"][0]["range"]["complete"], false);
+        for (field, value) in [("text", json!("")), ("sourceVersion", Value::Null), ("nextOffset", json!(3))] {
+            let mut invalid = body.clone();
+            invalid[field] = value;
+            let proof = receipt("attachment.read", "invalid-read", invalid);
+            assert!(!proof["kinds"].as_array().unwrap().contains(&json!("observed-content")), "{field}");
+        }
+    }
 
     fn code_snapshot(path: &str, hash: &str) -> Value {
         let files = json!([{"pathId":format!("{:x}", Sha256::digest(path.as_bytes())),"sha256":hash,"state":"present"}]);

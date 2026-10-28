@@ -1,5 +1,5 @@
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -101,12 +101,9 @@ fn image_projection(bytes: Vec<u8>, format: ImageFormat, arguments: &Value, canc
             "frame":if format == ImageFormat::Gif { Some(0) } else { None }}}))
 }
 
-/// Read the authorized version once; model media never creates a workspace preview.
-/// 只读取已授权的同一文件版本；模型图像输入不会创建右侧预览。
-fn read_image(path: PathBuf, binding: Value, arguments: Value, cancellation: &AtomicBool) -> ServiceResult<Value> {
-    active(cancellation)?;
+fn source_format(path: &Path) -> ServiceResult<ImageFormat> {
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
-    let format = match extension.as_str() {
+    Ok(match extension.as_str() {
         "png" => ImageFormat::Png,
         "jpg" | "jpeg" => ImageFormat::Jpeg,
         "gif" => ImageFormat::Gif,
@@ -114,7 +111,30 @@ fn read_image(path: PathBuf, binding: Value, arguments: Value, cancellation: &At
         "bmp" => ImageFormat::Bmp,
         "tif" | "tiff" => ImageFormat::Tiff,
         _ => return Err(ServiceError::new("IMAGE_FORMAT_UNSUPPORTED", "直接看图支持 PNG/JPEG/GIF/WebP/BMP/TIFF；其他格式请先转换，不能只改扩展名。", 415)),
-    };
+    })
+}
+
+fn project_source(bytes: Vec<u8>, format: ImageFormat, arguments: &Value, cancellation: &AtomicBool,
+    conflict_code: &str) -> ServiceResult<Value> {
+    active(cancellation)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(ServiceError::new("IMAGE_FILE_TOO_LARGE", "图片必须非空且不超过 32 MiB。", 400));
+    }
+    let sha256 = super::local_files::sha256(&bytes);
+    if arguments["expectedSha256"].as_str().is_some_and(|expected| expected != sha256) {
+        return Err(ServiceError::new(conflict_code, "图片已变化，请读取当前版本。", 409));
+    }
+    if image::guess_format(&bytes).map_err(image_error)? != format {
+        return Err(ServiceError::new("IMAGE_INVALID_CONTENT", "图片实际格式与扩展名不符，请使用正确的文件。", 422));
+    }
+    image_projection(bytes, format, arguments, cancellation)
+}
+
+/// Read the authorized version once; model media never creates a workspace preview.
+/// 只读取已授权的同一文件版本；模型图像输入不会创建右侧预览。
+fn read_image(path: PathBuf, binding: Value, arguments: Value, cancellation: &AtomicBool) -> ServiceResult<Value> {
+    active(cancellation)?;
+    let format = source_format(&path)?;
     super::service_filesystem::revalidate(&binding)?;
     let metadata = super::local_files::inspect(&path, false, true)?
         .filter(|metadata| metadata.is_file())
@@ -124,21 +144,12 @@ fn read_image(path: PathBuf, binding: Value, arguments: Value, cancellation: &At
     }
     let bytes = super::local_files::read_checked(&path, MAX_IMAGE_BYTES, true, "TOOL_FILE_CONFLICT")?;
     super::service_filesystem::revalidate(&binding)?;
-    active(cancellation)?;
-    let sha256 = super::local_files::sha256(&bytes);
-    if arguments["expectedSha256"].as_str().is_some_and(|expected| expected != sha256) {
-        return Err(ServiceError::new("TOOL_FILE_CONFLICT", "图片已变化，请读取当前版本。", 409));
-    }
-    if image::guess_format(&bytes).map_err(image_error)? != format {
-        return Err(ServiceError::new("IMAGE_INVALID_CONTENT", "图片实际格式与扩展名不符，请使用正确的文件。", 422));
-    }
-    let mut result = image_projection(bytes, format, &arguments, cancellation)?;
+    let mut result = project_source(bytes, format, &arguments, cancellation, "TOOL_FILE_CONFLICT")?;
     result["structuredContent"]["path"] = json!(super::local_files::path_text(&path));
     Ok(result)
 }
 
-pub(super) async fn read(arguments: Value, path: PathBuf, binding: Value, context: &GatewayToolContext) -> Result<Value, GatewayError> {
-    check_cancelled(context)?;
+fn validate_arguments(arguments: &Value) -> Result<(), GatewayError> {
     let expected = arguments["expectedSha256"].as_str().map(str::to_owned);
     if expected.as_ref().is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))) {
         return Err(failure("INVALID_TOOL_ARGUMENTS", "expectedSha256 必须是完整的小写 SHA-256。", 400));
@@ -146,6 +157,12 @@ pub(super) async fn read(arguments: Value, path: PathBuf, binding: Value, contex
     if arguments.get("maxDimension").is_some() && !arguments["maxDimension"].as_u64().is_some_and(|value| (1..=4096).contains(&value)) {
         return Err(failure("INVALID_TOOL_ARGUMENTS", "maxDimension 必须在 1 到 4096 之间。", 400));
     }
+    Ok(())
+}
+
+async fn image_worker<F>(context: &GatewayToolContext, work: F) -> Result<Value, GatewayError>
+where F: FnOnce(&AtomicBool) -> ServiceResult<Value> + Send + 'static {
+    check_cancelled(context)?;
     let mut cancellation = context.cancellation.clone();
     let workers = IMAGE_WORKERS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))).clone();
     let permit = tokio::select! {
@@ -158,22 +175,63 @@ pub(super) async fn read(arguments: Value, path: PathBuf, binding: Value, contex
     // 读取者持有并发名额直到解码结束，等待方取消也不会提前放开资源。
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        read_image(path, binding, arguments, &signal)
+        work(&signal)
     });
-    let mut result = tokio::select! {
+    let result = tokio::select! {
         result = worker => result.map_err(|_| failure("TOOL_WORKER_FAILED", "图片读取线程结束。", 500))?
             .map_err(|error| failure(&error.code, &error.message, error.status_code))?,
         _ = super::gateway::wait_for_cancellation(&mut cancellation) => return Err(failure("TOOL_CANCELLED", "图片读取已取消。", 409)),
     };
     check_cancelled(context)?;
+    Ok(result)
+}
+
+pub(super) async fn read(arguments: Value, path: PathBuf, binding: Value, context: &GatewayToolContext) -> Result<Value, GatewayError> {
+    check_cancelled(context)?;
+    validate_arguments(&arguments)?;
+    let mut result = image_worker(context, move |signal| read_image(path, binding, arguments, signal)).await?;
     result["structuredContent"]["mountId"] = context.config["activeMountId"].clone();
     result["structuredContent"]["mountName"] = context.config["activeMount"]["name"].clone();
     Ok(result)
 }
 
+fn read_saved_attachment(root: PathBuf, conversation: String, message: String, attachment: String,
+    arguments: Value, cancellation: &AtomicBool) -> ServiceResult<Value> {
+    active(cancellation)?;
+    let (metadata, bytes) = super::gateway_attachment_read::read_image_original(
+        &root, &conversation, &message, &attachment, MAX_IMAGE_BYTES, cancellation,
+    ).map_err(|error| ServiceError::new(&error.code, &error.message, error.status))?;
+    let format = source_format(Path::new(metadata["name"].as_str().unwrap_or("")))?;
+    let mut result = project_source(bytes, format, &arguments, cancellation, "ATTACHMENT_VERSION_CHANGED")?;
+    let structured = &mut result["structuredContent"];
+    structured["sourceId"] = json!(format!("attachment:{conversation}:{message}:{attachment}"));
+    structured["messageId"] = json!(message);
+    structured["attachmentId"] = metadata["id"].clone();
+    structured["sourceVersion"] = metadata["sha256"].clone();
+    structured["name"] = metadata["name"].clone();
+    Ok(result)
+}
+
+/// Read pixels from this conversation's immutable attachment, without granting filesystem access.
+/// 按当前会话的正式附件身份读取原图像素，不授予私有数据目录或工作区路径访问。
+pub(super) async fn read_attachment(arguments: Value, context: &GatewayToolContext) -> Result<Value, GatewayError> {
+    check_cancelled(context)?;
+    validate_arguments(&arguments)?;
+    let message = arguments["messageId"].as_str().filter(|id| !id.is_empty());
+    let attachment = arguments["attachmentId"].as_str().filter(|id| !id.is_empty());
+    if arguments.get("path").is_some() || arguments.get("mountId").is_some() || message.is_none() || attachment.is_none() {
+        return Err(failure("INVALID_TOOL_ARGUMENTS", "请选择图片路径，或提供同一消息的 messageId 与 attachmentId。", 400));
+    }
+    let (message, attachment) = (message.unwrap().to_owned(), attachment.unwrap().to_owned());
+    let root = context.data_home.clone();
+    let conversation = context.conversation_id.clone();
+    image_worker(context, move |signal| read_saved_attachment(root, conversation, message, attachment, arguments, signal)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::gateway_attachment_read::{test_save_image_attachment as saved_fixture, test_reserve_image_attachment};
 
     fn fixture(format: ImageFormat, width: u32, height: u32) -> Vec<u8> {
         let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, _| {
@@ -182,6 +240,79 @@ mod tests {
         let mut encoded = Cursor::new(Vec::new());
         image.write_to(&mut encoded, format).unwrap();
         encoded.into_inner()
+    }
+
+    #[tokio::test]
+    async fn saved_attachment_returns_original_pixels_and_crop_without_private_paths_or_workspace_writes() {
+        let (context, _cancel) = super::super::gateway::test_context();
+        let bytes = fixture(ImageFormat::Png, 80, 40);
+        let hash = super::super::local_files::sha256(&bytes);
+        let (message, attachment) = saved_fixture(&context, "原图.png", &bytes);
+        let arguments = json!({"messageId":message,"attachmentId":attachment,"expectedSha256":hash});
+        let result = read_attachment(arguments.clone(), &context).await.unwrap();
+        assert_eq!(STANDARD.decode(result["content"][0]["data"].as_str().unwrap()).unwrap(), bytes);
+        assert_eq!(result["structuredContent"]["sourceVersion"], hash);
+        assert_eq!(result["structuredContent"]["sha256"], hash);
+        assert_eq!(result["structuredContent"]["messageId"], message);
+        assert_eq!(result["structuredContent"]["attachmentId"], attachment);
+        assert_eq!(result["structuredContent"]["name"], "原图.png");
+        assert_eq!(result["structuredContent"]["sourceId"], format!("attachment:{}:{message}:{attachment}", context.conversation_id));
+        for field in ["path", "mountId", "presentation", "previewStatus", "imagePreview", "contentUrl"] {
+            assert!(result.get(field).is_none());
+            assert!(result["structuredContent"].get(field).is_none());
+        }
+        let mut crop_arguments = arguments;
+        crop_arguments["crop"] = json!({"x":40,"y":0,"width":40,"height":40});
+        crop_arguments["maxDimension"] = json!(20);
+        let cropped = read_attachment(crop_arguments, &context).await.unwrap();
+        let sent = STANDARD.decode(cropped["content"][0]["data"].as_str().unwrap()).unwrap();
+        let image = image::load_from_memory(&sent).unwrap().to_rgb8();
+        assert_eq!(image.dimensions(), (20, 20));
+        assert!(image.get_pixel(10, 10)[2] > 240 && image.get_pixel(10, 10)[0] < 20);
+        assert_eq!(cropped["structuredContent"]["sourceVersion"], hash);
+        assert_eq!(super::super::gateway_attachment_read::read_image_original(&context.data_home, &context.conversation_id,
+            &message, &attachment, MAX_IMAGE_BYTES, &AtomicBool::new(false)).unwrap().1, bytes);
+        assert!(context.runtime.preview_grants.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&context.workdir).unwrap().count(), 0);
+        std::fs::remove_dir_all(context.workdir.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_attachment_checks_scope_version_format_size_arguments_and_cancellation() {
+        let (context, cancel) = super::super::gateway::test_context();
+        let bytes = fixture(ImageFormat::Png, 2, 1);
+        let (message, attachment) = saved_fixture(&context, "photo.png", &bytes);
+        for (extra, code) in [
+            (json!({"expectedSha256":"0".repeat(64)}), "ATTACHMENT_VERSION_CHANGED"),
+            (json!({"expectedSha256":"invalid"}), "INVALID_TOOL_ARGUMENTS"),
+            (json!({"maxDimension":0}), "INVALID_TOOL_ARGUMENTS"),
+            (json!({"path":"photo.png"}), "INVALID_TOOL_ARGUMENTS"),
+        ] {
+            let mut arguments = json!({"messageId":message,"attachmentId":attachment});
+            arguments.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert_eq!(read_attachment(arguments, &context).await.unwrap_err().code, code);
+        }
+        let mut foreign = context.clone();
+        foreign.conversation_id = uuid::Uuid::new_v4().to_string();
+        let (foreign_message, foreign_attachment) = saved_fixture(&foreign, "foreign.png", &bytes);
+        assert_eq!(read_attachment(json!({"messageId":foreign_message,"attachmentId":foreign_attachment}), &context)
+            .await.unwrap_err().code, "MESSAGE_NOT_FOUND");
+        for (name, source, code) in [
+            ("wrong.jpg", bytes.clone(), "IMAGE_INVALID_CONTENT"),
+            ("broken.png", b"not an image".to_vec(), "IMAGE_INVALID_CONTENT"),
+            ("vector.svg", b"<svg/>".to_vec(), "IMAGE_FORMAT_UNSUPPORTED"),
+        ] {
+            let (message, attachment) = saved_fixture(&context, name, &source);
+            assert_eq!(read_attachment(json!({"messageId":message,"attachmentId":attachment}), &context)
+                .await.unwrap_err().code, code);
+        }
+        let (oversized_message, oversized_attachment) = test_reserve_image_attachment(&context, "large.png", MAX_IMAGE_BYTES + 1);
+        assert_eq!(read_attachment(json!({"messageId":oversized_message,"attachmentId":oversized_attachment}), &context)
+            .await.unwrap_err().code, "IMAGE_FILE_TOO_LARGE");
+        cancel.send(true).unwrap();
+        assert_eq!(read_attachment(json!({"messageId":message,"attachmentId":attachment}), &context)
+            .await.unwrap_err().code, "TOOL_CANCELLED");
+        std::fs::remove_dir_all(context.workdir.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]

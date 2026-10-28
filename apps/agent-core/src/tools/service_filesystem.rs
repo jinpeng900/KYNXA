@@ -422,6 +422,100 @@ pub(super) fn commit_binary(
     atomic_write(path, bytes, expected, binding, cancellation, MAX_BINARY_FILE_BYTES)
 }
 
+/// Export immutable attachment bytes without replacing a different existing file.
+/// 附件原件使用独立的 256 MiB 合同；原子发布不能覆盖其他内容的现有文件。
+pub(super) fn commit_binary_new(
+    path: &Path,
+    bytes: &[u8],
+    binding: &Value,
+    cancellation: &Option<Arc<AtomicBool>>,
+    maximum_bytes: u64,
+) -> ServiceResult<Value> {
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(ServiceError::new("TOOL_FILE_TOO_LARGE", "附件超过允许的大小上限。", 400));
+    }
+    if binding["path"].as_str() != Some(path_text(path).as_str()) {
+        return Err(ServiceError::new("TOOL_PATH_CHANGED", "附件导出目标与已授权路径不一致。", 409));
+    }
+    let lock = file_lock(path);
+    let _guard = lock.lock().unwrap();
+    let digest = sha256(bytes);
+    let receipt = |reused: bool| json!({"path":path_text(path),"bytes":bytes.len(),"sha256":digest,
+        "executed":!reused,"reused":reused,"created":!reused});
+    let reuse_existing = || -> ServiceResult<Option<Value>> {
+        cancelled(cancellation)?;
+        revalidate(binding)?;
+        let Some(metadata) = inspect(path, true, false)? else { return Ok(None); };
+        if !metadata.is_file() || metadata.len() != bytes.len() as u64 {
+            return Err(conflict("导出目标已存在且内容不同，请选择其他文件名。"));
+        }
+        let existing = read_checked(path, maximum_bytes, false, "TOOL_FILE_CONFLICT")?;
+        if existing != bytes || sha256(&existing) != digest {
+            return Err(conflict("导出目标已存在且内容不同，请选择其他文件名。"));
+        }
+        revalidate(binding)?;
+        cancelled(cancellation)?;
+        Ok(Some(receipt(true)))
+    };
+    if let Some(existing) = reuse_existing()? { return Ok(existing); }
+    let parent = path.parent().ok_or_else(|| invalid("文件父目录不存在。"))?;
+    if !inspect(parent, false, false)?.is_some_and(|metadata| metadata.is_dir()) {
+        return Err(invalid("文件父目录不存在。"));
+    }
+    let temporary = parent.join(format!(".kynxa-write-{}.tmp", random_identity()?));
+    let mut created = false;
+    let mut result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        cancelled(cancellation)?;
+        let mut file = options.open(&temporary).map_err(ServiceError::io)?;
+        created = true;
+        for chunk in bytes.chunks(1024 * 1024) {
+            cancelled(cancellation)?;
+            file.write_all(chunk).map_err(ServiceError::io)?;
+        }
+        file.sync_all().map_err(ServiceError::io)?;
+        let staged_version = handle_version(&file, &file.metadata().map_err(ServiceError::io)?)?;
+        drop(file);
+        let staged_metadata = inspect(&temporary, false, false)?
+            .ok_or_else(|| conflict("附件导出暂存文件已变化。"))?;
+        let current_version = file_version(&temporary, &staged_metadata)?;
+        if (current_version.volume, current_version.identity, current_version.size, current_version.links)
+            != (staged_version.volume, staged_version.identity, staged_version.size, staged_version.links) {
+            return Err(conflict("附件导出暂存文件已变化。"));
+        }
+        inspect(parent, false, false)?;
+        revalidate(binding)?;
+        cancelled(cancellation)?;
+        // Publish the fsynced sibling with the existing no-clobber hard-link pattern.
+        // 复用现有硬链接发布方式，目标即使在最后核验后出现也不会被覆盖。
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => Ok(receipt(false)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                reuse_existing()?.ok_or_else(|| conflict("导出目标在提交期间发生变化，请重试。"))
+            }
+            Err(error) => Err(ServiceError::io(error)),
+        }
+    })();
+    if created {
+        if let Err(error) = fs::remove_file(&temporary) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                if let Ok(committed) = &mut result {
+                    // An actual publication remains successful even if its temporary name needs cleanup.
+                    // 已实际发布的文件仍返回成功回执，不能因暂存名称清理失败诱发重复执行。
+                    committed["temporaryCleanupPending"] = json!(true);
+                }
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod read_window_tests {
     use super::*;
@@ -508,6 +602,46 @@ mod read_window_tests {
 #[cfg(test)]
 mod binary_commit_tests {
     use super::*;
+
+    #[test]
+    fn attachment_export_reuses_exact_bytes_and_preserves_different_existing_content() {
+        let root = std::env::temp_dir().join(format!("kynxa-attachment-export-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let root = canonical(&root, false).unwrap();
+        let path = root.join("original.bin");
+        let binding = json!({"requestedPath":path_text(&path),"path":path_text(&path),"allowMissing":true,"allowHardLinks":false});
+        let original = b"\0original attachment\xff";
+        let maximum = original.len() as u64;
+        let created = commit_binary_new(&path, original, &binding, &None, maximum).unwrap();
+        assert_eq!(created["executed"], true);
+        assert_eq!(created["reused"], false);
+        assert_eq!(created["sha256"], sha256(original));
+        let version = file_version(&path, &fs::metadata(&path).unwrap()).unwrap();
+        let reused = commit_binary_new(&path, original, &binding, &None, maximum).unwrap();
+        assert_eq!(reused["reused"], true);
+        assert_eq!(reused["executed"], false);
+        assert_eq!(file_version(&path, &fs::metadata(&path).unwrap()).unwrap(), version);
+        let mut different = original.to_vec();
+        different[1] = b'X';
+        assert_eq!(commit_binary_new(&path, &different, &binding, &None, maximum).unwrap_err().code, "TOOL_FILE_CONFLICT");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_attachment_export_creates_neither_destination_nor_temporary_file() {
+        let root = std::env::temp_dir().join(format!("kynxa-attachment-cancel-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let root = canonical(&root, false).unwrap();
+        let path = root.join("cancelled.bin");
+        let binding = json!({"requestedPath":path_text(&path),"path":path_text(&path),"allowMissing":true,"allowHardLinks":false});
+        let cancellation = Some(Arc::new(AtomicBool::new(true)));
+        assert_eq!(commit_binary_new(&path, b"original", &binding, &cancellation, b"original".len() as u64).unwrap_err().code, "TOOL_CANCELLED");
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn document_binary_commit_preserves_versions_cancellation_and_text_limits() {

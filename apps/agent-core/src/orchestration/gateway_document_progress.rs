@@ -28,10 +28,19 @@ impl DocumentWorkRecords {
         receipt: &Value,
         result_ref: &Value,
     ) -> Result<Option<Value>> {
-        let source = source_metadata(receipt);
+        let mut source = source_metadata(receipt);
+        if tool == "attachment.read" {
+            if !super::task::attachment_read_has_content(receipt) { return Ok(None); }
+            let body = attachment_payload(receipt);
+            source["sha256"] = json!(valid_hash(&body["sourceVersion"]).or_else(|| valid_hash(&body["sha256"])).unwrap());
+            source["totalCharacters"] = json!(body["totalCharacters"].as_u64().or_else(|| body["totalChars"].as_u64()).unwrap());
+            if body["complete"] == false || body["extraction"]["complete"] == false {
+                source["complete"] = json!(false);
+            }
+        }
         if !matches!(
             tool,
-            "filesystem.read" | "document.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
+            "filesystem.read" | "document.read" | "attachment.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
         ) || !result_ref["id"].as_str().is_some_and(|id| !id.is_empty())
             || source["sourceTool"] == "context.working-summary"
             || !has_document_locator(&source)
@@ -359,6 +368,12 @@ fn valid_hash(value: &Value) -> Option<&str> {
     value.as_str().filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+fn attachment_payload(content: &Value) -> &Value {
+    content.get("structuredContent").filter(|value| value.is_object())
+        .or_else(|| content.get("value").filter(|value| value.is_object()))
+        .unwrap_or(content)
+}
+
 fn invalid(message: &str) -> GatewayError {
     GatewayError::new("INVALID_DOCUMENT_PROGRESS", message, 409)
 }
@@ -420,6 +435,7 @@ fn source_range(source: &Value) -> Value {
         range.insert("start".into(), json!(start));
         range.insert("end".into(), json!(end));
         range.insert("totalCharacters".into(), source["totalCharacters"].clone());
+        if source["complete"] == false { range.insert("complete".into(), json!(false)); }
     }
     for field in ["lineRange", "locator"] {
         if let Some(value) = source.get(field).filter(|value| !value.is_null()) {
@@ -489,6 +505,7 @@ fn read_state(record: &Value) -> &'static str {
     let mut spans: Vec<(u64, u64, u64)> = ranges
         .iter()
         .filter_map(|range| {
+            if range["complete"] == false { return None; }
             Some((
                 range["start"].as_u64()?,
                 range["end"].as_u64()?,
@@ -637,6 +654,42 @@ mod tests {
     }
     fn reference() -> Value {
         json!({"id":uuid::Uuid::new_v4().to_string(),"sha256":"c".repeat(64),"bytes":512})
+    }
+
+    #[tokio::test]
+    async fn attachment_document_ranges_share_the_original_version_and_reject_empty_or_invalid_text() {
+        let fixture = Fixture::new();
+        let journal = TaskJournal::begin(&fixture.root, &input("attachment-records", 1), "fixture", 60_000).unwrap();
+        let mut records = DocumentWorkRecords::default();
+        let body = json!({"sourceId":"attachment:chat:message:document","sourceVersion":"a".repeat(64),
+            "text":"A😀","offset":0,"nextOffset":3,"totalChars":4,"hasMore":true,"complete":true});
+        let first = records.observe_read(&journal, "attachment.read", &body, &reference()).await.unwrap().unwrap();
+        assert_eq!(first["sourceVersion"]["sha256"], "a".repeat(64));
+        assert_eq!(first["readState"], "partial");
+        let mut next = body.clone();
+        next["text"] = json!("B");
+        next["offset"] = json!(3);
+        next["nextOffset"] = json!(4);
+        next["hasMore"] = json!(false);
+        let last = records.observe_read(&journal, "attachment.read", &next, &reference()).await.unwrap().unwrap();
+        assert_eq!(last["sourceIdentity"], first["sourceIdentity"]);
+        assert_eq!(last["readState"], "complete");
+        assert_eq!(records.directory()["documents"].as_array().unwrap().len(), 1);
+        for (field, value) in [("text", json!("")), ("sourceVersion", Value::Null), ("nextOffset", json!(2))] {
+            let mut invalid = body.clone();
+            invalid[field] = value;
+            assert!(!super::super::task::attachment_read_has_content(&invalid), "{field}");
+            assert!(records.observe_read(&journal, "attachment.read", &invalid, &reference()).await.unwrap().is_none());
+        }
+        assert!(records.observe_read(&journal, "attachment.export", &body, &reference()).await.unwrap().is_none());
+        let mut partial = body;
+        partial["sourceId"] = json!("attachment:chat:message:partial");
+        partial["text"] = json!("A😀B");
+        partial["nextOffset"] = json!(4);
+        partial["hasMore"] = json!(false);
+        partial["complete"] = json!(false);
+        let partial = records.observe_read(&journal, "attachment.read", &partial, &reference()).await.unwrap().unwrap();
+        assert_eq!(partial["readState"], "partial");
     }
 
     #[tokio::test]

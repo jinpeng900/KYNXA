@@ -370,7 +370,8 @@ impl ToolRound<'_> {
             if matches!(
                 name,
                 "filesystem.read" | "document.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
-            ) {
+            ) || name == "attachment.read" && successful_completion_receipt(&receipt)
+                && super::super::task::attachment_read_has_content(&canonical) {
                 round_progress.source_reads += 1;
                 if receipt["isError"] != true
                     && receipt["status"] == "completed"
