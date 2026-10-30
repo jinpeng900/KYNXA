@@ -293,7 +293,7 @@ async fn install_runtime(root: &Path, asset: &'static Asset, owner: &Arc<Engine>
         cancelled(token, owner)?;
         let offset = tokio::fs::metadata(&archive).await.map(|value| value.len()).unwrap_or(0);
         if offset == asset.bytes { break; }
-        let mut request = download_client()?.get(&url).timeout(Duration::from_secs(180));
+        let mut request = download_client(&url).await?.get(&url).timeout(Duration::from_secs(180));
         if offset > 0 && offset < asset.bytes { request = request.header(reqwest::header::RANGE, format!("bytes={offset}-")); }
         let transfer = async {
             let response = request.send().await.map_err(|_| error("LOCAL_RUNTIME_DOWNLOAD_FAILED", "本地推理运行时下载失败，可重试续传。", 502))?;
@@ -639,13 +639,11 @@ async fn wake(base: &str, mut token: watch::Receiver<bool>) -> Result<(), ModelE
     if !response.status().is_success() { return Err(error("LOCAL_MODEL_WAKE_FAILED", "本地模型唤醒未完成，请重试。", 503)); }
     Ok(())
 }
-fn download_client() -> Result<reqwest::Client, ModelError> {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    if let Some(client) = CLIENT.get() { return Ok(client.clone()); }
-    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(8))
+async fn download_client(url: &str) -> Result<reqwest::Client, ModelError> {
+    let client = super::gateway_download_network::builder(url).await?.redirect(reqwest::redirect::Policy::limited(8))
         .connect_timeout(Duration::from_secs(30)).build()
         .map_err(|_| error("LOCAL_RUNTIME_HTTP_FAILED", "运行时下载连接初始化失败。", 500))?;
-    let _ = CLIENT.set(client.clone()); Ok(client)
+    Ok(client)
 }
 
 pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::Receiver<bool>) -> Result<(), ModelError> {

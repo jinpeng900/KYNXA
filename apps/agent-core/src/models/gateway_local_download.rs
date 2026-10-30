@@ -9,6 +9,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static DOWNLOAD_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 
+#[path = "gateway_local_download_status.rs"]
+mod status;
+#[path = "gateway_local_download_ranges.rs"]
+mod ranges;
+#[path = "gateway_local_download_adaptive.rs"]
+mod adaptive;
+pub(super) use status::DownloadStatus;
+use status::{TransferMeter, phase};
+
 #[derive(Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct DownloadSources {
@@ -29,12 +38,24 @@ impl Default for DownloadSources {
     }
 }
 
+#[derive(Clone)]
 struct DownloadSource {
     url: String,
     kind: &'static str,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Copy)]
+struct TransferContext<'a> {
+    client: &'a reqwest::Client,
+    home: &'a Path,
+    library: &'a Library,
+    record: &'a InstalledModel,
+    file: &'a ModelFile,
+    source: &'a DownloadSource,
+    completed: u64,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct ResumeIdentity {
     url: String,
@@ -89,7 +110,9 @@ fn sources(home: &Path, file: &ModelFile) -> Result<Vec<DownloadSource>, ModelEr
     }
     let mut seen = std::collections::HashSet::new();
     result.retain(|source| seen.insert(source.url.clone()));
-    if configured.preferred != "auto" {
+    if configured.preferred == "auto" {
+        result.sort_by_key(|source| source.kind != "mirror");
+    } else {
         result.sort_by_key(|source| source.kind != configured.preferred);
     }
     Ok(result)
@@ -106,6 +129,10 @@ fn partial_path(directory: &Path, file: &ModelFile, source: &DownloadSource) -> 
 /// Only this file's deterministic resume siblings belong to model cancellation or deletion.
 /// 取消或删除模型时只清理该文件可确定归属的断点和身份记录。
 pub(super) fn owns_temporary_name(file_name: &str, candidate: &str) -> bool {
+    if let Some((base, range)) = candidate.rsplit_once(".range-") {
+        return owns_temporary_name(file_name, base) && range.split_once('-').is_some_and(|(start, end)|
+            !start.is_empty() && !end.is_empty() && start.bytes().all(|b| b.is_ascii_digit()) && end.bytes().all(|b| b.is_ascii_digit()));
+    }
     if candidate == format!("{file_name}.part") || candidate == format!("{file_name}.part.json") { return true; }
     candidate.strip_prefix(&format!("{file_name}.source-")).is_some_and(|suffix| {
         let digest = suffix.strip_suffix(".part").or_else(||suffix.strip_suffix(".part.json"));
@@ -140,6 +167,7 @@ async fn verified(path: &Path, file: &ModelFile, receiver: &watch::Receiver<Down
         let count = reader.read(&mut buffer).await.map_err(io_error)?;
         if count == 0 { break; }
         hash.update(&buffer[..count]);
+        tokio::task::yield_now().await;
     }
     if !file.sha256.is_empty() && format!("{:x}", hash.finalize()) != file.sha256 {
         return Ok(false);
@@ -159,15 +187,11 @@ async fn progress(home: &Path, library: &Library, id: &str, bytes: u64, save: bo
 }
 
 async fn transfer(
-    client: &reqwest::Client,
-    home: &Path,
-    library: &Library,
-    record: &InstalledModel,
-    file: &ModelFile,
-    source: &DownloadSource,
-    completed: u64,
+    context: &TransferContext<'_>,
     receiver: &mut watch::Receiver<DownloadAction>,
+    switch_slow: bool,
 ) -> Result<DownloadAction, ModelError> {
+    let TransferContext { client, home, library, record, file, source, completed } = *context;
     if !safe_leaf(&file.name) { return Err(error("INVALID_LOCAL_MODEL_PATH", "下载文件名无效。", 400)); }
     let directory = resolve(home, &record.directory);
     let destination = directory.join(&file.name);
@@ -186,10 +210,11 @@ async fn transfer(
     if !valid_source(&source.url) {
         return Err(error("INVALID_LOCAL_MODEL_SOURCE", "模型下载必须使用 HTTPS 来源。", 400));
     }
-    let identity = managed_files::read(&directory, &identity_path, 8192).map_err(storage_error)?
+    let mut identity = managed_files::read(&directory, &identity_path, 8192).map_err(storage_error)?
         .and_then(|bytes|serde_json::from_slice::<ResumeIdentity>(&bytes).ok()).unwrap_or_default();
     let mut offset = tokio::fs::metadata(&partial).await.map(|metadata| metadata.len()).unwrap_or(0);
     if offset > file.bytes || !identity.url.is_empty() && (identity.url != source.url || identity.sha256 != file.sha256 || identity.bytes != file.bytes) {
+        ranges::discard_stale(&partial, file).await?;
         tokio::fs::OpenOptions::new().write(true).truncate(true).open(&partial).await.map_err(io_error)?;
         offset = 0;
     }
@@ -203,6 +228,23 @@ async fn transfer(
         tokio::fs::OpenOptions::new().write(true).truncate(true).open(&partial).await.map_err(io_error)?;
         offset = 0;
     }
+    phase(library, &record.spec.id, "connecting", Some(source)).await;
+    if file.bytes >= ranges::MINIMUM_BYTES && !file.sha256.is_empty() {
+        match ranges::transfer(context, &partial, &identity, offset, receiver, switch_slow).await {
+            Ok(Some(DownloadAction::Running)) => return finalize(context, &partial, &destination, receiver).await,
+            Ok(Some(action)) => return Ok(action),
+            Ok(None) => {},
+            Err(error) if error.code == "LOCAL_MODEL_RANGE_UNAVAILABLE" => {
+                // A later response may ignore Range even after probing; resume the contiguous prefix serially.
+                // 探测后仍可能遇到忽略 Range 的响应；停止分段，重新读取连续前缀后回退单流。
+                offset = tokio::fs::metadata(&partial).await.map(|v|v.len()).unwrap_or(0);
+                identity = managed_files::read(&directory, &identity_path, 8192).map_err(storage_error)?
+                    .and_then(|bytes|serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+            },
+            Err(error) => return Err(error),
+        }
+    }
+    let Some(connection) = ranges::connection(receiver).await? else { return Ok(*receiver.borrow()); };
     let mut request = client.get(url).header(reqwest::header::ACCEPT_ENCODING, "identity");
     if offset > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
@@ -251,20 +293,25 @@ async fn transfer(
     };
     let encoded = serde_json::to_vec(&identity).map_err(|_|error("LOCAL_MODEL_DOWNLOAD_IO", "下载断点身份无法编码。", 500))?;
     managed_files::atomic_write(&directory, &identity_path, &encoded, 8192).map_err(storage_error)?;
-    let mut output = tokio::fs::OpenOptions::new().create(true).write(true)
+    let output = tokio::fs::OpenOptions::new().create(true).write(true)
         .append(offset > 0).truncate(offset == 0).open(&partial).await.map_err(io_error)?;
+    let mut output = tokio::io::BufWriter::with_capacity(256 * 1024, output);
     let response_start = offset;
     let mut chunks = response.bytes_stream();
-    let mut shown = Instant::now();
-    let mut saved = Instant::now();
-    loop {
+    let mut meter = TransferMeter::new(completed + offset);
+    meter.counters.active.store(1, std::sync::atomic::Ordering::Relaxed);
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    let transferred = async { loop {
         let chunk = tokio::select! {
             action = interrupted(receiver) => {
-                output.flush().await.map_err(io_error)?;
-                progress(home, library, &record.spec.id, completed + offset, true).await?;
                 return Ok(action);
             },
             chunk = chunks.next() => chunk,
+            _ = ticker.tick() => {
+                meter.publish(home, library, record, source, false).await?;
+                if switch_slow && meter.slow() { return Err(error("LOCAL_MODEL_SOURCE_SLOW", "当前来源持续偏慢，尝试其他来源。", 502)); }
+                continue;
+            },
         };
         let Some(chunk) = chunk else { break; };
         let chunk = chunk.map_err(|_|self::error("LOCAL_MODEL_DOWNLOAD_INTERRUPTED","模型下载中断，断点已保留。",502))?;
@@ -273,24 +320,30 @@ async fn transfer(
         }
         output.write_all(&chunk).await.map_err(io_error)?;
         offset += chunk.len() as u64;
-        if shown.elapsed() >= Duration::from_millis(250) {
-            let save = saved.elapsed() >= Duration::from_secs(2);
-            progress(home, library, &record.spec.id, completed + offset, save).await?;
-            shown = Instant::now(); if save { saved = Instant::now(); }
-        }
-    }
+        meter.received(chunk.len() as u64);
+        tokio::task::yield_now().await;
+    } Ok(DownloadAction::Running) }.await;
     output.flush().await.map_err(io_error)?;
-    output.sync_all().await.map_err(io_error)?;
-    drop(output);
+    output.get_ref().sync_all().await.map_err(io_error)?;
+    drop(output); drop(connection);
+    meter.publish(home, library, record, source, true).await?;
+    let action = transferred?;
+    if action != DownloadAction::Running { return Ok(action); }
     if offset - response_start != expected_response_bytes || offset < file.bytes {
         return Err(error("LOCAL_MODEL_DOWNLOAD_INTERRUPTED", "模型响应提前结束，已保留有效断点。", 502));
     }
-    if !verified(&partial, file, receiver).await? {
+    finalize(context, &partial, &destination, receiver).await
+}
+
+async fn finalize(context: &TransferContext<'_>, partial: &Path, destination: &Path, receiver: &watch::Receiver<DownloadAction>) -> Result<DownloadAction, ModelError> {
+    let TransferContext { home, library, record, file, source, completed, .. } = *context;
+    phase(library, &record.spec.id, "verifying", Some(source)).await;
+    if !verified(partial, file, receiver).await? {
         if *receiver.borrow() != DownloadAction::Running { return Ok(*receiver.borrow()); }
         return Err(error("LOCAL_MODEL_INTEGRITY_FAILED", "模型长度或 SHA-256 校验失败，未发布为已安装。", 502));
     }
     tokio::fs::rename(&partial, &destination).await.map_err(io_error)?;
-    clear_resume_files(&directory, file).await?;
+    clear_resume_files(partial.parent().unwrap(), file).await?;
     progress(home, library, &record.spec.id, completed + file.bytes, true).await?;
     Ok(DownloadAction::Running)
 }
@@ -313,34 +366,49 @@ pub(super) async fn run(
     mut receiver: watch::Receiver<DownloadAction>,
 ) -> Result<DownloadAction, ModelError> {
     let slots = DOWNLOAD_SLOTS.get_or_init(||Arc::new(tokio::sync::Semaphore::new(4))).clone();
+    phase(library, &record.spec.id, "queued", None).await;
     let _permit = tokio::select! {
         action = interrupted(&mut receiver) => return Ok(action),
         permit = slots.acquire_owned() => permit.map_err(|_|error("LOCAL_MODEL_DOWNLOAD_UNAVAILABLE","下载调度器已停止。",503))?,
     };
     own_directory(home, record).await?;
-    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(12))
-        .read_timeout(Duration::from_secs(30)).no_gzip().no_brotli().no_deflate()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 { attempt.error("too many download redirects") }
-            else if valid_source(attempt.url().as_str()) { attempt.follow() }
-            else { attempt.error("download redirect requires HTTPS") }
-        }))
-        .user_agent("KYNXA-local-models/1").build().map_err(|_|error("LOCAL_MODEL_DOWNLOAD_UNAVAILABLE","模型下载连接无法初始化。",500))?;
     let mut completed = 0;
     for file in &record.spec.files {
-        let sources = sources(home, file)?;
+        let mut sources = sources(home, file)?;
+        let mut best_slow: Option<(String, u64)> = None;
         let mut result = Err(error("LOCAL_MODEL_DOWNLOAD_FAILED", "模型下载未完成。", 502));
         'attempts: for attempt in 0..2 {
             for source in &sources {
-                result = transfer(&client, home, library, record, file, source, completed, &mut receiver).await;
+                phase(library, &record.spec.id, if attempt == 0 { "connecting" } else { "switching-source" }, Some(source)).await;
+                let builder = tokio::select! {
+                    action=interrupted(&mut receiver)=>return Ok(action),
+                    builder=super::super::gateway_download_network::builder(&source.url)=>builder?,
+                };
+                let client = builder.connect_timeout(Duration::from_secs(12))
+                    .read_timeout(Duration::from_secs(30)).no_gzip().no_brotli().no_deflate()
+                    .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                        if attempt.previous().len() >= 10 { attempt.error("too many download redirects") }
+                        else if valid_source(attempt.url().as_str()) { attempt.follow() }
+                        else { attempt.error("download redirect requires HTTPS") }
+                    }))
+                    .user_agent("KYNXA-local-models/1").build().map_err(|_|error("LOCAL_MODEL_DOWNLOAD_UNAVAILABLE","模型下载连接无法初始化。",500))?;
+                result = transfer(&TransferContext {client:&client,home,library,record,file,source,completed}, &mut receiver, sources.len() > 1 && attempt == 0).await;
+                if result.as_ref().is_err_and(|error|error.code == "LOCAL_MODEL_SOURCE_SLOW") {
+                    let speed = library.state.lock().await.downloads.get(&record.spec.id).and_then(|s|s.bytes_per_second).unwrap_or(0);
+                    if best_slow.as_ref().is_none_or(|(_, best)|speed > *best) { best_slow = Some((source.url.clone(), speed)); }
+                    phase(library, &record.spec.id, "switching-source", Some(source)).await;
+                }
                 match &result {
                     Ok(_) => break 'attempts,
                     Err(error) if !["LOCAL_MODEL_DOWNLOAD_FAILED", "LOCAL_MODEL_DOWNLOAD_INTERRUPTED", "LOCAL_MODEL_DOWNLOAD_HTTP",
-                        "LOCAL_MODEL_RANGE_MISMATCH", "LOCAL_MODEL_INTEGRITY_FAILED", "LOCAL_MODEL_DOWNLOAD_SIZE"].contains(&error.code.as_str()) => break 'attempts,
+                        "LOCAL_MODEL_RANGE_MISMATCH", "LOCAL_MODEL_INTEGRITY_FAILED", "LOCAL_MODEL_DOWNLOAD_SIZE", "LOCAL_MODEL_SOURCE_SLOW"].contains(&error.code.as_str()) => break 'attempts,
                     _ => {},
                 }
             }
             if attempt == 0 {
+                // If every source is slow/unavailable, keep the best observed source instead of rotating forever.
+                // 各来源都慢或不可用时，回到观测较好的来源继续，不无限来回换源。
+                if let Some((best, _)) = &best_slow { sources.sort_by_key(|source| source.url != *best); }
                 tokio::select! {
                     action = interrupted(&mut receiver) => {result=Ok(action);break;},
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {},
@@ -389,7 +457,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.models.insert(record.spec.id.clone(), record.clone());
         Fixture { home, bytes, record, library: Library { state: Mutex::new(LibraryState {
-            manifest, jobs: HashMap::new() }), operations: Mutex::new(()) } }
+            manifest, jobs: HashMap::new(), downloads: HashMap::new() }), operations: Mutex::new(()) } }
     }
 
     async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -402,8 +470,8 @@ mod tests {
     async fn transfer_fixture(fixture: &Fixture) -> Result<DownloadAction, ModelError> {
         let (_command, mut receiver) = watch::channel(DownloadAction::Running);
         let file = &fixture.record.spec.files[0];
-        transfer(&reqwest::Client::new(), &fixture.home, &fixture.library, &fixture.record, file,
-            &DownloadSource { url: file.url.clone(), kind: "official" }, 0, &mut receiver).await
+        transfer(&TransferContext {client:&reqwest::Client::new(),home:&fixture.home,library:&fixture.library,record:&fixture.record,file,
+            source:&DownloadSource { url: file.url.clone(), kind: "official" },completed:0}, &mut receiver, false).await
     }
 
     #[tokio::test]
@@ -412,7 +480,8 @@ mod tests {
         let file = &fixture.record.spec.files[0];
         let defaults = sources(&fixture.home, file).unwrap();
         assert_eq!(defaults.len(), 2);
-        assert_eq!(defaults[1].url, "https://hf-mirror.com/owner/repository/resolve/fixed/model.gguf");
+        assert_eq!(defaults[0].url, "https://hf-mirror.com/owner/repository/resolve/fixed/model.gguf");
+        assert_eq!(defaults[1].kind, "official");
         let github = "https://github.com/owner/repository/releases/download/model/model.gguf";
         let digest = file.sha256.clone();
         tokio::fs::write(fixture.home.join("download-sources.json"), serde_json::to_vec(&json!({
@@ -538,6 +607,174 @@ mod tests {
         assert!(!directory.join("tiny.gguf").exists());
         assert_eq!(tokio::fs::read(other).await.unwrap(), fixture.bytes[..64]);
         server.abort(); let _ = server.await;
+        tokio::fs::remove_dir_all(fixture.home).await.unwrap();
+    }
+
+    async fn large_fixture(source: String) -> Fixture {
+        let mut fixture = fixture(source).await;
+        fixture.bytes.resize(ranges::MINIMUM_BYTES as usize * 2 + 37, 7);
+        fixture.record.spec.download_bytes = fixture.bytes.len() as u64;
+        fixture.record.spec.files[0].bytes = fixture.bytes.len() as u64;
+        fixture.record.spec.files[0].sha256 = format!("{:x}", Sha256::digest(&fixture.bytes));
+        fixture.library.state.lock().await.manifest.models.insert(fixture.record.spec.id.clone(), fixture.record.clone());
+        fixture
+    }
+
+    struct Live(Arc<AtomicUsize>);
+    impl Drop for Live { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); } }
+
+    fn ranged_app(body: Arc<Vec<u8>>, active: Arc<AtomicUsize>, maximum: Arc<AtomicUsize>,
+        resumed: Arc<AtomicBool>, ignore_segments: bool, corrupt: bool) -> Router {
+        Router::new().fallback(move |request: Request<Body>| {
+            let body=body.clone(); let active=active.clone(); let maximum=maximum.clone(); let resumed=resumed.clone();
+            async move {
+                let header=request.headers().get("range").and_then(|v|v.to_str().ok()).unwrap_or("");
+                let pair=header.strip_prefix("bytes=").and_then(|v|v.split_once('-'));
+                let start=pair.and_then(|(a,_)|a.parse::<usize>().ok()).unwrap_or(0);
+                let closed=pair.is_some_and(|(_,b)|!b.is_empty());
+                let end=pair.and_then(|(_,b)|b.parse::<usize>().ok()).unwrap_or(body.len()-1);
+                if ignore_segments && closed && end>start {
+                    return Response::builder().status(StatusCode::OK).body(Body::from(body.to_vec())).unwrap();
+                }
+                if end>=body.len() || start>end { return Response::builder().status(StatusCode::RANGE_NOT_SATISFIABLE).body(Body::empty()).unwrap(); }
+                if end>start && start as u64 % ranges::RANGE_BYTES != 64 && start>64 { resumed.store(true, Ordering::SeqCst); }
+                let count=active.fetch_add(1, Ordering::SeqCst)+1; maximum.fetch_max(count, Ordering::SeqCst);
+                let guard=Live(active);
+                let total=body.len();
+                let stream=futures_util::stream::unfold((start,guard), move |(position,guard)| {
+                    let body=body.clone();
+                    async move {
+                        if position>end { return None; }
+                        tokio::time::sleep(Duration::from_millis(4)).await;
+                        let next=(position+4096).min(end+1);
+                        let mut bytes=body[position..next].to_vec();
+                        if corrupt && end>start && position==start { bytes[0]^=1; }
+                        Some((Ok::<_,std::io::Error>(bytes),(next,guard)))
+                    }
+                });
+                let mut response=Response::builder().header("etag","\"fixed\"").header("content-length",end-start+1);
+                if pair.is_some() { response=response.status(StatusCode::PARTIAL_CONTENT).header("content-range",format!("bytes {start}-{end}/{total}")); }
+                response.body(Body::from_stream(stream)).unwrap()
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn download_parallel_pause_resumes_original_prefix_and_partial_ranges() {
+        let mut fixture=large_fixture("https://example.com/model.gguf".into()).await;
+        let active=Arc::new(AtomicUsize::new(0)); let maximum=Arc::new(AtomicUsize::new(0)); let resumed=Arc::new(AtomicBool::new(false));
+        let (source,server)=serve(ranged_app(Arc::new(fixture.bytes.clone()),active.clone(),maximum.clone(),resumed.clone(),false,false)).await;
+        fixture.record.spec.files[0].url=format!("{source}tiny.gguf");
+        let directory=resolve(&fixture.home,&fixture.record.directory); let file=&fixture.record.spec.files[0];
+        tokio::fs::write(directory.join("tiny.gguf.part"),&fixture.bytes[..64]).await.unwrap();
+        tokio::fs::write(directory.join("tiny.gguf.part.json"),serde_json::to_vec(&ResumeIdentity {
+            url:file.url.clone(),sha256:file.sha256.clone(),bytes:file.bytes,etag:Some("\"fixed\"".into()),last_modified:None }).unwrap()).await.unwrap();
+        let (command,mut receiver)=watch::channel(DownloadAction::Running);
+        let client=reqwest::Client::new(); let origin=DownloadSource{url:file.url.clone(),kind:"official"};
+        let context=TransferContext{client:&client,home:&fixture.home,library:&fixture.library,record:&fixture.record,file,source:&origin,completed:0};
+        let transfer=transfer(&context,&mut receiver,false);
+        let pause=async { while maximum.load(Ordering::SeqCst)<2 {tokio::time::sleep(Duration::from_millis(1)).await;}
+            tokio::time::sleep(Duration::from_millis(8)).await; command.send_replace(DownloadAction::Paused); };
+        let (result,_)=tokio::time::timeout(Duration::from_secs(3),async{tokio::join!(transfer,pause)}).await.unwrap();
+        assert!(matches!(result.unwrap(),DownloadAction::Paused));
+        assert!(!directory.join("tiny.gguf").exists());
+        assert_eq!(tokio::fs::read(directory.join("tiny.gguf.part")).await.unwrap(),fixture.bytes[..64]);
+        assert_eq!(fixture.library.state.lock().await.downloads[&fixture.record.spec.id].connections,0,"workers settle before pause is acknowledged");
+        tokio::time::timeout(Duration::from_millis(200),async{while active.load(Ordering::SeqCst)>0{tokio::time::sleep(Duration::from_millis(1)).await;}}).await.unwrap();
+        let heartbeat=tokio::spawn(async{tokio::time::sleep(Duration::from_millis(5)).await; 1});
+        assert!(matches!(transfer_fixture(&fixture).await.unwrap(),DownloadAction::Running));
+        assert_eq!(heartbeat.await.unwrap(),1);
+        assert!(maximum.load(Ordering::SeqCst)>=2 && maximum.load(Ordering::SeqCst)<=2);
+        assert!(resumed.load(Ordering::SeqCst),"partial range offsets are reused");
+        assert_eq!(tokio::fs::read(directory.join("tiny.gguf")).await.unwrap(),fixture.bytes);
+        let mut remaining=tokio::fs::read_dir(&directory).await.unwrap();
+        while let Some(entry)=remaining.next_entry().await.unwrap(){
+            assert!(!owns_temporary_name("tiny.gguf",entry.file_name().to_str().unwrap()),"verified publication removes only owned resume files");
+        }
+        assert!(directory.join(".kynxa-local-model.json").is_file(),"library ownership marker remains intact");
+        server.abort();let _=server.await;tokio::fs::remove_dir_all(fixture.home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_parallel_falls_back_when_later_responses_ignore_ranges() {
+        let mut fixture=large_fixture("https://example.com/model.gguf".into()).await;
+        let (source,server)=serve(ranged_app(Arc::new(fixture.bytes.clone()),Arc::default(),Arc::default(),Arc::default(),true,false)).await;
+        fixture.record.spec.files[0].url=format!("{source}tiny.gguf");
+        assert!(matches!(transfer_fixture(&fixture).await.unwrap(),DownloadAction::Running));
+        assert_eq!(tokio::fs::read(resolve(&fixture.home,&fixture.record.directory).join("tiny.gguf")).await.unwrap(),fixture.bytes);
+        server.abort();let _=server.await;tokio::fs::remove_dir_all(fixture.home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_parallel_hash_mismatch_never_publishes_model() {
+        let mut fixture=large_fixture("https://example.com/model.gguf".into()).await;
+        let (source,server)=serve(ranged_app(Arc::new(fixture.bytes.clone()),Arc::default(),Arc::default(),Arc::default(),false,true)).await;
+        fixture.record.spec.files[0].url=format!("{source}tiny.gguf");
+        assert_eq!(transfer_fixture(&fixture).await.err().unwrap().code,"LOCAL_MODEL_INTEGRITY_FAILED");
+        assert!(!resolve(&fixture.home,&fixture.record.directory).join("tiny.gguf").exists());
+        server.abort();let _=server.await;tokio::fs::remove_dir_all(fixture.home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_throttling_reduces_concurrency_respects_retry_and_keeps_ranges() {
+        let mut fixture=large_fixture("https://example.com/model.gguf".into()).await;
+        let failed=Arc::new(std::sync::Mutex::new(None::<(String,Instant)>));
+        let retried=Arc::new(AtomicBool::new(false));
+        let state=failed.clone(); let retry= retried.clone();
+        let app=ranged_app(Arc::new(fixture.bytes.clone()),Arc::default(),Arc::default(),Arc::default(),false,false)
+            .layer(axum::middleware::from_fn(move |request: Request<Body>, next: axum::middleware::Next| {
+                let state=state.clone(); let retry=retry.clone();
+                async move {
+                    let header=request.headers().get("range").and_then(|v|v.to_str().ok()).unwrap_or("").to_owned();
+                    let segment=header.strip_prefix("bytes=").and_then(|s|s.split_once('-'))
+                        .is_some_and(|(a,b)|!b.is_empty() && a!=b);
+                    let reject = if segment {
+                        let mut failed=state.lock().unwrap();
+                        if let Some((original,when))=failed.as_ref() {
+                            if header==*original { assert!(when.elapsed()>=Duration::from_millis(900)); retry.store(true,Ordering::SeqCst); }
+                            false
+                        } else { *failed=Some((header,Instant::now())); true }
+                    } else { false };
+                    if reject { Response::builder().status(429).header("retry-after","1").body(Body::empty()).unwrap() }
+                    else { next.run(request).await }
+                }
+            }));
+        let (source,server)=serve(app).await;
+        fixture.record.spec.files[0].url=format!("{source}tiny.gguf");
+        let observe_backoff=async {
+            loop {
+                let state=fixture.library.state.lock().await;
+                if state.downloads.get(&fixture.record.spec.id).is_some_and(|status| status.target_connections==1 && status.adjustment=="backoff") { break; }
+                drop(state); tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let (result,())=tokio::time::timeout(Duration::from_secs(5),async { tokio::join!(transfer_fixture(&fixture),observe_backoff) }).await.unwrap();
+        assert!(matches!(result.unwrap(),DownloadAction::Running));
+        assert!(retried.load(Ordering::SeqCst));
+        assert_eq!(tokio::fs::read(resolve(&fixture.home,&fixture.record.directory).join("tiny.gguf")).await.unwrap(),fixture.bytes);
+        server.abort();let _=server.await;tokio::fs::remove_dir_all(fixture.home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_slow_origin_switches_to_configured_mirror() {
+        let body=bytes();
+        let slow=Router::new().fallback(move || {let body=body.clone();async move {
+            let stream=futures_util::stream::unfold(0,move |offset|{let body=body.clone();async move {
+                if offset>=body.len(){return None;} tokio::time::sleep(Duration::from_millis(120)).await;
+                let end=(offset+32).min(body.len());Some((Ok::<_,std::io::Error>(body[offset..end].to_vec()),end))
+            }});Response::builder().body(Body::from_stream(stream)).unwrap()
+        }});
+        let (origin,slow_server)=serve(slow).await;
+        let mirror_calls=Arc::new(AtomicUsize::new(0));let calls=mirror_calls.clone();
+        let (mirror,fast_server)=serve(Router::new().fallback(move||{let body=bytes();calls.fetch_add(1,Ordering::SeqCst);async move{body}})).await;
+        let fixture=fixture(format!("{origin}tiny.gguf")).await;
+        tokio::fs::write(fixture.home.join("download-sources.json"),serde_json::to_vec(&json!({
+            "preferred":"official","mirrors":{origin:[mirror]}})).unwrap()).await.unwrap();
+        let (_command,receiver)=watch::channel(DownloadAction::Running);
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5),run(&fixture.home,&fixture.library,&fixture.record,receiver)).await.unwrap().unwrap(),DownloadAction::Running));
+        assert!(mirror_calls.load(Ordering::SeqCst)>0);
+        assert_eq!(tokio::fs::read(resolve(&fixture.home,&fixture.record.directory).join("tiny.gguf")).await.unwrap(),fixture.bytes);
+        slow_server.abort();fast_server.abort();let _=slow_server.await;let _=fast_server.await;
         tokio::fs::remove_dir_all(fixture.home).await.unwrap();
     }
 }

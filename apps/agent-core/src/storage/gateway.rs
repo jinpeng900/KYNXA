@@ -2040,7 +2040,26 @@ pub fn handle_text(
             if let Some(cursor) = query_value(query, "cursor") {
                 args["cursor"] = json!(cursor);
             }
-            let (mut page, mut snapshot) = history_page_recovering(root, &location, &args)?;
+            let (mut page, mut snapshot) = if let Some(id) = query_value(query, "messageId") {
+                if query_value(query, "cursor").is_some() {
+                    return Err(error("指定消息不能同时使用分页游标。", "INVALID_CONVERSATION_DATA", 400));
+                }
+                let id = super::identity(&json!(id))?;
+                let ids = std::collections::HashSet::from([id.as_str().unwrap().to_ascii_lowercase()]);
+                // Restore one known reply through the existing versioned index, not arbitrary history pages.
+                // 已知回复按现有版本索引定位，不扫描任意数量的历史页；归属与原文核验保持不变。
+                let read = match conversation_history::read_latest(root, &location, Some(&ids), false) {
+                    Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
+                        read_messages_recovering(root, &location)?;
+                        conversation_history::read_latest(root, &location, Some(&ids), false)?
+                    }
+                    result => result?,
+                };
+                (json!({"rawMessages":read.messages,"targetMessageId":id,
+                    "hasMore":false,"nextCursor":null}), read)
+            } else {
+                history_page_recovering(root, &location, &args)?
+            };
             let messages = page["rawMessages"]
                 .as_array()
                 .unwrap()

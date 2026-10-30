@@ -24,7 +24,12 @@ public sealed record LocalModelInfo
     public JsonElement Error { get; init; }
     public string? SourceUrl { get; init; }
     public LocalModelRuntimeInfo? Runtime { get; init; }
+    public LocalModelDownloadInfo? Download { get; init; }
 }
+
+public sealed record LocalModelDownloadInfo(string Phase = "", string Source = "", string SourceKind = "",
+    long? BytesPerSecond = null, long? RemainingSeconds = null, int Connections = 0,
+    int TargetConnections = 0, string Adjustment = "");
 
 public sealed record LocalModelRuntimeInfo(string State = "stopped", int ActiveRequests = 0, int? ProcessId = null,
     string? Backend = null, bool ModelIdentityVerified = false, string? LoadedModelPath = null,

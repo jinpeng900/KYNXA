@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod document_fit;
 pub mod gateway;
 pub mod gateway_config;
+mod gateway_download_network;
 pub mod gateway_context;
 pub mod gateway_inference;
 pub mod gateway_local_engine;

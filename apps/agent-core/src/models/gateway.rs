@@ -950,6 +950,7 @@ pub async fn request_with_catalog(
     events: Option<mpsc::Sender<Value>>,
     catalog: &[Value],
 ) -> Result<ModelResponse, ModelError> {
+    let _foreground = super::gateway_download_network::ForegroundRequest::new();
     let timeout_ms = connection["timeoutMs"]
         .as_u64()
         .unwrap_or(DEFAULT_TIMEOUT_MS)

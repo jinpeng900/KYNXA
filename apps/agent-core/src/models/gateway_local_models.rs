@@ -85,7 +85,7 @@ struct DownloadJob {
     done: watch::Receiver<bool>,
 }
 
-struct LibraryState { manifest: Manifest, jobs: HashMap<String, DownloadJob> }
+struct LibraryState { manifest: Manifest, jobs: HashMap<String, DownloadJob>, downloads: HashMap<String, download::DownloadStatus> }
 struct Library { state: Mutex<LibraryState>, operations: Mutex<()> }
 static LIBRARIES: OnceLock<Mutex<HashMap<PathBuf, Arc<Library>>>> = OnceLock::new();
 
@@ -178,7 +178,7 @@ async fn library(home: &Path) -> Result<Arc<Library>, ModelError> {
         }
         Ok::<_, ModelError>(manifest)
     }).await.map_err(|_| error("LOCAL_MODEL_STORAGE_FAILED", "本地模型清单读取任务未完成。", 500))??;
-    let instance = Arc::new(Library { state: Mutex::new(LibraryState { manifest, jobs: HashMap::new() }), operations: Mutex::new(()) });
+    let instance = Arc::new(Library { state: Mutex::new(LibraryState { manifest, jobs: HashMap::new(), downloads: HashMap::new() }), operations: Mutex::new(()) });
     Ok(libraries.lock().await.entry(home.to_path_buf()).or_insert(instance).clone())
 }
 
@@ -249,7 +249,7 @@ async fn validate_gguf(path: &Path) -> Result<u64, ModelError> {
 }
 
 async fn snapshot(home: &Path, library: &Library) -> Value {
-    let manifest = library.state.lock().await.manifest.clone();
+    let (manifest, downloads) = { let state = library.state.lock().await; (state.manifest.clone(), state.downloads.clone()) };
     let mut models = catalog().iter().map(|spec| (spec.id.clone(), spec.clone())).collect::<BTreeMap<_, _>>();
     models.extend(manifest.models.iter().map(|(id, model)| (id.clone(), model.spec.clone())));
     let entries = models.into_iter().map(|(id, spec)| {
@@ -263,7 +263,8 @@ async fn snapshot(home: &Path, library: &Library) -> Value {
             "installed":installed,"enabled":manifest.enabled && record.is_some_and(|model| model.enabled),
             "status":record.map(|model| if model.status=="ready" && !exists {"missing"}else{model.status.as_str()}).unwrap_or("available"),
             "path":record.map(|model|resolve(home,&model.path)),
-            "downloadedBytes":record.map_or(0,|model|model.downloaded_bytes),"error":record.and_then(|model|model.error.clone())})
+            "downloadedBytes":record.map_or(0,|model|model.downloaded_bytes),"download":downloads.get(&id),
+            "error":record.and_then(|model|model.error.clone())})
     }).collect::<Vec<_>>();
     json!({"enabled":manifest.enabled,"installDirectory":resolve(home,&manifest.install_directory),
         "loadPolicy":manifest.load_policy,"models":entries})
@@ -365,6 +366,7 @@ async fn start_download(home:&Path, library:&Arc<Library>, id:&str)->Result<(),M
         }
         if let Err(error)=persist(&root,&state.manifest).await {eprintln!("local model download state: {}",error.code);}
         state.jobs.remove(&record.spec.id);
+        state.downloads.remove(&record.spec.id);
         let _=done.send(true);
     });
     Ok(())

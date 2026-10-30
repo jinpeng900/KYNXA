@@ -1078,14 +1078,18 @@
   function applyTranscriptPatch(snapshot) {
     if (!snapshot || snapshot.conversationId !== conversationId || !Array.isArray(snapshot.messages)) return;
     noteUnseenReplies(snapshot);
-    const replacements = new Map(snapshot.messages.map(message => [String(message.id), message]));
     if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
     const latest = pending?.conversationId === conversationId ? pending.messages
       : [...entries.values()].map(entry => entry.message);
     // Merge into a deferred selected snapshot, so multiple stream patches cannot erase earlier changes.
     // 多次流式增量合入被冻结的选区快照，后续刷新不能抹掉前一次更新。
     const merged = new Map(latest.map(message => [String(message.id), message]));
-    for (const [id, message] of replacements) merged.set(id, message);
+    const replacements = new Map();
+    for (const patch of snapshot.messages) {
+      const id = String(patch.id);
+      const message = window.KynxaMessagePresentation.mergeMessagePatch(merged.get(id), patch);
+      if (message) { merged.set(id, message); replacements.set(id, message); }
+    }
     const ordered = Array.isArray(messageOrder) ? messageOrder.map(id => merged.get(String(id))).filter(Boolean)
       : [...merged.values()];
     applyTranscript({ ...snapshot, messages: ordered, stateMessageIds: new Set(replacements.keys()) });

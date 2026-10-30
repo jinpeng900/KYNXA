@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using CachedHtml = KYNXA_Desktop.Services.TranscriptHtml;
 using System.Diagnostics;
 using System.Text.Json;
 using KYNXA.Contracts;
@@ -62,18 +63,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private bool _diagramExportPending;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
     private bool _prioritizeNextProjection;
-    private sealed record CachedSegmentHtml(AssistantSegment Source, string Html, string ReasoningHtml,
-        TranscriptMarkdown.StreamingState? Stream = null)
-    {
-        public long Size => (long)Source.Content.Length + Source.Reasoning.Length + Html.Length + ReasoningHtml.Length
-            + (Stream is null ? 0 : Stream.Source.Length + Stream.StableHtml.Length);
-    }
-    private sealed record CachedHtml(string Role, string Content, string Reasoning, bool Streaming, string Mode, string Html, string ReasoningHtml,
-        CachedSegmentHtml[] Segments, TranscriptMarkdown.StreamingState? Stream = null)
-    {
-        public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length + Segments.Sum(segment => segment.Size)
-            + (Stream is null ? 0 : Stream.Source.Length + Stream.StableHtml.Length);
-    }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
         ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
@@ -894,45 +883,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming && cached.Mode == row.Mode &&
         cached.Segments.Select(segment => segment.Source).SequenceEqual(row.AssistantSegments);
 
-    private static CachedHtml PreviewHtml(Snapshot row, CachedHtml? previous)
-    {
-        static string PlainHtml(string content) => content.Length == 0 ? ""
-            : "<div class=\"markdown-pending\" style=\"white-space:pre-wrap\">"
-                + System.Net.WebUtility.HtmlEncode(content.Length > 8192 ? content[^8192..] : content) + "</div>";
-        var segments = row.AssistantSegments.Select(segment =>
-            previous?.Segments.FirstOrDefault(value => value.Source == segment)
-                ?? new CachedSegmentHtml(segment, PlainHtml(segment.Content), "")).ToArray();
-        return new(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode,
-            row.Role != "user" && segments.Length == 0 ? PlainHtml(row.Content) : "", "", segments);
-    }
+    private static CachedHtml PreviewHtml(Snapshot row, CachedHtml? previous) =>
+        TranscriptHtmlCache.Preview(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, row.AssistantSegments, previous);
 
-    private static CachedHtml RenderHtml(Snapshot row, CachedHtml? previous)
-    {
-        var segments = row.AssistantSegments.Select(segment =>
-        {
-            var match = previous?.Segments.FirstOrDefault(value => value.Source == segment);
-            if (match is not null) return match;
-            if (segment.Status == "streaming")
-            {
-                var prior = previous?.Segments.FirstOrDefault(value => value.Source.Id == segment.Id);
-                var stream = TranscriptMarkdown.RenderStreaming(segment.Content, prior?.Stream);
-                return new CachedSegmentHtml(segment, stream.Html, "", stream.State);
-            }
-            return new CachedSegmentHtml(segment, TranscriptMarkdown.Render(segment.Content), "");
-        }).ToArray();
-        string html = "";
-        TranscriptMarkdown.StreamingState? state = null;
-        if (row.Role != "user" && segments.Length == 0)
-        {
-            if (row.Streaming)
-            {
-                var stream = TranscriptMarkdown.RenderStreaming(row.Content, previous?.Stream);
-                html = stream.Html; state = stream.State;
-            }
-            else html = TranscriptMarkdown.Render(row.Content);
-        }
-        return new(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, html, "", segments, state);
-    }
+    private static CachedHtml RenderHtml(Snapshot row, CachedHtml? previous) =>
+        TranscriptHtmlCache.Render(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, row.AssistantSegments, previous);
 
     private async Task<bool> PublishRowsAsync(IReadOnlyList<(Snapshot Row, CachedHtml Cache)> rendered, bool fullSnapshot,
         Guid? conversationId, long revision, long generation, Guid[]? messageOrder, bool openAtBottom, bool progressiveSnapshot = false)
@@ -940,8 +895,12 @@ public sealed class ConversationTranscript : Grid, IDisposable
         var payload = new { type = fullSnapshot ? "render" : "renderPatch", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom, progressiveSnapshot,
             messageOrder,
             historyHasOlder = _historyHasOlder, historyHasNewer = _historyHasNewer, historyHasNewReplies = _historyHasNewReplies,
-            messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
-                html = item.Cache.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
+            messages = rendered.Select(item =>
+            {
+                bool reuseBody = !fullSnapshot && _publishedRows.TryGetValue(item.Row.Id, out var previous)
+                    && SamePublishedBody(previous, item.Row);
+                return new { id = item.Row.Id, role = item.Row.Role, reuseBody, content = reuseBody ? null : item.Row.Content,
+                html = reuseBody ? null : item.Cache.Html, reasoningHtml = reuseBody ? null : item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                 htmlStableLength = item.Cache.Stream?.StableHtml.Length, htmlStableBlocks = item.Cache.Stream?.StableBlocks,
                 reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
                 presentationMode = item.Row.Mode, durationMs = item.Row.DurationMs,
@@ -954,7 +913,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 generationTimingState = item.Row.GenerationTimingState, generationClockId = item.Row.GenerationClockId,
                 createdAtMs = item.Row.CreatedAtMs, endRecordedAtMs = item.Row.EndRecordedAtMs,
                 streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
-                assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
+                assistantSegments = reuseBody ? null : item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
                     round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,
                     isAnswerContinuation = segment.Source.IsAnswerContinuation,
                     status = segment.Source.Status, content = segment.Source.Content, html = segment.Html,
@@ -966,7 +925,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     arguments = tool.Arguments, status = tool.Status, summary = tool.Summary, result = tool.Result,
                     approvalId = tool.ApprovalId, outsideWorkspace = tool.OutsideWorkspace, sandbox = tool.Sandbox,
                     workspaceRoot = tool.WorkspaceRoot, code = tool.Code, round = tool.Round, order = tool.Order,
-                    resultRef = tool.ResultRef is { } reference ? new { id = reference.Id, bytes = reference.Bytes, sha256 = reference.Sha256 } : null }).ToArray() }).ToArray() };
+                    resultRef = tool.ResultRef is { } reference ? new { id = reference.Id, bytes = reference.Bytes, sha256 = reference.Sha256 } : null }).ToArray() };
+            }).ToArray() };
         // Freeze UI-owned metadata first; encode full bodies off-thread and discard departed conversations.
         // 先固定界面元信息，再后台编码完整正文；离开聊天后丢弃过期结果。
         string encoded = await Task.Run(() => JsonSerializer.Serialize(payload));
@@ -977,19 +937,23 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     // Compare clock origins; inherited timing needs one metadata update, not per-frame updates.
     // 按计时起点比较；继承计时只更新一次元数据，无需逐帧刷新。
+    private static bool SamePublishedBody(Snapshot previous, Snapshot current) =>
+        previous.Role == current.Role && previous.Content == current.Content && previous.Reasoning == current.Reasoning
+        && previous.Streaming == current.Streaming && previous.Mode == current.Mode
+        && previous.AssistantSegments.SequenceEqual(current.AssistantSegments);
+
     private static bool SamePublishedSnapshot(Snapshot previous, Snapshot current) =>
-        previous.Id == current.Id && previous.Role == current.Role && previous.Content == current.Content &&
-        previous.Reasoning == current.Reasoning && previous.Streaming == current.Streaming &&
+        previous.Id == current.Id && SamePublishedBody(previous, current) &&
         previous.ReasoningState == current.ReasoningState && previous.ReasoningSeconds == current.ReasoningSeconds &&
         previous.Waiting == current.Waiting && previous.Status == current.Status && previous.Error == current.Error &&
-        previous.CanRetry == current.CanRetry && previous.Mode == current.Mode && previous.DurationMs == current.DurationMs &&
+        previous.CanRetry == current.CanRetry && previous.DurationMs == current.DurationMs &&
         previous.ExecutionPhase == current.ExecutionPhase &&
         previous.GenerationStartedTimestamp == current.GenerationStartedTimestamp &&
         previous.GenerationTimingState == current.GenerationTimingState && previous.GenerationClockId == current.GenerationClockId &&
         (current.GenerationTimingState == "live" || previous.GenerationElapsedMs == current.GenerationElapsedMs) &&
         previous.CreatedAtMs == current.CreatedAtMs && previous.EndRecordedAtMs == current.EndRecordedAtMs &&
         previous.TaskCompletionState == current.TaskCompletionState && previous.Attachments.SequenceEqual(current.Attachments) &&
-        previous.AssistantSegments.SequenceEqual(current.AssistantSegments) && previous.ToolActivities.SequenceEqual(current.ToolActivities);
+        previous.ToolActivities.SequenceEqual(current.ToolActivities);
 
     private long GetToolDisplayRevision(Guid messageId, ToolActivity tool)
     {

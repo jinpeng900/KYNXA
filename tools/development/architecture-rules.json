@@ -138,6 +138,10 @@
         "models/gateway_config.rs",
         "models/gateway_local_models.rs",
         "models/gateway_local_download.rs",
+        "models/gateway_download_network.rs",
+        "models/gateway_local_download_status.rs",
+        "models/gateway_local_download_ranges.rs",
+        "models/gateway_local_download_adaptive.rs",
         "models/gateway_local_engine.rs",
         "models/gateway_preparation.rs",
         "models/gateway_context.rs",
@@ -506,6 +510,26 @@
           "path": "models/gateway_local_download.rs",
           "allowedDomains": [],
           "purpose": "Resumable pinned local model transfers / 可恢复的固定本地模型下载"
+        },
+        {
+          "path": "models/gateway_download_network.rs",
+          "allowedDomains": [],
+          "purpose": "Download-only system proxy routing / 下载专用系统代理路由"
+        },
+        {
+          "path": "models/gateway_local_download_status.rs",
+          "allowedDomains": [],
+          "purpose": "Transient download observations / 临时下载观测"
+        },
+        {
+          "path": "models/gateway_local_download_adaptive.rs",
+          "allowedDomains": [],
+          "purpose": "Adaptive transfer window and shared admission / 自适应下载窗口与共享准入"
+        },
+        {
+          "path": "models/gateway_local_download_ranges.rs",
+          "allowedDomains": [],
+          "purpose": "Bounded parallel file ranges and contiguous resume / 有界分段与连续断点"
         },
         {
           "path": "models/gateway_local_engine.rs",

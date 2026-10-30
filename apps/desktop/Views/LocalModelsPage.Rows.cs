@@ -36,6 +36,7 @@ public sealed partial class LocalModelsPage
         });
         public string ProgressText => Model.DownloadedBytes > 0 && !Model.Installed
             ? FormatBytes(Model.DownloadedBytes) + " / " + FormatBytes(Model.DownloadBytes) : "";
+        public string DownloadDetails => LocalModelDownloadPresentation.Describe(Model.Download);
         public double Progress => Model.DownloadBytes > 0 ? Math.Clamp(100d * Model.DownloadedBytes / Model.DownloadBytes, 0, 100) : 0;
         public string EnableLabel => UiText.Get(Model.Enabled ? "停用" : "启用");
         public string InstallLabel => UiText.Get(Model.Status is "failed" or "error" or "cancelled" ? "重新安装" : "安装");

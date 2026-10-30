@@ -63,5 +63,14 @@
     return (strings?.[key] || fallback).replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ''));
   }
 
-  globalScope.KynxaMessagePresentation = Object.freeze({ selectMessagePresentation, elapsedText });
+  function mergeMessagePatch(previous, patch) {
+    if (!patch?.reuseBody) return patch;
+    if (!previous || String(previous.id) !== String(patch.id)) return null;
+    // A tool/status update must not copy or erase the unchanged long reply.
+    // 工具或状态更新不重传、不清空未变化的长回复；正文仍由原消息持有。
+    return { ...patch, content: previous.content, html: previous.html,
+      reasoningHtml: previous.reasoningHtml, assistantSegments: previous.assistantSegments };
+  }
+
+  globalScope.KynxaMessagePresentation = Object.freeze({ selectMessagePresentation, elapsedText, mergeMessagePatch });
 })();

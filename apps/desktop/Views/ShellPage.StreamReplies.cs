@@ -329,7 +329,6 @@ public sealed partial class ShellPage
                                     pending.Message.Error = string.Empty;
                                 }
                                 MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
-                                FlushReply(pending, final: true);
                                 break;
                         }
                         pending.Dirty = true;
@@ -341,7 +340,8 @@ public sealed partial class ShellPage
                     }
                     break;
                 }
-                catch (Exception error) when (pending.Started && !pending.Cancellation.IsCancellationRequested && !_chatClosing
+                catch (Exception error) when (pending.Started && pending.Message.Status == "streaming"
+                    && !pending.Cancellation.IsCancellationRequested && !_chatClosing
                     && error is not GatewayApiException && error is (IOException or UnauthorizedAccessException or
                         InvalidOperationException or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException))
                 {
@@ -356,15 +356,22 @@ public sealed partial class ShellPage
         }
         catch (OperationCanceledException) when (pending.Cancellation.IsCancellationRequested || _chatClosing)
         {
-            pending.Message.Status = "interrupted";
-            pending.Message.Error = string.Empty;
+            if (pending.Message.Status == "streaming")
+            {
+                pending.Message.Status = "interrupted";
+                pending.Message.Error = string.Empty;
+            }
         }
         catch (Exception error) when (error is System.Net.Http.HttpRequestException or OperationCanceledException or
             System.Text.Json.JsonException or InvalidDataException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            pending.Message.Status = "error";
-            pending.Message.Error = error is InvalidOperationException or InvalidDataException or GatewayApiException ? error.Message :
-                UiText.Get("连接中断，已保留收到的内容。请检查模型服务后重试。");
+            if (pending.Message.Status == "streaming")
+            {
+                pending.Message.Status = "error";
+                pending.Message.Error = error is InvalidOperationException or InvalidDataException or GatewayApiException ? error.Message :
+                    UiText.Get("连接中断，已保留收到的内容。请检查模型服务后重试。");
+            }
+            else Debug.WriteLine($"Settled reply presentation: {error.GetType().Name}");
         }
         finally
         {

@@ -351,6 +351,7 @@ public sealed partial class LocalModelsPage
                 <StackPanel Spacing="2" Visibility="{Binding ProgressVisibility}">
                   <ProgressBar Value="{Binding Progress}" Minimum="0" Maximum="100" Height="3" Foreground="{ThemeResource KynxaFocusBrush}"/>
                   <TextBlock Text="{Binding ProgressText}" FontFamily="{StaticResource KynxaUIFont}" FontSize="11" Opacity="0.7"/>
+                  <TextBlock Text="{Binding DownloadDetails}" FontFamily="{StaticResource KynxaUIFont}" FontSize="11" Opacity="0.7" TextWrapping="Wrap"/>
                 </StackPanel>
                 <TextBlock Text="{Binding ErrorText}" Visibility="{Binding ErrorVisibility}" FontFamily="{StaticResource KynxaUIFont}" FontSize="12" TextWrapping="Wrap"/>
               </StackPanel>
