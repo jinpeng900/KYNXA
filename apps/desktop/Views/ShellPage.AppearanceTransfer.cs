@@ -54,12 +54,8 @@ public sealed partial class ShellPage
             actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             Button Action(string key, string id)
             {
-                var button = new Button { FontFamily = font, CornerRadius = new CornerRadius(9), MinWidth = 0,
-                    MinHeight = 34, Padding = new Thickness(14, 5, 14, 5),
-                    HorizontalAlignment = HorizontalAlignment.Stretch };
-                UiLocalization.Bind(button, Button.ContentProperty, key);
-                UiLocalization.Bind(button, AutomationProperties.NameProperty, key);
-                AutomationProperties.SetAutomationId(button, id);
+                var button = BuildAppearanceActionButton(font, key, id);
+                button.HorizontalAlignment = HorizontalAlignment.Stretch;
                 return button;
             }
             _importAppearance = Action("导入外观", "AppearanceImportButton");

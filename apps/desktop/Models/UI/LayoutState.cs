@@ -28,6 +28,9 @@ public sealed class LayoutState
     public double WorkTaskRatio { get; set; }
     public string PermissionMode { get; set; } = "ask";
     public string InterfaceLanguage { get; set; } = "zh-CN";
+    public string MainWindowCloseAction { get; set; } = MainWindowClosePreferences.Tray;
+    // Confirmation is opt-in; X keeps hiding to the tray by default. / 关闭询问需主动开启，默认 X 仍隐藏到托盘。
+    public bool ConfirmMainWindowClose { get; set; }
     public string AppearancePaletteId { get; set; } = AppearancePalette.DefaultId;
     public string AppearanceMode { get; set; } = AppearancePalette.DefaultMode;
     public double ChatFontSize { get; set; } = AppearancePalette.DefaultChatFontSize;
@@ -37,4 +40,12 @@ public sealed class LayoutState
     public string LastPrimaryContent { get; set; } = "chat";
 
     public static LayoutState CreateDefault() => new();
+}
+
+internal sealed record MainWindowClosePreferences(string Action, bool Confirm)
+{
+    public const string Tray = "tray";
+    public const string Exit = "exit";
+
+    public static string NormalizeAction(string? action) => action == Exit ? Exit : Tray;
 }

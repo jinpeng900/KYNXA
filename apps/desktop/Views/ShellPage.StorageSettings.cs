@@ -81,7 +81,6 @@ public sealed partial class ShellPage
         var selectedBrush = AppearanceService.GetBrush("KynxaSelectionBrush");
         languagePicker.Resources["ComboBoxBackgroundBorderBrushFocused"] = focusBrush;
         languagePicker.Resources["SystemControlFocusVisualPrimaryBrush"] = focusBrush;
-        languagePicker.Resources["ComboBoxItemPillFillBrush"] = focusBrush;
         foreach (string key in new[] { "ComboBoxItemBorderBrushSelected", "ComboBoxItemBorderBrushSelectedPointerOver", "ComboBoxItemBorderBrushSelectedPressed" })
             languagePicker.Resources[key] = selectedBrush;
         languagePicker.Items.Add(new ComboBoxItem { Content = "简体中文", Tag = "zh-CN" });
@@ -103,7 +102,8 @@ public sealed partial class ShellPage
         var extensionRow = new StorageLocationRow("用户工具", ExtensionPaths.Root,
             "ExtensionStorageDirectoryPath", "ExtensionStorageDirectoryChooseButton");
         var progress = new ProgressRing { IsActive = false, Width = 24, Height = 24, Visibility = Visibility.Collapsed };
-        var status = new InfoBar { IsOpen = false, IsClosable = false };
+        var status = new CompactInfoBar { IsOpen = false };
+        AutomationProperties.SetAutomationId(status, "SettingsStatusNotice");
         AutomationProperties.SetLiveSetting(status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         var storageControls = new StorageSettingsControls(window, row, extensionRow, languagePicker, progress, status);
         var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
@@ -121,6 +121,8 @@ public sealed partial class ShellPage
         _settingsWorkspace = workspace;
         var generalPage = new StackPanel { Spacing = 14 };
         generalPage.Children.Add(languageRow);
+        generalPage.Children.Add(BuildCompletionNotificationSettingsSection(window));
+        generalPage.Children.Add(BuildMainWindowCloseSettingsSection(window));
         var storagePage = new StackPanel { Spacing = 14 };
         storagePage.Children.Add(row);
         storagePage.Children.Add(extensionRow);

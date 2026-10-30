@@ -17,6 +17,9 @@ internal static class ThemeIconGeometry
         ["IconWork"] = new(24, 24, [new("M3 7.5h7l2-2h3.5a2 2 0 0 1 2 2v1H21v9.3a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.8z", 1.8, true, false)]),
         ["IconFolderAdd"] = new(20, 20, [new("M11 16H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3l2 2h6a2 2 0 0 1 2 2v3M2 7h15M15 12v6m-3-3h6", 1.4, true, false)]),
         ["IconChatAdd"] = new(20, 20, [new("M17 9.5a7 7 0 0 1-7 7H3l1-4a7 7 0 1 1 13-3Z", 1.4, true, false), new("M10 6.5v6m-3-3h6", 1.4, true, false)]),
+        ["IconPinnedRecent"] = new(24, 24, [new("M10.5 20A8.5 8.5 0 1 1 20 10M11.5 6v5.5l-3 2", 1.7, true, false), new("M15 11h6l-1 4 2 2h-8l2-2-1-4ZM18 17v5", 1.7, true, false)]),
+        ["IconPinnedProject"] = new(24, 24, [new("M11 19H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2M3 9h10", 1.7, true, false), new("M15 11h6l-1 4 2 2h-8l2-2-1-4ZM18 17v5", 1.7, true, false)]),
+        ["IconPinnedChat"] = new(24, 24, [new("M11 18H9l-5 3v-5a3 3 0 0 1-1-2V7a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v2M7 8h9M7 12h4", 1.7, true, false), new("M15 11h6l-1 4 2 2h-8l2-2-1-4ZM18 17v5", 1.7, true, false)]),
         // Use quarter arcs to preserve the .8 radius despite float rounding at opposite endpoints.
         // 用四段圆弧保留 .8 半径，避免对径端点的浮点取整使圆心偏移。
         ["IconConnect"] = new(24, 24, [new("M5,4 H19 A2,2 0 0 1 21,6 V15 A2,2 0 0 1 19,17 H5 A2,2 0 0 1 3,15 V6 A2,2 0 0 1 5,4 Z", 1.8, true, false), new("M8 21h8M12 17v4", 1.8, true, false), new("M18.3,13.5 A0.8,0.8 0 0 1 17.5,14.3 A0.8,0.8 0 0 1 16.7,13.5 A0.8,0.8 0 0 1 17.5,12.7 A0.8,0.8 0 0 1 18.3,13.5 Z", 1.8, false, true)]),

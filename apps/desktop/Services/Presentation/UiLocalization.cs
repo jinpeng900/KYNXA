@@ -123,6 +123,29 @@ public static class UiLocalization
             (target, args) => Bind(target, AutomationProperties.HelpTextProperty, (string?)args.NewValue ?? string.Empty)));
     public static string GetAutomationHelp(DependencyObject target) => (string)target.GetValue(AutomationHelpProperty);
     public static void SetAutomationHelp(DependencyObject target, string value) => target.SetValue(AutomationHelpProperty, value);
+
+    public static readonly DependencyProperty TemplateButtonLabelProperty = DependencyProperty.RegisterAttached(
+        "TemplateButtonLabel", typeof(string), typeof(UiLocalization), new PropertyMetadata(null, (target, args) =>
+        {
+            if (target is not Button button) return;
+            button.Loaded -= LocalizeTemplateButton;
+            if (args.NewValue is not string) return;
+            // SDK owners may overwrite tooltips while applying their template; bind once the native button is loaded.
+            // SDK 所属控件会在应用模板时覆盖悬浮提示，因此须在原生按钮加载完成后绑定。
+            button.Loaded += LocalizeTemplateButton;
+            if (button.IsLoaded) LocalizeTemplateButton(button, new RoutedEventArgs());
+        }));
+    public static string GetTemplateButtonLabel(DependencyObject target) => (string)target.GetValue(TemplateButtonLabelProperty);
+    public static void SetTemplateButtonLabel(DependencyObject target, string value) => target.SetValue(TemplateButtonLabelProperty, value);
+
+    private static void LocalizeTemplateButton(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button button || button.GetValue(TemplateButtonLabelProperty) is not string key) return;
+        var tooltip = ToolTipService.GetToolTip(button) as ToolTip ?? new ToolTip();
+        Bind(tooltip, ContentControl.ContentProperty, key);
+        ToolTipService.SetToolTip(button, tooltip);
+        Bind(button, AutomationProperties.NameProperty, key);
+    }
 }
 
 /// <summary>

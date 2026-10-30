@@ -31,6 +31,8 @@ internal sealed class MainWindowTrayService : IDisposable
     private bool _sessionEnding;
     private bool _isDisposed;
 
+    public event EventHandler? CloseRequested;
+
     public MainWindowTrayService(Window window)
     {
         _window = window;
@@ -55,6 +57,13 @@ internal sealed class MainWindowTrayService : IDisposable
         SetForegroundWindow(_windowHandle);
     }
 
+    public bool TryHideToTray()
+    {
+        if (_isDisposed || _sessionEnding || _exitRequested || !EnsureTrayIcon()) return false;
+        _window.AppWindow.Hide();
+        return true;
+    }
+
     public void RequestExit()
     {
         if (_isDisposed || _sessionEnding || _exitRequested) return;
@@ -69,12 +78,23 @@ internal sealed class MainWindowTrayService : IDisposable
     public void ShowCompletionNotification(string? title)
     {
         if (_isDisposed || _exitRequested || !EnsureTrayIcon()) return;
+        var data = CreateCompletionNotificationData(title);
+        ShellNotifyIcon(1, ref data);
+    }
+
+    private NotifyIconData CreateCompletionNotificationData(string? title)
+    {
         var data = CreateIconData();
         data.Flags = 0x0010;
-        data.InfoTitle = AppIdentity.DisplayName;
-        data.Info = string.IsNullOrWhiteSpace(title) ? "回复已完成。" : "回复已完成：" + (title.Length > 180 ? title[..180] : title);
-        data.InfoFlags = 0x0001 | 0x0010;
-        ShellNotifyIcon(1, ref data);
+        data.InfoTitle = UiText.Get("回复已完成");
+        data.Info = string.IsNullOrWhiteSpace(title) ? UiText.Get("可以返回应用查看回复。") : (title.Length > 180 ? title[..180] : title);
+        // NIIF_USER uses the large app icon instead of the system information symbol.
+        // NIIF_USER 使用大尺寸应用图标，替换系统信息符号。
+        // The tray service owns this HICON until disposal; the notification only borrows it.
+        // HICON 由托盘服务持有至释放，通知仅借用，不创建额外句柄。
+        data.InfoFlags = 0x0004 | 0x0010 | 0x0020;
+        data.BalloonIcon = _icon;
+        return data;
     }
 
     private nint WindowProcedure(nint window, uint message, nint wParam, nint lParam, nuint subclassId, nuint referenceData)
@@ -83,12 +103,16 @@ internal sealed class MainWindowTrayService : IDisposable
         {
             if (message == QueryEndSessionMessage) _sessionEnding = true;
             else if (message == EndSessionMessage && wParam == 0) _sessionEnding = false;
-            else if (message == CloseMessage && !_sessionEnding && !_exitRequested && EnsureTrayIcon())
+            else if (message == CloseMessage && !_sessionEnding && !_exitRequested)
             {
                 // Intercept before AppWindow.Closing: a tray close must not pause replies or save as an exit.
                 // 在 AppWindow.Closing 之前拦截；关闭到托盘不能触发暂停回复或退出保存。
-                _window.AppWindow.Hide();
-                return 0;
+                if (CloseRequested is { } closeRequested)
+                {
+                    closeRequested(this, EventArgs.Empty);
+                    return 0;
+                }
+                if (TryHideToTray()) return 0;
             }
             else if (message == TrayCallbackMessage)
             {
@@ -184,6 +208,7 @@ internal sealed class MainWindowTrayService : IDisposable
         if (_isDisposed) return;
         _isDisposed = true;
         _window.Closed -= WindowClosed;
+        CloseRequested = null;
         RemoveTrayIcon();
         if (_isSubclassAttached)
         {

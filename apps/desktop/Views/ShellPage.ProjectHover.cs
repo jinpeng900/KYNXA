@@ -1,6 +1,9 @@
+using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
@@ -12,6 +15,25 @@ public sealed partial class ShellPage
     private Grid? _projectMenuRow;
     private bool _projectHeaderHovered;
     private bool _projectHeaderMenuOpen;
+
+    private void SidebarRow_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        var container = args.ItemContainer;
+        container.ClearValue(UiLocalization.AutomationHelpProperty);
+        container.ClearValue(AutomationProperties.HelpTextProperty);
+        container.ClearValue(AutomationProperties.NameProperty);
+        if (args.InRecycleQueue) return;
+        // Virtualized containers have no item DataContext; bind their actual item explicitly and clear on reuse.
+        // 虚拟化容器没有条目的 DataContext，显式绑定实际条目，并在回收时清除旧状态。
+        BindingOperations.SetBinding(container, UiLocalization.AutomationHelpProperty, new Binding
+        {
+            Source = args.Item, Path = new PropertyPath(nameof(ProjectTreeEntry.PinStatusKey)), Mode = BindingMode.OneWay
+        });
+        BindingOperations.SetBinding(container, AutomationProperties.NameProperty, new Binding
+        {
+            Source = args.Item, Path = new PropertyPath(nameof(ProjectTreeEntry.Title)), Mode = BindingMode.OneWay
+        });
+    }
 
     private static Grid? FindProjectRow(DependencyObject? child)
     {

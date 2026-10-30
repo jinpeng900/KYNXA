@@ -232,9 +232,9 @@
                                     <Button x:Name="AgentCancelSkillButton" services:UiLocalization.Content="取消" Click="CancelSkill_Click" Visibility="Collapsed" />
                                 </StackPanel>
                                 <Expander x:Name="AgentSkillDetailsExpander" services:UiLocalization.Header="技能详情">
-                                    <StackPanel Spacing="10">
-                                        <TextBlock x:Name="AgentSkillSourceLabel" Opacity="0.65" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
-                                        <TextBlock x:Name="AgentSkillDiagnosticsLabel" Opacity="0.65" />
+                                    <StackPanel Spacing="8">
+                                        <TextBlock x:Name="AgentSkillSourceLabel" Opacity="0.65" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
+                                        <TextBlock x:Name="AgentSkillDiagnosticsLabel" Opacity="0.65" TextWrapping="Wrap" Visibility="Collapsed" />
                                         <TextBox x:Name="AgentSkillPreviewBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="220" MaxHeight="360" services:UiLocalization.PlaceholderText="选择技能以预览内容" />
                                     </StackPanel>
                                 </Expander>

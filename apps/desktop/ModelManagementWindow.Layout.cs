@@ -60,6 +60,12 @@ public sealed partial class ModelManagementWindow
         _stackTokenValues = stackValues;
         ArrangeTokenRow(ContextWindowBox, CustomContextWindowBox, ContextWindowRow, stackValues);
         ArrangeTokenRow(MaxOutputTokensBox, CustomMaxOutputTokensBox, MaxOutputTokensRow, stackValues);
+        // Give destructive and primary actions separate rows on narrow windows without shrinking their labels or targets.
+        // 窄窗中让危险操作与主操作分行，保留完整文字和点击范围。
+        Grid.SetColumnSpan(DeleteConnectionActions, stackValues ? 3 : 1);
+        Grid.SetRow(ProbeButton, stackValues ? 1 : 0);
+        Grid.SetRow(SaveButton, stackValues ? 1 : 0);
+        ModelActionRow.RowSpacing = stackValues ? 8 : 0;
         // Move existing controls instead of rebuilding the form, so drafts, focus and scroll survive resize.
         // 移动已有控件而不重建表单，使草稿、焦点和滚动位置在缩放时保留。
     }

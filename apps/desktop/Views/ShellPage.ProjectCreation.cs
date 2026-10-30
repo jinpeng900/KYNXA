@@ -99,11 +99,15 @@ public sealed partial class ShellPage
         if (!_projectsReady || _projectActionPending || _savingOnClose || _chatClosing || _projectViewClosed)
             throw new InvalidOperationException(UiText.Get("请稍后重试。"));
         _projectActionPending = true;
+        UpdateProjectNoticeAction();
         UpdateSendButtonState();
         try { await commit(); }
         finally
         {
             _projectActionPending = false;
+            // Folder commits can open an undo notice while pending; restore its action and dismiss clock together.
+            // 文件夹提交可能在忙碌时打开撤销提示，结束后须一并恢复操作按钮和消失计时。
+            UpdateProjectNoticeAction();
             if (!_savingOnClose && !_projectViewClosed) UpdateSendButtonState();
         }
     }

@@ -362,6 +362,7 @@
       if (/^[a-z]+$/.test(name) && /^#[0-9a-f]{6}$/i.test(value))
         document.documentElement.style.setProperty('--appearance-' + name, value);
     }
+    document.documentElement.dataset.highContrast = String(palette?.highcontrast === true);
     if (/^#[0-9a-f]{6}$/i.test(palette?.main || '')) {
       const rgb = [1, 3, 5].map(i => parseInt(palette.main.slice(i, i + 2), 16));
       document.documentElement.style.colorScheme = rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722 < 128 ? 'dark' : 'light';

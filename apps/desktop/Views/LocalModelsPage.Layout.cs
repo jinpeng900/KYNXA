@@ -319,8 +319,7 @@ public sealed partial class LocalModelsPage
             resources[key] = focus;
         foreach (string key in new[] { "SystemControlFocusVisualPrimaryBrush", "TextControlBorderBrushFocused",
             "ComboBoxBorderBrushFocused", "ComboBoxBackgroundBorderBrushFocused", "ListViewItemFocusBorderBrush",
-            "ToggleSwitchFillOn", "ToggleSwitchFillOnPointerOver", "ToggleSwitchFillOnPressed", "ToggleSwitchStrokeOn",
-            "ToggleSwitchStrokeOnPointerOver", "ToggleSwitchStrokeOnPressed", "CheckBoxCheckBackgroundFillChecked",
+            "CheckBoxCheckBackgroundFillChecked",
             "CheckBoxCheckBackgroundFillCheckedPointerOver", "CheckBoxCheckBackgroundFillCheckedPressed", "CheckBoxCheckBorderBrushChecked" })
             resources[key] = focus;
         // Keep dropdown selection under the shared accent and high-contrast palette.

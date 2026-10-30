@@ -10,6 +10,9 @@
     <SvgImageSource x:Key="IconWork" UriSource="ms-appx:///Resources/UI/Icons/work-folder.svg" />
     <SvgImageSource x:Key="IconFolderAdd" UriSource="ms-appx:///Resources/UI/Icons/folder-add.svg" />
     <SvgImageSource x:Key="IconChatAdd" UriSource="ms-appx:///Resources/UI/Icons/chat-add.svg" />
+    <SvgImageSource x:Key="IconPinnedRecent" UriSource="ms-appx:///Resources/UI/Icons/pinned-recent.svg" />
+    <SvgImageSource x:Key="IconPinnedProject" UriSource="ms-appx:///Resources/UI/Icons/pinned-project.svg" />
+    <SvgImageSource x:Key="IconPinnedChat" UriSource="ms-appx:///Resources/UI/Icons/pinned-chat.svg" />
     <SvgImageSource x:Key="IconConnect" UriSource="ms-appx:///Resources/UI/Icons/connect.svg" />
     <SvgImageSource x:Key="IconScheduledTask" UriSource="ms-appx:///Resources/UI/Icons/scheduled-task.svg" />
     <SvgImageSource x:Key="IconSkills" UriSource="ms-appx:///Resources/UI/Icons/skills.svg" />

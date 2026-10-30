@@ -37,7 +37,7 @@ public sealed partial class RetrievalSettingsWindow
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
         foreach (string key in new[] { "ComboBoxBackgroundBorderBrushFocused", "SystemControlFocusVisualPrimaryBrush",
-            "ComboBoxItemPillFillBrush", "CheckBoxCheckBackgroundFillChecked", "CheckBoxCheckBackgroundFillCheckedPointerOver",
+            "CheckBoxCheckBackgroundFillChecked", "CheckBoxCheckBackgroundFillCheckedPointerOver",
             "CheckBoxCheckBackgroundFillCheckedPressed", "CheckBoxCheckBorderBrushChecked", "CheckBoxCheckBorderBrushCheckedPointerOver",
             "CheckBoxCheckBorderBrushCheckedPressed" })
             root.Resources[key] = focusBrush;

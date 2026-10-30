@@ -14,7 +14,7 @@ public sealed partial class ShellPage
         bool MigrationReady = false, string? RuntimeCleanupError = null);
 
     private sealed class StorageSettingsControls(Window window, StorageLocationRow dataRow, StorageLocationRow extensionRow,
-        ComboBox languagePicker, ProgressRing progress, InfoBar status)
+        ComboBox languagePicker, ProgressRing progress, CompactInfoBar status)
     {
         private readonly CancellationTokenSource _lifetime = new();
         public Window Window => window;
@@ -28,6 +28,7 @@ public sealed partial class ShellPage
         {
             IsBusy = busy;
             if (IsClosed) return;
+            status.IsAutoDismissPaused = busy;
             if (Navigation is { } navigation) navigation.IsEnabled = !busy;
             dataRow.ChangeButton.IsEnabled = !busy && !StoragePaths.EnvironmentControlled;
             extensionRow.ChangeButton.IsEnabled = !busy && !ExtensionPaths.EnvironmentControlled;
@@ -38,7 +39,15 @@ public sealed partial class ShellPage
         { if (!IsClosed) { progress.IsActive = active; progress.Visibility = active ? Visibility.Visible : Visibility.Collapsed; } }
 
         public void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
-        { if (!IsClosed) { UiLocalization.Bind(status, InfoBar.MessageProperty, text); status.Severity = severity; status.IsOpen = true; } }
+        {
+            if (IsClosed) return;
+            UiLocalization.Bind(status, InfoBar.MessageProperty, text);
+            status.Severity = severity;
+            status.IsOpen = true;
+            // Reusing an open notice gives the new message its full idle interval.
+            // 复用尚未关闭的提示时，新消息拥有完整的空闲显示时间。
+            status.RestartAutoDismiss();
+        }
 
         public void Close()
         { IsClosed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
