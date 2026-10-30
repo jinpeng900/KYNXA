@@ -1085,9 +1085,14 @@ public sealed partial class ToolManagementWindow : Window
     private void RenderSkillDiagnostics()
     {
         var skill = _editingSkill;
-        AgentSkillDiagnosticsLabel.Text = skill is null ? "" : string.Join("\n", (skill.Diagnostics ?? []).Select(item => item.Code + ": " + item.Message));
-        if (skill?.Conflict is { } conflict) AgentSkillDiagnosticsLabel.Text += "\n" + UiText.Get(conflict.Preferred ?
-            "此技能是同名技能的优先来源。" : "存在更高优先级的同名技能，请核对来源。");
+        var diagnostics = (skill?.Diagnostics ?? []).Select(item => item.Code + ": " + item.Message).ToList();
+        if (skill?.Conflict is { } conflict) diagnostics.Add(UiText.Get(conflict.Preferred ?
+            "此技能是同名技能的优先来源。" : "存在更高优先级的同名技能，请核对来源。"));
+        AgentSkillDiagnosticsLabel.Text = string.Join("\n", diagnostics);
+        // Empty diagnostics must not reserve a text row and duplicate the detail panel's spacing.
+        // 无诊断时不预留文字行，避免叠加详情区间距而形成大块空白。
+        AgentSkillDiagnosticsLabel.Visibility = string.IsNullOrWhiteSpace(AgentSkillDiagnosticsLabel.Text)
+            ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private async void ImportSkill_Click(object sender, RoutedEventArgs e)

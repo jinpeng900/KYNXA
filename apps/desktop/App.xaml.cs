@@ -57,6 +57,11 @@ public partial class App : Application
 
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        if (Window is MainWindow existingWindow)
+        {
+            existingWindow.RestoreFromActivation();
+            return;
+        }
         // Restore language and appearance before creating controls to avoid a different first frame.
         // 创建控件前恢复语言与外观，避免首帧使用不同的配色。
         var preferences = new Services.LayoutStateService().Load();

@@ -6,6 +6,9 @@ namespace KYNXA_Desktop.ViewModels;
 public sealed record RecentConversation(string Title, string RelativeTime)
 {
     public Guid Id { get; init; } = Guid.NewGuid();
+    public bool IsPinned { get; init; }
+    public Microsoft.UI.Xaml.Visibility PinnedVisibility => IsPinned ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+    public string PinStatusKey => IsPinned ? "已置顶" : string.Empty;
     public string MoreId => $"ChatMore_{Id:N}";
 }
 

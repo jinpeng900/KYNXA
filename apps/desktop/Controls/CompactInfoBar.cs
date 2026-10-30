@@ -15,7 +15,7 @@ namespace KYNXA_Desktop.Controls;
 /// </summary>
 public sealed class CompactInfoBar : InfoBar
 {
-    private static readonly TimeSpan DismissDelay = TimeSpan.FromSeconds(6);
+    internal static readonly TimeSpan DismissDelay = TimeSpan.FromSeconds(5);
     private readonly Stopwatch _dismissElapsed = new();
     private DispatcherQueueTimer? _dismissTimer;
     private TimeSpan _remaining = DismissDelay;
@@ -34,6 +34,7 @@ public sealed class CompactInfoBar : InfoBar
             RefreshMessagePresentation();
             UpdateAutoDismiss();
         });
+        RegisterPropertyChangedCallback(TitleProperty, (_, _) => RefreshMessagePresentation());
         RegisterPropertyChangedCallback(IsOpenProperty, (_, _) =>
         {
             if (IsOpen) RestartAutoDismiss();
@@ -108,7 +109,7 @@ public sealed class CompactInfoBar : InfoBar
     private void UpdateAutoDismiss()
     {
         PauseDismissClock();
-        if (!IsLoaded || !IsOpen || Severity == InfoBarSeverity.Error || _pointerInside || _focusInside || _isAutoDismissPaused) return;
+        if (!IsLoaded || !IsOpen || _pointerInside || _focusInside || _isAutoDismissPaused) return;
         if (_remaining <= TimeSpan.Zero) { IsOpen = false; return; }
         if (_dismissTimer is null)
         {
@@ -117,7 +118,7 @@ public sealed class CompactInfoBar : InfoBar
             _dismissTimer.Tick += DismissTimerTick;
         }
         // Charge only visible idle time; interaction pauses the remaining delay instead of restarting it.
-        // 只累计可见空闲时间；交互时暂停剩余倒计时，而不是重新计满六秒。
+        // 只累计可见空闲时间；交互时暂停剩余倒计时，而不是重新计满五秒。
         _dismissTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, _remaining.TotalMilliseconds));
         _dismissElapsed.Restart();
         _dismissTimer.Start();
@@ -139,13 +140,20 @@ public sealed class CompactInfoBar : InfoBar
 
     private void RefreshMessagePresentation()
     {
+        if (GetTemplateChild("Title") is TextBlock title)
+            title.Visibility = string.IsNullOrEmpty(Title) ? Visibility.Collapsed : Visibility.Visible;
         if (GetTemplateChild("Message") is not TextBlock message) return;
         message.MaxLines = 1;
-        message.FontSize = 12;
+        message.FontSize = (double)Application.Current.Resources["KynxaBodyFontSize"];
         message.TextWrapping = TextWrapping.NoWrap;
         message.TextTrimming = TextTrimming.CharacterEllipsis;
         message.Foreground = AppearanceService.GetBrush(Severity == InfoBarSeverity.Error ? "KynxaErrorBrush" : "KynxaTextBrush");
-        message.SetBinding(ToolTipService.ToolTipProperty, new Binding { Source = this, Path = new PropertyPath(nameof(Message)) });
+        if (ToolTipService.GetToolTip(message) is not ToolTip)
+        {
+            var tooltip = new ToolTip();
+            tooltip.SetBinding(ContentControl.ContentProperty, new Binding { Source = this, Path = new PropertyPath(nameof(Message)) });
+            ToolTipService.SetToolTip(message, tooltip);
+        }
     }
 
     private void DismissErrorOnOutsidePointer(object sender, PointerRoutedEventArgs args)

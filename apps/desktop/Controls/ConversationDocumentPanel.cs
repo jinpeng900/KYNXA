@@ -1245,7 +1245,10 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
         _address.FocusVisualPrimaryBrush = focus;
         _address.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         _notice.Foreground = _loading.Foreground = new SolidColorBrush(AppearanceService.ParseColor(palette.Secondary));
-        var appearance = new { type = "appearance", palette = new { main = palette.Main, soft = palette.Soft, accent = palette.Secondary,
+        var appearance = new { type = "appearance", palette = new { main = palette.Main, soft = palette.Soft, accent = palette.Accent,
+            accenttext = palette.AccentText, onaccent = palette.OnAccent, selection = palette.Selection,
+            hover = palette.ControlHover, pressed = palette.ControlPressed, disabled = palette.Disabled, disabledtext = palette.DisabledText,
+            error = palette.Error, success = palette.Success, warning = palette.Warning, highcontrast = palette.IsHighContrast,
             text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar },
             strings = new {
                 copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"),
@@ -1316,25 +1319,43 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
         _viewport.Children.Remove(view.Browser); view.Browser.Close();
     }
 
+    private void ForgetSelectedTarget(string key)
+    {
+        if (_activeKey != key) return;
+        // Closing releases both the viewer and its selection identity; reopening must initialize a fresh target.
+        // 关闭时同步释放视图与选中身份，避免再次打开时跳过初始化或把内部页面地址当作文件路径。
+        ++_generation;
+        _activeKey = _path = _title = _requestedVersion = _websiteKey = null;
+        _current = null; _contentAddress = _websiteAddress = null; _chrome = null;
+        _attachment = null; _attachmentMessageId = _mountId = null;
+        _isWebsite = _isChanges = _showSource = _websiteActivationRequested = false;
+    }
+
     public void CloseTab(Guid conversationId, ConversationWorkTab tab)
     {
         string? key = tab.Kind switch
         {
-            "changes" => $"{conversationId:D}:changes",
+            "changes" => $"{conversationId:D}:changes:{tab.MountId:D}",
             "browser" => $"{conversationId:D}:web:{tab.Target}",
             _ when tab.Target?.StartsWith("attachment:", StringComparison.Ordinal) == true => $"{conversationId:D}:{tab.Target}",
             _ when tab.Target is not null => $"{conversationId:D}:file:{tab.Target}",
             _ => null
         };
         if (key is null) return;
+        ForgetSelectedTarget(key);
         if (_documentWork.Remove(key, out var work)) CloseDocumentWork(work);
         _documents.Remove(key); _viewStates.Remove(key); _navigationUris.Remove(key); _pendingAnchors.Remove(key); CloseView(key);
-        if (_chromeViews.Remove(key, out var chrome)) { _viewport.Children.Remove(chrome.View); CloseChromeView(chrome.View); }
+        if (_chromeViews.Remove(key, out var chrome))
+        {
+            if (ReferenceEquals(_chrome, chrome.View)) _chrome = null;
+            _viewport.Children.Remove(chrome.View); CloseChromeView(chrome.View);
+        }
     }
 
     public void CloseConversation(Guid conversationId)
     {
         string prefix = conversationId.ToString("D") + ":";
+        if (_activeKey is { } selectedKey && selectedKey.StartsWith(prefix, StringComparison.Ordinal)) ForgetSelectedTarget(selectedKey);
         foreach (var pair in _documentWork.Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal)).ToArray())
         { _documentWork.Remove(pair.Key); CloseDocumentWork(pair.Value); }
         foreach (string key in _views.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray()) CloseView(key);

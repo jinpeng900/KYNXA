@@ -35,6 +35,7 @@ public static partial class UiText
         ["移除"] = "Remove",
         ["新建项目"] = "New project",
         ["先在项目中发送消息，再打开工作文件夹。"] = "Send a message in this project before opening its managed working folder.",
+        ["此项目还没有可打开的工作文件夹，请先关联文件夹或开始任务。"] = "This project has no workspace folder to open yet. Link a folder or start a task first.",
         ["文件列表返回为空。"] = "The file list response was empty.",
         ["文件列表读取失败（HTTP {0}）。"] = "Could not load the file list (HTTP {0}).",
         ["正在读取文件列表…"] = "Loading files…",

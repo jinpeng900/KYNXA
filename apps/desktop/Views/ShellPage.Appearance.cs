@@ -74,6 +74,22 @@ public sealed partial class ShellPage
         public StackPanel Root { get; } = new() { Spacing = 14, Margin = new Thickness(0, 4, 0, 8) };
         public Button HeaderAction => _resetButton;
 
+        private static Button BuildAppearanceActionButton(FontFamily font, string textKey, string automationId)
+        {
+            // Use the regular outlined button template so settings actions remain recognizable before hover.
+            // 沿用原生描边按钮模板，使设置操作在悬停前也清楚可见。
+            var button = new Button
+            {
+                FontFamily = font, MinWidth = 0, MinHeight = 34, CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(12, 5, 12, 5),
+                BorderBrush = AppearanceService.GetBrush("KynxaDividerBrush"), BorderThickness = new Thickness(1)
+            };
+            UiLocalization.Bind(button, Button.ContentProperty, textKey);
+            UiLocalization.Bind(button, AutomationProperties.NameProperty, textKey);
+            AutomationProperties.SetAutomationId(button, automationId);
+            return button;
+        }
+
         public AppearanceSettingsSection(FontFamily font, Func<AppearancePreferences, string?> savePreferences,
             Func<AppearanceTransferPreferences> readSavedPreferences, Func<bool, Task<Windows.Storage.StorageFile?>> pickFile,
             bool hideHeading = false)
@@ -86,11 +102,9 @@ public sealed partial class ShellPage
             var title = new TextBlock { FontFamily = font, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
                 Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush") };
             UiLocalization.Bind(title, TextBlock.TextProperty, "外观");
-            _resetButton = new Button { FontFamily = font, FontSize = 12, Padding = new Thickness(10, 5, 10, 5),
-                CornerRadius = new CornerRadius(8), Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-            UiLocalization.Bind(_resetButton, Button.ContentProperty, "恢复默认外观");
-            UiLocalization.Bind(_resetButton, AutomationProperties.NameProperty, "恢复默认外观");
-            AutomationProperties.SetAutomationId(_resetButton, "AppearanceResetButton");
+            _resetButton = BuildAppearanceActionButton(font, "恢复默认外观", "AppearanceResetButton");
+            _resetButton.FontSize = 12;
+            _resetButton.Padding = new Thickness(10, 5, 10, 5);
             _resetButton.Click += (_, _) => Save(new(AppearanceService.DefaultPaletteId, "light", 15, null), resetAccentDraft: true);
             Grid.SetColumn(_resetButton, 1);
             if (!hideHeading)
@@ -154,12 +168,7 @@ public sealed partial class ShellPage
             accentRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             accentRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             accentRow.Children.Add(_accentInput);
-            var chooseColor = new Button { FontFamily = font, MinHeight = 34, CornerRadius = new CornerRadius(9),
-                Padding = new Thickness(12, 5, 12, 5),
-                Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-            UiLocalization.Bind(chooseColor, Button.ContentProperty, "选择颜色");
-            UiLocalization.Bind(chooseColor, AutomationProperties.NameProperty, "选择颜色");
-            AutomationProperties.SetAutomationId(chooseColor, "AppearanceColorPickerButton");
+            var chooseColor = BuildAppearanceActionButton(font, "选择颜色", "AppearanceColorPickerButton");
             var colorPicker = new ColorPicker { IsAlphaEnabled = false, Width = 280 };
             AutomationProperties.SetAutomationId(colorPicker, "AppearanceColorPicker");
             UiLocalization.Bind(colorPicker, AutomationProperties.NameProperty, "自定义强调色");
@@ -186,15 +195,9 @@ public sealed partial class ShellPage
             accentGroup.Children.Add(BuildSettingRow(font, "自定义强调色", accentRow));
             var accentActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
                 Margin = new Thickness(16, 0, 16, 12) };
-            var applyAccent = new Button { FontFamily = font, CornerRadius = new CornerRadius(8),
-                Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-            UiLocalization.Bind(applyAccent, Button.ContentProperty, "应用颜色");
-            AutomationProperties.SetAutomationId(applyAccent, "AppearanceAccentApplyButton");
+            var applyAccent = BuildAppearanceActionButton(font, "应用颜色", "AppearanceAccentApplyButton");
             applyAccent.Click += (_, _) => ApplyAccent();
-            _accentReset = new Button { FontFamily = font, CornerRadius = new CornerRadius(8),
-                Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-            UiLocalization.Bind(_accentReset, Button.ContentProperty, "使用预设颜色");
-            AutomationProperties.SetAutomationId(_accentReset, "AppearanceAccentResetButton");
+            _accentReset = BuildAppearanceActionButton(font, "使用预设颜色", "AppearanceAccentResetButton");
             _accentReset.Click += (_, _) => Save(CurrentPreferences() with { Accent = null }, resetAccentDraft: true);
             // TextChanging is synchronous; TextChanged can arrive after a programmatic refresh has ended.
             // TextChanging 同步执行，避免程序刷新结束后异步 TextChanged 重新标记草稿。

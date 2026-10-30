@@ -84,12 +84,25 @@ public sealed partial class ShellPage
 
     private void SetCompletionNotifications(bool enabled)
     {
+        bool saved = TrySetCompletionNotifications(enabled);
+        ShowActionFeedback(UiText.Get(saved
+            ? enabled ? "已开启本机回复完成通知。" : "已关闭本机回复完成通知。"
+            : "通知偏好未能保存，请稍后重试。"));
+    }
+
+    private bool TrySetCompletionNotifications(bool enabled)
+    {
         try
         {
             ExpansionNotifications.SetEnabled(enabled);
-            ShowActionFeedback(enabled ? "已开启本机回复完成通知。" : "已关闭本机回复完成通知。");
+            _refreshCompletionNotificationSettings?.Invoke();
+            return true;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { ShowActionFeedback(error.Message); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            _refreshCompletionNotificationSettings?.Invoke();
+            return false;
+        }
     }
 
     private async Task StartExpansionRemoteAsync()

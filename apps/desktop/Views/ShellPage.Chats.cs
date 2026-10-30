@@ -99,13 +99,13 @@ public sealed partial class ShellPage
             string detail = chat.IsSample ? UiText.Get("示例对话") : UiText.Get("刚刚");
             if (!positions.TryGetValue(chat.Id, out var row))
             {
-                rows.Insert(index, new RecentConversation(chat.Title, detail) { Id = chat.Id });
+                rows.Insert(index, new RecentConversation(chat.Title, detail) { Id = chat.Id, IsPinned = chat.IsPinned });
                 continue;
             }
             int currentIndex = rows[index].Id == chat.Id ? index : rows.IndexOf(row);
             if (currentIndex != index) rows.Move(currentIndex, index);
-            if (row.Title != chat.Title || row.RelativeTime != detail)
-                rows[index] = new RecentConversation(chat.Title, detail) { Id = chat.Id };
+            if (row.Title != chat.Title || row.RelativeTime != detail || row.IsPinned != chat.IsPinned)
+                rows[index] = new RecentConversation(chat.Title, detail) { Id = chat.Id, IsPinned = chat.IsPinned };
         }
         ChatHistoryList.SelectedItem = ViewModel.RecentConversations.FirstOrDefault(chat => chat.Id == _activeStandaloneChat?.Id);
         RefreshSidebarSearches("chat");

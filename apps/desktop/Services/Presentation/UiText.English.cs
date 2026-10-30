@@ -298,6 +298,7 @@ public static partial class UiText
         ["新聊天"] = "New chat",
         ["新聊天 {0}"] = "New chat {0}",
         ["取消置顶"] = "Unpin",
+        ["已置顶"] = "Pinned",
         ["置顶项目"] = "Pin project",
         ["在文件资源管理器中打开"] = "Open in File Explorer",
         ["关联文件夹不存在：{0}"] = "Linked folder not found: {0}",

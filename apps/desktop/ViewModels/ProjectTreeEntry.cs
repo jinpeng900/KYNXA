@@ -13,6 +13,7 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
 {
     private string _title = chat?.Title ?? project.Name;
     private string _glyph = (chat?.IsPinned ?? project.IsPinned) ? "\uE718" : "\uE8B7";
+    private bool _isPinned = chat?.IsPinned ?? project.IsPinned;
     private string? _mountedFolder;
     public ProjectState Project { get; private set; } = project;
     public ProjectChatState? Chat { get; private set; } = chat;
@@ -41,6 +42,11 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
         OnPropertyChanged(nameof(MountedFolderVisibility));
     }
     public string Glyph => _glyph;
+    public bool IsPinned => _isPinned;
+    public Visibility PinnedVisibility => IsPinned ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility UnpinnedProjectVisibility => Chat is null && !IsPinned ? Visibility.Visible : Visibility.Collapsed;
+    public string PinStatusKey => IsPinned ? "已置顶" : string.Empty;
+    public string PinIconKey => Chat is null ? "IconPinnedProject" : "IconPinnedRecent";
     public Visibility ProjectOnlyVisibility => Chat is null ? Visibility.Visible : Visibility.Collapsed;
     public string MoreLabel => Chat is null ? Services.UiText.Get("项目操作") : Services.UiText.Get("聊天操作");
     public string MoreId => Chat is null ? $"ProjectMore_{Project.Id:N}" : $"ChatMore_{Chat.Id:N}";
@@ -76,6 +82,14 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
         OnPropertyChanged(nameof(ContextTitle));
         OnPropertyChanged(nameof(MountedFolderTooltip));
         SetProperty(ref _glyph, (chat?.IsPinned ?? project.IsPinned) ? "\uE718" : "\uE8B7", nameof(Glyph));
+        // Pinning mutates the same model instance; cache its presented value so recycled rows notify bindings.
+        // 置顶会修改同一模型实例，缓存展示值，确保复用行仍能通知绑定刷新。
+        if (SetProperty(ref _isPinned, chat?.IsPinned ?? project.IsPinned, nameof(IsPinned)))
+        {
+            OnPropertyChanged(nameof(PinnedVisibility));
+            OnPropertyChanged(nameof(UnpinnedProjectVisibility));
+            OnPropertyChanged(nameof(PinStatusKey));
+        }
     }
 
     [ObservableProperty]

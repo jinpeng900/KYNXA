@@ -205,9 +205,24 @@ public sealed partial class ShellPage
             // 空白项目保留运行时托管目录，不为打开资源管理器而新建并写入虚假的外部挂载。
             var chat = project.Chats.FirstOrDefault(chat => chat.Id == ActiveChatId && chat.IsPersisted) ??
                 project.Chats.FirstOrDefault(chat => chat.IsPersisted);
-            if (chat is null) { ShowActionFeedback(UiText.Get("先在项目中发送消息，再打开工作文件夹。")); return; }
+            string unavailable = UiText.Get("此项目还没有可打开的工作文件夹，请先关联文件夹或开始任务。");
+            if (chat is null)
+            {
+                ShowActionFeedback(unavailable);
+                return;
+            }
             using var api = new WorkspaceFilesApiClient();
-            path = (await api.ListAsync(chat.Id, null, null, _historyLifetime.Token)).Path;
+            try
+            {
+                path = (await api.ListAsync(chat.Id, null, null, _historyLifetime.Token)).Path;
+            }
+            catch (GatewayApiException error) when (error.ErrorCode == "ENOENT")
+            {
+                // Saved empty chats have metadata before their managed workspace is created on demand.
+                // 空聊天可先保存元数据，托管工作目录仍按需创建；仅根目录缺失时提供操作引导。
+                ShowActionFeedback(unavailable);
+                return;
+            }
         }
         if (!Directory.Exists(path)) throw new DirectoryNotFoundException(string.Format(UiText.Get("关联文件夹不存在：{0}"), path));
         var folder = await StorageFolder.GetFolderFromPathAsync(path);

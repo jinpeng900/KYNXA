@@ -72,7 +72,9 @@ public sealed partial class ShellPage
         if (_chatClosing || !IsLoaded) return;
         ActionFeedbackText.Text = text;
         ActionFeedbackHost.Visibility = Visibility.Visible;
-        _actionFeedbackTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        // Passive action feedback shares the notice duration while leaving the underlying workspace interactive.
+        // 被动操作反馈沿用统一提示时长，同时允许继续操作下方工作区。
+        _actionFeedbackTimer ??= new DispatcherTimer { Interval = CompactInfoBar.DismissDelay };
         _actionFeedbackTimer.Tick -= ActionFeedbackTimer_Tick;
         _actionFeedbackTimer.Tick += ActionFeedbackTimer_Tick;
         _actionFeedbackTimer.Stop();

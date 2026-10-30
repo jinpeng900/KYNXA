@@ -105,7 +105,9 @@ public sealed partial class ShellPage
 
     private void UpdateModelPickerLabel()
     {
-        SelectedModelLabel.Text = _selectedModel?.Name ?? UiText.Get(_isModelCatalogLoading ? "读取模型连接中…" : "模型选择");
+        // Keep the composer's label stable during refresh; loading and failures remain on the dedicated status control.
+        // 刷新时保持输入区标签稳定；读取进度与失败信息继续由独立状态控件呈现。
+        SelectedModelLabel.Text = _selectedModel?.Name ?? UiText.Get("模型选择");
         string modelLabel = _selectedModel is null ? UiText.Get("模型选择")
             : $"{_selectedModel.Label}\n{_selectedModel.ModelId}";
         AutomationProperties.SetName(ModelPickerButton, _selectedModel?.Label ?? UiText.Get("模型选择"));

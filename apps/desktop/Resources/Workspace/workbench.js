@@ -1,5 +1,6 @@
-import { element as el, button, input, select, field, number } from './preview-ui.js';
+import { element as el, button, input, field, number } from './preview-ui.js';
 import { createNotice } from './preview-notice.js';
+import { createSelectScope } from './workbench-controls.js';
 
 const defaults = [
   { name: '资料报告', body: '根据 {{资料路径}} 中的资料，制作 {{报告主题}} 报告。引用真实来源，保存到 {{输出目录}}，展示最终报告。' },
@@ -21,6 +22,7 @@ const symbols = {
   diagnostics: 'M3 18h18M6 14V9M12 14V4M18 14v-3',
   notes: 'M4 3h16v18H4zM8 7h8M8 11h8M8 15h5',
   export: 'M12 3v12M8 11l4 4 4-4M4 16v5h16v-5',
+  delete: 'M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6',
   shortcut: 'M4 5h16v14H4zM7 9h1M11 9h1M15 9h1M7 13h1M11 13h5'
 };
 function icon(name) {
@@ -33,7 +35,10 @@ function resultRows(result) { if (Array.isArray(result)) return result; return r
 function filePath(item) { return item.path || item.relativePath || item.reference || item.name || item.title || ''; }
 
 export async function open(options) {
-  const root = el('div', 'workbench'), header = el('header', 'workbench-header'), nav = el('nav', 'workbench-nav'), track = el('div', 'workbench-nav-track'), indicator = el('span', 'workbench-nav-indicator'), page = el('div', 'workbench-page'), feedback = createNotice(root, 'workbench-status');
+  const root = el('div', 'workbench'), header = el('header', 'workbench-header'), nav = el('nav', 'workbench-nav'), track = el('div', 'workbench-nav-track'), indicator = el('span', 'workbench-nav-indicator'), page = el('div', 'workbench-page'), feedback = createNotice(root, 'workbench-status', { dismissAfterMs: 5000 });
+  const choices = createSelectScope(root), select = choices.select;
+  const storedFontSize = Number(readStore('kynxa.workbench.fontsize', 15));
+  root.style.setProperty('--workbench-font-size', (Number.isFinite(storedFontSize) ? Math.min(24, Math.max(12, storedFontSize)) : 15) + 'px');
   const identity = options.conversationId || 'local', storeKey = 'kynxa.workbench.' + identity;
   let state = readStore(storeKey, { templates: defaults, bookmarks: [], collections: [], notes: '' }), disposed = false, activePage = options.state?.workbench?.page || 'home', revision = 0, speech;
   state.templates ||= defaults; state.bookmarks ||= []; state.collections ||= [];
@@ -66,6 +71,9 @@ export async function open(options) {
   function action(name) { options.onAction?.(name); }
   function exportText(filename, content, mimeType = 'text/plain') { options.onExport?.({ filename, content, mimeType, encoding: 'utf8' }); }
   function row(...nodes) { const n = el('div', 'workbench-row'); n.append(...nodes); return n; }
+  function actionRow(...controls) { const n = row(...controls); n.classList.add('workbench-actions'); return n; }
+  function primary(control) { control.classList.add('primary'); return control; }
+  function destructiveButton(text, action) { const control = button('', action, text); control.classList.add('danger'); control.append(icon('delete'), el('span', '', text)); return control; }
   function showList(parent, items, render) { parent.replaceChildren(); if (!items.length) { const empty = el('div', 'workbench-empty'); empty.append(icon('files'), el('span', '', '暂无内容')); parent.append(empty); } items.forEach((item, i) => { const n = el('div', 'workbench-list-item'); render(n, item, i); parent.append(n); }); }
   function quote(text, title = '工作台') { const value = String(text || '').trim(); if (!value) { notice('先填写或选中需要引用的内容。', true); return; } options.onSelection?.({ kind: 'workbench', title, text: value.slice(0, 24000) }); notice('已放入输入框，可继续编辑后发送。'); }
   const tabs = [['home', '工作', '工作', 'work'], ['files', '成果', '成果与版本', 'files'], ['research', '资料', '资料', 'research'], ['templates', '模板', '模板', 'templates'], ['batch', '批量', '批量处理', 'batch'], ['connect', '辅助', '连接与辅助', 'connect'], ['diagnostics', '状态', '状态', 'diagnostics']];
@@ -76,7 +84,7 @@ export async function open(options) {
   root.append(header, nav, feedback.node, page); options.container.append(root);
   for (const [id, label, accessibleLabel, symbol] of tabs) { const b = button('', () => navigate(id), accessibleLabel); b.dataset.page = id; b.id = 'workbench-tab-' + id; b.setAttribute('role', 'tab'); b.setAttribute('aria-label', accessibleLabel); b.setAttribute('aria-controls', 'workbench-page'); b.append(icon(symbol), el('span', '', label)); track.append(b); }
   nav.setAttribute('role', 'tablist'); nav.setAttribute('aria-label', '工作台页面'); page.id = 'workbench-page'; page.setAttribute('role', 'tabpanel');
-  function positionIndicator() { const selected = track.querySelector('[aria-selected=true]'); if (!selected || disposed) return; indicator.style.width = selected.offsetWidth + 'px'; indicator.style.transform = `translateX(${selected.offsetLeft}px)`; return selected; }
+  function positionIndicator() { const selected = track.querySelector('[aria-selected=true]'); if (!selected || disposed) return; indicator.style.width = selected.offsetWidth + 'px'; indicator.style.height = selected.offsetHeight + 'px'; indicator.style.transform = `translate(${selected.offsetLeft}px, ${selected.offsetTop}px)`; return selected; }
   function revealTab(selected, smooth) {
     if (!selected || !nav.clientWidth) return;
     const left = selected.offsetLeft - 6, right = selected.offsetLeft + selected.offsetWidth + 6;
@@ -91,7 +99,7 @@ export async function open(options) {
     event.preventDefault(); nav.scrollLeft = next;
   }, { passive: false });
   nav.addEventListener('keydown', event => { const buttons = [...track.querySelectorAll('button')], index = buttons.indexOf(document.activeElement); if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length; buttons[next].focus(); navigate(buttons[next].dataset.page); });
-  function navigate(id) { if (disposed) return; activePage = id; revision++; speech?.stop?.();
+  function navigate(id) { if (disposed) return; choices.close(); activePage = id; revision++; speech?.stop?.();
     track.querySelectorAll('button').forEach(b => { const selected = b.dataset.page === id; b.setAttribute('aria-selected', selected); b.tabIndex = selected ? 0 : -1; if (selected) { page.setAttribute('aria-labelledby', b.id); revealTab(b, true); } }); positionIndicator(); page.replaceChildren(); notice('');
     options.onState?.({ workbench: { page: id } }); run(({ home, files, research, templates, batch, connect, diagnostics }[id] || home))(); }
   async function home() {
@@ -102,9 +110,9 @@ export async function open(options) {
     page.append(el('p', 'workbench-subtitle', '从当前聊天出发，管理资料、作品与下一步。'));
     const grid = el('div', 'workbench-grid');
     const creation = card('输入与制作', '将附件、工作目录与工具接入当前聊天。', 'work');
-    creation.append(button('添加附件', () => action('attach')), button('关联文件夹', () => action('folder')), button('浏览文件', () => action('files')), button('打开终端', () => action('terminal')), button('工具与技能', () => action('extensions')));
-    const works = card('继续修改成果', '在预览中选中文字、表格或三维对象，引用后描述要修改的部分。'); works.append(button('查看成果与版本', () => navigate('files')), button('使用工作模板', () => navigate('templates')));
-    const notes = card('项目笔记', '记录作品要求、版本说明与重要决定。', 'notes'); const note = textArea(state.notes || '', '项目要点、版本说明、重要决定…'); note.setAttribute('aria-label', '项目笔记'); note.onchange = run(async () => { state.notes = note.value.slice(0, 200000); await saveProject(); }); notes.append(note, button('引用笔记', () => quote(note.value, '项目笔记')));
+    creation.append(actionRow(button('添加附件', () => action('attach')), button('关联文件夹', () => action('folder')), button('浏览文件', () => action('files')), button('打开终端', () => action('terminal')), button('工具与技能', () => action('extensions'))));
+    const works = card('继续修改成果', '在预览中选中文字、表格或三维对象，引用后描述要修改的部分。'); works.append(actionRow(button('查看成果与版本', () => navigate('files')), button('使用工作模板', () => navigate('templates'))));
+    const notes = card('项目笔记', '记录作品要求、版本说明与重要决定。', 'notes'); const note = textArea(state.notes || '', '项目要点、版本说明、重要决定…'); note.setAttribute('aria-label', '项目笔记'); note.onchange = run(async () => { state.notes = note.value.slice(0, 200000); await saveProject(); }); notes.append(note, actionRow(button('引用笔记', () => quote(note.value, '项目笔记'))));
     const access = card('快捷操作', '常用入口，随时回到创作。', 'shortcut'); for (const [key, desc] of [['Ctrl+L', '输入框'], ['Ctrl+N', '新聊天'], ['Ctrl+F', '当前聊天查找'], ['Ctrl+Shift+K', '历史会话查找']]) { const shortcut = el('div', 'workbench-shortcut'); shortcut.append(el('span', '', desc), el('kbd', 'workbench-key', key)); access.append(shortcut); } access.append(button('辅助与连接', () => navigate('connect')));
     grid.append(creation, works, notes, access); page.append(grid);
     const importFile = el('input'); importFile.type = 'file'; importFile.accept = '.json'; importFile.hidden = true;
@@ -193,8 +201,8 @@ export async function open(options) {
       const expectedHash=result.currentHash || result.version || result.currentVersion || '';
       showList(versions,resultRows(result),(n,item)=> { const hash=item.version || item.sha256 || item.hash;
         n.append(el('strong','',`${item.createdAt || item.savedAt || ''} ${String(hash || '').slice(0,16)}`));
-        n.append(button('比较',run(async()=> { const r=await request('versions.compare',{path:p,version:hash}); if(marker!==revision || sequence!==versionRequest) return; diff.replaceChildren(el('pre','',r.beforeText ?? r.before ?? r.savedText ?? ''),el('pre','',r.afterText ?? r.after ?? r.currentText ?? '')); })),
-          button('恢复此版本',run(async()=> { if(sequence!==versionRequest) return; await request('versions.restore',{path:p,version:hash,expectedHash}); if(marker!==revision || sequence!==versionRequest) return; notice('版本已恢复'); await inspect(p); if(marker===revision) options.onOpen?.(p); })));
+        n.append(actionRow(button('比较',run(async()=> { const r=await request('versions.compare',{path:p,version:hash}); if(marker!==revision || sequence!==versionRequest) return; diff.replaceChildren(el('pre','',r.beforeText ?? r.before ?? r.savedText ?? ''),el('pre','',r.afterText ?? r.after ?? r.currentText ?? '')); })),
+          button('恢复此版本',run(async()=> { if(sequence!==versionRequest) return; await request('versions.restore',{path:p,version:hash,expectedHash}); if(marker!==revision || sequence!==versionRequest) return; notice('版本已恢复'); await inspect(p); if(marker===revision) options.onOpen?.(p); }))));
       });
       if(!resultRows(result).length) versions.replaceChildren(el('p','preview-muted','还没有快照，可先保存当前版本。'));
     }
@@ -203,7 +211,7 @@ export async function open(options) {
       const p=editingPath, hash=editingHash, content=editor.value, sequence=editRequest;
       const r=await request('files.write',{path:p,expectedHash:hash,encoding:'utf8',content}); if(marker!==revision || sequence!==editRequest) return;
       editingHash=r.sha256 || r.version || ''; notice('已保存修改并保留旧版快照'); if(marker===revision) options.onOpen?.(p);
-    },()=>!readingEditor && !!editingPath && !!editingHash && !readTruncated)); saveEdit.disabled=true;
+    },()=>!readingEditor && !!editingPath && !!editingHash && !readTruncated)); saveEdit.disabled=true; primary(saveEdit);
     async function edit(p) {
       const sequence=++editRequest; readingEditor=true; saveEdit.disabled=true;
       try {
@@ -214,7 +222,7 @@ export async function open(options) {
         if(readTruncated) notice('当前只读取部分内容，可引用分析，不能覆盖保存。'); editor.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'});
       } finally { if(sequence===editRequest) { readingEditor=false; saveEdit.disabled=readTruncated || !editingHash || busyControls.has(saveEdit); } }
     }
-    function renderCollections() { showList(groups,state.collections,(n,c)=> { n.append(el('strong','',c.name)); for(const p of c.paths || []) { const open=button(p.split(/[\\/]/).pop(),()=>options.onOpen?.(p),p); open.classList.add('workbench-associated-file');n.append(open); } n.append(button('移除关联组',run(async()=> { const i=state.collections.indexOf(c);if(i<0)return;state.collections.splice(i,1);await saveProject();if(marker===revision)renderCollections(); }))); }); }
+    function renderCollections() { showList(groups,state.collections,(n,c)=> { n.append(el('strong','',c.name)); const links=actionRow(); for(const p of c.paths || []) { const open=button(p.split(/[\\/]/).pop(),()=>options.onOpen?.(p),p); open.classList.add('workbench-associated-file');links.append(open); } links.append(button('移除关联组',run(async()=> { const i=state.collections.indexOf(c);if(i<0)return;state.collections.splice(i,1);await saveProject();if(marker===revision)renderCollections(); }))); n.append(links); }); }
     path.onkeydown=e=> { if(e.key==='Enter') { e.preventDefault();run(load)(); } }; filter.oninput=resetList;
     editor.onkeydown=e=> { if((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='s'){e.preventDefault();if(!saveEdit.disabled)saveEdit.click();} };
     const up=button('上级目录',run(async()=> {
@@ -223,10 +231,15 @@ export async function open(options) {
       else { const index=Math.max(current.lastIndexOf('/'),current.lastIndexOf('\\'));path.value=index<0?'.':current.slice(0,index+1); }
       await load();
     }));
-    page.append(row(path,button('读取文件',run(load)),up,button('已生成成果',run(async()=> { const sequence=++listRequest,r=await request('deliverables.list');if(marker!==revision || sequence!==listRequest)return;fileItems=resultRows(r);deliverables=true;listingTruncated=!!r.truncated || !!r.hasMore;resetList(); }))),
-      row(filter,category,sort),listing,list,row(previous,pageText,next),el('h2','','关联作品'),row(collection),groups,
-      el('h2','','版本记录'),selectedLabel,button('保存选中文件快照',run(async()=> { if(!selected)throw new Error('先选择文件的“版本与比较”');const p=selected;await request('versions.create',{path:p});if(marker===revision)await inspect(p); })),versions,diff,
-      el('h2','','文本与源码编辑'),editingLabel,editor,row(saveEdit,button('让模型修改选中内容',()=>quote(`${editingPath}\n\n${editor.value.slice(editor.selectionStart,editor.selectionEnd)||editor.value}`,'文件修改'))));
+    const browsing = card('工作文件', '浏览当前目录，按名称或类型查找成果。');
+    browsing.append(row(path,primary(button('读取文件',run(load))),up,button('已生成成果',run(async()=> { const sequence=++listRequest,r=await request('deliverables.list');if(marker!==revision || sequence!==listRequest)return;fileItems=resultRows(r);deliverables=true;listingTruncated=!!r.truncated || !!r.hasMore;resetList(); }))),
+      row(filter,category,sort),listing,list,row(previous,pageText,next));
+    const associated = card('关联作品', '将相关文件整理到同一作品中。'); associated.append(row(collection),groups);
+    const history = card('版本记录', '保存快照后，可比较内容或恢复已有版本。');
+    history.append(selectedLabel,actionRow(button('保存选中文件快照',run(async()=> { if(!selected)throw new Error('先选择文件的“版本与比较”');const p=selected;await request('versions.create',{path:p});if(marker===revision)await inspect(p); }))),versions,diff);
+    const editing = card('文本与源码编辑', '载入完整内容后保存修改，原有版本继续保留。', 'notes');
+    editing.append(editingLabel,editor,row(saveEdit,button('让模型修改选中内容',()=>quote(`${editingPath}\n\n${editor.value.slice(editor.selectionStart,editor.selectionEnd)||editor.value}`,'文件修改'))));
+    page.append(browsing,associated,history,editing);
     renderCollections();run(load)();
   }
   async function research() {
@@ -234,11 +247,14 @@ export async function open(options) {
     const saved = await request('bookmarks.list'); if (marker !== revision) return;
     if (Array.isArray(saved.items)) { state.bookmarks = saved.items; save(); }
     const q = input('查找以前的讨论、决定与成果'), results = el('div', 'workbench-list'), url = input('参考网页地址 https://'), title = input('标题'), note = textArea('', '摘录或注释'), bookmarks = el('div', 'workbench-list');
-    function render() { showList(bookmarks, state.bookmarks, (n, item, i) => { n.append(el('strong', '', item.title || item.url), el('p', '', item.note)); n.append(button('打开来源', () => options.onOpen?.(item.url)), button('引用', () => quote(`${item.title}\n${item.url}\n${item.note}`, '参考资料')), button('删除', run(async () => { if (item.id) { const r = await request('bookmarks.delete', { id: item.id }); state.bookmarks = r.items; } else state.bookmarks.splice(i, 1); save(); render(); }))); }); }
-    async function search() { const r = await request('search.conversations', { query: q.value, limit: 20 }); showList(results, resultRows(r), (n, item) => { const text = item.excerpt || item.snippet || item.text || item.content || ''; n.append(el('strong', '', item.title || item.conversationTitle || '历史讨论'), el('p', '', text)); n.append(button('引用内容', () => quote(text, item.title || '历史讨论'))); if (item.conversationId || item.id) n.append(button('打开原会话', () => options.onNavigate?.(item.conversationId || item.id))); }); }
-    page.append(row(q, button('搜索历史', run(search))), results, el('h2', '', '来源与注释'), row(title, url), note,
-      button('收藏来源', run(async () => { const address = new URL(url.value); if (!['http:', 'https:'].includes(address.protocol)) throw new Error('请输入 HTTP 或 HTTPS 地址'); const r = await request('bookmarks.save', { item: { title: title.value.trim(), url: address.href, note: note.value, savedAt: new Date().toISOString() } }); state.bookmarks = r.items; save(); render(); })),
-      button('导出参考资料', () => exportText('参考资料.md', state.bookmarks.map((b, i) => `## ${i + 1}. ${b.title || b.url}\n\n${b.url}\n\n${b.note || ''}`).join('\n\n'), 'text/markdown')), bookmarks);
+    function render() { showList(bookmarks, state.bookmarks, (n, item, i) => { n.append(el('strong', '', item.title || item.url), el('p', '', item.note)); n.append(actionRow(button('打开来源', () => options.onOpen?.(item.url)), button('引用', () => quote(`${item.title}\n${item.url}\n${item.note}`, '参考资料')), destructiveButton('删除', run(async () => { if (item.id) { const r = await request('bookmarks.delete', { id: item.id }); state.bookmarks = r.items; } else state.bookmarks.splice(i, 1); save(); render(); })))); }); }
+    async function search() { const r = await request('search.conversations', { query: q.value, limit: 20 }); showList(results, resultRows(r), (n, item) => { const text = item.excerpt || item.snippet || item.text || item.content || ''; n.append(el('strong', '', item.title || item.conversationTitle || '历史讨论'), el('p', '', text)); const actions = actionRow(button('引用内容', () => quote(text, item.title || '历史讨论'))); if (item.conversationId || item.id) actions.append(button('打开原会话', () => options.onNavigate?.(item.conversationId || item.id))); n.append(actions); }); }
+    const discussions = card('历史讨论', '查找当前范围中的讨论、决定与成果。', 'research');
+    discussions.append(row(q, primary(button('搜索历史', run(search)))),results);
+    const sources = card('来源与注释', '保留参考地址、摘录与注释，方便继续使用。', 'notes');
+    sources.append(row(title,url),note,row(primary(button('收藏来源', run(async () => { const address = new URL(url.value); if (!['http:', 'https:'].includes(address.protocol)) throw new Error('请输入 HTTP 或 HTTPS 地址'); const r = await request('bookmarks.save', { item: { title: title.value.trim(), url: address.href, note: note.value, savedAt: new Date().toISOString() } }); state.bookmarks = r.items; save(); render(); }))),
+      button('导出参考资料', () => exportText('参考资料.md', state.bookmarks.map((b, i) => `## ${i + 1}. ${b.title || b.url}\n\n${b.url}\n\n${b.note || ''}`).join('\n\n'), 'text/markdown'))),bookmarks);
+    page.append(discussions,sources);
     q.onkeydown = e => { if (e.key === 'Enter') run(search)(); }; render();
   }
   async function templates() {
@@ -259,19 +275,23 @@ export async function open(options) {
       fill();
     }
     function fill() { preview.value = body.value.replace(/\{\{[^{}]+\}\}/g, key => values[key] || key); }
-    function render() { showList(list, state.templates, (n, item, i) => { n.append(el('strong', '', item.name), el('p', '', item.body), button('使用／编辑', () => prepare(item, i, true)), button('删除', run(async () => { if (item.id) { const r = await request('templates.delete', { id: item.id }); state.templates = r.items; } else { const index = state.templates.indexOf(item); if (index >= 0) state.templates.splice(index, 1); } if (editingItem === item || (item.id && editingItem?.id === item.id)) editingItem = null; state.customTemplatesUsed = true; save(); render(); }))); }); }
-    body.oninput = syncParameters; page.append(list, el('h2', '', '模板编辑'), name, body, row(button('新建模板', () => prepare({ name: '', body: '' }, -1, true)), button('保存模板', run(async () => { if (!name.value.trim() || !body.value.trim()) throw new Error('填写模板名称与内容'); const item = { name: name.value.trim(), body: body.value }, prepared = templateRevision; if (editingItem?.id) item.id = editingItem.id; const r = await request('templates.save', { item }); state.templates = r.items; state.customTemplatesUsed = true; save(); render(); if(prepared===templateRevision) editingItem = state.templates.find(t => t.id === r.id) || null; notice('模板已保存'); }))), parameters, preview,
-      button('放入输入框', () => quote(preview.value, name.value || '工作模板'))); render(); if (state.templates.length) prepare(state.templates[0], 0);
+    function render() { showList(list, state.templates, (n, item, i) => { n.append(el('strong', '', item.name), el('p', '', item.body), actionRow(button('使用／编辑', () => prepare(item, i, true)), destructiveButton('删除', run(async () => { if (item.id) { const r = await request('templates.delete', { id: item.id }); state.templates = r.items; } else { const index = state.templates.indexOf(item); if (index >= 0) state.templates.splice(index, 1); } if (editingItem === item || (item.id && editingItem?.id === item.id)) editingItem = null; state.customTemplatesUsed = true; save(); render(); })))); }); }
+    const library = card('工作模板', '复用常用要求，按实际任务填写参数。', 'templates'); library.append(list);
+    const templateEditor = card('模板编辑', '使用 {{参数名}} 标记需要填写的内容。', 'notes');
+    body.oninput = syncParameters; templateEditor.append(name, body, row(button('新建模板', () => prepare({ name: '', body: '' }, -1, true)), primary(button('保存模板', run(async () => { if (!name.value.trim() || !body.value.trim()) throw new Error('填写模板名称与内容'); const item = { name: name.value.trim(), body: body.value }, prepared = templateRevision; if (editingItem?.id) item.id = editingItem.id; const r = await request('templates.save', { item }); state.templates = r.items; state.customTemplatesUsed = true; save(); render(); if(prepared===templateRevision) editingItem = state.templates.find(t => t.id === r.id) || null; notice('模板已保存'); })))), parameters, preview,
+      button('放入输入框', () => quote(preview.value, name.value || '工作模板'))); page.append(library,templateEditor); render(); if (state.templates.length) prepare(state.templates[0], 0);
   }
   function batch() {
     const { notice } = pageActions(revision);
     const picker = el('input'); picker.type = 'file'; picker.multiple = true; const list = el('div', 'workbench-list'), progress = el('progress', 'workbench-progress'); progress.max = 1; progress.value = 0;
     const prefix = input('输出名前缀', '整理_'), extension = select([['original', '保留格式'], ['png', '图片 → PNG'], ['jpeg', '图片 → JPEG'], ['webp', '图片 → WebP'], ['txt', '文本 → UTF-8 TXT'], ['md', '文本 → Markdown']], 'original', () => {});
+    extension.setAttribute('aria-label', '输出格式');
     let files = [], maxWidth = 1920;
     picker.onchange = () => { files = [...picker.files].slice(0, 500); showList(list, files, (n, f, i) => n.append(el('strong', '', `${i + 1}. ${f.name}`), el('p', '', `${(f.size / 1024).toFixed(1)} KiB`))); };
-    page.append(el('p', 'workbench-subtitle', '选择输入文件，输出打成一个 ZIP；原文件保留。支持图片缩放转换、文本编码转换和批量命名。'), picker,
+    const processing = card('批量处理', '选择输入文件，输出打成一个 ZIP；原文件保留。支持图片缩放转换、文本编码转换和批量命名。', 'batch');
+    processing.append(picker,
       row(prefix, extension, field('图片最长边', number(1920, 64, 8192, n => maxWidth = n))), list, progress,
-      button('生成批量处理 ZIP', run(async () => {
+      primary(button('生成批量处理 ZIP', run(async () => {
         if (!files.length) throw new Error('先选择文件'); if (!window.JSZip) throw new Error('ZIP 组件尚未加载');
         if (files.reduce((n, f) => n + f.size, 0) > 48 * 1024 * 1024) throw new Error('本次批量输入最多 48 MiB，请分组处理');
         const zip = new window.JSZip(), report = []; let index = 0;
@@ -290,24 +310,24 @@ export async function open(options) {
           zip.file(safe, bytes); report.push(`${f.name}\t${safe}\t${result}`); progress.value = index / files.length;
         }
         zip.file('处理清单.tsv', report.join('\n')); const content = await zip.generateAsync({ type: 'base64', compression: 'STORE' }); options.onExport?.({ filename: '批量处理.zip', mimeType: 'application/zip', encoding: 'base64', content }); notice(`已整理 ${index} 个文件，请选择保存位置。`);
-      })));
+      })))); page.append(processing);
   }
   function connect() {
     const { request, notice } = pageActions(revision);
     const grid = el('div', 'workbench-grid'), voice = card('语音与朗读', '语音输入与文字朗读，按需启动。', 'connect'), transcript = textArea('', '识别文字或输入需要朗读的内容');
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    voice.append(transcript, button('开始语音输入', () => {
+    voice.append(transcript, actionRow(button('开始语音输入', () => {
       if (!Recognition) { notice('当前 WebView 未提供语音识别，可用 Windows 的 Win+H 语音输入。'); return; }
       speech?.stop?.(); speech = new Recognition(); speech.lang = 'zh-CN'; speech.continuous = true; speech.interimResults = false;
       speech.onresult = e => { for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) transcript.value += e.results[i][0].transcript; };
       speech.onerror = e => notice('语音识别：' + e.error, true); speech.start();
     }), button('停止语音', () => speech?.stop?.()), button('放入输入框', () => quote(transcript.value, '语音输入')),
-      button('朗读', () => { if (!window.speechSynthesis) { notice('当前环境没有语音合成'); return; } speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(transcript.value); utterance.lang = 'zh-CN'; speechSynthesis.speak(utterance); }), button('停止朗读', () => window.speechSynthesis?.cancel()));
+      button('朗读', () => { if (!window.speechSynthesis) { notice('当前环境没有语音合成'); return; } speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(transcript.value); utterance.lang = 'zh-CN'; speechSynthesis.speak(utterance); }), button('停止朗读', () => window.speechSynthesis?.cancel())));
     const appearance = card('阅读与操作', '调整工作区文字与通知方式。', 'templates'); let size = Number(readStore('kynxa.workbench.fontsize', 15));
-    appearance.append(field('字号', number(size, 12, 24, n => { document.documentElement.style.fontSize = n + 'px'; writeStore('kynxa.workbench.fontsize', n); })), button('设置', () => action('settings')),
-      button('启用完成通知', () => action('notifications')), button('关闭完成通知', () => action('notifications-off')));
+    appearance.append(row(field('阅读字号', number(size, 12, 24, n => { root.style.setProperty('--workbench-font-size', n + 'px'); writeStore('kynxa.workbench.fontsize', n); }))), actionRow(button('设置', () => action('settings')),
+      button('启用完成通知', () => action('notifications')), button('关闭完成通知', () => action('notifications-off'))));
     const remote = card('手机连接', '连接后可在手机查看进度、发送消息和接收成果。公网访问需可达地址或中继。', 'connect');
-    remote.append(button('启动手机连接', () => action('remote-start')), button('关闭连接', () => action('remote-stop')), button('刷新连接状态', run(async () => { const r = await request('remote.status'); renderRemote(remote, r); })));
+    remote.append(actionRow(button('启动手机连接', () => action('remote-start')), button('关闭连接', () => action('remote-stop')), button('刷新连接状态', run(async () => { const r = await request('remote.status'); renderRemote(remote, r); }))));
     grid.append(voice, appearance, remote); page.append(grid);
     function renderRemote(parent, r) { parent.querySelectorAll('.remote-status').forEach(n => n.remove()); const n = el('div', 'remote-status');
       const url = r.inviteUrl || r.url; if (url) { n.append(el('p', '', url)); if (window.qrcode) { const qr = window.qrcode(0, 'M'); qr.addData(url); qr.make(); const view = el('div', 'workbench-qr'); view.innerHTML = qr.createSvgTag({ scalable: true, margin: 3 }); n.append(view); } }
@@ -353,5 +373,5 @@ export async function open(options) {
     page.append(row(button('刷新状态',run(refresh)),button('本地模型与设置',()=>action('settings')),button('工具与技能',()=>action('extensions'))),updated,view,detail);run(refresh)();
   }
   navigate(tabs.some(([id]) => id === activePage) ? activePage : 'home');
-  return { getState: () => ({ workbench: { page: activePage } }), setActive(active) { if (!active) { speech?.stop?.(); window.speechSynthesis?.cancel(); } }, dispose() { disposed = true; revision++; resizeObserver.disconnect(); speech?.stop?.(); window.speechSynthesis?.cancel(); feedback.dispose(); } };
+  return { getState: () => ({ workbench: { page: activePage } }), setActive(active) { if (!active) { choices.close(); speech?.stop?.(); window.speechSynthesis?.cancel(); } }, dispose() { disposed = true; revision++; choices.dispose(); resizeObserver.disconnect(); speech?.stop?.(); window.speechSynthesis?.cancel(); feedback.dispose(); } };
 }

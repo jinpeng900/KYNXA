@@ -27,6 +27,7 @@ public sealed class LayoutStateService
                     state.WorkProjectsHeightRatio = NormalizeHeightRatio(state.WorkProjectsHeightRatio);
                     state.WorkTasksHeightRatio = NormalizeHeightRatio(state.WorkTasksHeightRatio);
                     state.InterfaceLanguage = UiText.NormalizeLanguage(state.InterfaceLanguage);
+                    state.MainWindowCloseAction = MainWindowClosePreferences.NormalizeAction(state.MainWindowCloseAction);
                     state.AppearancePaletteId = AppearanceService.NormalizePaletteId(state.AppearancePaletteId);
                     state.AppearanceMode = AppearanceService.NormalizeMode(state.AppearanceMode);
                     state.ChatFontSize = AppearanceService.NormalizeChatFontSize(state.ChatFontSize);
