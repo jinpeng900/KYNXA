@@ -1,4 +1,4 @@
-﻿; Small online bootstrap. The full installer owns installation, upgrades and uninstall registration.
+; Small online bootstrap. The full installer owns installation, upgrades and uninstall registration.
 ; 轻量联网引导程序；真正安装、升级及卸载登记由完整安装器统一负责。
 #ifndef OnlinePayloadRoot
   #error OnlinePayloadRoot must point to the prepared online bootstrap files.
@@ -7,7 +7,7 @@
   #define PackageOutputDir "..\..\..\..\artifacts\installer\output"
 #endif
 #ifndef PackageVersion
-  #define PackageVersion "1.8.7"
+  #define PackageVersion "1.8.8"
 #endif
 #ifndef IconFile
   #define IconFile "..\..\Assets\AppIcon.ico"

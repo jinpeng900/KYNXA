@@ -1,4 +1,4 @@
-﻿; KYNXA Windows x64 installer. The release staging directory is the only payload source.
+; KYNXA Windows x64 installer. The release staging directory is the only payload source.
 ; KYNXA Windows x64 安装器。发布暂存目录是唯一的软件载荷来源。
 #ifndef PayloadRoot
   #error PayloadRoot must point to the prepared release staging directory.
@@ -7,7 +7,7 @@
   #define PackageOutputDir "..\..\..\..\artifacts\installer\output"
 #endif
 #ifndef PackageVersion
-  #define PackageVersion "1.8.7"
+  #define PackageVersion "1.8.8"
 #endif
 #ifndef LauncherFile
   #define LauncherFile "KYNXA.Desktop.exe"

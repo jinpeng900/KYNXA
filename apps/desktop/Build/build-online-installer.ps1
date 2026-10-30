@@ -1,8 +1,8 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$OutputDirectory,
     [string]$ReleaseManifestPath,
-    [string]$PackageVersion = '1.8.7',
+    [string]$PackageVersion = '1.8.8',
     [string]$CompilerPath,
     [switch]$AllowUnpublished
 )
