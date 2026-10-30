@@ -32,9 +32,9 @@ public sealed class ConversationPromptQueue : UserControl
     {
         Visibility = Visibility.Collapsed;
         FontFamily = Application.Current.Resources["KynxaUIFont"] as FontFamily;
-        Resources["SystemControlFocusVisualPrimaryBrush"] = Brush("KynxaSecondaryTextBrush");
+        Resources["SystemControlFocusVisualPrimaryBrush"] = Brush("KynxaFocusBrush");
         Resources["SystemControlFocusVisualSecondaryBrush"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        Resources["TextControlBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
+        Resources["TextControlBorderBrushFocused"] = Brush("KynxaFocusBrush");
         Content = new ScrollViewer
         {
             Content = _items, MaxHeight = 170,
@@ -111,14 +111,14 @@ public sealed class ConversationPromptQueue : UserControl
         ApplyStyle(row.More, "KynxaCompactIconButtonStyle");
         foreach (var button in new[] { row.Steer, row.Delete, row.More })
         {
-            button.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
+            button.FocusVisualPrimaryBrush = Brush("KynxaFocusBrush");
             button.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             button.Foreground = Brush("KynxaSecondaryTextBrush");
         }
         row.Surface.Background = Brush("KynxaReplySurfaceBrush");
         row.Surface.BorderBrush = Brush("KynxaDividerBrush");
         row.Preview.Foreground = row.Editor.Foreground = Brush("KynxaTextBrush");
-        row.Editor.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
+        row.Editor.FocusVisualPrimaryBrush = Brush("KynxaFocusBrush");
         row.Editor.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         row.Editor.BorderBrush = Brush("KynxaDividerBrush");
         row.More.Flyout = row.Menu;
@@ -127,7 +127,7 @@ public sealed class ConversationPromptQueue : UserControl
         row.Menu.Items.Add(row.Down);
         foreach (var item in new[] { row.Edit, row.Up, row.Down })
         {
-            item.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
+            item.FocusVisualPrimaryBrush = Brush("KynxaFocusBrush");
             item.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         }
         row.Steer.Click += (_, _) =>
@@ -148,6 +148,7 @@ public sealed class ConversationPromptQueue : UserControl
             {
                 row.Prompt.Text = row.Editor.Text;
                 row.Preview.Text = row.Prompt.DisplayText;
+                ToolTipService.SetToolTip(row.Preview, row.Preview.Text);
             }
         };
         row.Editor.LostFocus += (_, _) => EndEdit(row);
@@ -167,6 +168,7 @@ public sealed class ConversationPromptQueue : UserControl
     private void UpdateRow(MessageRow row, int index)
     {
         if (!row.IsEditing) { row.Preview.Text = row.Prompt.DisplayText; row.Editor.Text = row.Prompt.Text; }
+        ToolTipService.SetToolTip(row.Preview, row.Preview.Text);
         bool interactive = !row.Prompt.IsSubmitting;
         bool editable = interactive && !row.Prompt.IsTaskGuidance;
         row.Editor.IsReadOnly = !editable;
@@ -194,6 +196,7 @@ public sealed class ConversationPromptQueue : UserControl
         if (!row.IsEditing) return;
         row.IsEditing = false;
         row.Preview.Text = row.Prompt.DisplayText;
+        ToolTipService.SetToolTip(row.Preview, row.Preview.Text);
         row.Preview.Visibility = Visibility.Visible;
         row.Editor.Visibility = Visibility.Collapsed;
     }

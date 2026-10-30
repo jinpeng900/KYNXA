@@ -9,7 +9,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Windows.Storage;
-using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop.Views;
 
@@ -131,8 +130,9 @@ public sealed partial class ShellPage
             await SaveProjectsAndRenderAsync();
         });
         Item(UiText.Get("在文件资源管理器中打开"), "\uE8B7", () => OpenProjectFolderAsync(project));
-        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? UiText.Get("关联工作文件夹") : UiText.Get("重新关联文件夹"), "\uE8F4", () => ChangeProjectFolderAsync(project));
-        if (!string.IsNullOrWhiteSpace(project.FolderPath))
+        bool hasFolder = !string.IsNullOrWhiteSpace(ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath);
+        Item(hasFolder ? UiText.Get("重新关联文件夹") : UiText.Get("关联工作文件夹"), "\uE8F4", () => ChangeProjectFolderAsync(project));
+        if (hasFolder)
             Item(UiText.Get("取消关联文件夹"), "\uE8F4", () => UnmountProjectFolderAsync(project));
         Item(UiText.Get("检索设置"), "\uE721", () =>
         {
@@ -198,7 +198,7 @@ public sealed partial class ShellPage
     private async Task OpenProjectFolderAsync(ProjectState project)
     {
         if (!IsAvailableProject(project)) return;
-        string? path = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId)?.Path ?? project.FolderPath;
+        string? path = ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath;
         if (string.IsNullOrWhiteSpace(path))
         {
             // A blank project keeps its managed runtime directory without turning it into an external mount.
@@ -214,45 +214,59 @@ public sealed partial class ShellPage
         if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException(UiText.Get("无法打开文件资源管理器。"));
     }
 
-    private async Task ChangeProjectFolderAsync(ProjectState project)
+    private Task ChangeProjectFolderAsync(ProjectState project)
     {
-        if (!IsAvailableProject(project)) return;
-        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is null || !IsAvailableProject(project)) return;
-        await ApplyProjectFolderAsync(project, folder);
+        if (!IsAvailableProject(project)) return Task.CompletedTask;
+        Guid? originalChat = ActiveChatId, originalProject = _selectedWorkProjectId;
+        bool originalMode = ViewModel.IsChatMode;
+        var editor = new WorkspaceFolderEditor(UiText.Get("关联工作文件夹"), project.Name,
+            ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath, creating: false, async input =>
+            {
+                if (!IsAvailableProject(project) || ActiveChatId != originalChat || _selectedWorkProjectId != originalProject ||
+                    ViewModel.IsChatMode != originalMode) throw new OperationCanceledException();
+                await CommitFolderEditAsync(() => input.FolderPath is { } path
+                    ? ReplaceProjectFolderAsync(project, path) : UnmountProjectFolderAsync(project, showFailureEditor: false));
+            }, allowUnlink: !string.IsNullOrWhiteSpace(project.FolderPath));
+        ShowInlineFolderEditor(editor);
+        return Task.CompletedTask;
     }
 
-    private async Task ApplyProjectFolderAsync(ProjectState project, StorageFolder folder)
+    private async Task ReplaceProjectFolderAsync(ProjectState project, string path)
     {
-        if (!IsAvailableProject(project)) return;
         var previous = CaptureProjectFolderBinding(project);
-        var original = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId);
-        if (original is not null && SameFolderPath(original.Path, folder.Path) && original.Name == folder.DisplayName &&
-            SameFolderPath(project.FolderPath, original.Path)) return;
-        var replacement = original is null ? new ProjectMountState(Guid.NewGuid(), folder.DisplayName, folder.Path)
-            : original with { Name = folder.DisplayName, Path = folder.Path, BindingRevision = original.BindingRevision + 1 };
-        project.Mounts.RemoveAll(mount => mount.Id == replacement.Id);
-        project.Mounts.Add(replacement);
+        var original = ProjectMountPresentation.WorkspaceMount(project);
+        bool unchanged = original is not null && string.Equals(Path.TrimEndingDirectorySeparator(original.Path),
+            path, StringComparison.OrdinalIgnoreCase);
+        var replacement = original is null ? new ProjectMountState(Guid.NewGuid(), FolderDisplayName(path), path)
+            : original with { Name = FolderDisplayName(path), Path = path, BindingRevision = original.BindingRevision + (unchanged ? 0UL : 1UL) };
+        project.Mounts = [replacement];
         project.DefaultMountId = replacement.Id;
         project.FolderPath = replacement.Path;
         try { await SaveProjectsAndRenderAsync(); }
         catch { ApplyProjectFolderBinding(project, previous); throw; }
         ShowProjectFolderNotice(project, previous,
-            string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path));
+            string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, path));
     }
 
-    private async Task UnmountProjectFolderAsync(ProjectState project)
+    private Task UnmountProjectFolderAsync(ProjectState project) => UnmountProjectFolderAsync(project, showFailureEditor: true);
+
+    private async Task UnmountProjectFolderAsync(ProjectState project, bool showFailureEditor)
     {
-        if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(project.FolderPath)) return;
+        if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath)) return;
         var previous = CaptureProjectFolderBinding(project);
-        project.Mounts.RemoveAll(mount => mount.Id == project.DefaultMountId);
-        project.DefaultMountId = project.Mounts.FirstOrDefault()?.Id;
-        project.FolderPath = project.Mounts.FirstOrDefault()?.Path;
+        project.Mounts = [];
+        project.DefaultMountId = null;
+        project.FolderPath = null;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { ApplyProjectFolderBinding(project, previous); throw; }
+        catch (Exception error)
+        {
+            ApplyProjectFolderBinding(project, previous);
+            if (!showFailureEditor) throw;
+            // Keep this chat and draft in place; retry errors belong to the same inline folder editor.
+            await ChangeProjectFolderAsync(project);
+            WorkspaceHome.ShowFolderEditorError(error.Message);
+            return;
+        }
         ShowProjectFolderNotice(project, previous,
             string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name));
     }
@@ -293,24 +307,7 @@ public sealed partial class ShellPage
         RevealProject(project);
     }
 
-    private async Task<ProjectState?> PickProjectFolderAsync()
-    {
-        Guid? originalChat = ActiveChatId, originalProject = _selectedWorkProjectId;
-        bool originalMode = ViewModel.IsChatMode;
-        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-        StorageFolder? folder = await picker.PickSingleFolderAsync();
-        if (folder is null || _projectViewClosed || _chatClosing || _savingOnClose || ActiveChatId != originalChat ||
-            _selectedWorkProjectId != originalProject || ViewModel.IsChatMode != originalMode) return null;
-        var project = _projects.FirstOrDefault(candidate => candidate.Mounts.Any(mount =>
-            string.Equals(Path.TrimEndingDirectorySeparator(mount.Path), Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase)) ||
-            candidate.FolderPath is not null && string.Equals(Path.TrimEndingDirectorySeparator(candidate.FolderPath),
-                Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase));
-        if (project is null) return await ShowProjectCreationAsync(folder);
-        await RunProjectActionAsync(async () => { project.IsArchived = false; await SaveProjectsAndRenderAsync(); });
-        return project;
-    }
+    private Task<ProjectState?> PickProjectFolderAsync() => ShowProjectCreationAsync(reuseFolderProject: true);
 
     private async Task SaveProjectsAndRenderAsync()
     {

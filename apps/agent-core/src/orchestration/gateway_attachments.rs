@@ -135,10 +135,8 @@ pub(crate) async fn content(
     .map_err(|_| GatewayError::new("ATTACHMENT_WORKER_FAILED", "附件读取线程结束。", 500))??;
     Ok(AttachmentContent {
         bytes,
-        mime_type: metadata["contentType"]
-            .as_str()
-            .unwrap_or("application/octet-stream")
-            .to_owned(),
+        mime_type: crate::tools::gateway_workspace_media::format(Path::new(metadata["name"].as_str().unwrap_or("")))
+            .map(|(_,mime)|mime).unwrap_or_else(||metadata["contentType"].as_str().unwrap_or("application/octet-stream")).to_owned(),
         sha256: metadata["sha256"].as_str().unwrap_or("").to_owned(),
     })
 }
@@ -170,7 +168,12 @@ pub(crate) async fn preview(
         format!("/api/conversations/{conversation}/attachments/{attachment}/content?{}", query.finish())
     };
     let mut result = json!({"kind":"text","title":name,"path":name,"version":version,
-        "mimeType":metadata["contentType"]});
+        "mimeType":metadata["contentType"],"downloadUrl":content_url});
+    if let Some(media) = crate::tools::gateway_workspace_media::attachment_metadata(path, &bytes)? {
+        for (key,value) in media.as_object().unwrap() { result[key]=value.clone(); }
+        if result["renderable"] == true { result["contentUrl"] = json!(content_url); }
+        return Ok(result);
+    }
     let (direct, bytes) = if matches!(extension.as_str(), "docx" | "pptx" | "xlsx") && arguments["representation"] != "pdf" {
         let source = path.to_owned();
         tokio::task::spawn_blocking(move || {

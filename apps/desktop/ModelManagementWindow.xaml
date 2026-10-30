@@ -186,11 +186,25 @@
                     <StackPanel Spacing="10">
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <ProgressRing x:Name="BusyIndicator" Width="18" Height="18" IsActive="False" HorizontalAlignment="Left" />
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Button x:Name="DeleteConnectionButton" services:UiLocalization.Content="删除连接"
+                                        Foreground="{StaticResource KynxaErrorBrush}" Visibility="Collapsed"
+                                        AutomationProperties.AutomationId="ModelConnectionDelete" Click="DeleteConnectionButton_Click" />
+                                <ProgressRing x:Name="BusyIndicator" Width="18" Height="18" IsActive="False" />
+                            </StackPanel>
                             <Button x:Name="ProbeButton" Grid.Column="1" services:UiLocalization.Content="获取模型 / 测试" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="TestConnectionButton_Click" />
                             <Button x:Name="SaveButton" Grid.Column="2" services:UiLocalization.Content="保存连接" Background="{StaticResource KynxaSendBrush}" Foreground="{StaticResource KynxaOnAccentBrush}" Click="SaveConnectionButton_Click" />
                         </Grid>
-                        <TextBlock x:Name="StatusText" FontSize="12" MaxHeight="52" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" AutomationProperties.LiveSetting="Polite" />
+                        <Grid x:Name="StatusRow" ColumnSpacing="4">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock x:Name="StatusText" FontSize="12" MaxLines="1" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                                       Foreground="{StaticResource KynxaSecondaryTextBrush}" AutomationProperties.LiveSetting="Polite" />
+                            <Button x:Name="DismissStatusButton" Grid.Column="1" Content="×" FontSize="13"
+                                    Foreground="{StaticResource KynxaErrorBrush}" Background="Transparent" BorderThickness="0"
+                                    MinWidth="20" MinHeight="20" Padding="2" CornerRadius="4" Visibility="Collapsed"
+                                    services:UiLocalization.AutomationName="关闭提示" Click="DismissStatusButton_Click" />
+                        </Grid>
                     </StackPanel>
                 </Border>
             </Grid>

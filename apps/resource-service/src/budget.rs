@@ -6,6 +6,8 @@ use std::collections::HashMap;
 
 const MAX_LEASES: usize = 128;
 const MAX_TTL_MS: u64 = 300_000;
+const MAX_TRANSPORT_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+const TRANSPORT_SYSTEM_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -54,6 +56,8 @@ struct Lease {
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_device_id: Option<u32>,
     task_id: String,
+    #[serde(skip)]
+    model_transport: bool,
 }
 
 pub struct ResourceBudget {
@@ -115,6 +119,9 @@ impl ResourceBudget {
                 "capacityMemoryBytes":memory_capacity(hardware),"maximumResidentReservationBytes":hardware.memory.total_bytes/2,
                 "availableMemoryBytes": self.available_memory(hardware),
                 "availableTransportMemoryBytes": self.available_memory_for(hardware, "model-transport"),
+                "maximumTransportReservationBytes": MAX_TRANSPORT_MEMORY_BYTES,
+                "reservedTransportMemoryBytes": self.reserved_transport_memory(),
+                "transportSystemHeadroomBytes": TRANSPORT_SYSTEM_HEADROOM_BYTES,
                 "gpuMemoryState": if materialized_gpu_bytes > 0 { "observed-process-increments" } else { "unverified-reservation" },
                 "observedMaterializedGpuMemoryBytes":materialized_gpu_bytes,
                 "availableGpuMemoryBytes":self.available_gpu_memory(hardware),
@@ -222,13 +229,22 @@ impl ResourceBudget {
     fn available_memory_for(&self, hardware: &HardwareSnapshot, workload: &str) -> u64 {
         let (_, reserved, _) = self.reserved();
         let materialized = self.materialized_memory().values().sum::<u64>();
-        let capacity = if workload == "model-transport" {
-            // Transport may use foreground headroom, preserving the system floor and unresolved debt.
-            // 模型通信可使用前台余量，仍预留系统底线并扣除未兑现预约。
-            hardware.memory.available_bytes.saturating_sub(512 * 1024 * 1024)
-        } else { memory_capacity(hardware) };
-        capacity.saturating_sub(reserved.saturating_sub(materialized))
+        let unmaterialized = reserved.saturating_sub(materialized);
+        if workload == "model-transport" {
+            // A bounded I/O pool does not reserve an already resident model a second time.
+            // 小额通信池不重复预约已驻留模型，但仍扣除所有未兑现债务并保留系统余量。
+            return hardware.memory.available_bytes
+                .saturating_sub(TRANSPORT_SYSTEM_HEADROOM_BYTES)
+                .saturating_sub(unmaterialized)
+                .min(MAX_TRANSPORT_MEMORY_BYTES.saturating_sub(self.reserved_transport_memory()));
+        }
+        memory_capacity(hardware).saturating_sub(unmaterialized)
             .min((hardware.memory.total_bytes / 2).saturating_sub(reserved))
+    }
+
+    fn reserved_transport_memory(&self) -> u64 {
+        self.leases.values().filter(|lease| lease.model_transport)
+            .fold(0, |reserved, lease| reserved.saturating_add(lease.memory_bytes))
     }
 
     pub fn restore(&mut self, leases: Vec<RestoredLease>) -> Value {
@@ -242,7 +258,8 @@ impl ResourceBudget {
             if restored.contains_key(&lease.lease_id) { return json!({"status":"denied","reason":"RESOURCE_RESTORE_INVALID"}); }
             restored.insert(lease.lease_id.clone(), Lease { lease_id:lease.lease_id,expires_at:lease.expires_at,
                 cpu_threads:lease.cpu_threads,memory_bytes:lease.memory_bytes,gpu_memory_bytes:lease.gpu_memory_bytes,
-                device_id:None,execution_provider:None,execution_device_id:None,task_id:lease.task_id });
+                device_id:None,execution_provider:None,execution_device_id:None,task_id:lease.task_id,
+                model_transport:false });
         }
         // Restore held debt atomically; monitor restarts do not free capacity.
         // 原子恢复未结清预约，监控重启不代表资源已经释放。
@@ -332,6 +349,7 @@ impl ResourceBudget {
                 None
             },
             task_id: request.task_id,
+            model_transport: request.workload == "model-transport",
         };
         self.leases.insert(lease.lease_id.clone(), lease.clone());
         let mut output = serde_json::to_value(&lease).expect("lease serialization");
@@ -484,13 +502,85 @@ mod tests {
         assert_eq!(budget.acquire(request(1, 16 << 20), &machine, 0)["reason"], "RESOURCE_PRESSURE");
         assert_eq!(budget.acquire(transport.clone(), &machine, 0)["status"], "granted");
         assert_eq!(budget.snapshot(&machine, 2000)["budget"]["reservedMemoryBytes"], 272 << 20);
-        machine.memory.available_bytes = 780 << 20;
+        machine.memory.available_bytes = 330 << 20;
         assert_eq!(budget.acquire(transport.clone(), &machine, 2000)["reason"], "RESOURCE_PRESSURE");
         transport.memory_bytes = 33 << 20;
         assert_eq!(budget.acquire(transport.clone(), &machine, 2000)["reason"], "RESOURCE_INVALID_REQUEST");
         transport.memory_bytes = 16 << 20;
         transport.gpu_memory_bytes = 1;
         assert_eq!(budget.acquire(transport, &machine, 2000)["reason"], "RESOURCE_INVALID_REQUEST");
+    }
+    fn transport_request(memory: u64) -> AllocationRequest {
+        let mut transport = request(0, memory);
+        transport.kind = "foreground".into();
+        transport.workload = "model-transport".into();
+        transport
+    }
+
+    #[test]
+    fn small_transport_survives_low_memory_but_compute_keeps_its_system_floor() {
+        let mut budget = ResourceBudget::new();
+        let mut machine = hardware();
+        machine.memory.available_bytes = 480 << 20;
+        assert_eq!(budget.acquire(request(1, 16 << 20), &machine, 0)["reason"], "RESOURCE_PRESSURE");
+        assert_eq!(budget.acquire(transport_request(16 << 20), &machine, 0)["status"], "granted");
+        machine.memory.available_bytes = TRANSPORT_SYSTEM_HEADROOM_BYTES + (31 << 20);
+        assert_eq!(budget.acquire(transport_request(16 << 20), &machine, 0)["reason"], "RESOURCE_PRESSURE");
+    }
+
+    #[test]
+    fn materialized_resident_model_does_not_exhaust_the_separate_transport_pool() {
+        let mut budget = ResourceBudget::new();
+        let model_bytes = (8_u64 << 30) + (128 << 20);
+        let restored = serde_json::from_value(json!([
+            {"leaseId":"resident-model","expiresAt":1,"cpuThreads":0,"memoryBytes":model_bytes,
+                "gpuMemoryBytes":0,"taskId":"model"}
+        ])).unwrap();
+        assert_eq!(budget.restore(restored)["status"], "restored");
+        let mut machine = hardware();
+        machine.memory.available_bytes = 480 << 20;
+        // An unknown or only partly materialized model still owes its unresolved reservation.
+        assert_eq!(budget.acquire(transport_request(16 << 20), &machine, 2000)["reason"], "RESOURCE_PRESSURE");
+        budget.reconcile_memory(vec![LeaseMemoryObservation { lease_id:"resident-model".into(),process_id:42,
+            start_time_ms:100,baseline_memory_bytes:Some(100),memory_bytes:Some(model_bytes + 100 - (420 << 20)),state:"running" }]);
+        assert_eq!(budget.acquire(transport_request(16 << 20), &machine, 2000)["reason"], "RESOURCE_PRESSURE");
+        budget.reconcile_memory(vec![LeaseMemoryObservation { lease_id:"resident-model".into(),process_id:42,
+            start_time_ms:100,baseline_memory_bytes:Some(100),memory_bytes:Some(model_bytes + 100),state:"running" }]);
+        assert_eq!(budget.acquire(transport_request(16 << 20), &machine, 2000)["status"], "granted");
+        assert_eq!(budget.acquire(request(0, 1), &machine, 2000)["reason"], "RESOURCE_PRESSURE");
+        assert_eq!(budget.snapshot(&machine, 2000)["quarantinedLeases"], 1);
+    }
+
+    #[test]
+    fn transport_pool_stays_bounded_even_after_materialization_and_expiry() {
+        let mut budget = ResourceBudget::new();
+        let mut observations = Vec::new();
+        for _ in 0..4 {
+            let lease = budget.acquire(transport_request(16 << 20), &hardware(), 0);
+            assert_eq!(lease["status"], "granted");
+            observations.push(LeaseMemoryObservation { lease_id:lease["leaseId"].as_str().unwrap().into(),
+                process_id:42,start_time_ms:100,baseline_memory_bytes:Some(0),memory_bytes:Some(64 << 20),state:"running" });
+        }
+        budget.reconcile_memory(observations.clone());
+        assert_eq!(budget.acquire(transport_request(1), &hardware(), 2000)["reason"], "RESOURCE_PRESSURE");
+        assert_eq!(budget.snapshot(&hardware(), 2000)["accounting"]["reservedTransportMemoryBytes"], MAX_TRANSPORT_MEMORY_BYTES);
+        budget.release(&observations[0].lease_id);
+        assert_eq!(budget.acquire(transport_request(16 << 20), &hardware(), 2000)["status"], "granted");
+    }
+
+    #[test]
+    fn transport_contract_cannot_reserve_model_loading_or_compute_resources() {
+        let mut oversized = transport_request(33 << 20);
+        let mut background = transport_request(16 << 20); background.kind = "background".into();
+        let mut cpu = transport_request(16 << 20); cpu.cpu_threads = 2;
+        let mut gpu = transport_request(16 << 20); gpu.gpu_memory_bytes = 1;
+        let mut budget = ResourceBudget::new();
+        for invalid in [oversized.clone(), background, cpu, gpu, transport_request(0)] {
+            assert_eq!(budget.acquire(invalid, &hardware(), 0)["reason"], "RESOURCE_INVALID_REQUEST");
+        }
+        oversized.workload = "compute".into();
+        let mut machine = hardware(); machine.memory.available_bytes = 480 << 20;
+        assert_eq!(budget.acquire(oversized, &machine, 0)["reason"], "RESOURCE_PRESSURE");
     }
     #[test]
     fn allocation_is_atomic_and_expiry_does_not_free_unconfirmed_work() {

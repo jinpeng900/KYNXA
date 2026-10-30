@@ -448,8 +448,8 @@ public sealed partial class ShellPage : Page
     private void WorkSidebarContent_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (WorkRecentHistory is null || ProjectTree is null) return;
-        // Each section keeps its own bounded content height above the fixed sidebar footer.
-        // 各分区在固定页脚上方按自身条数限高，不再由任务区占满剩余空间。
+        // Recalculate only geometry; dragged heights and list identities survive a resize.
+        // 仅重算布局；窗口缩放保留拖动高度及原列表对象。
         UpdateWorkSidebarHeights(e.NewSize.Height);
     }
 
@@ -596,9 +596,9 @@ public sealed partial class ShellPage : Page
     private void UpdateComposerExpandVisual()
     {
         ComposerExpandIcon.Glyph = _composerExpanded ? "\uE73F" : "\uE740";
-        ToolTipService.SetToolTip(
-            ComposerExpandButton,
-            _composerExpanded ? UiText.Get("收起输入区") : UiText.Get("展开输入区"));
+        string label = UiText.Get(_composerExpanded ? "收起输入区" : "展开输入区");
+        ToolTipService.SetToolTip(ComposerExpandButton, label);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ComposerExpandButton, label);
     }
 
     private void NewPrimaryAction_Click(object sender, RoutedEventArgs e)

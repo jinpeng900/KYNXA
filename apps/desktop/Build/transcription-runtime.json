@@ -1,0 +1,97 @@
+{
+  "schema": "kynxa-transcription-runtime/v1",
+  "engine": {
+    "name": "whisper.cpp",
+    "version": "1.8.3",
+    "license": "MIT",
+    "source": "https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.3",
+    "download": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.3/whisper-bin-x64.zip",
+    "archiveSha256": "d824b1e37599f882b396e73f1ee0bfd5d0529f700314c48311dcbd00b803321d",
+    "archiveBytes": 3968674,
+    "archiveName": "whisper-bin-x64-v1.8.3.zip"
+  },
+  "model": {
+    "name": "ggml-tiny.bin",
+    "multilingual": true,
+    "license": "MIT",
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "source": "https://huggingface.co/ggerganov/whisper.cpp",
+    "download": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin",
+    "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    "bytes": 77691713
+  },
+  "files": [
+    {
+      "name": "ggml-base.dll",
+      "bytes": 536064,
+      "sha256": "61c9c57f49f380896ed54ed3f71735e10a2d986f482c2b0a55e72b47f731b193",
+      "path": "runtime/transcription/ggml-base.dll",
+      "kind": "archive",
+      "entry": "Release/ggml-base.dll"
+    },
+    {
+      "name": "ggml-cpu.dll",
+      "bytes": 683008,
+      "sha256": "eb2f1d023e51c40b27463b5ab165600eb48cb60323740f400b1b62e1c8706c56",
+      "path": "runtime/transcription/ggml-cpu.dll",
+      "kind": "archive",
+      "entry": "Release/ggml-cpu.dll"
+    },
+    {
+      "name": "ggml-tiny.bin",
+      "bytes": 77691713,
+      "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+      "path": "runtime/transcription/ggml-tiny.bin",
+      "kind": "model"
+    },
+    {
+      "name": "ggml.dll",
+      "bytes": 67584,
+      "sha256": "bcfeaf6e5b59c315fc36e290715aa7a84b22461e968543c13dfcf57df7b1b81d",
+      "path": "runtime/transcription/ggml.dll",
+      "kind": "archive",
+      "entry": "Release/ggml.dll"
+    },
+    {
+      "name": "LICENSE-whisper-model-MIT.txt",
+      "bytes": 1063,
+      "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+      "path": "runtime/transcription/LICENSE-whisper-model-MIT.txt",
+      "kind": "local",
+      "source": "native-assets/licenses/transcription/LICENSE-whisper-model-MIT.txt"
+    },
+    {
+      "name": "LICENSE-whisper.cpp-MIT.txt",
+      "bytes": 1078,
+      "sha256": "e562a2ddfaf8280537795ac5ecd34e3012b6582a147ef69ba6a6a5c08c84757d",
+      "path": "runtime/transcription/LICENSE-whisper.cpp-MIT.txt",
+      "kind": "local",
+      "source": "native-assets/licenses/transcription/LICENSE-whisper.cpp-MIT.txt"
+    },
+    {
+      "name": "README-KYNXA.txt",
+      "bytes": 1324,
+      "sha256": "b6785618a8ff544677d385ebc910746613114e489e59fc05cf4605c855f5ec81",
+      "path": "runtime/transcription/README-KYNXA.txt",
+      "kind": "local",
+      "source": "native-assets/licenses/transcription/README-KYNXA.txt"
+    },
+    {
+      "name": "whisper-cli.exe",
+      "bytes": 480768,
+      "sha256": "0ff971e410240a0b97117432d771245698f376e06105c011959d2bfc4bb23311",
+      "path": "runtime/transcription/whisper-cli.exe",
+      "kind": "archive",
+      "entry": "Release/whisper-cli.exe"
+    },
+    {
+      "name": "whisper.dll",
+      "bytes": 483840,
+      "sha256": "4037a6567fbb08fc7efda18e4d128a95df9c31ba171af20439d1a93b785d007e",
+      "path": "runtime/transcription/whisper.dll",
+      "kind": "archive",
+      "entry": "Release/whisper.dll"
+    }
+  ],
+  "runtimeIdentifier": "win-x64"
+}

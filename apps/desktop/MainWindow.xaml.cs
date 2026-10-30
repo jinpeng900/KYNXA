@@ -16,6 +16,7 @@ public sealed partial class MainWindow : Window
     private readonly Services.MainWindowTrayService _trayService;
 
     internal void RequestExit() => _trayService.RequestExit();
+    internal void ShowCompletionNotification(string? title) => _trayService.ShowCompletionNotification(title);
 
     private void MoreOptions_Click(object sender, RoutedEventArgs e)
     {
@@ -26,6 +27,8 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        Title = AppCaptionText.Text = Services.AppIdentity.DisplayName;
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);

@@ -19,7 +19,7 @@ public sealed class ConversationAttachmentDrafts : Grid
     {
         Children.Add(new ScrollViewer { Content = _items, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Enabled,
-            VerticalScrollMode = ScrollMode.Disabled });
+            VerticalScrollMode = ScrollMode.Disabled, ZoomMode = ZoomMode.Disabled, Padding = new Thickness(0, 0, 0, 12) });
         MaxHeight = 118;
         Margin = new Thickness(14, 10, 14, 0);
         Visibility = Visibility.Collapsed;
@@ -30,7 +30,9 @@ public sealed class ConversationAttachmentDrafts : Grid
         _items.Children.Clear();
         foreach (var file in files)
         {
-            var card = new Grid { Width = file.Thumbnail is null ? 174 : 112, Height = 96 };
+            // Reserve the horizontal scrollbar lane within the existing attachment height budget.
+            // 在原有附件高度内为横向滚动条留槽，避免文件名被覆盖。
+            var card = new Grid { Width = file.Thumbnail is null ? 174 : 112, Height = 88 };
             var surface = new Border
             {
                 CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1),
@@ -40,17 +42,17 @@ public sealed class ConversationAttachmentDrafts : Grid
             AutomationProperties.SetName(surface, file.Name);
             if (file.Thumbnail is not null)
                 card.Children.Add(new Border { CornerRadius = new CornerRadius(9), Child = new Image
-                    { Source = file.Thumbnail, Stretch = Stretch.UniformToFill, Height = 62, VerticalAlignment = VerticalAlignment.Top } });
+                    { Source = file.Thumbnail, Stretch = Stretch.UniformToFill, Height = 54, VerticalAlignment = VerticalAlignment.Top } });
             else
                 card.Children.Add(new FontIcon { Glyph = "\uE8A5", FontSize = 26, Foreground = Brush("KynxaSecondaryTextBrush"),
                     HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(12, 12, 0, 0), VerticalAlignment = VerticalAlignment.Top });
             card.Children.Add(new TextBlock { Text = file.Name, FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis,
                 Foreground = Brush("KynxaTextBrush"), Margin = new Thickness(10, 0, 9, 9), VerticalAlignment = VerticalAlignment.Bottom });
             var remove = new Button { Content = new FontIcon { Glyph = "\uE711", FontSize = 10 }, Padding = new Thickness(4),
-                MinWidth = 22, MinHeight = 22, CornerRadius = new CornerRadius(7), Margin = new Thickness(0, 4, 4, 0),
+                Width = 28, Height = 28, MinWidth = 0, MinHeight = 0, CornerRadius = new CornerRadius(8), Margin = new Thickness(0, 4, 4, 0),
                 HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
                 Foreground = Brush("KynxaSecondaryTextBrush"), Background = Brush("KynxaReplySurfaceBrush"), BorderThickness = new Thickness(0),
-                FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush"), FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+                FocusVisualPrimaryBrush = Brush("KynxaFocusBrush"), FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
             if (Application.Current.Resources.TryGetValue("KynxaCompactIconButtonStyle", out var style) && style is Style buttonStyle)
                 remove.Style = buttonStyle;
             AutomationProperties.SetName(remove, UiText.Get("移除附件") + " " + file.Name);

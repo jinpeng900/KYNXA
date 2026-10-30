@@ -547,7 +547,8 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","document.create","image.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.") || ["document.read","document.create","attachment.export","media.transcribe","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+        || name == "image.read" && arguments["path"].is_string()
         || name == "artifact.open" && !arguments["url"].is_string() && !arguments["resultId"].is_string()
 }
 
@@ -570,13 +571,16 @@ pub(crate) fn operation_mount_binding(ctx: &GatewayToolContext, arguments: &Valu
     Ok(mounts.iter().find(|mount|mount["id"] == ctx.config["defaultMountId"]).cloned().unwrap_or(Value::Null))
 }
 
-/// Freeze a resumed task's original mounts; catalog additions never silently enlarge its authority.
-/// 固定续接任务原有的挂载授权；目录列表新增不能悄悄扩大该任务的访问范围。
+/// Retain the task identity while limiting restored access to the current work folder.
+/// 保留任务原身份；恢复权限只与当前工作目录取交集，不重新放回已移除目录。
 pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot: &Value) -> Result<(), GatewayError> {
     if !snapshot.is_object() { return Ok(()); }
     if let Some(mounts) = snapshot["mounts"].as_array() {
+        let current = ctx.config["workspaceMounts"].as_array().cloned().unwrap_or_default();
+        let mounts = mounts.iter().filter(|old|current.iter().any(|live|
+            crate::storage::workspace_mounts::same_mount(old,live))).take(1).cloned().collect::<Vec<_>>();
+        ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
         ctx.config["workspaceMounts"] = json!(mounts);
-        ctx.config["defaultMountId"] = snapshot["defaultMountId"].clone();
         ctx.config["bindingSnapshot"] = snapshot.clone();
         ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
     } else if let Some(folder) = snapshot["folderPath"].as_str() {
@@ -584,11 +588,13 @@ pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot:
             .filter(|mount|mount["path"] == folder).cloned().collect::<Vec<_>>();
         ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
         ctx.config["workspaceMounts"] = json!(mounts);
-        ctx.authorized_roots = vec![PathBuf::from(folder)];
+        ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
     }
     if let Some(folder) = snapshot["folderPath"].as_str().filter(|folder|!folder.is_empty()) {
-        ctx.workdir = PathBuf::from(folder);
-        if !ctx.authorized_roots.contains(&ctx.workdir) { ctx.authorized_roots.push(ctx.workdir.clone()); }
+        let folder = PathBuf::from(folder);
+        if ctx.authorized_roots.iter().any(|root|super::local_files::within(root,&folder) && super::local_files::within(&folder,root)) {
+            ctx.workdir = folder;
+        }
     }
     Ok(())
 }
@@ -700,7 +706,19 @@ pub(super) async fn filesystem(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create");
+    filesystem_bound(name, args, ctx, None).await
+}
+
+pub(super) async fn filesystem_binary_write(args: Value, bytes: Vec<u8>, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    filesystem_bound("filesystem.write", args, ctx, Some(bytes)).await
+}
+
+pub(super) async fn filesystem_binary_export(args: Value, bytes: Vec<u8>, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    filesystem_bound("attachment.export", args, ctx, Some(bytes)).await
+}
+
+async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, binary: Option<Vec<u8>>) -> Result<Value, GatewayError> {
+    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create" | "attachment.export");
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -752,6 +770,26 @@ pub(super) async fn filesystem(
     }
     let binding = json!({"requestedPath":super::local_files::path_text(&requested),"path":super::local_files::path_text(&path),
         "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "image.read" || name == "artifact.open"});
+    if let Some(bytes) = binary {
+        let expected = args["expectedHash"].clone();
+        let cancellation = WorkerCancellation::new(ctx);
+        let signal = cancellation.signal.clone();
+        let attachment_export = name == "attachment.export";
+        if attachment_export && super::intent::path_domain(&super::local_files::path_text(&path)) == "code" {
+            observe_code_target(ctx, &binding)?;
+        }
+        return tokio::task::spawn_blocking(move || (if attachment_export {
+            super::service_filesystem::commit_binary_new(&path, &bytes, &binding, &Some(signal),
+                crate::storage::message_attachments::MAXIMUM_FILE_BYTES)
+        } else {
+            super::service_filesystem::commit_binary(&path, &bytes, &expected, &binding, &Some(signal))
+        }).map(|mut result| {
+            if attachment_export { result["codeTarget"] = json!(super::intent::path_domain(result["path"].as_str().unwrap_or("")) == "code"); }
+            result
+        })
+            .map_err(|error| failure(&error.code, &error.message, error.status_code)))
+            .await.map_err(|_| failure("TOOL_WORKER_FAILED", "文件保存未完成。", 500))?;
+    }
     if name == "artifact.open" {
         return super::gateway_workspace_preview::open(args, path, binding, ctx).await;
     }
@@ -1023,7 +1061,7 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "image.read", "attachment.export", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
@@ -1052,6 +1090,22 @@ async fn execute_inner(
     }
     if tool_name == "attachment.read" {
         return super::gateway_attachment_read::read(args, ctx).await;
+    }
+    if tool_name == "attachment.export" {
+        return super::gateway_attachment_read::export(args, ctx).await;
+    }
+    if tool_name == "image.read" {
+        let has_path = args["path"].as_str().is_some_and(|path| !path.trim().is_empty());
+        let has_message = args["messageId"].as_str().is_some_and(|id| !id.is_empty());
+        let has_attachment = args["attachmentId"].as_str().is_some_and(|id| !id.is_empty());
+        if has_path && (args.get("messageId").is_some() || args.get("attachmentId").is_some())
+            || !has_path && (!has_message || !has_attachment || args.get("path").is_some() || args.get("mountId").is_some()) {
+            return Err(failure("INVALID_TOOL_ARGUMENTS", "请仅指定图片 path，或同时指定 messageId 和 attachmentId；附件读取不使用 mountId。", 400));
+        }
+        if !has_path { return super::gateway_image::read_attachment(args, ctx).await; }
+    }
+    if tool_name == "media.transcribe" {
+        return super::gateway_workspace_transcription::tool(args, ctx).await;
     }
     if tool_name == "artifact.open" {
         if !args["path"].as_str().is_some_and(|path| !path.trim().is_empty()) {
@@ -2329,52 +2383,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mounted_files_keep_default_identity_and_revoke_only_the_removed_root() {
+    async fn single_work_folder_rejects_extra_roots_and_preserves_explicit_external_access() {
         use crate::storage::{gateway as data, workspace_mounts};
         let (mut ctx, _sender) = test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
-        let second = root.join("第二个 folder");
+        let second = root.join("second folder");
         std::fs::create_dir_all(&second).unwrap();
         std::fs::write(ctx.workdir.join("same.txt"),"DEFAULT").unwrap();
         std::fs::write(second.join("same.txt"),"SECOND").unwrap();
         let project_id = uuid::Uuid::new_v4().to_string();
         let first_id = uuid::Uuid::new_v4().to_string();
         let second_id = uuid::Uuid::new_v4().to_string();
-        data::ensure_conversation(&ctx.data_home,&ctx.conversation_id,"Mount fixture").unwrap();
+        data::ensure_conversation(&ctx.data_home,&ctx.conversation_id,"Folder fixture").unwrap();
         let old = data::load_catalog(&ctx.data_home).unwrap();
-        let catalog = json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Mount fixture",
-            "Mounts":[{"Id":first_id,"Name":"Default","Path":ctx.workdir,"BindingRevision":1},{"Id":second_id,"Name":"Secondary","Path":second,"BindingRevision":1}],
-            "DefaultMountId":first_id,"Chats":[{"Id":ctx.conversation_id,"Title":"Mounts","Messages":[
-                {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Mount fixture","Status":"completed"}]}]}]});
+        let mut catalog = json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Folder fixture",
+            "Mounts":[{"Id":first_id,"Name":"Current","Path":ctx.workdir,"BindingRevision":1},{"Id":second_id,"Name":"Removed","Path":second,"BindingRevision":1}],
+            "DefaultMountId":first_id,"Chats":[{"Id":ctx.conversation_id,"Title":"Folder","Messages":[
+                {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Folder fixture","Status":"completed"}]}]}]});
+        assert_eq!(data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap_err().code(),"INVALID_WORKSPACE_MOUNTS");
+        assert_eq!(data::handle_raw("PUT","/api/conversations/catalog",&[],&catalog,&catalog.to_string(),&ctx.data_home).unwrap().unwrap_err().code(),"INVALID_WORKSPACE_MOUNTS");
+        assert_eq!(data::load_catalog(&ctx.data_home).unwrap()["Revision"],old["Revision"]);
+        catalog["Projects"][0]["Mounts"].as_array_mut().unwrap().truncate(1);
         data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap();
         let relation = data::relationship(&ctx.data_home,&ctx.conversation_id).unwrap();
         ctx.project_id = Some(project_id);
         ctx.permission_mode = "full".into();
         ctx.config["workspaceMounts"] = relation["mounts"].clone();
         ctx.config["defaultMountId"] = relation["defaultMountId"].clone();
-        ctx.config["bindingSnapshot"] = workspace_mounts::snapshot(&relation);
-        ctx.authorized_roots.push(second.clone());
-        let default_read = execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap();
-        let second_read = execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap();
-        assert_ne!(default_read["sha256"],second_read["sha256"]);
-        execute("filesystem.write",json!({"mountId":second_id,"path":"same.txt","content":"SECOND UPDATED","expectedHash":second_read["sha256"]}),&ctx).await.unwrap();
-        assert_eq!(std::fs::read_to_string(ctx.workdir.join("same.txt")).unwrap(),"DEFAULT");
-        assert_eq!(std::fs::read_to_string(second.join("same.txt")).unwrap(),"SECOND UPDATED");
-        let listing = workspace_files(&json!({"mountId":second_id,"path":"."}),&ctx).await.unwrap();
-        assert!(Path::new(listing["path"].as_str().unwrap()).is_absolute());
-        assert!(listing["entries"].as_array().unwrap().iter().any(|entry|entry["name"] == "same.txt"));
-        assert!(workspace_files(&json!({"mountId":second_id,"path":".."}),&ctx).await.is_err());
-        // Explicit external file access retains its original permission/reason contract.
-        // 明确指定的外部文件仍遵循原有权限与原因合同，不因多目录支持被全面禁止。
-        std::fs::write(root.join("external.txt"),"EXTERNAL").unwrap();
-        execute("filesystem.read",json!({"path":root.join("external.txt"),"reason":"Read the explicitly selected fixture file"}),&ctx).await.unwrap();
-        let mut next = data::load_catalog(&ctx.data_home).unwrap();
-        next["Projects"][0]["Mounts"].as_array_mut().unwrap().retain(|mount|mount["Id"] != second_id);
-        data::handle("PUT","/api/conversations/catalog",&[],&next,&ctx.data_home).unwrap().unwrap();
-        assert_eq!(execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
-        assert_eq!(execute("filesystem.read",json!({"path":second.join("same.txt"),"reason":"An old authorization is not a live mount"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
-        assert_eq!(execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap()["sha256"],default_read["sha256"]);
+        let mut snapshot = workspace_mounts::snapshot(&relation);
+        snapshot["mounts"].as_array_mut().unwrap().push(json!({"id":second_id,"name":"Old second root","path":second,"bindingRevision":1}));
+        restrict_workspace_context(&mut ctx,&snapshot).unwrap();
+        assert_eq!(ctx.config["workspaceMounts"].as_array().unwrap().len(),1);
+        assert!(!ctx.authorized_roots.contains(&second));
         assert_eq!(execute("work.folder.list",json!({}),&ctx).await.unwrap()["mounts"].as_array().unwrap().len(),1);
+        let default_read = execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap();
+        assert_eq!(default_read["content"],"DEFAULT");
+        assert_eq!(execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_UNAVAILABLE");
+        execute("filesystem.read",json!({"path":second.join("same.txt"),"reason":"Read the user-selected external file without associating another folder"}),&ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(second.join("same.txt")).unwrap(),"SECOND");
         assert!(root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -72,6 +72,8 @@ public sealed partial class LocalModelsPage
         var storage = new Grid { ColumnSpacing = 8 };
         storage.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         storage.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        storage.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        storage.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var location = new StackPanel { Spacing = 3 };
         location.Children.Add(Label("模型安装目录", 12, secondary: true));
         _directory.FontFamily = UIFont;
@@ -87,6 +89,16 @@ public sealed partial class LocalModelsPage
         locationActions.Children.Add(openDirectory);
         Grid.SetColumn(locationActions, 1);
         storage.Children.Add(locationActions);
+        storage.SizeChanged += (_, args) =>
+        {
+            bool compact = args.NewSize.Width < 520;
+            Grid.SetColumnSpan(location, compact ? 2 : 1);
+            Grid.SetColumn(locationActions, compact ? 0 : 1);
+            Grid.SetRow(locationActions, compact ? 1 : 0);
+            Grid.SetColumnSpan(locationActions, compact ? 2 : 1);
+            locationActions.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+            storage.RowSpacing = compact ? 8 : 0;
+        };
         card.Children.Add(storage);
         UiLocalization.Bind(_policy, AutomationProperties.NameProperty, "模型加载策略");
         AutomationProperties.SetAutomationId(_policy, "LocalModelsLoadPolicy");
@@ -143,8 +155,21 @@ public sealed partial class LocalModelsPage
         details.Children.Add(refresh);
         settings.Children.Add(details);
         UiLocalization.Bind(_count, ToolTipService.ToolTipProperty, "离开页面不会取消下载；空闲驻留与唤醒由模型运行时和资源策略管理。");
-        Grid.SetRow(settings, 1);
-        _root.Children.Add(settings);
+        var settingsScroll = new ScrollViewer
+        {
+            Content = settings, HorizontalScrollMode = ScrollMode.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, ZoomMode = ZoomMode.Disabled
+        };
+        // Keep models reachable in short windows while the options retain their own scroll area.
+        // 矮窗口给模型列表保留空间，顶部选项可单独滚动。
+        _root.SizeChanged += (_, args) =>
+        {
+            if (args.NewSize.Height > 0)
+                settingsScroll.MaxHeight = Math.Max(96, args.NewSize.Height - navigation.ActualHeight - 144);
+        };
+        Grid.SetRow(settingsScroll, 1);
+        _root.Children.Add(settingsScroll);
 
         _models.ItemsSource = _visibleRows;
         _models.FontFamily = UIFont;
@@ -221,6 +246,12 @@ public sealed partial class LocalModelsPage
             return;
         }
         if (args.ItemContainer.ContentTemplateRoot is not FrameworkElement root) return;
+        if (root.FindName("LocalModelLayout") is Grid layout)
+        {
+            layout.SizeChanged -= ModelLayout_SizeChanged;
+            layout.SizeChanged += ModelLayout_SizeChanged;
+            ArrangeModelActions(layout);
+        }
         foreach (string name in new[] { "LocalModelInstall", "LocalModelPause", "LocalModelResume", "LocalModelCancel",
             "LocalModelEnable", "LocalModelDelete" })
         {
@@ -229,6 +260,26 @@ public sealed partial class LocalModelsPage
             button.Click -= ModelAction_Click;
             button.Click += ModelAction_Click;
         }
+    }
+
+    private static void ModelLayout_SizeChanged(object sender, SizeChangedEventArgs args)
+    {
+        if (sender is Grid layout) ArrangeModelActions(layout);
+    }
+
+    private static void ArrangeModelActions(Grid layout)
+    {
+        if (layout.FindName("LocalModelActions") is not StackPanel actions) return;
+        // Give the model details their full row before moving actions below them on narrow pages.
+        // 窄页时把操作移到下一行，让模型名称和参数保留完整的可用宽度。
+        bool compact = layout.ActualWidth < 560;
+        if (layout.Children[0] is FrameworkElement details)
+            Grid.SetColumnSpan(details, compact ? 2 : 1);
+        Grid.SetColumn(actions, compact ? 0 : 1);
+        Grid.SetRow(actions, compact ? 1 : 0);
+        Grid.SetColumnSpan(actions, compact ? 2 : 1);
+        actions.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        layout.RowSpacing = compact ? 8 : 0;
     }
 
     private static TextBlock Label(string key, double fontSize = 13, bool secondary = false)
@@ -281,8 +332,9 @@ public sealed partial class LocalModelsPage
     private const string ModelTemplate = """
         <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
           <Border Background="{ThemeResource KynxaSettingsCardBrush}" CornerRadius="12" Padding="12,8" Margin="4,3">
-            <Grid ColumnSpacing="12">
+            <Grid Name="LocalModelLayout" ColumnSpacing="12">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
               <StackPanel Spacing="2">
                 <Grid ColumnSpacing="8">
                   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -303,7 +355,7 @@ public sealed partial class LocalModelsPage
                 </StackPanel>
                 <TextBlock Text="{Binding ErrorText}" Visibility="{Binding ErrorVisibility}" FontFamily="{StaticResource KynxaUIFont}" FontSize="12" TextWrapping="Wrap"/>
               </StackPanel>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+              <StackPanel Name="LocalModelActions" Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                 <Button Name="LocalModelInstall" Tag="{Binding Id}" Content="{Binding InstallLabel}" Visibility="{Binding InstallVisibility}" IsEnabled="{Binding ActionsEnabled}" Style="{StaticResource KynxaQuietButtonStyle}" CornerRadius="8" FontSize="12" Padding="8,5"/>
                 <Button Name="LocalModelPause" Tag="{Binding Id}" Content="{Binding PauseLabel}" Visibility="{Binding PauseVisibility}" IsEnabled="{Binding ActionsEnabled}" Style="{StaticResource KynxaQuietButtonStyle}" CornerRadius="8" FontSize="12" Padding="8,5"/>
                 <Button Name="LocalModelResume" Tag="{Binding Id}" Content="{Binding ResumeLabel}" Visibility="{Binding ResumeVisibility}" IsEnabled="{Binding ActionsEnabled}" Style="{StaticResource KynxaQuietButtonStyle}" CornerRadius="8" FontSize="12" Padding="8,5"/>

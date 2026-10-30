@@ -11,11 +11,12 @@
     },
     "webview2-offline-x64": {
       "fileName": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
-      "sha256": "3505a37b54a294c2bc423b30d6c02cd33a2e58dbcdc7e03b50d7a4112746c986",
-      "bytes": 214131448,
-      "snapshotDate": "2026-10-16",
+      "sha256": "1c401b327fbc7bb9731b4e350a2194f083cbc3ede46508d52e1cae6610a39bea",
+      "bytes": 214884560,
+      "snapshotDate": "2026-10-28",
       "updateNote": "The official Evergreen link may change. A maintainer must verify the Microsoft-signed replacement and update this pin; never accept new bytes automatically.",
       "sources": [
+        { "id": "official-snapshot", "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/f699d81e-69ce-4b09-aa07-23ff2713045b/MicrosoftEdgeWebView2RuntimeInstallerX64.exe" },
         { "id": "official", "url": "https://go.microsoft.com/fwlink/?linkid=2124701" }
       ]
     }

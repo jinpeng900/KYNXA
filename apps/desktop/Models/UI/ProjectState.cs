@@ -26,6 +26,7 @@ public sealed class ProjectChatState
     public List<ChatMessageState> Messages { get; set; } = [];
     [System.Text.Json.Serialization.JsonIgnore]
     public bool IsPersisted { get; set; }
+    public bool KeepWorkspace { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool CanPersist => IsPersisted || IsSample || Messages.Count > 0;
+    public bool CanPersist => IsPersisted || IsSample || Messages.Count > 0 || KeepWorkspace;
 }

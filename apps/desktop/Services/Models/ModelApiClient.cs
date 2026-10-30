@@ -81,6 +81,18 @@ public sealed class ModelApiClient : IDisposable
         return (await ReadAsync<ModelSaveResponse>(response, cancellationToken).ConfigureAwait(false)).Provider;
     }
 
+    public async Task DeleteAsync(string providerId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
+        await _ensureReady(cancellationToken).ConfigureAwait(false);
+        using var response = await _httpClient.DeleteAsync(
+            $"/api/models/connections/{Uri.EscapeDataString(providerId)}", cancellationToken).ConfigureAwait(false);
+        var result = await ReadAsync<JsonElement>(response, cancellationToken).ConfigureAwait(false);
+        if (!result.TryGetProperty("deleted", out var deleted) || deleted.ValueKind != JsonValueKind.True ||
+            !result.TryGetProperty("providerId", out var identity) || identity.GetString() != providerId)
+            throw new InvalidDataException(UiText.Get("删除连接的回执无效，请刷新连接列表。"));
+    }
+
     public async Task<ModelProbeResponse> TestAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
         ValidateContextWindowTokens(connection.ContextWindowTokens);

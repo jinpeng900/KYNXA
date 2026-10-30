@@ -4,15 +4,29 @@
   'use strict';
   const content = document.getElementById('content');
   const states = new Map();
-  let key = '', revision = 0, scrollTimer = 0, docxView = null, officeView = null, documentRead = null;
+  let key = '', renderId = null, revision = 0, scrollTimer = 0, docxView = null, officeView = null, documentRead = null, previewView = null, active = true, requestSequence = 0;
+  const requests = new Map();
   const post = message => window.chrome?.webview?.postMessage(message);
+  let notice = null, noticeTimer = 0;
+
+  function clearNotice() { clearTimeout(noticeTimer); notice?.dispose(); notice = null; }
+  async function feedback(text, error, scope = { key, renderId, revision }) {
+    const { createNotice } = await import('./preview-notice.js');
+    if (scope.key !== key || scope.renderId !== renderId || scope.revision !== revision) return;
+    clearNotice(); notice = createNotice(content); notice.show(text, error);
+    if (!error) noticeTimer = setTimeout(clearNotice, 4000);
+  }
+  function cancelRequests(message) {
+    for (const pending of requests.values()) { clearTimeout(pending.timer); pending.reject(new DOMException(message, 'AbortError')); }
+    requests.clear();
+  }
 
   function saveState() {
     if (!key) return;
-    const state = { ...(officeView?.getState?.() || {}), x: scrollX, y: scrollY };
+    const state = { ...(officeView?.getState?.() || previewView?.getState?.() || {}), x: scrollX, y: scrollY };
     states.delete(key); states.set(key, state);
     while (states.size > 24) states.delete(states.keys().next().value);
-    post({ type: 'state', key, state });
+    post({ type: 'state', key, renderId, state });
   }
 
   function readState(value) {
@@ -27,17 +41,51 @@
 
   async function show(message) {
     saveState();
+    clearNotice();
     key = message.key || '';
+    renderId = message.renderId;
     const current = ++revision;
+    const requestScope = { key, renderId, revision: current };
     documentRead?.abort(); documentRead = null;
     officeView?.dispose?.(); officeView = null;
+    previewView?.dispose?.(); previewView = null;
+    cancelRequests('预览已切换');
     releaseDocx(docxView); docxView = null;
     content.replaceChildren();
     window.kynxaContentBlocks?.disposeDetached();
     window.kynxaTables?.disposeDetached();
     document.body.dataset.previewKind = message.kind || '';
     window.kynxaDiagrams?.disposeDetached();
-    if (message.kind === 'markdown' || message.kind === 'mermaid' || message.kind === 'code') {
+    active = message.active !== false;
+    if (['model3d', 'image', 'audio', 'video', 'workbench', 'delimited'].includes(message.kind)) {
+      try {
+        const moduleName = ({ model3d: 'model-preview', image: 'image-preview', audio: 'media-preview', video: 'media-preview', workbench: 'workbench', delimited: 'data-preview' })[message.kind];
+        const module = await import('./' + moduleName + '.js');
+        if (current !== revision) return;
+        const read = new AbortController(); documentRead = read;
+        requestScope.signal = read.signal;
+        const handle = await module.open({ ...message, container: content, state: states.get(key) || readState(message.state), signal: read.signal,
+          sourceFormat: message.renderFormat || message.sourceFormat,
+          isCurrent: () => revision === current,
+          onState(state) { if (current !== revision) return; states.set(key, state); post({ type: 'state', key, renderId: message.renderId, state }); },
+          onSelection(payload) { if (current === revision) post({ type: 'selection', key, renderId: message.renderId, ...payload, payload, version: message.version }); },
+          onExport(payload) { if (current === revision) post({ type: 'exportAsset', key, renderId: message.renderId, ...payload }); },
+          onOpen(path) { if (current === revision) post({ type: 'link', key, url: path }); },
+          onNavigate(conversationId) { if (current === revision) post({ type: 'navigateConversation', key, conversationId }); },
+          onAction(action) { if (current === revision) post({ type: 'workbench-action', key, payload: { action } }); },
+          request(action, payload) { return requestWorkbench(action, payload, requestScope); }
+        });
+        if (revision !== current) { handle?.dispose?.(); return; }
+        previewView = handle; handle?.setActive?.(active);
+      } catch (error) {
+        if (current !== revision || error.name === 'AbortError') return;
+        documentRead?.abort(); cancelRequests('预览未能打开'); content.replaceChildren();
+        const text = error.message || '此内容暂时无法打开';
+        await feedback(text, true, requestScope);
+        if (current !== revision) return;
+        post({ type: 'previewError', key: requestScope.key, renderId: message.renderId, message: text });
+      }
+    } else if (message.kind === 'markdown' || message.kind === 'mermaid' || message.kind === 'code') {
       // HTML is produced by the existing HTML-disabled Markdown renderer, never passed through from a document.
       // HTML 仅来自现有禁止原生 HTML 的 Markdown 渲染器，绝不直接接受文档内的 HTML。
       content.innerHTML = typeof message.html === 'string' ? message.html : '';
@@ -49,15 +97,6 @@
       window.kynxaDiagrams?.hydrate(content);
       window.kynxaContentBlocks?.hydrate(content);
       window.kynxaTables?.hydrate(content);
-    } else if (message.kind === 'delimited' && Array.isArray(message.rows)) {
-      const table = document.createElement('table'), body = document.createElement('tbody');
-      for (const values of message.rows) {
-        if (!Array.isArray(values)) continue;
-        const row = document.createElement('tr');
-        for (const value of values) { const cell = document.createElement('td'); cell.textContent = String(value ?? ''); row.append(cell); }
-        body.append(row);
-      }
-      table.append(body); content.append(table); window.kynxaTables?.hydrate(content);
     } else if (['docx', 'pptx', 'xlsx'].includes(message.kind)) {
       try {
         if (!await renderOffice(message, current)) return;
@@ -65,12 +104,6 @@
         if (revision === current) post({ type: message.kind + '-failed', key: message.key || '', renderId: message.renderId });
         return;
       }
-    } else if (message.kind === 'image' && typeof message.contentUrl === 'string') {
-      const image = document.createElement('img'); image.alt = message.title || '';
-      const wrapper = document.createElement('div'); wrapper.className = 'image-view'; wrapper.append(image); content.append(wrapper);
-      image.addEventListener('click', () => image.classList.toggle('actual-size'));
-      image.addEventListener('load', () => { if (revision === current) restoreState(states.get(key) || readState(message.state)); });
-      image.src = message.contentUrl;
     } else {
       const text = document.createElement('pre'); text.className = 'plain-text';
       text.textContent = typeof message.text === 'string' ? message.text : ''; content.append(text);
@@ -154,7 +187,7 @@
         if (revision !== current) return;
         const merged = { ...state, x: scrollX, y: scrollY };
         states.set(message.key || '', merged);
-        post({ type: 'state', key: message.key || '', state: merged });
+        post({ type: 'state', key: message.key || '', renderId: message.renderId, state: merged });
       },
       onError() {
         if (revision === current) post({ type: message.kind + '-failed', key: message.key || '', renderId: message.renderId });
@@ -311,10 +344,27 @@
 
   window.kynxaOffice?.register('docx', renderDocxBytes);
 
+  function requestWorkbench(action, payload, scope) {
+    // A detached preview cannot dispatch work against whichever file is now open.
+    // 已切走的预览不能把旧操作发到当前文件。
+    if (scope.revision !== revision || scope.key !== key || scope.renderId !== renderId || scope.signal?.aborted)
+      return Promise.reject(new DOMException('预览已切换', 'AbortError'));
+    const requestId = 'workbench-' + (++requestSequence);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { requests.delete(requestId); reject(new Error('工作台请求超时，请刷新状态后重试。')); }, action === 'media.transcribe' ? 610000 : 90000);
+      requests.set(requestId, { resolve, reject, timer, ...scope });
+      post({ type: 'workbenchRequest', key: scope.key, renderId: scope.renderId, requestId, action, payload });
+    });
+  }
+
   function appearance(palette) {
     for (const [name, value] of Object.entries(palette || {})) {
       if (/^[a-z]+$/.test(name) && /^#[0-9a-f]{6}$/i.test(value))
         document.documentElement.style.setProperty('--appearance-' + name, value);
+    }
+    if (/^#[0-9a-f]{6}$/i.test(palette?.main || '')) {
+      const rgb = [1, 3, 5].map(i => parseInt(palette.main.slice(i, i + 2), 16));
+      document.documentElement.style.colorScheme = rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722 < 128 ? 'dark' : 'light';
     }
   }
 
@@ -331,6 +381,21 @@
   window.chrome?.webview?.addEventListener('message', event => {
     const message = event.data;
     if (message?.type === 'show') show(message);
+    else if (message?.type === 'setActive' && (!message.key || message.key === key)) { active = message.active !== false; previewView?.setActive?.(active); }
+    else if (message?.type === 'workbenchResult') {
+      const pending = requests.get(message.requestId);
+      if (!pending || pending.key !== key || pending.revision !== revision || pending.renderId !== renderId
+        || message.key !== pending.key || message.renderId !== pending.renderId) return;
+      requests.delete(message.requestId); clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(typeof message.error === 'string' ? message.error : message.error.message || '工作台操作失败')); else pending.resolve(message.result);
+    }
+    else if (message?.type === 'exportAssetResult') {
+      if (message.key !== key || message.renderId !== renderId) return;
+      const text = message.outcome === 'success' ? '已保存' : message.outcome === 'cancelled' ? '已取消保存' : message.error || '保存失败';
+      void feedback(text, message.outcome === 'error');
+    }
+    else if (message?.type === 'command' && message.command === 'refresh') { post({ type: 'refresh', key }); }
+    else if (message?.type === 'viewport') { content.style.maxWidth = message.width > 0 ? message.width + 'px' : ''; content.style.margin = message.width > 0 ? 'auto' : ''; }
     else if (message?.type === 'saveState') saveState();
     else if (message?.type === 'appearance') {
       appearance(message.palette);
@@ -352,6 +417,12 @@
     event.preventDefault();
     window.kynxaMarkdownLinks?.follow(link, content, url => post({ type: 'link', key, url }));
   });
+  const selectionButton = document.createElement('button'); selectionButton.className = 'preview-button'; selectionButton.textContent = '引用选中内容';
+  Object.assign(selectionButton.style, { position: 'fixed', right: '14px', bottom: '14px', zIndex: '30', boxShadow: '0 3px 15px #0003' }); selectionButton.hidden = true; document.body.append(selectionButton);
+  document.addEventListener('selectionchange', () => { selectionButton.hidden = !(window.getSelection()?.toString().trim()) || document.body.dataset.previewKind === 'workbench'; });
+  selectionButton.addEventListener('pointerdown', event => event.preventDefault());
+  selectionButton.addEventListener('click', () => { const text = window.getSelection()?.toString().trim(); if (text) post({ type: 'selection', key, renderId, kind: 'text', title: document.title, text: text.slice(0, 16000), payload: { kind: 'text', title: document.title, text: text.slice(0, 16000) } }); });
+  window.addEventListener('pagehide', () => { ++revision; key = ''; renderId = null; clearTimeout(scrollTimer); clearNotice(); previewView?.dispose?.(); officeView?.dispose?.(); documentRead?.abort(); cancelRequests('预览已关闭'); });
   window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(saveState, 120); }, { passive: true });
   post({ type: 'ready' });
 })();

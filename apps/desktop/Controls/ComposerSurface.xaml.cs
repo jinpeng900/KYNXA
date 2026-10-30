@@ -37,16 +37,17 @@ public sealed partial class ComposerSurface : UserControl
 
     private void UpdateFocusBorder()
     {
-        bool editorFocused = false;
+        bool surfaceFocused = false;
         if (XamlRoot is not null)
         {
             for (var element = Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
                 element is not null; element = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element))
             {
-                if (element == EditorSurface) { editorFocused = true; break; }
+                if (element == EditorSurface || element == FooterSurface) { surfaceFocused = true; break; }
             }
         }
-        EditorSurface.BorderBrush = AppearanceService.GetBrush(editorFocused ? "KynxaFocusBrush" : "KynxaComposerBorderBrush");
+        EditorSurface.BorderBrush = FooterBackground.BorderBrush = AppearanceService.GetBrush(
+            surfaceFocused ? "KynxaFocusBrush" : "KynxaComposerBorderBrush");
     }
 
     private static void OnFooterVisibilityChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args) =>

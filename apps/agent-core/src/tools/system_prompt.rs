@@ -16,15 +16,16 @@ fn cost(lines: &[String]) -> u64 {
     estimate_tokens(&lines.join("\n"))
 }
 
-/// Only a bounded directory inventory enters prompts; complete bindings remain discoverable without indexing.
-/// 提示词只投影有界目录清单；完整挂载通过只读工具取得，不等待索引或占满上下文。
+/// Present the single work-folder binding without indexing or scanning it.
+/// 只展示当前唯一工作目录，不为说明目录而扫描或等待索引。
 fn workspace_guidance(context: &Value) -> Option<String> {
     let mounts = context["workspaceMounts"].as_array().filter(|mounts| !mounts.is_empty())?;
-    let preview = mounts.iter().take(6).map(|mount| json!({
+    let mount = mounts.iter().find(|mount|mount["id"]==context["defaultMountId"]).or_else(||mounts.first())?;
+    let preview = json!({
         "mountId":mount["id"],"name":short_text(string(&mount["name"]),64,24),
-        "path":short_text(string(&mount["path"]),256,80),"default":mount["id"]==context["defaultMountId"]
-    })).collect::<Vec<_>>();
-    Some(format!("Workspace mounts ({}, default={}): {}. Relative paths use the default; choose mountId for another root. Same-name paths in different roots are distinct. work.folder.list lists all authorized roots; right terminals keep their own mount and cwd. Never infer access to a shared parent.", mounts.len(), string(&context["defaultMountId"]), json!(preview)))
+        "path":short_text(string(&mount["path"]),256,80)
+    });
+    Some(format!("Work folder: {preview}. Each work has at most one linked folder. Relative paths use it; work.folder.list returns its current mountId. Right terminals retain their cwd. Replacing the work folder requires the user's request; other paths follow normal explicit authorization."))
 }
 fn ordered(fields: Vec<(&str, Value)>) -> String {
     // Preserve field order in prompt text; changing the projection would change tokens and cache identity.
@@ -454,7 +455,7 @@ fn compact_local_prompt(args: &Value, maximum: f64) -> Value {
         let mut proposed = lines.clone();
         proposed.extend(dynamic.clone()); proposed.push(workspace.clone());
         dynamic.push(if cost(&proposed) as f64 <= maximum.min(1400.0) { workspace }
-            else { "Multiple workspace roots: work.folder.list lists authorized mountIds; choose mountId for a non-default root. Right terminals retain their own cwd; no shared-parent access.".into() });
+            else { "One work folder: work.folder.list returns its mountId; relative paths use that folder. Terminals retain their cwd; other paths require normal authorization.".into() });
     }
     for observation in array(&args["browserPrompt"]) {
         dynamic.push(string(observation).to_owned());
@@ -570,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn coding_guidance_keeps_mount_identity_and_map_coverage_explicit() {
+    fn coding_guidance_keeps_single_folder_identity_and_map_coverage_explicit() {
         for local in [false, true] {
             let prompt = calculate(&json!({"compactLocalModel":local,"maximumTokens":1800,
                 "context":{"permissionMode":"full","supportsTools":true,"workspaceRoot":"/a",
@@ -582,6 +583,9 @@ mod tests {
             assert!(prompt.contains("codeNavigation"));
             assert!(prompt.contains("selected evidence only"));
             assert!(prompt.contains("relevant checks"));
+            assert!(!prompt.contains("choose mountId for another root"));
+            assert!(!prompt.contains("Multiple workspace roots"));
+            assert!(!prompt.contains("\"path\":\"/b\""));
         }
     }
 

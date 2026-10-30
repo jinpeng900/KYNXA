@@ -264,6 +264,9 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             if !value["Draft"].is_null() && !value["Draft"].is_string() {
                 return Err(invalid("会话文本格式无效，原文件已保留。"));
             }
+            if !value["KeepWorkspace"].is_null() && !value["KeepWorkspace"].is_boolean() {
+                return Err(invalid("工作区保留标记必须是布尔值。"));
+            }
             return Ok(Value::Null);
         }
         "storage.catalog.uniqueMessages" => {
@@ -539,7 +542,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                     && !saved.contains(&key(&message["Id"]).unwrap_or_default())
             })
             .collect();
-        if !truthy(&location["Chat"]["IsSample"]) && messages.is_empty() && new_messages.is_empty()
+        if !truthy(&location["Chat"]["IsSample"]) && location["Chat"]["KeepWorkspace"] != true && messages.is_empty() && new_messages.is_empty()
         {
             continue;
         }
@@ -757,6 +760,20 @@ mod save_plan_tests {
             json!([{"Location":{"Id":"user-chat","ProjectId":null},
             "conversationId":"user-chat","messageIndex":0}])
         );
+    }
+
+    #[test]
+    fn an_explicit_workspace_can_exist_without_synthetic_chat_messages() {
+        let current = catalog(json!([]));
+        let next = catalog(json!([
+            {"Id":"workspace-chat","Title":"Workspace","KeepWorkspace":true,"Messages":[]},
+            {"Id":"draft-chat","Title":"Unsent draft","Messages":[]}
+        ]));
+        let saved = plan("storage.catalog.savePlan", &current, &next,
+            json!([{"id":"workspace-chat","messages":[]},{"id":"draft-chat","messages":[]}])).unwrap();
+        assert_eq!(saved["next"]["Chats"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["next"]["Chats"][0]["Id"], "workspace-chat");
+        assert_eq!(saved["writes"], json!([]));
     }
 
     #[test]

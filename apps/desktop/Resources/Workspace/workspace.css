@@ -2,16 +2,24 @@
   --appearance-main: #ffffff; --appearance-soft: #f3f2f0; --appearance-accent: #666666;
   --appearance-text: #262626; --appearance-secondary: #666666; --appearance-border: #dddddd;
   --appearance-sidebar: #f8f7f5;
+  --preview-card: color-mix(in srgb, var(--appearance-sidebar) 75%, var(--appearance-main));
+  --preview-line: color-mix(in srgb, var(--appearance-border) 72%, transparent);
+  --preview-tint: color-mix(in srgb, var(--appearance-accent) 13%, var(--appearance-main));
+  --preview-focus: color-mix(in srgb, var(--appearance-accent) 65%, var(--appearance-text));
   /* UI text keeps system Latin/CJK faces; only code uses a monospaced family.
    * 正文使用系统中英文字体；仅代码使用等宽字体，避免中文 TXT 落入浏览器默认宋体。 */
-  --ui-font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --ui-font: 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
   --code-font: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei UI', 'Microsoft YaHei', monospace;
   color: var(--appearance-text); background: var(--appearance-main); font: 15px/1.75 var(--ui-font);
   color-scheme: light;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; }
-body { padding: 18px 22px 32px; overflow-wrap: anywhere; }
+body { padding: 20px 24px 32px; overflow-wrap: anywhere; }
+html { scrollbar-color: color-mix(in srgb, var(--appearance-secondary) 35%, transparent) transparent; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--appearance-secondary) 30%, transparent); border: 2px solid transparent; border-radius: 10px; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--appearance-secondary) 50%, transparent); }
 /* Slide and sheet viewports own scrolling; outer spacing must fit the available workspace height.
  * 幻灯片和表格自行管理滚动，外围留白与视口高度对应，避免叠出多余的外层滚动条。 */
 body[data-preview-kind='docx'], body[data-preview-kind='pptx'], body[data-preview-kind='xlsx'] { padding: 12px; }
@@ -22,7 +30,7 @@ h1 { font-size: 1.65em; } h2 { font-size: 1.35em; } h3 { font-size: 1.16em; }
 p { margin: .7em 0; }
 a { color: inherit; text-underline-offset: 3px; }
 button { font: inherit; color: inherit; border: 0; background: transparent; cursor: pointer; }
-pre { padding: 12px; border: 1px solid var(--appearance-border); border-radius: 9px;
+pre { padding: 14px; border: 1px solid var(--preview-line); border-radius: 12px;
   background: var(--appearance-sidebar); overflow-x: auto; white-space: pre; overflow-wrap: normal; }
 pre.plain-text { font-family: var(--ui-font); font-size: 15px; line-height: 1.75; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; white-space: pre-wrap; overflow-wrap: anywhere; }
 code { font-family: var(--code-font); font-size: .92em; }
@@ -30,7 +38,7 @@ code { font-family: var(--code-font); font-size: .92em; }
 table { border-collapse: collapse; min-width: max-content; max-width: 100%; }
 th, td { padding: 7px 10px; border: 1px solid var(--appearance-border); text-align: left; }
 th { background: var(--appearance-soft); }
-.table-scroll { overflow-x: auto; }
+.table-scroll { overflow-x: auto; border-radius: 12px; }
 body[data-preview-kind='delimited'] td { white-space: pre-wrap; vertical-align: top; }
 blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--appearance-border); color: var(--appearance-secondary); }
 img { max-width: 100%; height: auto; }
@@ -42,7 +50,7 @@ img { max-width: 100%; height: auto; }
 .math[data-display='true'] { overflow-x: auto; padding: 6px 0; }
 .mermaid-viewport:focus-visible, .mermaid-viewer-viewport:focus-visible,
 .mermaid-source-details summary:focus-visible, button:focus-visible, a:focus-visible {
-  outline: 1px solid var(--appearance-secondary); outline-offset: 2px; border-radius: 5px;
+  outline: 2px solid var(--preview-focus); outline-offset: 2px; border-radius: 7px;
 }
 @media (max-width: 420px) { body { padding: 12px 12px 24px; } }
 

@@ -63,8 +63,15 @@ if ($Action -eq 'Export') {
         $FileListPath = Join-Path $SourceRoot 'asset-files.txt'
         if (-not [IO.File]::Exists($FileListPath)) { $FileListPath = Join-Path $SourceRoot 'bundle-files.txt' }
     }
+    $sourcePaths = [Collections.Generic.List[string]]::new()
+    $sourcePaths.AddRange([IO.File]::ReadAllLines([IO.Path]::GetFullPath($FileListPath), $utf8))
+    if ($Profile -eq 'Full') {
+        # The transcription runtime has its own verified inventory.
+        # 转录运行时使用独立清单，完整资源包也必须包含。
+        $sourcePaths.AddRange([IO.File]::ReadAllLines((Join-Path $SourceRoot 'transcription-files.txt'), $utf8))
+    }
     $payload = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($sourcePath in [IO.File]::ReadAllLines([IO.Path]::GetFullPath($FileListPath), $utf8)) {
+    foreach ($sourcePath in $sourcePaths) {
         if ([string]::IsNullOrWhiteSpace($sourcePath)) { continue }
         $sourcePath = [IO.Path]::GetFullPath($sourcePath)
         if (-not $sourcePath.StartsWith($SourceRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {

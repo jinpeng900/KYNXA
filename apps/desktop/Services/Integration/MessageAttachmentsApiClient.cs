@@ -87,7 +87,12 @@ public sealed class MessageAttachmentsApiClient : IDisposable
         string query = $"messageId={messageId:D}";
         if (!string.IsNullOrEmpty(attachment.Sha256)) query += "&version=" + Uri.EscapeDataString(attachment.Sha256);
         string extension = System.IO.Path.GetExtension(attachment.Name).ToLowerInvariant();
-        if (extension is ".doc" or ".docx" or ".ppt" or ".pptx" or ".odt" or ".odp" or ".rtf" or ".xls" or ".xlsx" or ".ods")
+        if (extension is ".doc" or ".docx" or ".ppt" or ".pptx" or ".odt" or ".odp" or ".rtf" or ".xls" or ".xlsx" or ".ods"
+            or ".glb" or ".gltf" or ".obj" or ".stl" or ".ply" or ".fbx"
+            or ".mp3" or ".wav" or ".ogg" or ".opus" or ".m4a" or ".aac" or ".flac"
+            or ".mp4" or ".webm" or ".mov" or ".m4v" or ".avi" or ".mkv"
+            || attachment.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+            || attachment.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
         {
             using var previewDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             previewDeadline.CancelAfter(TimeSpan.FromSeconds(150));

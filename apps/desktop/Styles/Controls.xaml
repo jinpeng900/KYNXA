@@ -175,6 +175,45 @@
         <Setter Property="FontWeight" Value="Normal" />
         <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource KynxaFocusBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="Transparent" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                          BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal">
+                                    <VisualState.Setters><Setter Target="Feedback.Opacity" Value="0" /></VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="Feedback.Opacity" Value="1" />
+                                        <Setter Target="Feedback.Background" Value="{StaticResource KynxaButtonHoverOverlayBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="Feedback.Opacity" Value="1" />
+                                        <Setter Target="Feedback.Background" Value="{StaticResource KynxaButtonPressedOverlayBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters><Setter Target="Presenter.Opacity" Value="0.45" /><Setter Target="Feedback.Opacity" Value="0" /></VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                        <Border x:Name="Feedback" Background="{StaticResource KynxaButtonHoverOverlayBrush}"
+                                CornerRadius="{TemplateBinding CornerRadius}" Opacity="0" IsHitTestVisible="False" />
+                        <ContentPresenter x:Name="Presenter" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          Padding="{TemplateBinding Padding}" Foreground="{TemplateBinding Foreground}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
     <Style x:Key="KynxaInfoBarActionButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
         <Setter Property="MinWidth" Value="64" />
@@ -196,24 +235,6 @@
         <Setter Property="Padding" Value="6" />
         <Setter Property="HorizontalAlignment" Value="Center" />
         <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style x:Key="KynxaWorkspaceTabButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
-        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource KynxaSecondaryTextBrush}" />
-        <Setter Property="FocusVisualSecondaryBrush" Value="Transparent" />
-        <!-- The complete tab owns its background; title and close controls never paint separate tiles.
-             完整标签统一绘制背景，标题与关闭按钮在悬停和按下时都不另画背景块。
-        -->
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
-                                      Padding="{TemplateBinding Padding}" Background="Transparent"
-                                      Foreground="{TemplateBinding Foreground}"
-                                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                      VerticalContentAlignment="Center" />
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
     </Style>
     <Style x:Key="KynxaNavigationButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
         <Setter Property="Height" Value="{StaticResource KynxaSidebarRowHeight}" />

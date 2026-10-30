@@ -196,9 +196,7 @@ fn io_error(source: std::io::Error) -> ModelError {
 fn map_error(value: crate::gateway_contract::GatewayError) -> ModelError {
     error(&value.code, &value.message, value.status)
 }
-pub fn is_managed(connection: &Value) -> bool {
-    connection["providerId"].as_str().is_some_and(|id| id.starts_with("kynxa-local-"))
-}
+pub use super::connections::is_managed_local as is_managed;
 fn identity<'a>(connection: &'a Value, model: &'a str) -> Result<&'a str, ModelError> {
     let id = connection["providerId"].as_str().and_then(|id| id.strip_prefix("kynxa-local-"))
         .filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)))

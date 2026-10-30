@@ -68,6 +68,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decoded_tool_truncation_keeps_its_recovery_code_and_finish_diagnostics() {
+        let error = json!({"code":"MODEL_TOOL_OUTPUT_TRUNCATED","message":"output limit","type":"interrupted",
+            "finishReason":"max_tokens","outputTruncated":true,"hasToolCalls":true,"estimatedGeneratedTokens":2176});
+        let failure = ModelError::decoded(&error);
+        assert_eq!(failure.code, "MODEL_TOOL_OUTPUT_TRUNCATED");
+        assert_eq!(failure.details["decoderCode"], error["code"]);
+        for field in ["type", "finishReason", "outputTruncated", "hasToolCalls", "estimatedGeneratedTokens"] {
+            assert_eq!(failure.details[field], error[field], "{field}");
+        }
+        for code in ["MODEL_TOOL_ARGUMENT_INVALID", "MODEL_TOOL_IDENTITY_INVALID", "MODEL_TOOL_CALL_LIMIT"] {
+            let failure = ModelError::decoded(&json!({"code":code,"message":"invalid tool","type":"error"}));
+            assert_eq!(failure.code, "MODEL_TOOL_CALL_INVALID");
+            assert_eq!(failure.details["decoderCode"], code);
+        }
+    }
+
+    #[test]
     fn account_connection_and_retryable_provider_rejections_remain_distinct() {
         for (status, body, code) in [
             (402, json!({"error":{"message":"private balance detail"}}), "MODEL_CREDIT_EXHAUSTED"),
@@ -743,10 +760,10 @@ impl ModelError {
         let decoder_code = error["code"]
             .as_str()
             .unwrap_or("MODEL_RESPONSE_INCOMPLETE");
-        // Invalid model calls are one pre-dispatch recovery class; preserve the precise decoder reason.
-        // 无效模型调用统一进入派发前恢复类别；精确解码原因仍保留在诊断中。
+        // Output-limit recovery needs its precise code; other invalid calls retain their shared recovery class.
+        // 输出额度恢复需要精确错误码；其他无效调用仍保持原有的统一恢复类别。
         let mut result = Self::new(
-            if decoder_code.starts_with("MODEL_TOOL_") {
+            if decoder_code.starts_with("MODEL_TOOL_") && decoder_code != "MODEL_TOOL_OUTPUT_TRUNCATED" {
                 "MODEL_TOOL_CALL_INVALID"
             } else {
                 decoder_code
@@ -755,6 +772,11 @@ impl ModelError {
             502,
         );
         result.details = json!({"type":error["type"],"decoderCode":decoder_code,"contractCode":error["contractCode"],"estimatedGeneratedTokens":error["estimatedGeneratedTokens"],"requestDispatched":false});
+        for field in ["finishReason", "outputTruncated", "hasToolCalls"] {
+            if let Some(value) = error.get(field) {
+                result.details[field] = value.clone();
+            }
+        }
         result
     }
     pub fn cancelled() -> Self {

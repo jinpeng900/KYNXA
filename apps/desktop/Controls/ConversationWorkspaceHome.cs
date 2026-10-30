@@ -1,5 +1,4 @@
 using KYNXA_Desktop.Services;
-using KYNXA_Desktop.Models.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -16,17 +15,17 @@ namespace KYNXA_Desktop.Controls;
 public sealed class ConversationWorkspaceHome : Grid
 {
     private readonly TextBox _address = new() { PlaceholderText = "https://", FontSize = 13, MinHeight = 34,
-        CornerRadius = new CornerRadius(9), Padding = new Thickness(10, 5, 10, 5), MinWidth = 0 };
+        CornerRadius = new CornerRadius(9), BorderThickness = new Thickness(0),
+        Padding = new Thickness(10, 5, 10, 5), MinWidth = 0, UseSystemFocusVisuals = false };
     private readonly TextBlock _directory = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap,
-        TextAlignment = TextAlignment.Center, MaxWidth = 420 };
-    private readonly ComboBox _roots = new() { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0,
-        DisplayMemberPath = nameof(ProjectMountState.Name), Visibility = Visibility.Collapsed };
+        TextTrimming = TextTrimming.CharacterEllipsis, MaxLines = 2 };
     private readonly StackPanel _files = new() { Spacing = 2 };
     private readonly ScrollViewer _fileScroll;
-    private readonly StackPanel _homeContent;
+    private readonly ScrollViewer _homeScroll;
+    private readonly ScrollViewer _folderEditorHost = new() { Visibility = Visibility.Collapsed,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    private WorkspaceFolderEditor? _folderEditor;
     private readonly Grid _filePane = new() { Visibility = Visibility.Collapsed, RowSpacing = 10, Margin = new Thickness(14) };
-    private readonly ComboBox _browseRoots = new() { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0,
-        DisplayMemberPath = nameof(ProjectMountState.Name), CornerRadius = new CornerRadius(8) };
     private readonly SegmentedSelector _fileKinds = new([
         new("files", "文件", "\uE8B7"), new("attachments", "已保存附件", "\uE723")]);
     private readonly SegmentedSelector _attachmentScopes = new([new("chat", "本聊天"), new("work", "本工作")]);
@@ -39,18 +38,18 @@ public sealed class ConversationWorkspaceHome : Grid
     private bool _updatingBrowser, _hasProject;
     private SavedAttachmentPage? _attachmentPage;
     private readonly TextBlock _fileNotice = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap };
-    private bool _updatingRoots;
-    private Guid? _selectedMountId;
+    private readonly CompactInfoBar _fileError = new() { Severity = InfoBarSeverity.Error, IsIconVisible = false };
+    private readonly TextBlock _fileLocation = new() { FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis,
+        MaxLines = 1, Margin = new Thickness(2, 0, 2, 0) };
     private WorkspaceDirectoryListing? _listing;
     private string? _listingRoot;
-    public event EventHandler<Guid>? MountRequested;
     public event EventHandler<string?>? DirectoryRequested;
     public event EventHandler<string>? WorkspaceFileRequested;
-    public Guid? SelectedMountId => _selectedMountId;
     public event EventHandler<string>? WebsiteRequested;
     public event EventHandler? ChangesRequested;
     public event EventHandler? TerminalRequested;
     public event EventHandler? FileRequested;
+    public event EventHandler? LocalFileRequested;
     public event EventHandler? FileBrowserClosed;
     public event EventHandler? RefreshRequested;
     public event EventHandler<bool>? AttachmentsRequested;
@@ -58,71 +57,67 @@ public sealed class ConversationWorkspaceHome : Grid
     public event EventHandler<SavedAttachmentEntry>? SavedAttachmentRequested;
     public Func<string, CancellationToken, Task<WorkspaceDirectoryListing>>? DirectoryLoader { get; set; }
     public bool IsFileBrowserVisible => _filePane.Visibility == Visibility.Visible;
+    public bool IsFolderEditorVisible => _folderEditor is not null;
     public bool IsShowingAttachments => IsFileBrowserVisible && _fileKinds.SelectedKey == "attachments";
     public bool UsesProjectAttachments => _hasProject && _attachmentScopes.SelectedKey == "work";
-    private readonly Button _changes, _terminal, _file;
+    private readonly Button _changes, _terminal, _file, _navigate, _localFile, _browserLocalFile;
     private readonly Dictionary<TextBlock, string> _labels = [];
     private string? _directoryPath;
     private bool _hasConversation, _languageSubscribed;
 
     public ConversationWorkspaceHome()
     {
-        var content = _homeContent = new StackPanel { Spacing = 18, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Stretch,
+        var content = new StackPanel { Spacing = 16, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(18) };
-        var title = new TextBlock { Text = UiText.Get("工作区"), FontSize = 20,
-            HorizontalAlignment = HorizontalAlignment.Center, Foreground = Brush("KynxaTextBrush") };
-        _labels[title] = "工作区";
-        content.Children.Add(title);
-        content.Children.Add(_directory);
-        content.Children.Add(_roots);
-        _roots.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
-        _roots.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        _roots.CornerRadius = new CornerRadius(8);
-        _roots.Background = Brush("KynxaReplySurfaceBrush");
-        _roots.Foreground = Brush("KynxaTextBrush");
-        _roots.BorderBrush = Brush("KynxaDividerBrush");
-        _roots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _roots.Resources["ComboBoxSelectionIndicatorBrush"] = Brush("KynxaSecondaryTextBrush");
-        AutomationProperties.SetAutomationId(_roots, "WorkspaceMountSelector");
-        AutomationProperties.SetName(_roots, UiText.Get("工作文件夹"));
-        _roots.SelectionChanged += (_, _) =>
+        var homeLayout = new Grid();
+        homeLayout.Children.Add(content);
+        _homeScroll = new ScrollViewer { Content = homeLayout, VerticalContentAlignment = VerticalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        _homeScroll.SizeChanged += (_, args) =>
         {
-            if (_updatingRoots || _roots.SelectedItem is not ProjectMountState mount || _selectedMountId == mount.Id) return;
-            _selectedMountId = mount.Id; MountRequested?.Invoke(this, mount.Id);
+            if (args.NewSize.Width <= 0 || args.NewSize.Height <= 0) return;
+            // Center within the viewport; a shorter window still scrolls the whole entry group.
+            // 按可见区域居中；矮窗口仍能滚到整组入口的底部。
+            homeLayout.MinHeight = args.NewSize.Height;
+            content.Width = Math.Min(460, Math.Max(0, args.NewSize.Width - 36));
         };
-        var addressRow = new Grid { ColumnSpacing = 5 };
-        addressRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        addressRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        addressRow.Children.Add(_address);
-        var navigate = CreateButton("\uE72A", "打开网页");
-        navigate.Padding = new Thickness(9); Grid.SetColumn(navigate, 1); addressRow.Children.Add(navigate);
-        navigate.Click += (_, _) => Navigate();
+        content.Children.Add(CreateHomeHeading());
+        content.Children.Add(CreateLocationCard());
+        _navigate = CreateButton("\uE72A", "打开网页");
+        _navigate.Content = new FontIcon { Glyph = "\uE72A", FontSize = 14 };
+        _navigate.Width = 32; _navigate.Height = 32; _navigate.MinHeight = 0;
+        _navigate.Padding = new Thickness(6); _navigate.Margin = new Thickness(0, 2, 2, 2);
+        _navigate.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        _navigate.UseSystemFocusVisuals = false;
+        _navigate.Click += (_, _) => Navigate();
         _address.KeyDown += (_, args) => { if (args.Key == VirtualKey.Enter) { args.Handled = true; Navigate(); } };
-        content.Children.Add(addressRow);
+        content.Children.Add(CreateAddressEntry());
         var actions = new Grid { ColumnSpacing = 8 };
         for (int index = 0; index < 3; index++) actions.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        _changes = CreateButton("\uE8A9", "变更");
-        _terminal = CreateButton("\uE756", "终端");
-        _file = CreateButton("\uE8A5", "文件");
+        _changes = CreateButton("\uE8A9", "变更", centerContent: true);
+        _terminal = CreateButton("\uE756", "终端", centerContent: true);
+        _file = CreateButton("\uE8A5", "文件", centerContent: true);
         _changes.Click += (_, _) => ChangesRequested?.Invoke(this, EventArgs.Empty);
         _terminal.Click += (_, _) => TerminalRequested?.Invoke(this, EventArgs.Empty);
         _file.Click += (_, _) => FileRequested?.Invoke(this, EventArgs.Empty);
         actions.Children.Add(_changes); Grid.SetColumn(_terminal, 1); actions.Children.Add(_terminal);
         Grid.SetColumn(_file, 2); actions.Children.Add(_file); content.Children.Add(actions);
+        _localFile = CreateButton("\uE8A5", "选择本机文件", centerContent: true);
+        _localFile.Click += (_, _) => LocalFileRequested?.Invoke(this, EventArgs.Empty);
+        content.Children.Add(_localFile);
+        _browserLocalFile = CreateButton("\uE8A5", "选择本机文件", centerContent: true);
+        _browserLocalFile.Padding = new Thickness(8, 6, 8, 6);
+        _browserLocalFile.Click += (_, _) => LocalFileRequested?.Invoke(this, EventArgs.Empty);
         _fileNotice.Foreground = Brush("KynxaSecondaryTextBrush");
         _files.Children.Add(_fileNotice);
         _fileScroll = new ScrollViewer { Content = _files,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        Children.Add(content);
+        Children.Add(_homeScroll);
         CreateFilePane();
+        Children.Add(_folderEditorHost);
         _directory.Foreground = Brush("KynxaSecondaryTextBrush");
         _address.Foreground = Brush("KynxaTextBrush");
-        _address.Background = Brush("KynxaReplySurfaceBrush");
-        _address.BorderBrush = Brush("KynxaDividerBrush");
-        _address.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
-        _address.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        _address.Resources["TextControlBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _address.Resources["TextControlBorderBrushPointerOver"] = Brush("KynxaSecondaryTextBrush");
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
         Loaded += (_, _) =>
         {
@@ -136,20 +131,97 @@ public sealed class ConversationWorkspaceHome : Grid
         };
     }
 
+    private Border CreateAddressEntry()
+    {
+        var transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        var row = new Grid();
+        row.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        row.Children.Add(_address); Grid.SetColumn(_navigate, 1); row.Children.Add(_navigate);
+        var frame = new Border { Child = row, CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1), BorderBrush = Brush("KynxaDividerBrush"),
+            Background = Brush("KynxaReplySurfaceBrush") };
+        _address.Background = _address.BorderBrush = transparent;
+        foreach (string key in new[] { "TextControlBackground", "TextControlBackgroundPointerOver", "TextControlBackgroundFocused",
+            "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" }) _address.Resources[key] = transparent;
+        _address.Resources["TextControlBorderThemeThickness"] = new Thickness(0);
+        _address.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+        void UpdateFocus() => frame.BorderBrush = Brush(_address.FocusState != FocusState.Unfocused || _navigate.FocusState != FocusState.Unfocused
+            ? "KynxaSecondaryTextBrush" : "KynxaDividerBrush");
+        _address.GotFocus += (_, _) => UpdateFocus(); _address.LostFocus += (_, _) => UpdateFocus();
+        _navigate.GotFocus += (_, _) => UpdateFocus(); _navigate.LostFocus += (_, _) => UpdateFocus();
+        return frame;
+    }
+
+    private Grid CreateHomeHeading()
+    {
+        var heading = new Grid { ColumnSpacing = 12 };
+        heading.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        heading.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        heading.Children.Add(new Border { Width = 44, Height = 44, CornerRadius = new CornerRadius(14),
+            Background = Brush("KynxaSelectionBrush"), Child = new FontIcon { Glyph = "\uE80F", FontSize = 21,
+                Foreground = Brush("KynxaAccentTextBrush") } });
+        var text = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
+        foreach (var (key, size) in new[] { ("工作区", 20d), ("查看文件、网页与工作成果", 12d) })
+        {
+            var label = new TextBlock { Text = UiText.Get(key), FontSize = size, TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush(size == 20 ? "KynxaTextBrush" : "KynxaSecondaryTextBrush") };
+            _labels[label] = key; text.Children.Add(label);
+        }
+        Grid.SetColumn(text, 1); heading.Children.Add(text);
+        return heading;
+    }
+
+    private Border CreateLocationCard()
+    {
+        var location = new StackPanel { Spacing = 6 };
+        var title = new TextBlock { Text = UiText.Get("工作文件夹"), FontSize = 11,
+            Foreground = Brush("KynxaSecondaryTextBrush") };
+        _labels[title] = "工作文件夹";
+        location.Children.Add(title); location.Children.Add(_directory);
+        return new Border { Padding = new Thickness(12), CornerRadius = new CornerRadius(12),
+            BorderBrush = Brush("KynxaDividerBrush"), BorderThickness = new Thickness(1),
+            Background = Brush("KynxaReplySurfaceBrush"), Child = location };
+    }
+
     public void ShowDirectory(string? directory, bool hasConversation)
     {
         _directoryPath = directory; _hasConversation = hasConversation;
         _directory.Text = string.IsNullOrEmpty(directory) ? UiText.Get("未关联工作文件夹") : directory;
+        ToolTipService.SetToolTip(_directory, _directory.Text);
         _changes.IsEnabled = hasConversation && !string.IsNullOrEmpty(directory);
         _terminal.IsEnabled = hasConversation;
         _file.IsEnabled = hasConversation;
+        _localFile.IsEnabled = hasConversation;
+        _browserLocalFile.IsEnabled = hasConversation;
         _address.IsEnabled = hasConversation;
+        _navigate.IsEnabled = hasConversation;
     }
+
+    public void ShowFolderEditor(WorkspaceFolderEditor editor)
+    {
+        CancelFolderEditor();
+        HideFiles();
+        _folderEditor = editor;
+        _folderEditorHost.Content = editor;
+        _folderEditorHost.Visibility = Visibility.Visible;
+        _homeScroll.Visibility = Visibility.Collapsed;
+        editor.Closed += (_, _) =>
+        {
+            if (!ReferenceEquals(_folderEditor, editor)) return;
+            _folderEditor = null;
+            _folderEditorHost.Content = null; _folderEditorHost.Visibility = Visibility.Collapsed;
+            _homeScroll.Visibility = Visibility.Visible;
+        };
+    }
+
+    public void CancelFolderEditor() => _folderEditor?.Cancel();
+    public void ShowFolderEditorError(string message) => _folderEditor?.ShowError(message);
 
     private void CreateFilePane()
     {
-        for (int index = 0; index < 5; index++) _filePane.RowDefinitions.Add(new()
-            { Height = index == 3 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+        for (int index = 0; index < 6; index++) _filePane.RowDefinitions.Add(new()
+            { Height = index == 4 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
         var toolbar = new Grid { ColumnSpacing = 8 };
         toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         toolbar.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
@@ -168,28 +240,32 @@ public sealed class ConversationWorkspaceHome : Grid
         refresh.Click += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
         toolbar.Children.Add(refresh); Grid.SetColumn(refresh, 2);
         _filePane.Children.Add(toolbar);
-        _filePane.Children.Add(_fileKinds); Grid.SetRow(_fileKinds, 1);
-        _filePane.Children.Add(_browseRoots); Grid.SetRow(_browseRoots, 2);
-        _filePane.Children.Add(_attachmentScopes); Grid.SetRow(_attachmentScopes, 2);
-        _filePane.Children.Add(_fileScroll); Grid.SetRow(_fileScroll, 3);
-        _filePane.Children.Add(_pages); Grid.SetRow(_pages, 4);
-        _browseRoots.Background = Brush("KynxaReplySurfaceBrush");
-        _browseRoots.Foreground = Brush("KynxaTextBrush");
-        _browseRoots.BorderBrush = Brush("KynxaDividerBrush");
-        _browseRoots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _browseRoots.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
-        _browseRoots.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        _browseRoots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
-        _browseRoots.Resources["ComboBoxSelectionIndicatorBrush"] = Brush("KynxaSecondaryTextBrush");
+        _fileLocation.Foreground = Brush("KynxaSecondaryTextBrush");
+        _filePane.Children.Add(_fileLocation); Grid.SetRow(_fileLocation, 1);
+        var sources = new Grid { ColumnSpacing = 8, RowSpacing = 8 };
+        sources.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        sources.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        sources.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        sources.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        sources.Children.Add(_fileKinds); sources.Children.Add(_browserLocalFile);
+        Grid.SetRow(_browserLocalFile, 1); Grid.SetColumnSpan(_browserLocalFile, 2);
+        sources.SizeChanged += (_, args) =>
+        {
+            bool inline = args.NewSize.Width >= 480;
+            sources.RowSpacing = inline ? 0 : 8;
+            Grid.SetColumnSpan(_fileKinds, inline ? 1 : 2);
+            Grid.SetRow(_browserLocalFile, inline ? 0 : 1);
+            Grid.SetColumn(_browserLocalFile, inline ? 1 : 0);
+            Grid.SetColumnSpan(_browserLocalFile, inline ? 1 : 2);
+        };
+        _filePane.Children.Add(sources); Grid.SetRow(sources, 2);
+        _filePane.Children.Add(_attachmentScopes); Grid.SetRow(_attachmentScopes, 3);
+        _filePane.Children.Add(_fileScroll); Grid.SetRow(_fileScroll, 4);
+        _filePane.Children.Add(_pages); Grid.SetRow(_pages, 5);
         AutomationProperties.SetAutomationId(_filePane, "WorkspaceFileBrowser");
         AutomationProperties.SetAutomationId(back, "WorkspaceFileBrowserBack");
         AutomationProperties.SetAutomationId(refresh, "WorkspaceFileBrowserRefresh");
-        AutomationProperties.SetAutomationId(_browseRoots, "WorkspaceBrowserMountSelector");
-        _browseRoots.SelectionChanged += (_, _) =>
-        {
-            if (_updatingRoots || _browseRoots.SelectedItem is not ProjectMountState mount || _selectedMountId == mount.Id) return;
-            _selectedMountId = mount.Id; MountRequested?.Invoke(this, mount.Id);
-        };
+        AutomationProperties.SetAutomationId(_browserLocalFile, "WorkspaceFileBrowserLocalFile");
         _fileKinds.SelectionChanged += (_, key) =>
         {
             if (_updatingBrowser) return;
@@ -214,10 +290,11 @@ public sealed class ConversationWorkspaceHome : Grid
         _updatingBrowser = true;
         try { _fileKinds.SelectedKey = kind; }
         finally { _updatingBrowser = false; }
-        _homeContent.Visibility = Visibility.Collapsed; _filePane.Visibility = Visibility.Visible;
-        _browseRoots.Visibility = kind == "files" && _browseRoots.Items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _homeScroll.Visibility = Visibility.Collapsed; _filePane.Visibility = Visibility.Visible;
         _attachmentScopes.Visibility = kind == "attachments" && _hasProject ? Visibility.Visible : Visibility.Collapsed;
         _pages.Children.Clear();
+        _fileLocation.Text = kind == "attachments" ? UiText.Get("已保存附件") : _listing?.Path ?? _directoryPath ?? UiText.Get("未关联工作文件夹");
+        ToolTipService.SetToolTip(_fileLocation, _fileLocation.Text);
     }
 
     private void ResetDirectoryReads()
@@ -225,23 +302,6 @@ public sealed class ConversationWorkspaceHome : Grid
         ++_browserGeneration;
         _browserReads.Cancel(); _browserReads.Dispose(); _browserReads = new();
         _directoryCache.Clear();
-    }
-
-    public void ShowMounts(IReadOnlyList<ProjectMountState> mounts, Guid? selectedMountId)
-    {
-        _updatingRoots = true;
-        try
-        {
-            bool changed = _roots.ItemsSource is not IReadOnlyList<ProjectMountState> previous || !previous.SequenceEqual(mounts);
-            if (changed) _roots.ItemsSource = mounts.ToArray();
-            if (changed) _browseRoots.ItemsSource = _roots.ItemsSource;
-            _selectedMountId = selectedMountId;
-            _roots.SelectedItem = ((IEnumerable<ProjectMountState>?)_roots.ItemsSource)?.FirstOrDefault(mount => mount.Id == selectedMountId);
-            _browseRoots.SelectedItem = _roots.SelectedItem;
-            _roots.Visibility = mounts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-            _browseRoots.Visibility = !IsShowingAttachments && mounts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-        finally { _updatingRoots = false; }
     }
 
     public void ShowFilesLoading()
@@ -255,17 +315,23 @@ public sealed class ConversationWorkspaceHome : Grid
     public void HideFiles()
     {
         ResetDirectoryReads(); _expandedDirectories.Clear(); DirectoryLoader = null;
+        _fileError.IsOpen = false;
         _listing = null; _attachmentPage = null; _files.Children.Clear();
-        _filePane.Visibility = Visibility.Collapsed; _homeContent.Visibility = Visibility.Visible;
+        _filePane.Visibility = Visibility.Collapsed;
+        _homeScroll.Visibility = IsFolderEditorVisible ? Visibility.Collapsed : Visibility.Visible;
     }
 
     public void ShowFilesError(string message)
-    { _files.Children.Clear(); _fileNotice.Text = message; _files.Children.Add(_fileNotice); }
+    {
+        _files.Children.Clear(); _fileError.Message = message; _fileError.IsOpen = true;
+        _files.Children.Add(_fileError);
+    }
 
     public void ShowFiles(WorkspaceDirectoryListing listing, string? rootPath)
     {
         EnterFilePane("files");
         _listing = listing; _listingRoot = rootPath;
+        _fileLocation.Text = listing.Path; ToolTipService.SetToolTip(_fileLocation, listing.Path);
         _files.Children.Clear(); _fileScroll.Visibility = Visibility.Visible;
         if (rootPath is not null && !string.Equals(Path.TrimEndingDirectorySeparator(listing.Path),
             Path.TrimEndingDirectorySeparator(rootPath), StringComparison.OrdinalIgnoreCase))
@@ -304,7 +370,7 @@ public sealed class ConversationWorkspaceHome : Grid
                     FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush"),
                     FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
                 AutomationProperties.SetAutomationId(folder, "WorkspaceFolder_" + entry.Name);
-                ToolTipService.SetToolTip(folder, entry.Name);
+                ToolTipService.SetToolTip(folder, path);
                 folder.Expanding += async (_, _) =>
                 {
                     _expandedDirectories.Add(path);
@@ -319,6 +385,7 @@ public sealed class ConversationWorkspaceHome : Grid
                 var button = CreateButton("\uE8A5", entry.Name, translate: false);
                 button.Content = label; button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
                 button.Padding = new Thickness(8, 7, 8, 7);
+                ToolTipService.SetToolTip(button, path);
                 AutomationProperties.SetAutomationId(button, "WorkspaceFile_" + entry.Name);
                 button.Click += (_, _) => WorkspaceFileRequested?.Invoke(this, path);
                 container.Children.Add(button);
@@ -380,6 +447,7 @@ public sealed class ConversationWorkspaceHome : Grid
             text.Children.Add(new TextBlock { Text = $"{entry.ConversationTitle} · {entry.SizeBytes:N0} B", FontSize = 11,
                 Foreground = Brush("KynxaSecondaryTextBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
             button.Content = text;
+            ToolTipService.SetToolTip(button, $"{entry.Name}\n{entry.ConversationTitle} · {entry.SizeBytes:N0} B");
             AutomationProperties.SetAutomationId(button, "SavedAttachment_" + entry.Id.ToString("D"));
             button.Click += (_, _) => SavedAttachmentRequested?.Invoke(this, entry);
             _files.Children.Add(button);
@@ -409,15 +477,19 @@ public sealed class ConversationWorkspaceHome : Grid
             WebsiteRequested?.Invoke(this, address.AbsoluteUri);
     }
 
-    private Button CreateButton(string glyph, string text, bool translate = true)
+    private Button CreateButton(string glyph, string text, bool translate = true, bool centerContent = false)
     {
-        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, HorizontalAlignment = HorizontalAlignment.Center };
+        var label = new Grid { ColumnSpacing = 7, MinWidth = 0 };
+        label.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        label.ColumnDefinitions.Add(new() { Width = centerContent ? GridLength.Auto : new GridLength(1, GridUnitType.Star) });
         label.Children.Add(new FontIcon { Glyph = glyph, FontSize = 13 });
-        var caption = new TextBlock { Text = translate ? UiText.Get(text) : text, FontSize = 12 };
-        if (translate) _labels[caption] = text;
-        label.Children.Add(caption);
+        var caption = new TextBlock { Text = translate ? UiText.Get(text) : text, FontSize = 12,
+            TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(caption, 1); label.Children.Add(caption);
         var button = new Button { Content = label, CornerRadius = new CornerRadius(9), Padding = new Thickness(8, 11, 8, 11),
-            MinWidth = 0, HorizontalAlignment = HorizontalAlignment.Stretch, Background = Brush("KynxaReplySurfaceBrush"),
+            MinWidth = 0, HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = centerContent ? HorizontalAlignment.Center : HorizontalAlignment.Stretch,
+            Background = Brush("KynxaReplySurfaceBrush"),
             BorderBrush = Brush("KynxaDividerBrush"), Foreground = Brush("KynxaTextBrush"),
             FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush"), FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Tag = text };
         if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var style) && style is Style quiet) button.Style = quiet;
@@ -430,9 +502,10 @@ public sealed class ConversationWorkspaceHome : Grid
     private void RefreshLanguage()
     {
         foreach (var (label, key) in _labels) label.Text = UiText.Get(key);
-        foreach (var button in new[] { _changes, _terminal, _file })
+        foreach (var button in new[] { _changes, _terminal, _file, _navigate, _localFile, _browserLocalFile })
         {
             string caption = UiText.Get((string)button.Tag);
+            if (button.Content is Panel panel && panel.Children.OfType<TextBlock>().FirstOrDefault() is { } label) label.Text = caption;
             AutomationProperties.SetName(button, caption); ToolTipService.SetToolTip(button, caption);
         }
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));

@@ -12,10 +12,11 @@ public sealed class LayoutState
     public bool WorkRecentExpanded { get; set; }
     public bool WorkTasksExpanded { get; set; } = true;
     public bool ChatHistoryExpanded { get; set; } = true;
-    // Retain legacy divider values for old layout files; automatic list sizing ignores them.
-    // 保留旧布局文件的分隔线数值以兼容读取；列表自动伸缩不再使用这些比例。
-    public double WorkNavigationRatio { get; set; }
-    public double WorkRecentRatio { get; set; }
+    // Zero uses four visible rows; a drag saves a share of the available list space.
+    // 零表示默认四行；拖动后记录占可用列表空间的比例。
+    public double WorkRecentHeightRatio { get; set; }
+    public double WorkProjectsHeightRatio { get; set; }
+    public double WorkTasksHeightRatio { get; set; }
     public List<Guid> RecentWorkChatIds { get; set; } = [];
     public double TopWorkspaceHeight { get; set; } = ShellLayoutMetrics.TopDefault;
     public bool PreviewVisible { get; set; } = true;

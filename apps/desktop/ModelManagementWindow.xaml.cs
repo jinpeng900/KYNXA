@@ -4,6 +4,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using System.Globalization;
 using System.Net.Http;
@@ -35,6 +36,7 @@ public sealed partial class ModelManagementWindow : Window
     public ModelManagementWindow()
     {
         InitializeComponent();
+        WindowRoot.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(WindowRoot_PointerPressed), true);
         AppearanceService.TrackWindow(this);
         InitializeDraftPresentation();
         ExtendsContentIntoTitleBar = true;
@@ -571,10 +573,12 @@ public sealed partial class ModelManagementWindow : Window
     {
         if (_closed) return;
         string text = _statusMessage();
-        StatusText.Text = text;
+        StatusText.Text = text.Replace('\r', ' ').Replace('\n', ' ');
         ToolTipService.SetToolTip(StatusText, text);
         StatusText.Foreground = _statusIsError ? AppearanceService.GetBrush("KynxaErrorBrush")
             : (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"];
+        DismissStatusButton.Visibility = _statusIsError && text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        StatusRow.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static string FriendlyError(Exception error) => error switch

@@ -814,6 +814,9 @@ pub fn handle_raw(
                 next[field] = value.clone();
             }
         }
+        for project in next["Projects"].as_array().into_iter().flatten() {
+            super::workspace_mounts::validate_submission(project)?;
+        }
         let submitted = locations(&next);
         super::message_attachments::validate_catalog_submission(root, document, &submitted)?;
         let requests = catalog::apply(
@@ -1156,7 +1159,7 @@ fn migrate_legacy_at(root: &Path, legacy: &Path, models: &Path) -> ContractResul
         }
     }
     document["Chats"].as_array_mut().unwrap().retain(|chat| {
-        chat["IsSample"] == true
+        chat["IsSample"] == true || chat["KeepWorkspace"] == true
             || chat["Messages"]
                 .as_array()
                 .is_some_and(|messages| !messages.is_empty())
@@ -1173,7 +1176,7 @@ fn migrate_legacy_at(root: &Path, legacy: &Path, models: &Path) -> ContractResul
             }
         }
         project["Chats"].as_array_mut().unwrap().retain(|chat| {
-            chat["IsSample"] == true
+            chat["IsSample"] == true || chat["KeepWorkspace"] == true
                 || chat["Messages"]
                     .as_array()
                     .is_some_and(|messages| !messages.is_empty())
@@ -2863,6 +2866,9 @@ pub fn handle(
                 if let Some(value) = body.get(field) {
                     next[field] = value.clone();
                 }
+            }
+            for project in next["Projects"].as_array().into_iter().flatten() {
+                super::workspace_mounts::validate_submission(project)?;
             }
             let submitted = locations(&next);
             super::message_attachments::validate_catalog_submission(root, document, &submitted)?;

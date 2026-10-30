@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using KYNXA_Desktop.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -19,10 +20,20 @@ public sealed class CompactInfoBar : InfoBar
     private DispatcherQueueTimer? _dismissTimer;
     private TimeSpan _remaining = DismissDelay;
     private bool _pointerInside, _focusInside, _isAutoDismissPaused;
+    private UIElement? _pointerRoot;
+    private readonly PointerEventHandler _outsidePointer;
 
     public CompactInfoBar()
     {
+        _outsidePointer = DismissErrorOnOutsidePointer;
         DefaultStyleKey = typeof(InfoBar);
+        IsClosable = true;
+        Resources["InfoBarErrorSeverityBackgroundBrush"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        RegisterPropertyChangedCallback(SeverityProperty, (_, _) =>
+        {
+            RefreshMessagePresentation();
+            UpdateAutoDismiss();
+        });
         RegisterPropertyChangedCallback(IsOpenProperty, (_, _) =>
         {
             if (IsOpen) RestartAutoDismiss();
@@ -32,13 +43,20 @@ public sealed class CompactInfoBar : InfoBar
                 _pointerInside = _focusInside = false;
             }
         });
-        Loaded += (_, _) => RestartAutoDismiss();
+        Loaded += (_, _) =>
+        {
+            if (_pointerRoot is null && XamlRoot?.Content is UIElement root)
+            { _pointerRoot = root; root.AddHandler(UIElement.PointerPressedEvent, _outsidePointer, true); }
+            RestartAutoDismiss();
+        };
         Unloaded += (_, _) =>
         {
             PauseDismissClock();
             if (_dismissTimer is not null) _dismissTimer.Tick -= DismissTimerTick;
             _dismissTimer = null;
             _pointerInside = _focusInside = false;
+            _pointerRoot?.RemoveHandler(UIElement.PointerPressedEvent, _outsidePointer);
+            _pointerRoot = null;
         };
         PointerEntered += (_, _) => { _pointerInside = true; UpdateAutoDismiss(); };
         PointerExited += (_, _) => { _pointerInside = false; UpdateAutoDismiss(); };
@@ -90,7 +108,7 @@ public sealed class CompactInfoBar : InfoBar
     private void UpdateAutoDismiss()
     {
         PauseDismissClock();
-        if (!IsLoaded || !IsOpen || _pointerInside || _focusInside || _isAutoDismissPaused) return;
+        if (!IsLoaded || !IsOpen || Severity == InfoBarSeverity.Error || _pointerInside || _focusInside || _isAutoDismissPaused) return;
         if (_remaining <= TimeSpan.Zero) { IsOpen = false; return; }
         if (_dismissTimer is null)
         {
@@ -116,9 +134,26 @@ public sealed class CompactInfoBar : InfoBar
     protected override void OnApplyTemplate()
     {
         base.OnApplyTemplate();
+        RefreshMessagePresentation();
+    }
+
+    private void RefreshMessagePresentation()
+    {
         if (GetTemplateChild("Message") is not TextBlock message) return;
-        message.MaxLines = 3;
+        message.MaxLines = 1;
+        message.FontSize = 12;
+        message.TextWrapping = TextWrapping.NoWrap;
         message.TextTrimming = TextTrimming.CharacterEllipsis;
+        message.Foreground = AppearanceService.GetBrush(Severity == InfoBarSeverity.Error ? "KynxaErrorBrush" : "KynxaTextBrush");
         message.SetBinding(ToolTipService.ToolTipProperty, new Binding { Source = this, Path = new PropertyPath(nameof(Message)) });
+    }
+
+    private void DismissErrorOnOutsidePointer(object sender, PointerRoutedEventArgs args)
+    {
+        if (!IsOpen || Severity != InfoBarSeverity.Error) return;
+        for (DependencyObject? element = args.OriginalSource as DependencyObject; element is not null;
+            element = VisualTreeHelper.GetParent(element))
+            if (ReferenceEquals(element, this)) return;
+        IsOpen = false;
     }
 }

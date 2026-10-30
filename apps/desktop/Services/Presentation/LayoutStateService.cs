@@ -15,13 +15,17 @@ public sealed class LayoutStateService
         {
             string? json = null;
             if (File.Exists(SettingsPath)) json = File.ReadAllText(SettingsPath);
-            else if (ApplicationData.Current.LocalSettings.Values[SettingsKey] is string legacy) json = legacy;
+            else if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT"))
+                && ApplicationData.Current.LocalSettings.Values[SettingsKey] is string legacy) json = legacy;
             if (json is not null)
             {
                 LayoutState? state = JsonSerializer.Deserialize<LayoutState>(json);
                 if (state is not null && state.LayoutVersion <= LayoutState.CurrentVersion)
                 {
                     state.RecentWorkChatIds ??= [];
+                    state.WorkRecentHeightRatio = NormalizeHeightRatio(state.WorkRecentHeightRatio);
+                    state.WorkProjectsHeightRatio = NormalizeHeightRatio(state.WorkProjectsHeightRatio);
+                    state.WorkTasksHeightRatio = NormalizeHeightRatio(state.WorkTasksHeightRatio);
                     state.InterfaceLanguage = UiText.NormalizeLanguage(state.InterfaceLanguage);
                     state.AppearancePaletteId = AppearanceService.NormalizePaletteId(state.AppearancePaletteId);
                     state.AppearanceMode = AppearanceService.NormalizeMode(state.AppearanceMode);
@@ -50,6 +54,9 @@ public sealed class LayoutStateService
 
         return LayoutState.CreateDefault();
     }
+
+    private static double NormalizeHeightRatio(double ratio) =>
+        double.IsFinite(ratio) ? Math.Clamp(ratio, 0, 1) : 0;
 
     public bool Save(LayoutState state)
     {

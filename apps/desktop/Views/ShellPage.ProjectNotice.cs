@@ -133,24 +133,30 @@ public sealed partial class ShellPage
         else RenderProjects();
     }
 
-    private static ProjectFolderBinding CaptureProjectFolderBinding(ProjectState project) =>
-        new(project.FolderPath, project.Mounts.ToArray(), project.DefaultMountId);
+    private static ProjectFolderBinding CaptureProjectFolderBinding(ProjectState project)
+    {
+        var mount = ProjectMountPresentation.WorkspaceMount(project);
+        return new(mount?.Path ?? project.FolderPath, mount is null ? [] : [mount], mount?.Id);
+    }
 
     private static bool SameFolderPath(string? first, string? second) => string.Equals(
         first is null ? null : Path.TrimEndingDirectorySeparator(first),
         second is null ? null : Path.TrimEndingDirectorySeparator(second), StringComparison.OrdinalIgnoreCase);
 
     private static bool MatchesProjectFolderBinding(ProjectState project, ProjectFolderBinding binding) =>
-        project.DefaultMountId == binding.DefaultMountId && SameFolderPath(project.FolderPath, binding.FolderPath) &&
-        project.Mounts.Count == binding.Mounts.Length && project.Mounts.Zip(binding.Mounts).All(pair =>
+        CaptureProjectFolderBinding(project) is { } current &&
+        current.DefaultMountId == binding.DefaultMountId && SameFolderPath(current.FolderPath, binding.FolderPath) &&
+        current.Mounts.Length == binding.Mounts.Length && current.Mounts.Zip(binding.Mounts).All(pair =>
             pair.First.Id == pair.Second.Id && pair.First.Name == pair.Second.Name &&
             pair.First.BindingRevision == pair.Second.BindingRevision && SameFolderPath(pair.First.Path, pair.Second.Path));
 
     private static void ApplyProjectFolderBinding(ProjectState project, ProjectFolderBinding binding)
     {
-        project.FolderPath = binding.FolderPath;
-        project.Mounts = binding.Mounts.ToList();
-        project.DefaultMountId = binding.DefaultMountId;
+        var mount = ProjectMountPresentation.WorkspaceMount(new ProjectState
+        { FolderPath = binding.FolderPath, Mounts = binding.Mounts.ToList(), DefaultMountId = binding.DefaultMountId });
+        project.FolderPath = mount?.Path;
+        project.Mounts = mount is null ? [] : [mount];
+        project.DefaultMountId = mount?.Id;
     }
 
     private void ShowProjectFolderNotice(ProjectState project, ProjectFolderBinding previous, string message)

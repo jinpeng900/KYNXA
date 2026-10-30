@@ -10,12 +10,19 @@ pub(crate) fn user_message(text: &str, message_id: &str, prepared: &Value) -> Va
     let mut document = String::new();
     for item in prepared["attachments"].as_array().into_iter().flatten() {
         document.push_str(&format!(
-            "\nAttachment: {} (attachmentId={}, messageId={message_id})\n",
+            "\nAttachment: {} (attachmentId={}, messageId={message_id}, sourceVersion={})\n",
             item["name"].as_str().unwrap_or("file"),
-            item["id"].as_str().unwrap_or("")
+            item["id"].as_str().unwrap_or(""),
+            item["sha256"].as_str().unwrap_or("unavailable")
         ));
     }
+    if prepared["attachments"].as_array().is_some_and(|items| !items.is_empty()) {
+        document.push_str("Attachment access: attachment.read extracts text/OCR; image.read(messageId, attachmentId) supplies pixels; attachment.export(messageId, attachmentId, path) copies the original to an authorized work file for scripts. No private path search or duplicate upload is needed.\n");
+    }
     for item in prepared["texts"].as_array().into_iter().flatten() {
+        if item["textState"] == "empty" && item["originalAvailable"] == true {
+            document.push_str(&format!("\n{}: no text recognized; the original image is available for visual reading or byte export.\n", item["name"].as_str().unwrap_or("image")));
+        }
         document.push_str(&format!(
             "\n--- {} | version={} ---\n{}\n",
             item["name"].as_str().unwrap_or("file"),

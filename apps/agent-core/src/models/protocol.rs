@@ -151,7 +151,7 @@ pub fn check_finish(reason: &Value) -> Option<Value> {
     if reason.is_empty() || matches!(reason, "stop" | "end_turn" | "stop_sequence") {
         return None;
     }
-    Some(error(
+    let mut failure = error(
         if output_limit(reason) {
             "回复达到模型输出上限，已保留生成的内容。"
         } else if matches!(reason, "tool_calls" | "tool_use") {
@@ -161,7 +161,11 @@ pub fn check_finish(reason: &Value) -> Option<Value> {
         },
         None,
         "interrupted",
-    ))
+    );
+    failure["error"]["finishReason"] = json!(reason);
+    failure["error"]["outputTruncated"] = json!(output_limit(reason));
+    failure["error"]["hasToolCalls"] = json!(matches!(reason, "tool_calls" | "tool_use"));
+    Some(failure)
 }
 
 pub fn validate_count(count: usize) -> Option<Value> {
@@ -300,6 +304,7 @@ fn decode_turn(args: &Value) -> Value {
     };
     if !truncated && !matches!(string(&parts["finish"]), "tool_calls" | "tool_use") {
         if let Some(mut failure) = check_finish(&parts["finish"]) {
+            failure["error"]["hasToolCalls"] = json!(!raw_calls.is_empty());
             if !raw_calls.is_empty() {
                 failure["error"]["code"] = json!("MODEL_TOOL_OUTPUT_TRUNCATED");
             }
@@ -402,10 +407,17 @@ fn decode_turn(args: &Value) -> Value {
                     .any(|part| part["type"] == "refusal")
         })
     };
+    // Encrypted reasoning can consume the output allowance before any public summary or text exists.
+    // 加密思考可能先用完输出额度，此时尚无公开摘要或正文，仍须保留原生续接内容。
+    let private_reasoning = protocol == "openai-responses"
+        && array(&result["output"]).iter().any(|item| {
+            item["type"] == "reasoning"
+                && item["encrypted_content"].as_str().is_some_and(|text| !text.is_empty())
+        });
     if decoded.is_empty()
         && trim(string(&parts["content"])).is_empty()
         && !refusal
-        && !(truncated && !trim(string(&parts["reasoning"])).is_empty())
+        && !(truncated && (!trim(string(&parts["reasoning"])).is_empty() || private_reasoning))
     {
         return fail(decoder_error(
             "模型返回空回复，当前步骤未执行工具。",

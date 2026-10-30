@@ -231,6 +231,22 @@ impl Execution {
                     self.prepared.state.broker_note("Broker: this provider rejected its tool grammar before dispatch. Declarations were simplified; use discovery to load only the next necessary capability. Prior successful effects remain valid.");
                     return Ok(PhaseOutcome::Continue);
                 }
+                if budget::resume_execution_after_truncated_review(
+                    &mut self.rounds.review_pending, &error.code, &error.details,
+                ) {
+                    self.rounds.retry_next_request = true;
+                    self.prepared.state.completion.acceptance_reviewed = false;
+                    self.prepared.state.completion.acceptance_review_revision = None;
+                    checkpoint_completion_review(&mut self.prepared.state, false,
+                        self.rounds.review_evidence_required, self.rounds.review_attempts);
+                    append_control_notice(&mut self.prepared.state, "completionReviewNotice", None);
+                    let _ = self.prepared.state.task.apply("task.resumed", &json!({}));
+                    let _ = self.prepared.state.tools.effects
+                        .apply("effects.protect", &json!({"includeCurrent":true}));
+                    self.prepared.state.broker_note(budget::TRUNCATED_REVIEW_EXECUTION_NOTICE);
+                    self.prepared.state.save(&self.runtime, &self.run, "streaming", None).await?;
+                    return Ok(PhaseOutcome::Continue);
+                }
                 if self.prepared.state.recoveries < 2
                     && [
                         "MODEL_TOOL_CALL_INVALID",

@@ -28,6 +28,25 @@ pub(super) fn review_output_limit(requirements: usize, attempts: u64, available:
         .saturating_add(attempts.saturating_mul(1024)).min(available)
 }
 
+/// A truncated tool proposal needs the execution budget, not another identical short review.
+/// 工具提议被截断后恢复执行额度，不能原样重试短核验。
+pub(super) const TRUNCATED_REVIEW_EXECUTION_NOTICE: &str = "The review proposed an operation but its arguments were cut off before dispatch. Return to execution with the normal negotiated output budget. Generate only the missing complete call; split large payloads into smaller valid steps when needed. No truncated operation ran. Preserve successful receipts and follow the latest user instruction; do not add work or repeat completed effects.";
+
+pub(super) fn resume_execution_after_truncated_review(
+    review_pending: &mut bool,
+    code: &str,
+    details: &Value,
+) -> bool {
+    if !*review_pending || details["outputTruncated"] != true
+        || !(code == "MODEL_TOOL_OUTPUT_TRUNCATED"
+            || details["decoderCode"] == "MODEL_TOOL_OUTPUT_TRUNCATED")
+    {
+        return false;
+    }
+    *review_pending = false;
+    true
+}
+
 /// Budget operations are pure; caller-owned timing and cancellation remain at actual I/O boundaries.
 /// 预算操作是纯计算；计时与取消仍由调用方在真实 I/O 边界负责。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
@@ -491,6 +510,29 @@ fn remove_overlap<'a>(previous: &str, text: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_review_tool_returns_to_execution_instead_of_repeating_2176_tokens() {
+        let available = 16384;
+        assert_eq!(review_output_limit(1, 0, available), 2176);
+        let decoded = crate::models::protocol::calculate("models.protocol.decodeTurn", &json!({
+            "protocol":"openai-completions","allowTruncatedText":true,"catalog":[],"result":{
+            "choices":[{"message":{"tool_calls":[{"id":"pending-call","function":{
+                "name":"filesystem_write","arguments":"{\"path\":\"result.html\",\"text\":\"unfinished"}}]},
+                "finish_reason":"length"}]}})).unwrap();
+        let error = &decoded["error"];
+        let mut reviewing = true;
+        assert!(resume_execution_after_truncated_review(&mut reviewing, error["code"].as_str().unwrap(), error));
+        let next_limit = if reviewing { review_output_limit(1, 0, available) } else { available };
+        assert_eq!(next_limit, available);
+        assert!(!resume_execution_after_truncated_review(&mut reviewing, error["code"].as_str().unwrap(), error),
+            "An execution failure cannot keep receiving a fresh review escape.");
+        for details in [json!({"outputTruncated":false}), json!({"outputTruncated":true,"decoderCode":"MODEL_TOOL_ARGUMENT_INVALID"})] {
+            let mut pending = true;
+            assert!(!resume_execution_after_truncated_review(&mut pending, "MODEL_TOOL_CALL_INVALID", &details));
+            assert!(pending);
+        }
+    }
 
     #[test]
     fn single_requirement_review_has_room_beyond_the_old_640_token_ceiling() {

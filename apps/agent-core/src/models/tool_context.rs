@@ -115,6 +115,10 @@ pub(crate) fn source_metadata(content: &Value) -> Value {
         "path",
         "sha256",
         "sourceId",
+        "messageId",
+        "attachmentId",
+        "textState",
+        "originalAvailable",
         "sourceRevision",
         "contentHash",
         "derivationSignature",
@@ -860,6 +864,12 @@ fn context_arguments(arguments: &Value) -> Value {
     let mut output = serde_json::Map::new();
     for field in [
         "path",
+        "messageId",
+        "attachmentId",
+        "mountId",
+        "expectedSha256",
+        "crop",
+        "maxDimension",
         "sourceId",
         "scopeKey",
         "id",
@@ -924,6 +934,12 @@ pub(crate) fn evidence_identity(evidence: &Value) -> String {
     // 按内容版本和正文范围识别已读来源，新包装 ID 不算新增证据。
     if evidence["kind"] == "original-source" {
         if let Some((start, end)) = actual_range {
+            if evidence["tool"] == "attachment.read"
+                && source["sourceId"].as_str().is_some_and(|source| source.starts_with("attachment:"))
+                && valid_digest(&source["sourceVersion"])
+            {
+                return json!(["attachment-window", source["sourceId"], source["sourceVersion"], start, end]).to_string();
+            }
             if matches!(string(&evidence["tool"]), "filesystem.read" | "document.read")
                 && !string(&source["path"]).is_empty()
                 && valid_digest(&source["sha256"])
@@ -1045,6 +1061,8 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
                 name,
                 "filesystem.read"
                     | "document.read"
+                    | "attachment.read"
+                    | "image.read"
                     | "filesystem.list"
                     | "filesystem.search"
                     | "knowledge.read"
@@ -1091,6 +1109,10 @@ fn compact_evidence(record: &Value) -> Value {
         "path",
         "url",
         "sourceId",
+        "messageId",
+        "attachmentId",
+        "textState",
+        "originalAvailable",
         "sha256",
         "contentHash",
         "sourceRevision",

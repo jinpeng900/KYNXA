@@ -1,12 +1,12 @@
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using KYNXA.Contracts;
+using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private readonly Dictionary<Guid, Guid> _workspaceMountSelections = [];
     private Guid? _filesConversation;
     private Guid? _filesMount;
     private string? _filesBinding;
@@ -16,15 +16,53 @@ public sealed partial class ShellPage
     private int _attachmentOffset;
     private CancellationTokenSource? _workspaceFileRead;
     private string? _retrievalActivationKey;
+    private bool _pickingLocalWorkspaceFile;
+
+    private async Task PickLocalWorkspaceFileAsync()
+    {
+        if (_pickingLocalWorkspaceFile || _chatClosing || !IsLoaded || HasPresentationModal()
+            || ActiveChatId is not Guid conversation) return;
+        _pickingLocalWorkspaceFile = true;
+        try
+        {
+            var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
+            var file = await picker.PickSingleFileAsync();
+            if (file is null || _chatClosing || !IsLoaded || ActiveChatId != conversation) return;
+            if (!Path.IsPathFullyQualified(file.Path))
+            {
+                ShowActionFeedback(UiText.Get("所选文件没有可用的本机路径。"));
+                return;
+            }
+            var (chat, project) = FindChat(conversation);
+            if (chat is null) return;
+            chat.KeepWorkspace = true;
+            if (!chat.IsPersisted) await SaveChatChangesAsync(project);
+            if (_chatClosing || !IsLoaded || ActiveChatId != conversation) return;
+            // The picker grants this file's preview, never another folder or model-wide access.
+            // 选择器只授权预览此文件，不增加工作文件夹或模型的目录权限。
+            WorkspaceHome.CancelFolderEditor();
+            AddWorkspaceTab(conversation, ConversationWorkspaceSources.File(file.Path, file.Name, userSelected: true) with
+                { PresentationPriority = WorkspacePresentationPriority.Requested }, select: true);
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.COMException or IOException or HttpRequestException
+            or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            if (!_chatClosing && ActiveChatId == conversation)
+                ShowActionFeedback(UiText.Get("本机文件打开失败，请重试。"));
+        }
+        finally { _pickingLocalWorkspaceFile = false; }
+    }
 
     private void NotifyActiveRetrievalProject(ProjectState? project)
     {
         if (!_projectsReady || _chatClosing || _projectViewClosed) return;
-        string key = project is null ? "global" : $"{project.Id:D}/{project.FolderPath}/" +
-            string.Join(";", project.Mounts.Select(mount => $"{mount.Id:D}:{mount.BindingRevision}:{mount.Path}"));
+        var mount = ProjectMountPresentation.WorkspaceMount(project);
+        string key = project is null ? "global" : $"{project.Id:D}/{mount?.Id:D}/{mount?.BindingRevision}/{mount?.Path ?? project.FolderPath}";
         if (_retrievalActivationKey == key) return;
         _retrievalActivationKey = key;
-        _ = ActivateRetrievalProjectAsync(project is { Mounts.Count: > 0 } ? project.Id : null);
+        _ = ActivateRetrievalProjectAsync(mount is not null ? project!.Id : null);
     }
 
     private async Task ActivateRetrievalProjectAsync(Guid? projectId)
@@ -44,25 +82,10 @@ public sealed partial class ShellPage
     private ProjectState? CurrentWorkspaceProject() => ActiveChatId is Guid conversation ? FindChat(conversation).Project
         : WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
 
-    private ProjectMountState? CurrentWorkspaceMount()
-    {
-        var project = CurrentWorkspaceProject();
-        if (project is null) return null;
-        Guid? selected = _workspaceMountSelections.TryGetValue(project.Id, out Guid id) ? id : project.DefaultMountId;
-        return project.Mounts.FirstOrDefault(mount => mount.Id == selected) ?? project.Mounts.FirstOrDefault();
-    }
+    private ProjectMountState? CurrentWorkspaceMount() => ProjectMountPresentation.WorkspaceMount(CurrentWorkspaceProject());
 
     private string CurrentWorkspaceFilesBinding() => CurrentWorkspaceMount() is { } mount
         ? $"{mount.Id:D}/{mount.BindingRevision}/{mount.Path}" : CurrentWorkspaceDirectory() ?? string.Empty;
-
-    private void SelectWorkspaceMount(Guid mountId)
-    {
-        if (_chatClosing || CurrentWorkspaceProject() is not { } project || !project.Mounts.Any(mount => mount.Id == mountId)) return;
-        _workspaceMountSelections[project.Id] = mountId;
-        bool wasBrowsing = _filesConversation == ActiveChatId;
-        ApplyLayout();
-        if (wasBrowsing && !WorkspaceHome.IsShowingAttachments) _ = BrowseWorkspaceFilesAsync();
-    }
 
     private void CancelWorkspaceFileRead(bool forgetScope = false)
     {
@@ -154,21 +177,16 @@ public sealed partial class ShellPage
         ActiveMessages.FirstOrDefault(row => row.Message.Id == message)?.Message.Attachments.FirstOrDefault(item => item.Id == attachment)
         ?? ResourcesFor(conversation).Attachments.GetValueOrDefault($"{message:D}/{attachment:D}");
 
-    private ConversationWorkTab LabelWorkspaceMount(Guid conversation, ConversationWorkTab tab)
+    private ConversationWorkTab BindWorkspaceFile(Guid conversation, ConversationWorkTab tab)
     {
-        var project = FindChat(conversation).Project;
-        if (project is null || tab.Kind is not ("document" or "diagram") || string.IsNullOrWhiteSpace(tab.Target) ||
+        if (tab.MountId is not null || tab.Kind is not ("document" or "diagram") || string.IsNullOrWhiteSpace(tab.Target) ||
             !Path.IsPathFullyQualified(tab.Target)) return tab;
-        string path = Path.GetFullPath(tab.Target);
-        var candidates = tab.MountId is Guid selectedMount ? project.Mounts.Where(mount => mount.Id == selectedMount)
-            : project.Mounts.OrderByDescending(mount => mount.Path.Length);
-        var mount = candidates.FirstOrDefault(mount =>
-        {
-            string root = Path.TrimEndingDirectorySeparator(mount.Path);
-            return string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
-                path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-        });
+        var mount = ProjectMountPresentation.WorkspaceMount(FindChat(conversation).Project);
         if (mount is null) return tab;
-        return tab with { MountId = mount.Id, Title = project.Mounts.Count > 1 ? $"{Path.GetFileName(path)} · {mount.Name}" : tab.Title };
+        string path = Path.GetFullPath(tab.Target);
+        string root = Path.TrimEndingDirectorySeparator(mount.Path);
+        return string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? tab with { MountId = mount.Id } : tab;
     }
 }

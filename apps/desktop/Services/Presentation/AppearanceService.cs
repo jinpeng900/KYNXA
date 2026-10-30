@@ -77,7 +77,8 @@ public static class AppearanceService
     public static Color ParseColor(string hex)
     {
         uint rgb = uint.Parse(hex.AsSpan(1), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-        return Color.FromArgb(255, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
+        return Color.FromArgb(hex.Length == 9 ? (byte)(rgb >> 24) : (byte)255,
+            (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
     }
 
     public static SolidColorBrush GetBrush(string key) => (SolidColorBrush)Application.Current.Resources[key];
@@ -199,6 +200,10 @@ public static class AppearanceService
         SetBrush("KynxaAmbientWaveSoftBrush", palette.Sidebar);
         SetBrush("KynxaReplySurfaceBrush", palette.ReplySurface);
         SetBrush("KynxaControlHoverBrush", palette.ControlHover);
+        var feedbackText = ParseColor(palette.Text);
+        string FeedbackOverlay(byte alpha) => $"#{alpha:X2}{feedbackText.R:X2}{feedbackText.G:X2}{feedbackText.B:X2}";
+        SetBrush("KynxaButtonHoverOverlayBrush", FeedbackOverlay(palette.IsHighContrast ? (byte)32 : (byte)8));
+        SetBrush("KynxaButtonPressedOverlayBrush", FeedbackOverlay(palette.IsHighContrast ? (byte)48 : (byte)14));
         SetBrush("KynxaControlPressedBrush", palette.ControlPressed);
         SetBrush("ButtonBackgroundPointerOver", palette.ControlHover);
         SetBrush("ButtonBackgroundPressed", palette.ControlPressed);

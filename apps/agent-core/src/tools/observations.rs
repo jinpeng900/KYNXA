@@ -270,6 +270,8 @@ fn call_key(call: &Value) -> Option<String> {
         name,
         "filesystem.read"
             | "document.read"
+            | "attachment.read"
+            | "image.read"
             | "knowledge.read"
             | "tool.result.read"
             | "conversation.history.read"
@@ -341,6 +343,13 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
             definitions.sort_by_cached_key(Value::to_string);
             json!([definitions, value["configurationGeneration"],value["mcpConfigurationGeneration"],
                 value["permissionMode"],value["permissions"]])
+        }
+        "attachment.read" if value["sourceId"].is_string() && value["sourceVersion"].is_string() => {
+            json!([value["sourceId"], value["sourceVersion"], value["offset"], value["nextOffset"],
+                value["textState"], value["text"]])
+        }
+        "image.read" if value["sourceId"].is_string() && value["imageSha256"].is_string() => {
+            json!([value["sourceId"], value["sourceVersion"], value["imageSha256"], value["crop"], value["width"], value["height"]])
         }
         "knowledge.read"
             if value["text"].is_string()

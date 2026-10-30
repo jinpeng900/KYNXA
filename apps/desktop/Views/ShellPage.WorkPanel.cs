@@ -23,13 +23,14 @@ public sealed partial class ShellPage
     private void UpdateMountedWorkspacePresentation()
     {
         var project = ViewModel.IsChatMode ? null : WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
-        MountedWorkspace.ShowProject(project?.Id, UserMountedFolder(project), project?.Mounts);
+        MountedWorkspace.ShowProject(project?.Id, UserMountedFolder(project), ProjectMountPresentation.WorkspaceMount(project)?.Name);
         NotifyActiveRetrievalProject(project);
         ApplyLayout();
     }
 
     private double UpdateWorkPanelLayout()
     {
+        CancelFolderEditorForChangedScope();
         double available = MainRegion.ActualWidth;
         bool hasSpace = CanOpenWorkPanel(available, MainRegion.ActualHeight);
         bool inline = CanShowWorkPanel(available, MainRegion.ActualHeight);
@@ -43,10 +44,11 @@ public sealed partial class ShellPage
             _emptyWorkPanelRequested = false;
         }
         bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
-        bool canOpen = (ActiveChatId is not null || isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder) && hasSpace;
+        bool editingFolder = WorkspaceHome.IsFolderEditorVisible;
+        bool canOpen = (ActiveChatId is not null || isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder || editingFolder) && hasSpace;
         // A folder header alone does not need a preview column. Empty opening belongs to the mode/project/chat scope.
         // 仅有目录标题时不占用预览列；空面板请求属于当前模式、项目与会话，未创建聊天时也不会跨项目泄漏。
-        bool visible = canOpen && _layout.PreviewVisible && (WorkTabs.HasOpenTabs || _emptyWorkPanelRequested);
+        bool visible = canOpen && _layout.PreviewVisible && (WorkTabs.HasOpenTabs || _emptyWorkPanelRequested || editingFolder);
         _workPanelUsesOverlay = visible && !inline;
         double panelWidth = visible ? inline ? GetWorkPanelWidth(available, _layout.PreviewWidth)
             : GetWorkPanelOverlayWidth(available, _layout.PreviewWidth) : 0;
@@ -112,6 +114,7 @@ public sealed partial class ShellPage
 
     private void CloseWorkPanelButton_Click(object sender, RoutedEventArgs e)
     {
+        WorkspaceHome.CancelFolderEditor();
         _emptyWorkPanelRequested = false;
         _layout.PreviewVisible = false;
         ApplyLayout();

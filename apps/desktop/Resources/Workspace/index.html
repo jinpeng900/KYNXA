@@ -3,13 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; img-src 'self' http://127.0.0.1:* http://localhost:* https://kynxa-markdown-images.local blob: data:; frame-src 'self'; connect-src 'self' https://kynxa-workspace-content.local; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; img-src 'self' https://kynxa-workspace-content.local http://127.0.0.1:* http://localhost:* https://kynxa-markdown-images.local blob: data:; media-src 'self' https://kynxa-workspace-content.local blob:; frame-src 'self'; connect-src 'self' https://kynxa-workspace-content.local blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <link rel="stylesheet" href="../Math/KaTeX/katex.min.css">
   <link rel="stylesheet" href="../Transcript/diagrams.css">
   <link rel="stylesheet" href="../Transcript/content-blocks.css">
   <link rel="stylesheet" href="../Transcript/table-blocks.css">
   <link rel="stylesheet" href="../Transcript/markdown-content.css">
   <link rel="stylesheet" href="workspace.css">
+  <link rel="stylesheet" href="preview-controls.css">
+  <link rel="stylesheet" href="model-preview.css">
+  <link rel="stylesheet" href="workbench.css">
   <script src="../Math/KaTeX/katex.min.js" defer></script>
   <script src="../Transcript/diagrams.js" defer></script>
   <script src="../Transcript/content-blocks.js" defer></script>
@@ -20,6 +23,7 @@
   <script src="office-preview.js" defer></script>
   <script src="pptx.js" defer></script>
   <script src="xlsx.js" defer></script>
+  <script src="vendor/qrcode-generator/qrcode.js" defer></script>
   <script src="workspace.js" defer></script>
   <title>文件预览</title>
 </head>

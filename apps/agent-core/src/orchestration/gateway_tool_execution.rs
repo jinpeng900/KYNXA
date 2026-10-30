@@ -29,10 +29,11 @@ pub(super) fn artifact_version_changed(call: &Value, receipt: &Value, before: &V
     if receipt["reused"] == true || receipt["executed"] == false || !successful_completion_receipt(receipt) {return false;}
     let name = call["name"].as_str().unwrap_or("");
     let value = &receipt["content"];
-    if matches!(name,"filesystem.write" | "filesystem.edit" | "filesystem.delete" | "filesystem.mkdir" | "document.create") {
+    if value["reused"] == true || value["executed"] == false {return false;}
+    if matches!(name,"filesystem.write" | "filesystem.edit" | "filesystem.delete" | "filesystem.mkdir" | "document.create" | "attachment.export") {
         if value["path"].as_str().is_some_and(|path|!path.is_empty()) {
             if value["deleted"] == true || value["created"] == true || value["changed"] == true {return true;}
-            if matches!(name,"filesystem.write" | "filesystem.edit" | "document.create")
+            if matches!(name,"filesystem.write" | "filesystem.edit" | "document.create" | "attachment.export")
                 && let Some(hash) = value["sha256"].as_str().filter(|hash|
                     hash.len()==64 && hash.bytes().all(|byte|byte.is_ascii_hexdigit())) {
                 // Native writes require null for a missing target or the exact previous hash for replacement.
@@ -197,6 +198,20 @@ mod work_progress_tests {
         let mut reused = receipt;
         reused["reused"] = json!(true);
         assert!(!artifact_version_changed(&create,&reused,&before,&after));
+    }
+
+    #[test]
+    fn attachment_exports_report_native_creates_but_not_reused_commits_as_progress() {
+        let call = json!({"name":"attachment.export","arguments":{"path":"copy.png","expectedSha256":"a".repeat(64)}});
+        let receipt = json!({"status":"completed","executed":true,
+            "content":{"path":"copy.png","sha256":"a".repeat(64),"bytes":20}});
+        assert!(artifact_version_changed(&call, &receipt, &Value::Null, &Value::Null));
+        for marker in [json!({"reused":true}), json!({"executed":false})] {
+            let mut reused = receipt.clone();
+            reused["content"].as_object_mut().unwrap().extend(marker.as_object().unwrap().clone());
+            assert!(!artifact_version_changed(&call, &reused,
+                &json!({"complete":true,"signature":"before"}), &json!({"complete":true,"signature":"after"})));
+        }
     }
 }
 

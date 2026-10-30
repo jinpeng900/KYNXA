@@ -66,6 +66,17 @@ internal sealed class MainWindowTrayService : IDisposable
         SendMessage(_windowHandle, CloseMessage, 0, 0);
     }
 
+    public void ShowCompletionNotification(string? title)
+    {
+        if (_isDisposed || _exitRequested || !EnsureTrayIcon()) return;
+        var data = CreateIconData();
+        data.Flags = 0x0010;
+        data.InfoTitle = AppIdentity.DisplayName;
+        data.Info = string.IsNullOrWhiteSpace(title) ? "回复已完成。" : "回复已完成：" + (title.Length > 180 ? title[..180] : title);
+        data.InfoFlags = 0x0001 | 0x0010;
+        ShellNotifyIcon(1, ref data);
+    }
+
     private nint WindowProcedure(nint window, uint message, nint wParam, nint lParam, nuint subclassId, nuint referenceData)
     {
         try
@@ -82,7 +93,7 @@ internal sealed class MainWindowTrayService : IDisposable
             else if (message == TrayCallbackMessage)
             {
                 uint notification = (uint)(lParam.ToInt64() & 0xffff);
-                if (notification is 0x0400 or 0x0401 or 0x0203) Restore();
+                if (notification is 0x0400 or 0x0401 or 0x0405 or 0x0203) Restore();
                 else if (notification is 0x007B or 0x0205) ShowMenu();
                 return 0;
             }
@@ -133,7 +144,7 @@ internal sealed class MainWindowTrayService : IDisposable
         Flags = 0x0001 | 0x0002 | 0x0004 | 0x0080,
         CallbackMessage = TrayCallbackMessage,
         Icon = _icon,
-        Tip = "KYNXA",
+        Tip = AppIdentity.DisplayName,
         Info = string.Empty,
         InfoTitle = string.Empty
     };
@@ -144,9 +155,9 @@ internal sealed class MainWindowTrayService : IDisposable
         if (menu == 0) { Restore(); return; }
         try
         {
-            AppendMenu(menu, 0, OpenMenuId, UiText.Get("打开 KYNXA"));
+            AppendMenu(menu, 0, OpenMenuId, UiText.Get("打开 KYNXA").Replace("KYNXA", AppIdentity.DisplayName, StringComparison.Ordinal));
             AppendMenu(menu, 0x0800, 0, null);
-            AppendMenu(menu, 0, ExitMenuId, UiText.Get("退出 KYNXA"));
+            AppendMenu(menu, 0, ExitMenuId, UiText.Get("退出 KYNXA").Replace("KYNXA", AppIdentity.DisplayName, StringComparison.Ordinal));
             SetMenuDefaultItem(menu, OpenMenuId, false);
             GetCursorPos(out var point);
             SetForegroundWindow(_windowHandle);

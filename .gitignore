@@ -31,6 +31,7 @@ venv/
 **/connections.json.*
 **/local-server.json
 /Data/
+/ExpansionData/
 /Extensions/
 /storage.json
 /extensions.json

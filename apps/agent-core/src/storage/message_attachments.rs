@@ -595,6 +595,8 @@ pub fn save_extraction(
         for field in ["error", "errorCode"] {
             if let Some(value) = extracted.get(field) {
                 saved[field] = value.clone();
+            } else {
+                saved.as_object_mut().unwrap().remove(field);
             }
         }
         gateway::commit_json(

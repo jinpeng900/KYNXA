@@ -22,8 +22,8 @@ fn legacy_id(project: &Value) -> String {
     uuid::Uuid::from_bytes(bytes).to_string()
 }
 
-/// Normalize old single-root and current multi-root projects without reading or creating any directory.
-/// 规范化旧单根与多根项目，不读取或创建实体目录；首次正式保存会固化派生标识。
+/// Keep one work folder while retaining its existing permission identity.
+/// 每个工作只保留一个关联目录，沿用原权限标识；不读取或创建实体目录。
 pub fn project(value: &Value) -> ContractResult {
     let mut project = value.clone();
     let explicit = value.get("Mounts").filter(|mounts| !mounts.is_null());
@@ -52,13 +52,25 @@ pub fn project(value: &Value) -> ContractResult {
     }
     let default = value["DefaultMountId"].as_str().filter(|id| !id.is_empty())
         .map(|id| uuid::Uuid::parse_str(id).map(|id|id.to_string()).map_err(|_|invalid("默认挂载标识无效。")))
-        .transpose()?.or_else(|| normalized.first().and_then(|mount| mount["Id"].as_str()).map(str::to_owned));
+        .transpose()?.or_else(|| value["FolderPath"].as_str()
+            .and_then(|folder| normalized.iter().find(|mount|mount["Path"].as_str().is_some_and(|path|path_key(path)==path_key(folder))))
+            .or_else(||normalized.first()).and_then(|mount|mount["Id"].as_str()).map(str::to_owned));
     let default_mount = default.as_ref().and_then(|id| normalized.iter().find(|mount| mount["Id"] == *id));
     if default.is_some() && default_mount.is_none() { return Err(invalid("默认挂载不在当前工作目录列表中。")); }
     project["FolderPath"] = default_mount.map(|mount| mount["Path"].clone()).unwrap_or(Value::Null);
     project["DefaultMountId"] = default.map(Value::String).unwrap_or(Value::Null);
+    normalized.retain(|mount|mount["Id"] == project["DefaultMountId"]);
     project["Mounts"] = json!(normalized);
     Ok(project)
+}
+
+/// Reject new multi-folder submissions; legacy reads still select their original default.
+/// 新提交拒绝多目录，旧数据读取仍兼容并保留原默认目录。
+pub fn validate_submission(value: &Value) -> Result<(), ContractError> {
+    if value["Mounts"].as_array().is_some_and(|mounts|mounts.len()>1) {
+        return Err(invalid("一个工作只能关联一个文件夹；请选择更换当前文件夹。"));
+    }
+    Ok(())
 }
 
 pub fn relationship(value: &Value) -> ContractResult {
@@ -74,7 +86,7 @@ pub fn bind_default(value: &Value, path: &str) -> ContractResult {
     let id = project["DefaultMountId"].as_str().map(str::to_owned).unwrap_or_else(||legacy_id(value));
     let mounts = project["Mounts"].as_array_mut().unwrap();
     if let Some(mount) = mounts.iter_mut().find(|mount| mount["Id"] == id) {
-        if mount["Path"] != path { mount["BindingRevision"] = json!(mount["BindingRevision"].as_u64().unwrap_or(1).saturating_add(1)); }
+        if !mount["Path"].as_str().is_some_and(|old|path_key(old)==path_key(path)) { mount["BindingRevision"] = json!(mount["BindingRevision"].as_u64().unwrap_or(1).saturating_add(1)); }
         mount["Path"] = json!(path);
     } else {
         mounts.push(json!({"Id":id,"Name":Path::new(path).file_name().and_then(|name|name.to_str()).unwrap_or("工作目录"),"Path":path,"BindingRevision":1}));
@@ -122,6 +134,36 @@ pub fn validate_snapshot(previous: &Value, current: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn old_multi_folder() -> Value {
+        json!({"Id":"58b59200-e290-4610-93c8-daf7d9da2199",
+            "DefaultMountId":"f228652d-5733-4c5c-b246-f971886444ed",
+            "Mounts":[
+                {"Id":"67bb9c9f-aedd-4cdd-a858-4c7be90beab9","Name":"Other","Path":std::env::temp_dir().join("other"),"BindingRevision":2},
+                {"Id":"f228652d-5733-4c5c-b246-f971886444ed","Name":"Current","Path":std::env::temp_dir().join("current"),"BindingRevision":7}]})
+    }
+    #[test]
+    fn old_multi_folder_keeps_only_the_default_with_its_identity_and_revision() {
+        let old=old_multi_folder(); let single=project(&old).unwrap();
+        assert_eq!(single["Mounts"],json!([old["Mounts"][1]]));
+        assert_eq!(single["DefaultMountId"],old["DefaultMountId"]);
+        assert_eq!(single["FolderPath"],old["Mounts"][1]["Path"]);
+        assert_eq!(project(&single).unwrap(),single);
+        let mut fallback=old.clone(); fallback["DefaultMountId"]=Value::Null; fallback["FolderPath"]=old["Mounts"][1]["Path"].clone();
+        assert_eq!(project(&fallback).unwrap()["Mounts"],single["Mounts"]);
+    }
+    #[test]
+    fn multi_folder_submission_is_rejected_and_replacement_keeps_one_versioned_binding() {
+        let old=old_multi_folder(); assert!(validate_submission(&old).is_err());
+        let single=project(&old).unwrap(); assert!(validate_submission(&single).is_ok());
+        let same=bind_default(&single,single["FolderPath"].as_str().unwrap()).unwrap();
+        assert_eq!(same["Mounts"][0]["BindingRevision"],7);
+        let replacement=std::env::temp_dir().join("replacement");
+        let next=bind_default(&single,replacement.to_str().unwrap()).unwrap();
+        assert_eq!(next["Mounts"].as_array().unwrap().len(),1);
+        assert_eq!(next["Mounts"][0]["Id"],single["Mounts"][0]["Id"]);
+        assert_eq!(next["Mounts"][0]["BindingRevision"],8);
+        assert!(!validate_snapshot(&snapshot(&relationship(&single).unwrap()),&relationship(&next).unwrap()));
+    }
     #[test]
     fn legacy_mount_identity_is_stable_and_unrelated_changes_do_not_revoke_it() {
         let old = json!({"Id":"58b59200-e290-4610-93c8-daf7d9da2199","FolderPath":std::env::temp_dir().join("work-a")});

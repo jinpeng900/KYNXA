@@ -52,7 +52,7 @@ public sealed class ConversationWorkTabState
         while (_chats.Count > MaximumConversations) _chats.Remove(_chats.Where(pair => pair.Key != currentId).MinBy(pair => pair.Value.Touched).Key);
         var keys = new HashSet<string>(StringComparer.Ordinal);
         var next = items.Where(item => item is not null && !string.IsNullOrWhiteSpace(item.Key) && item.Key.Length <= 512 &&
-            !item.Key.Any(char.IsControl) && item.Kind is "screenshot" or "terminal" or "document" or "diagram" or "browser" or "changes" &&
+            !item.Key.Any(char.IsControl) && item.Kind is "screenshot" or "terminal" or "document" or "diagram" or "browser" or "changes" or "workbench" &&
             item.Title is not null && item.Title.Length <= 256 && keys.Add(item.Key)).ToArray();
         if (tabs.HasCustomOrder)
         {

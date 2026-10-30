@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace KYNXA_Desktop.Services;
@@ -41,9 +42,58 @@ public sealed class WorkspacePreviewApiClient : IDisposable
         var root = _http.BaseAddress ?? ModelGatewayService.Address;
         var address = new Uri(root, contentUrl);
         if (address.Scheme != root.Scheme || address.Host != root.Host || address.Port != root.Port
-            || !address.AbsolutePath.StartsWith("/agent/workspace/", StringComparison.Ordinal))
+            || address.AbsolutePath != "/agent/workspace/content")
             throw new InvalidDataException(UiText.Get("文件预览地址无效。"));
         return address;
+    }
+
+    public sealed record ProxyContent(byte[] Bytes, int StatusCode, string Reason, string Headers);
+
+    /// <summary>Forward a single byte range only to the host's exact authorized content address.</summary>
+    public async Task<ProxyContent> ReadProxyContentAsync(Uri address, string? range, string method,
+        CancellationToken cancellationToken)
+    {
+        var root = _http.BaseAddress ?? ModelGatewayService.Address;
+        string[] segments = address.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        bool attachment = segments is ["api", "conversations", var conversation, "attachments", var id, "content"]
+            && Guid.TryParse(conversation, out _) && Guid.TryParse(id, out _);
+        if (address.Scheme != root.Scheme || address.Host != root.Host || address.Port != root.Port
+            || address.AbsolutePath != "/agent/workspace/content" && !attachment || method is not ("GET" or "HEAD"))
+            throw new InvalidDataException("Unsupported content address.");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(60));
+        using var request = new HttpRequestMessage(method == "HEAD" ? HttpMethod.Head : HttpMethod.Get, address);
+        if (!string.IsNullOrEmpty(range))
+        {
+            if (range.Length > 128 || !RangeHeaderValue.TryParse(range, out var parsed) || parsed.Unit != "bytes"
+                || parsed.Ranges.Count != 1) throw new InvalidDataException("Unsupported byte range.");
+            request.Headers.Range = parsed;
+        }
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+        if (response.StatusCode is not (System.Net.HttpStatusCode.OK or System.Net.HttpStatusCode.PartialContent
+            or System.Net.HttpStatusCode.RequestedRangeNotSatisfiable))
+            await GatewayResponseReader.EnsureSuccessAsync(response, "Content request failed ({0}).", deadline.Token);
+        const int limit = 256 * 1024 * 1024;
+        if (response.Content.Headers.ContentLength > limit) throw new InvalidDataException("Content exceeds the preview limit.");
+        byte[] bytes = [];
+        if (method != "HEAD")
+        {
+            await using var source = await response.Content.ReadAsStreamAsync(deadline.Token);
+            using var output = new MemoryStream();
+            byte[] buffer = new byte[65536];
+            int count;
+            while ((count = await source.ReadAsync(buffer, deadline.Token)) != 0)
+            {
+                if (output.Length + count > limit) throw new InvalidDataException("Content exceeds the preview limit.");
+                output.Write(buffer, 0, count);
+            }
+            bytes = output.ToArray();
+        }
+        var headers = new System.Text.StringBuilder("Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: https://kynxa-workspace.local\r\n");
+        foreach (string name in new[] { "Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified" })
+            if (response.Content.Headers.TryGetValues(name, out var values) || response.Headers.TryGetValues(name, out values))
+                headers.Append(name).Append(": ").Append(string.Join(", ", values)).Append("\r\n");
+        return new(bytes, (int)response.StatusCode, response.ReasonPhrase ?? "OK", headers.ToString());
     }
 
     /// <summary>

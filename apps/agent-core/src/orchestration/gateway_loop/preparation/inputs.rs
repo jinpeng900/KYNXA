@@ -303,7 +303,7 @@ impl RootExecution {
             // Persist attachment navigation at its original observation position.
             // 附件导航按原观测位置保存，避免恢复时重复或丢失。
             state.context.runtime_snapshot = crate::models::runtime_context::snapshot(runtime_role,
-                &format!("{dynamic_runtime}\nSaved attachments in this conversation (read originals with attachment.read only when needed): {}", json!(attachment_directory)),
+                &format!("{dynamic_runtime}\nSaved attachments in this conversation (attachment.read: extracted text/OCR; image.read with messageId+attachmentId: pixels; attachment.export with those IDs and destination path: original bytes for scripts; missing OCR text does not mean a missing original): {}", json!(attachment_directory)),
                 initial_runtime_authority);
         }
         if let Some((notice, reference)) = automatic_evidence_note {

@@ -65,6 +65,24 @@ mod tests {
             usage
         );
     }
+
+    #[test]
+    fn anthropic_output_limit_keeps_tool_truncation_facts_and_never_returns_calls() {
+        let mut stream = StreamState::default();
+        stream.apply("models.stream.open", &json!({"protocol":"anthropic-messages","allowTruncatedText":true})).unwrap();
+        for item in [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"fixture","input":{}}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+        ] {
+            stream.apply("models.stream.frame", &json!({"frame":{"data":item.to_string()}})).unwrap();
+        }
+        let failure = stream.apply("models.stream.frame", &json!({"frame":{"data":json!({"type":"message_stop"}).to_string()}})).unwrap();
+        assert_eq!(failure["error"]["code"], "MODEL_TOOL_OUTPUT_TRUNCATED");
+        assert_eq!(failure["error"]["finishReason"], "max_tokens");
+        assert_eq!(failure["error"]["outputTruncated"], true);
+        assert_eq!(failure["error"]["hasToolCalls"], true);
+        assert!(failure.get("result").is_none());
+    }
 }
 
 impl StreamState {
@@ -394,6 +412,7 @@ impl StreamState {
                     && !self.has_tool_calls();
                 if self.stop_reason != "tool_use" && !text_limit {
                     if let Some(mut failure) = check_finish(&self.stop_reason) {
+                        failure["error"]["hasToolCalls"] = json!(self.has_tool_calls());
                         if self.has_tool_calls() {
                             failure["error"]["code"] = json!("MODEL_TOOL_OUTPUT_TRUNCATED");
                         }

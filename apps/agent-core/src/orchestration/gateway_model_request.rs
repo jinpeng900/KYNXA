@@ -183,6 +183,7 @@ pub(crate) async fn request_model(
     let mut steering = run.steering.subscribe();
     let steering_sequence = ctx.config["activeSteeringSequence"].as_u64()
         .unwrap_or_else(|| *steering.borrow_and_update());
+    run.emit(json!({"type":"task_progress","phase":"preparing-model"})).await;
     let managed = match ensure_model_ready(runtime, run, connection, model_name, &body, cancellation.clone()).await {
         Ok(managed) => managed,
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
@@ -195,6 +196,7 @@ pub(crate) async fn request_model(
         Ok(guard) => guard,
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
     };
+    run.emit(json!({"type":"task_progress","phase":"waiting-model"})).await;
     let slot = match runtime.model_slots.acquire_with_priority(
         connection, model_name, run.parent_task_id.is_none(),
         !run.is_background_recovery.load(std::sync::atomic::Ordering::Acquire), cancellation.clone(),
@@ -202,6 +204,7 @@ pub(crate) async fn request_model(
         Ok(slot) => slot,
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
     };
+    run.emit(json!({"type":"task_progress","phase":"waiting-resource"})).await;
     let leases = match acquire_model_resources(
         runtime, run, ctx, connection, model_name, context_window_tokens, managed, cancellation.clone(),
     ).await {
@@ -233,6 +236,7 @@ pub(crate) async fn request_model(
         }
     }
     drop(admission_wait);
+    run.emit(json!({"type":"task_progress","phase":"model"})).await;
     let mut outcome = dispatch_model(connection, body, catalog, cancellation, events,
         steering, steering_sequence, steering_enabled).await;
     let result = &outcome.result;

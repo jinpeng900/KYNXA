@@ -1880,21 +1880,36 @@ mod tests {
             json!({"choices":[{"message":{"content":"partial text"},"finish_reason":"length"}]});
         let turn = decode_response("openai-completions", raw, &[], Value::Null).unwrap();
         assert!(turn.output_truncated);
-        let raw = json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{"name":"filesystem_read","arguments":"{}"}}]},"finish_reason":"length"}]});
-        let failure =
-            decode_response("openai-completions", raw, &catalog(), Value::Null).unwrap_err();
-        assert_eq!(failure.code, "MODEL_TOOL_CALL_INVALID");
-        assert_eq!(
-            failure.details["decoderCode"],
-            "MODEL_TOOL_OUTPUT_TRUNCATED"
-        );
-        let raw = json!({"message":{"tool_calls":[{"function":{"name":"filesystem_read","arguments":{}}}]},"done_reason":"length"});
-        let failure = decode_response("ollama", raw, &catalog(), Value::Null).unwrap_err();
-        assert_eq!(failure.code, "MODEL_TOOL_CALL_INVALID");
-        assert_eq!(
-            failure.details["decoderCode"],
-            "MODEL_TOOL_OUTPUT_TRUNCATED"
-        );
+        for (name, finish, raw) in [
+            ("openai-completions", "length", json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{"name":"filesystem_read","arguments":"{}"}}]},"finish_reason":"length"}]})),
+            ("anthropic-messages", "max_tokens", json!({"content":[{"type":"tool_use","id":"call-1","name":"filesystem_read","input":{}}],"stop_reason":"max_tokens"})),
+            ("openai-responses", "max_output_tokens", json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","call_id":"call-1","name":"filesystem_read","arguments":"{}"}]})),
+            ("ollama", "length", json!({"message":{"tool_calls":[{"function":{"name":"filesystem_read","arguments":{}}}]},"done_reason":"length"})),
+        ] {
+            let failure = decode_response(name, raw, &catalog(), Value::Null).unwrap_err();
+            assert_eq!(failure.code, "MODEL_TOOL_OUTPUT_TRUNCATED", "{name}");
+            assert_eq!(failure.details["decoderCode"], "MODEL_TOOL_OUTPUT_TRUNCATED", "{name}");
+            assert_eq!(failure.details["finishReason"], finish, "{name}");
+            assert_eq!(failure.details["outputTruncated"], true, "{name}");
+            assert_eq!(failure.details["hasToolCalls"], true, "{name}");
+        }
+    }
+    #[test]
+    fn responses_private_reasoning_at_output_limit_continues_without_public_text() {
+        let raw = json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+            "output":[{"type":"reasoning","id":"reasoning-1","summary":[],"encrypted_content":"opaque-provider-state"}]});
+        let turn = decode_response("openai-responses", raw.clone(), &[], Value::Null).unwrap();
+        assert!(turn.output_truncated);
+        assert!(turn.content.is_empty());
+        assert!(turn.reasoning.is_empty());
+        assert!(turn.calls.is_empty());
+        assert_eq!(turn.continuation, raw["output"].as_array().unwrap().clone());
+        let mut completed = raw.clone();
+        completed["status"] = json!("completed");
+        assert_eq!(decode_response("openai-responses", completed, &[], Value::Null).unwrap_err().code, "MODEL_RESPONSE_EMPTY");
+        let mut empty = raw;
+        empty["output"][0]["encrypted_content"] = json!("");
+        assert_eq!(decode_response("openai-responses", empty, &[], Value::Null).unwrap_err().code, "MODEL_RESPONSE_EMPTY");
     }
     #[test]
     fn invalid_calls_and_mapped_names_fail_before_a_turn_can_be_dispatched() {

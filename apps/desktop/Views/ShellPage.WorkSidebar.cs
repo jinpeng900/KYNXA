@@ -165,23 +165,30 @@ public sealed partial class ShellPage
         double rowHeight = (double)Application.Current.Resources["KynxaSidebarRowHeight"];
         int projectRows = VisibleProjectRows(VisibleProjectEntries);
         bool projectsExpanded = ProjectTree.Visibility == Visibility.Visible;
+        WorkRecentDivider.Visibility = _layout.WorkRecentExpanded && VisibleWorkRecentEntries.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        WorkProjectsDivider.Visibility = projectsExpanded && projectRows > 0 ? Visibility.Visible : Visibility.Collapsed;
+        double dividerHeight = (WorkRecentDivider.Visibility == Visibility.Visible ? WorkRecentDivider.Height : 0)
+            + (WorkProjectsDivider.Visibility == Visibility.Visible ? WorkProjectsDivider.Height : 0);
         double emptyHeight = SidebarHintHeight(WorkRecentSearchEmpty) + SidebarHintHeight(ProjectSearchEmpty)
             + SidebarHintHeight(WorkTaskSearchEmpty);
         int nonemptySections = (_layout.WorkRecentExpanded && VisibleWorkRecentEntries.Count > 0 ? 1 : 0)
             + (projectsExpanded && projectRows > 0 ? 1 : 0) + (_layout.WorkTasksExpanded && VisibleWorkTaskEntries.Count > 0 ? 1 : 0);
-        double minimumContentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + nonemptySections * rowHeight;
+        double minimumContentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + dividerHeight + nonemptySections * rowHeight;
         bool outerScroll = available < minimumContentHeight;
         // Very short windows scroll the section shell so each inner list can still show a readable whole row.
         // 极矮窗口滚动分区外壳，让每个内层列表仍能展示可读的完整一行。
-        var geometry = WorkSidebarLayout.Calculate(Math.Max(available, minimumContentHeight) - emptyHeight, _layout.WorkRecentExpanded,
-            projectsExpanded, _layout.WorkTasksExpanded, VisibleWorkRecentEntries.Count, projectRows, VisibleWorkTaskEntries.Count, rowHeight)
+        _workSidebarListBudget = Math.Max(available, minimumContentHeight) - ShellLayoutMetrics.WorkSidebarHeaderHeight - emptyHeight - dividerHeight;
+        var geometry = WorkSidebarLayout.Calculate(Math.Max(available, minimumContentHeight) - emptyHeight - dividerHeight, _layout.WorkRecentExpanded,
+            projectsExpanded, _layout.WorkTasksExpanded, VisibleWorkRecentEntries.Count, projectRows, VisibleWorkTaskEntries.Count, rowHeight,
+            _layout.WorkRecentHeightRatio, _layout.WorkProjectsHeightRatio, _layout.WorkTasksHeightRatio)
             ?? new WorkSidebarLayoutResult(0, 0, 0);
         WorkSidebarViewport.Height = available;
         WorkSidebarViewport.MaxHeight = available;
         WorkRecentHistory.Height = FloorToPixel(geometry.RecentHeight);
         ProjectTree.Height = FloorToPixel(geometry.ProjectsHeight);
         WorkTaskHistory.Height = FloorToPixel(geometry.TasksHeight);
-        double contentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + WorkRecentHistory.Height + ProjectTree.Height + WorkTaskHistory.Height;
+        double contentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + dividerHeight + WorkRecentHistory.Height + ProjectTree.Height + WorkTaskHistory.Height;
         WorkSidebarContent.Height = contentHeight;
         WorkSidebarContent.MaxHeight = contentHeight;
         WorkSidebarContent.Margin = outerScroll ? new Thickness(0, 0, 12, 0) : new Thickness(0);
@@ -250,15 +257,13 @@ public sealed partial class ShellPage
 
     private void SidebarPane_SizeChanged(object sender, SizeChangedEventArgs args) => QueueWorkSidebarLayout();
 
-    private static int VisibleProjectRows(IEnumerable<ProjectTreeEntry> entries, int remaining = ShellLayoutMetrics.WorkSidebarVisibleRows)
+    private static int VisibleProjectRows(IEnumerable<ProjectTreeEntry> entries)
     {
         int count = 0;
         foreach (var entry in entries)
         {
-            if (count >= remaining) break;
             count++;
-            if (entry.IsExpanded && count < remaining)
-                count += VisibleProjectRows(entry.Children, remaining - count);
+            if (entry.IsExpanded) count += VisibleProjectRows(entry.Children);
         }
         return count;
     }

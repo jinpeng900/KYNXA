@@ -550,9 +550,9 @@ async fn apply_user_steering(
                 saved["Id"].as_str().unwrap(), context.config["attachmentContextChars"].as_u64().unwrap_or(4096) as usize, true,
                 run.native_cancellation.token.clone()).await?;
             state.context.history.push(crate::models::message_attachments::user_message(text, saved["Id"].as_str().unwrap(), &prepared));
-            if let Some(tool) = tools::builtin_catalog().into_iter().find(|tool| tool["name"] == "attachment.read") {
-                select_loaded_tools(state, &json!({"tools":[tool]}), &json!(["attachment.read"]));
-            }
+            let attachment_tools = tools::builtin_catalog().into_iter().filter(|tool|
+                matches!(tool["name"].as_str(), Some("attachment.read" | "attachment.export" | "image.read"))).collect::<Vec<_>>();
+            select_loaded_tools(state, &json!({"tools":attachment_tools}), &json!(["attachment.read","attachment.export","image.read"]));
         } else { state.context.history.push(json!({"role":"user","content":text})); }
         state.applied_steering_ids.insert(saved["Id"].as_str().unwrap().to_owned());
         let trusted = context.config["trustedUserText"].as_str().unwrap_or("");

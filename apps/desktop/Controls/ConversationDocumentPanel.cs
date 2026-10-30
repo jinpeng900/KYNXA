@@ -19,7 +19,7 @@ namespace KYNXA_Desktop.Controls;
 /// Cache open views within limits; inactive views yield browser resources.
 /// 限量缓存已打开视图，切换不重复解析；闲置视图让出浏览器资源。
 /// </summary>
-public sealed class ConversationDocumentPanel : Grid, IDisposable
+public sealed partial class ConversationDocumentPanel : Grid, IDisposable
 {
     private const string PreviewHost = "kynxa-workspace.local";
     private const string PreviewPage = "https://" + PreviewHost + "/Workspace/index.html";
@@ -62,6 +62,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         public bool ShowSource { get; set; }
         public bool Queued { get; set; }
         public bool Preparing { get; set; }
+        public bool LoadingMore { get; set; }
         public bool Closed { get; set; }
         public string? Error { get; set; }
         public Task? PdfFallback { get; set; }
@@ -91,16 +92,14 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         public DirectDocumentPreviewException() : base("Office direct rendering needs the page converter.") { }
     }
     private readonly Grid _viewport = new();
-    private readonly Grid _toolbar = new() { ColumnSpacing = 4, Padding = new Thickness(6, 4, 6, 4) };
+    private readonly Grid _toolbar = new() { ColumnSpacing = 4, Padding = new Thickness(7, 6, 7, 6),
+        BorderThickness = new Thickness(0, 0, 0, 1), CornerRadius = new CornerRadius(14, 14, 0, 0) };
     private readonly Button _back = QuietIcon("\uE72B", "后退");
     private readonly Button _forward = QuietIcon("\uE72A", "前进");
     private readonly Button _reload = QuietIcon("\uE72C", "刷新预览");
-    private readonly Button _source = QuietButton("</>", "查看源码");
-    private readonly Button _more = QuietButton("继续加载", "继续加载");
-    private readonly Button _browserOptions = QuietIcon("\uE712", "网站数据");
     private readonly Button _openWebsite = QuietButton("打开网页", "打开网页");
-    private readonly TextBox _address = new() { MinWidth = 0, MinHeight = 28, CornerRadius = new CornerRadius(7),
-        Padding = new Thickness(8, 3, 8, 3), FontSize = 12, PlaceholderText = "https://" };
+    private readonly TextBox _address = new() { MinWidth = 0, MinHeight = 32, CornerRadius = new CornerRadius(10),
+        Padding = new Thickness(10, 4, 10, 4), FontSize = 12, PlaceholderText = "https://" };
     private readonly TextBlock _notice = new() { Margin = new Thickness(10, 4, 10, 4), FontSize = 12,
         TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
     private readonly Button _alternativeSearch = QuietButton("切换搜索源", "切换搜索源");
@@ -110,10 +109,9 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
     private readonly TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly Dictionary<string, string> _viewStates = new(StringComparer.Ordinal);
+    private readonly WorkspacePreviewStateCache _viewStates = new();
     private readonly Dictionary<string, Uri> _navigationUris = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _pendingAnchors = new(StringComparer.Ordinal);
-    private readonly Queue<string> _viewOrder = new();
     private sealed record ChromeTab(ConversationChromeView View, Task Initialization) { public long Touched { get; set; } }
     private readonly Dictionary<string, ChromeTab> _chromeViews = new(StringComparer.Ordinal);
     private ConversationChromeView? _chrome;
@@ -147,16 +145,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         RowDefinitions.Add(new() { Height = GridLength.Auto });
         RowDefinitions.Add(new() { Height = GridLength.Auto });
         RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
-        _toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        _toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        _toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        _toolbar.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        _toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        _toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        AddToolbar(_back, 0); AddToolbar(_forward, 1); AddToolbar(_reload, 2);
-        AddToolbar(_address, 3); AddToolbar(_source, 4); AddToolbar(_more, 5);
-        _toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        AddToolbar(_browserOptions, 6);
+        InitializePreviewToolbar();
         _viewport.Children.Add(_loading);
         _openWebsite.HorizontalAlignment = HorizontalAlignment.Center;
         _openWebsite.VerticalAlignment = VerticalAlignment.Center;
@@ -177,10 +166,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _back.Click += async (_, _) => await NavigateChromeAsync("back");
         _forward.Click += async (_, _) => await NavigateChromeAsync("forward");
         _reload.Click += (_, _) => RefreshCurrent();
-        _source.Click += async (_, _) => await ToggleSourceAsync();
-        _more.Click += async (_, _) => await LoadMoreAsync();
         _address.KeyDown += AddressKeyDown;
-        _browserOptions.Click += (_, _) => ShowWebsiteDataMenu();
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
         Loaded += (_, _) => _loaded.TrySetResult();
         AppearanceService.Changed += AppearanceChanged;
@@ -478,10 +464,10 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private async Task LoadMoreAsync()
     {
         if (_activeKey is not { } key || !_documentWork.TryGetValue(key, out var work)
-            || work.Preview is not { HasMore: true, NextOffset: int offset } previous) return;
+            || work.LoadingMore || work.Preview is not { HasMore: true, NextOffset: int offset } previous) return;
         try
         {
-            _more.IsEnabled = false;
+            work.LoadingMore = true;
             var next = work.Attachment is { } attachment && work.MessageId is { } messageId
                 ? await _attachments.ReadPreviewAsync(work.ConversationId, messageId, attachment, offset, work.Cancellation.Token)
                 : await _api.ReadAsync(work.ConversationId, work.Path, offset, work.UserSelected, work.Cancellation.Token, work.MountId);
@@ -495,7 +481,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception error) { if (IsSelected(work)) Fail(error); }
-        finally { if (IsSelected(work)) _more.IsEnabled = true; }
+        finally { work.LoadingMore = false; }
     }
 
     private async Task ToggleSourceAsync()
@@ -552,11 +538,15 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 if (!IsLive(work)) return;
                 if (work.ShowSource != source || !ReferenceEquals(work.Preview, preview)) continue;
                 view.Rendered = NewReady(); view.BackgroundPreparing = false;
+                var resources = PrepareContentResources(view, work);
                 view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "show", key = work.Key,
                     renderId = ++view.RenderId,
                     kind = source ? "text" : code ? "code" : preview.Kind, text, html, rows = preview.Rows, delimiter = preview.Delimiter,
-                    contentUrl = IsDirectOfficeDocument(preview.Kind) ? DocumentContentAddress(preview.Kind, preview.Version) : work.ContentAddress?.AbsoluteUri,
-                    state = _viewStates.GetValueOrDefault(work.Key), title = work.Title ?? preview.Title }));
+                    contentUrl = IsDirectOfficeDocument(preview.Kind) ? DocumentContentAddress(preview.Kind, preview.Version) : resources.ContentUrl,
+                    resources = resources.Resources, sourceFormat = preview.SourceFormat, renderFormat = preview.RenderFormat, dependencyStatus = preview.DependencyStatus,
+                    renderable = preview.Renderable, metadata = preview.Metadata, mimeType = preview.MimeType,
+                    path = preview.Path, version = preview.Version, conversationId = work.ConversationId, mountId = work.MountId,
+                    active = IsSelected(work), state = _viewStates.GetValueOrDefault(work.Key), title = work.Title ?? preview.Title }));
                 try { await view.Rendered.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken); }
                 catch (Exception error) when (IsDirectOfficeDocument(preview.Kind)
                     && error is DirectDocumentPreviewException or TimeoutException)
@@ -613,9 +603,9 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private void SetPreviewActions(WorkspacePreviewTarget preview)
     {
-        _source.Visibility = preview.Kind is "markdown" or "mermaid" or "delimited" ? Visibility.Visible : Visibility.Collapsed;
-        _more.Visibility = preview.HasMore ? Visibility.Visible : Visibility.Collapsed;
-        _source.Content = _showSource ? UiText.Get("显示预览") : UiText.Get("查看源码");
+        _canShowSource = preview.Kind is "markdown" or "mermaid" or "delimited";
+        _hasMorePreview = preview.HasMore;
+        UpdatePreviewCaption(preview.Title);
     }
 
     private static string? CodeLanguage(string path) => Path.GetExtension(path).ToLowerInvariant() switch
@@ -662,11 +652,14 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             if (TryWebsite(args.Uri, out _)) OpenLink(args.Uri);
         };
         core.NewWindowRequested += (sender, args) => { args.Handled = true; if (TryWebsite(args.Uri, out _)) OpenLink(args.Uri); };
-        core.PermissionRequested += (_, args) => args.State = CoreWebView2PermissionState.Deny;
+        core.PermissionRequested += (_, args) => args.State = args.PermissionKind == CoreWebView2PermissionKind.Microphone
+            && args.IsUserInitiated && args.Uri == PreviewPage && view.Active && view.Work?.Preview?.Kind == "workbench"
+            ? CoreWebView2PermissionState.Allow : CoreWebView2PermissionState.Deny;
         core.DownloadStarting += (_, args) => args.Cancel = true;
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += (sender, args) =>
         {
+            if (TrySupplyExpansionContent(view, args, environment)) return;
             if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var imageUri)
                 && TranscriptMarkdown.TryImageSource(imageUri, out var imagePath))
             {
@@ -877,7 +870,13 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             if (!message.TryGetProperty("key", out var key) || key.GetString() is not { Length: > 0 } messageKey) return;
             // A saved scroll reply can arrive after the user has already selected the next tab.
             // 滚动保存回执可能晚于标签切换，仍按原标签键保存，而不是丢弃或归到新标签。
-            if (type == "state" && message.TryGetProperty("state", out var state)) { CacheState(messageKey, state.GetRawText()); return; }
+            if (type == "state" && message.TryGetProperty("state", out var state))
+            {
+                if (messageKey == view.Key && (!message.TryGetProperty("renderId", out var stateRender)
+                    || stateRender.TryGetInt64(out long version) && version == view.RenderId))
+                    CacheState(messageKey, state.GetRawText());
+                return;
+            }
             if (type == "shown")
             {
                 if (messageKey != view.Key || message.TryGetProperty("renderId", out var renderId) && renderId.GetInt64() != view.RenderId) return;
@@ -912,6 +911,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                 return;
             }
             if (messageKey != _activeKey) return;
+            if (TryHandleExpansionMessage(view, message, type)) return;
             if (type == "exportDiagram") { _ = ExportWorkspaceDiagramAsync(view, message.Clone()); return; }
             if (type == "link" && message.TryGetProperty("url", out var url) && url.GetString() is { } target && TranscriptMarkdown.IsSafeUrl(target))
             {
@@ -1034,6 +1034,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         {
             bool selected = ReferenceEquals(view.Browser, active);
             view.Active = selected;
+            SendActiveState(view, selected);
             if (selected) view.Browser.Visibility = Visibility.Visible;
             else DeactivateView(view);
             if (view.Browser.CoreWebView2 is not { } core) continue;
@@ -1044,6 +1045,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private static void DeactivateView(BrowserView view)
     {
+        SendActiveState(view, false);
         view.Active = false; view.Browser.Opacity = 0; view.Browser.IsHitTestVisible = false;
         // Separate first display from background completion; hidden work must not take input.
         // 首屏显示与后台完成分开；隐藏视图继续准备，但不接收输入。
@@ -1053,13 +1055,9 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private void CacheState(string key, string state)
     {
-        if (_disposed || state.Length > 2048) return;
-        if (!_viewStates.ContainsKey(key)) _viewOrder.Enqueue(key);
-        _viewStates[key] = state;
-        while (_viewOrder.Count > 128)
-        {
-            string removed = _viewOrder.Dequeue(); _viewStates.Remove(removed); _navigationUris.Remove(removed); _pendingAnchors.Remove(removed);
-        }
+        if (_disposed) return;
+        foreach (string removed in _viewStates.Store(key, state))
+        { _navigationUris.Remove(removed); _pendingAnchors.Remove(removed); }
     }
 
     private string? SavedState() => _activeKey is { } key && _viewStates.TryGetValue(key, out var state) ? state : null;
@@ -1076,6 +1074,16 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private void RefreshCurrent()
     {
+        if (_current?.Kind == "workbench")
+        {
+            SaveViewState();
+            if (_activeKey is { } key && _documentWork.TryGetValue(key, out var work))
+            {
+                if (work.View is { } view) view.RenderedSignature = null;
+                _ = QueueDocument(work);
+            }
+            return;
+        }
         if (_isWebsite && !_websiteActivationRequested) ActivateWebsite();
         else if (_isWebsite && _chrome is null && _websiteAddress is { } address) _ = OpenChromeAsync(address, ++_generation);
         else if (_isWebsite) _ = NavigateChromeAsync("reload");
@@ -1111,9 +1119,11 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private void SetToolbarMode(bool website)
     {
+        _toolbarWebsite = website;
         _back.Visibility = _forward.Visibility = _address.Visibility = website ? Visibility.Visible : Visibility.Collapsed;
-        _browserOptions.Visibility = website ? Visibility.Visible : Visibility.Collapsed;
-        _source.Visibility = _more.Visibility = Visibility.Collapsed;
+        _previewCaption.Visibility = website ? Visibility.Collapsed : Visibility.Visible;
+        _canShowSource = _hasMorePreview = false;
+        UpdatePreviewCaption(_title);
         if (!website)
         {
             _openWebsite.Visibility = Visibility.Collapsed;
@@ -1122,19 +1132,10 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         }
     }
 
-    private void ShowWebsiteDataMenu()
-    {
-        var menu = new MenuFlyout();
-        var clear = new MenuFlyoutItem { Text = UiText.Get("清除所有网站登录数据"), IsEnabled = !_clearingWebsiteData };
-        clear.Click += async (_, _) => await ClearWebsiteDataAsync();
-        menu.Items.Add(clear);
-        menu.ShowAt(_browserOptions);
-    }
-
     private async Task ClearWebsiteDataAsync()
     {
         if (_disposed || _clearingWebsiteData || _conversationId == Guid.Empty) return;
-        _clearingWebsiteData = true; _browserOptions.IsEnabled = false;
+        _clearingWebsiteData = true;
         try
         {
             // Login data belongs to the application, while closing a tab never removes it.
@@ -1150,7 +1151,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             }
         }
         catch (Exception error) { if (!_disposed) Fail(error); }
-        finally { _clearingWebsiteData = false; if (!_disposed) _browserOptions.IsEnabled = true; }
+        finally { _clearingWebsiteData = false; }
     }
 
     private void ShowVerificationState(ChromeWorkspaceState state)
@@ -1206,8 +1207,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 
     private static Button QuietButton(string content, string label)
     {
-        var button = new Button { Content = content, MinWidth = 28, MinHeight = 28, Padding = new Thickness(7, 3, 7, 3),
-            CornerRadius = new CornerRadius(7), BorderThickness = new Thickness(0), FontSize = 12 };
+        var button = new Button { Content = content, MinWidth = 32, MinHeight = 32, Padding = new Thickness(8, 4, 8, 4),
+            CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(0), FontSize = 12 };
         if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var value) && value is Style style) button.Style = style;
         LabelButton(button, label);
         return button;
@@ -1221,10 +1222,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private void AppearanceChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(ApplyAppearance);
     private void LanguageChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(() =>
     {
-        _more.Content = UiText.Get("继续加载"); _source.Content = UiText.Get(_showSource ? "显示预览" : "查看源码");
         LabelButton(_back, "后退"); LabelButton(_forward, "前进"); LabelButton(_reload, "刷新预览");
-        LabelButton(_source, _showSource ? "显示预览" : "查看源码"); LabelButton(_more, "继续加载");
-        LabelButton(_browserOptions, "网站数据"); _openWebsite.Content = UiText.Get("打开网页"); LabelButton(_openWebsite, "打开网页");
+        LabelButton(_previewOptions, "更多预览操作"); _openWebsite.Content = UiText.Get("打开网页"); LabelButton(_openWebsite, "打开网页");
         _alternativeSearch.Content = UiText.Get("切换搜索源"); LabelButton(_alternativeSearch, "切换搜索源");
         if (_showingVerification) SetNotice(UiText.Get(_alternativeSearchAddress is null
             ? "此网页需要人工验证，请在网页中完成。" : "搜索服务需要人工验证，可在网页完成验证或切换搜索源。"));
@@ -1237,9 +1236,14 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (_disposed) return;
         var palette = AppearanceService.Current;
         var border = new SolidColorBrush(AppearanceService.ParseColor(palette.Border));
-        _address.Resources["TextControlBorderBrushFocused"] = border;
+        _toolbar.BorderBrush = border;
+        _toolbar.Background = new SolidColorBrush(AppearanceService.ParseColor(palette.Main));
+        _previewCaption.Foreground = new SolidColorBrush(AppearanceService.ParseColor(palette.Secondary));
+        var focus = AppearanceService.GetBrush("KynxaFocusBrush");
+        _address.Resources["TextControlBorderBrushFocused"] = focus;
         _address.Resources["TextControlBorderBrushPointerOver"] = border;
-        _address.FocusVisualPrimaryBrush = border; _address.FocusVisualSecondaryBrush = border;
+        _address.FocusVisualPrimaryBrush = focus;
+        _address.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         _notice.Foreground = _loading.Foreground = new SolidColorBrush(AppearanceService.ParseColor(palette.Secondary));
         var appearance = new { type = "appearance", palette = new { main = palette.Main, soft = palette.Soft, accent = palette.Secondary,
             text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar },
@@ -1303,6 +1307,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private void CloseView(string key)
     {
         if (!_views.Remove(key, out var view)) return;
+        SendActiveState(view, false); _authorizedResources.Remove(key);
         view.Closed = true; view.Ready.TrySetCanceled(); view.Rendered.TrySetCanceled(); view.Navigated.TrySetCanceled();
         if (view.Work is { } work && ReferenceEquals(work.View, view)) work.View = null;
         view.Work = null;
@@ -1324,7 +1329,6 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (key is null) return;
         if (_documentWork.Remove(key, out var work)) CloseDocumentWork(work);
         _documents.Remove(key); _viewStates.Remove(key); _navigationUris.Remove(key); _pendingAnchors.Remove(key); CloseView(key);
-        RemoveStateOrder(item => item == key);
         if (_chromeViews.Remove(key, out var chrome)) { _viewport.Children.Remove(chrome.View); CloseChromeView(chrome.View); }
     }
 
@@ -1337,7 +1341,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         foreach (string key in _documents.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray()) _documents.Remove(key);
         foreach (string key in _viewStates.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray()) _viewStates.Remove(key);
         foreach (string key in _navigationUris.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray()) _navigationUris.Remove(key);
-        RemoveStateOrder(key => key.StartsWith(prefix, StringComparison.Ordinal));
+        foreach (string key in _pendingAnchors.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray()) _pendingAnchors.Remove(key);
         foreach (var pair in _chromeViews.Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal)).ToArray())
         { _chromeViews.Remove(pair.Key); _viewport.Children.Remove(pair.Value.View); CloseChromeView(pair.Value.View); }
     }
@@ -1362,13 +1366,6 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         return Task.WhenAll(_closingChrome.ToArray());
     }
 
-    private void RemoveStateOrder(Func<string, bool> remove)
-    {
-        var retained = _viewOrder.Where(key => !remove(key)).ToArray();
-        _viewOrder.Clear();
-        foreach (string key in retained) _viewOrder.Enqueue(key);
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
@@ -1377,10 +1374,10 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _documentWork.Clear(); _pendingDocuments.Clear();
         AppearanceService.Changed -= AppearanceChanged; UiText.LanguageChanged -= LanguageChanged;
         foreach (string key in _views.Keys.ToArray()) CloseView(key);
-        _views.Clear(); _documents.Clear(); _attachments.Dispose();
+        _views.Clear(); _documents.Clear(); _attachments.Dispose(); _workbenchApi.Dispose();
         foreach (var tab in _chromeViews.Values) CloseChromeView(tab.View);
         _chromeViews.Clear(); _api.Dispose();
-        _viewStates.Clear(); _navigationUris.Clear(); _viewOrder.Clear();
+        _viewStates.Clear(); _navigationUris.Clear(); _pendingAnchors.Clear();
     }
 
 }

@@ -998,7 +998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_terminal_uses_the_selected_mount_and_keeps_it_when_default_changes() {
+    async fn model_terminal_keeps_its_folder_identity_and_rejects_retargeting_after_replacement() {
         use crate::storage::{gateway as data, workspace_mounts};
         let (mut context, _owner) = super::super::gateway::test_context();
         let root = context.workdir.parent().unwrap().to_owned();
@@ -1006,11 +1006,10 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         let project_id = uuid::Uuid::new_v4().to_string();
         let first_id = uuid::Uuid::new_v4().to_string();
-        let second_id = uuid::Uuid::new_v4().to_string();
         data::ensure_conversation(&context.data_home,&context.conversation_id,"Terminal mounts").unwrap();
         let old = data::load_catalog(&context.data_home).unwrap();
         data::handle("PUT","/api/conversations/catalog",&[],&json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Terminal mounts",
-            "Mounts":[{"Id":first_id,"Name":"A","Path":context.workdir,"BindingRevision":1},{"Id":second_id,"Name":"B","Path":second,"BindingRevision":1}],
+            "Mounts":[{"Id":first_id,"Name":"A","Path":context.workdir,"BindingRevision":1}],
             "DefaultMountId":first_id,"Chats":[{"Id":context.conversation_id,"Title":"Terminal","Messages":[
                 {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Terminal mounts fixture","Status":"completed"}]}]}]}),&context.data_home).unwrap().unwrap();
         let relation = data::relationship(&context.data_home,&context.conversation_id).unwrap();
@@ -1019,15 +1018,11 @@ mod tests {
         context.config["workspaceMounts"] = relation["mounts"].clone();
         context.config["defaultMountId"] = relation["defaultMountId"].clone();
         context.config["bindingSnapshot"] = workspace_mounts::snapshot(&relation);
-        context.authorized_roots.push(second.clone());
-        let user_opened = open(&json!({"mountId":second_id}),&context).await.unwrap();
+        let user_opened = open(&json!({}),&context).await.unwrap();
         let id = user_opened["sessionId"].clone();
-        assert_eq!(user_opened["mountId"],second_id);
+        assert_eq!(user_opened["mountId"],first_id);
         let listed = execute("terminal.workspace.list",&json!({}),&context).await.unwrap();
-        assert_eq!(listed["sessions"][0]["mountId"],second_id);
-        let mut catalog = data::load_catalog(&context.data_home).unwrap();
-        catalog["Projects"][0]["DefaultMountId"] = json!(second_id);
-        data::handle("PUT","/api/conversations/catalog",&[],&catalog,&context.data_home).unwrap().unwrap();
+        assert_eq!(listed["sessions"][0]["mountId"],first_id);
         // Verify a relative write rather than comparing short and long Windows path spellings.
         // 通过相对写入验证真实目录，避免 Windows 长短路径的不同拼写导致误判。
         let script = "Set-Content -LiteralPath '.cwd-verification.txt' -Value 'owned-terminal-fixture'; Write-Output ('KYNXA_' + 'CWD_READY')\r";
@@ -1043,13 +1038,13 @@ mod tests {
                 if text.contains("KYNXA_CWD_READY") { break; }
             }
         }).await.unwrap();
-        assert_eq!(std::fs::read_to_string(second.join(".cwd-verification.txt")).unwrap().trim(), "owned-terminal-fixture");
-        assert!(!context.workdir.join(".cwd-verification.txt").exists());
+        assert_eq!(std::fs::read_to_string(context.workdir.join(".cwd-verification.txt")).unwrap().trim(), "owned-terminal-fixture");
+        assert!(!second.join(".cwd-verification.txt").exists());
         let mut catalog = data::load_catalog(&context.data_home).unwrap();
-        catalog["Projects"][0]["DefaultMountId"] = json!(first_id);
-        catalog["Projects"][0]["Mounts"].as_array_mut().unwrap().retain(|mount|mount["Id"] != second_id);
+        catalog["Projects"][0] = workspace_mounts::bind_default(&catalog["Projects"][0],second.to_str().unwrap()).unwrap();
         data::handle("PUT","/api/conversations/catalog",&[],&catalog,&context.data_home).unwrap().unwrap();
-        assert!(super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":"echo should-not-run\r","reason":"A removed mount must reject new input"}),&context).await.is_err());
+        assert_eq!(super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":"echo should-not-run\r","reason":"An old terminal must not silently move to a replacement folder"}),&context).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
+        assert!(!second.join(".cwd-verification.txt").exists());
         assert!(context.runtime.terminals.lock().await.contains_key(id.as_str().unwrap()));
         execute("terminal.workspace.close",&json!({"sessionId":id,"reason":"Release the same owned terminal"}),&context).await.unwrap();
         assert!(root.starts_with(std::env::temp_dir()));

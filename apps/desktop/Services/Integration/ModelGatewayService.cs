@@ -317,8 +317,13 @@ public static class ModelGatewayService
     /// <remarks>只启动随包原生网关；缺失时明确报错，不查找或回退 Node。</remarks>
     private static string FindNativeGateway()
     {
-        var bundled = Path.Combine(ApplicationPaths.Root, "runtime", "agent", "kynxa-gateway.exe");
-        if (File.Exists(bundled)) return bundled;
-        throw new FileNotFoundException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"), bundled);
+        foreach (string relative in new[] { "runtime/agent/kynxa-gateway.exe", "runtime/resource/kynxa-resource-service.exe",
+            "runtime/native/onnxruntime.dll", "runtime/native/vec0.dll" })
+        {
+            string required = Path.Combine(ApplicationPaths.Root, relative);
+            if (!File.Exists(required) || new FileInfo(required).Length == 0) throw new FileNotFoundException(
+                string.Format(UiText.Get("缺少运行文件：{0}。请重新构建或安装 KYNXA。"), relative), required);
+        }
+        return Path.Combine(ApplicationPaths.Root, "runtime", "agent", "kynxa-gateway.exe");
     }
 }

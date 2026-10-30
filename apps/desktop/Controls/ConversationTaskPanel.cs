@@ -6,6 +6,7 @@ using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Controls;
 
@@ -19,8 +20,10 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
 {
     private const int MaximumVisibleRoots = 500;
     private readonly ObservableCollection<TaskRow> _rows = [];
-    private readonly ListView _list = new() { SelectionMode = ListViewSelectionMode.None, MaxHeight = 320 };
-    private readonly Expander _section = new() { HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly ListView _list = new() { SelectionMode = ListViewSelectionMode.None, MaxHeight = 320,
+        HorizontalContentAlignment = HorizontalAlignment.Stretch };
+    private readonly Expander _section = new() { HorizontalAlignment = HorizontalAlignment.Stretch,
+        HorizontalContentAlignment = HorizontalAlignment.Stretch, CornerRadius = new CornerRadius(12) };
     private readonly TextBlock _notice = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap };
     private readonly Button _refresh = new() { MinHeight = 28, Padding = new Thickness(8, 3, 8, 3) };
     private readonly Button _more = new() { MinHeight = 28, Padding = new Thickness(8, 3, 8, 3) };
@@ -56,18 +59,27 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         Grid.SetRow(_list, 2); _body.Children.Add(_list);
         _list.MaxHeight = double.PositiveInfinity;
         _section.Content = _body; _section.IsExpanded = false;
-        _section.MinHeight = 28; _section.FontSize = 12;
-        _section.Resources["ExpanderHeaderPadding"] = new Thickness(8, 0, 8, 0);
+        _section.MinHeight = 34; _section.FontSize = 12;
+        _section.Resources["ExpanderHeaderPadding"] = new Thickness(10, 3, 10, 3);
+        _section.Resources["ExpanderContentPadding"] = new Thickness(8, 4, 8, 8);
         _section.Resources["ExpanderChevronButtonSize"] = 24d;
         _section.Resources["ExpanderChevronMargin"] = new Thickness(8, 0, 4, 0);
+        var resources = Application.Current.Resources;
+        if (resources.TryGetValue("KynxaQuietButtonStyle", out var buttonStyle) && buttonStyle is Style quiet)
+            _refresh.Style = _more.Style = quiet;
+        foreach (var button in new[] { _refresh, _more }) button.CornerRadius = new CornerRadius(9);
+        if (resources.TryGetValue("KynxaSelectionBrush", out var selection) && selection is Brush selected)
+            _section.Resources["ExpanderHeaderBackground"] = selected;
+        if (resources.TryGetValue("KynxaControlHoverBrush", out var hover) && hover is Brush hovered)
+            _section.Resources["ExpanderHeaderBackgroundPointerOver"] = hovered;
         Children.Add(_section);
         _list.ItemsSource = _rows;
         _list.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
-                <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" CornerRadius="10">
                     <Expander.Header>
-                        <StackPanel Spacing="3">
-                            <TextBlock Text="{Binding Goal}" FontSize="12" TextTrimming="CharacterEllipsis" MaxWidth="360" />
+                        <StackPanel Spacing="3" HorizontalAlignment="Stretch">
+                            <TextBlock Text="{Binding Goal}" FontSize="12" TextTrimming="CharacterEllipsis" />
                             <TextBlock Text="{Binding StateText}" FontSize="11" />
                         </StackPanel>
                     </Expander.Header>
@@ -101,11 +113,11 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
 
     private void UpdateBodyHeight()
     {
-        _body.Height = Math.Max(32, _availableHeight - 32);
+        _body.Height = Math.Max(32, _availableHeight - 46);
         // Explicit collapsed geometry wins over the framework's default expander header height.
         // 收起时使用明确高度，避免框架默认 Expander 标题仍占据大块空间。
-        _section.Height = _section.IsExpanded ? double.NaN : 28;
-        _section.MaxHeight = _section.IsExpanded ? _availableHeight : 28;
+        _section.Height = _section.IsExpanded ? double.NaN : 34;
+        _section.MaxHeight = _section.IsExpanded ? _availableHeight : 34;
     }
 
     public void ConfigureApi(ITasksApi api) => _api = api;

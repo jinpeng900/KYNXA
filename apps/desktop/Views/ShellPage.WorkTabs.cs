@@ -28,6 +28,7 @@ public sealed partial class ShellPage
         WorkTabs.TabsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
         WorkTabs.TabInvoked += (_, tab) =>
         {
+            WorkspaceHome.CancelFolderEditor();
             if (!_chatClosing && ActiveChatId is Guid conversation && tab.Kind == "browser" && tab.Target is { } url)
                 DocumentPanel.ShowWebsite(conversation, url, tab.Title);
         };
@@ -36,9 +37,15 @@ public sealed partial class ShellPage
             if (closed.Tab.Kind == "terminal") WorkspaceTerminal.CloseSession(closed.ConversationId, closed.Tab.Key);
             else DocumentPanel.CloseTab(closed.ConversationId, closed.Tab);
         };
-        WorkTabs.HomeRequested += (_, _) => { ApplyLayout(); WorkspaceHome.FocusAddress(); };
+        WorkTabs.HomeRequested += (_, _) =>
+        {
+            WorkspaceHome.CancelFolderEditor();
+            CancelWorkspaceFileRead(forgetScope: true);
+            WorkspaceHome.HideFiles();
+            ApplyLayout(); WorkspaceHome.FocusAddress();
+        };
         WorkspaceHome.FileRequested += (_, _) => OpenWorkspaceFile();
-        WorkspaceHome.MountRequested += (_, mountId) => SelectWorkspaceMount(mountId);
+        WorkspaceHome.LocalFileRequested += async (_, _) => await PickLocalWorkspaceFileAsync();
         WorkspaceHome.DirectoryRequested += async (_, path) => await BrowseWorkspaceFilesAsync(path);
         WorkspaceHome.WorkspaceFileRequested += (_, path) =>
         {
@@ -74,6 +81,7 @@ public sealed partial class ShellPage
         DocumentPanel.WebsiteRequested += (_, url) => AddWebsiteTab(url);
         ConversationMessages.LinkRequested += (_, request) => OpenMarkdownLink(request.ConversationId, request.Target);
         DocumentPanel.FileRequested += (_, request) => OpenMarkdownLink(request.ConversationId, request.Path, request.MountId);
+        InitializeExpansionWorkbench();
         Unloaded += (_, _) => { DocumentPanel.SetPreviewEnabled(false); CancelWorkspaceFileRead(forgetScope: true); };
     }
 
@@ -163,7 +171,7 @@ public sealed partial class ShellPage
                 return discovered;
             });
             if (_chatClosing || tab is null) return;
-            tab = LabelWorkspaceMount(conversation, tab);
+            tab = BindWorkspaceFile(conversation, tab);
             StoreWorkspaceResource(resources, tab, order);
             if (tab.Kind == "browser" && liveReply) resources.ActivatedWebsites.Add(tab.Key);
             if (ActiveChatId == conversation)
@@ -210,7 +218,7 @@ public sealed partial class ShellPage
 
     private void AddWorkspaceTab(Guid conversation, ConversationWorkTab tab, bool select)
     {
-        tab = LabelWorkspaceMount(conversation, tab);
+        tab = BindWorkspaceFile(conversation, tab);
         var resources = ResourcesFor(conversation);
         StoreWorkspaceResource(resources, tab, ++_workspaceSequence);
         if (select && tab.Kind == "browser") resources.ActivatedWebsites.Add(tab.Key);
@@ -240,13 +248,14 @@ public sealed partial class ShellPage
 
     private void PresentSelectedWorkTab(bool sidebarVisible)
     {
+        bool editingFolder = WorkspaceHome.IsFolderEditorVisible;
         var selected = WorkTabs.SelectedTab;
         var screenshot = selected?.Kind == "screenshot"
             ? ScreenshotPanel.Items.FirstOrDefault(source => ScreenshotTabKey(source) == selected.Key) : null;
-        bool showScreenshot = sidebarVisible && screenshot is not null;
-        bool showDocument = sidebarVisible && ActiveChatId is not null && selected?.Target is not null &&
-            selected.Kind is "document" or "diagram" or "browser" or "changes";
-        bool showTerminal = sidebarVisible && ActiveChatId is not null && selected?.Kind == "terminal";
+        bool showScreenshot = sidebarVisible && !editingFolder && screenshot is not null;
+        bool showDocument = sidebarVisible && !editingFolder && ActiveChatId is not null && selected?.Target is not null &&
+            selected.Kind is "document" or "diagram" or "browser" or "changes" or "workbench";
+        bool showTerminal = sidebarVisible && !editingFolder && ActiveChatId is not null && selected?.Kind == "terminal";
 
         if (!showScreenshot) ScreenshotPanel.SetPreviewEnabled(false);
         if (!showDocument) DocumentPanel.SetPreviewEnabled(false);
@@ -266,6 +275,7 @@ public sealed partial class ShellPage
                     && FindWorkspaceAttachment(ActiveChatId!.Value, messageId, attachmentId) is { } attachment)
                     DocumentPanel.ShowAttachment(ActiveChatId!.Value, messageId, attachment);
             }
+            else if (selected.Kind == "workbench") DocumentPanel.ShowWorkbench(ActiveChatId!.Value, selected.MountId);
             else if (selected.Kind == "changes") DocumentPanel.ShowChanges(ActiveChatId!.Value, selected.MountId);
             else if (selected.Kind == "browser")
             {
@@ -286,7 +296,6 @@ public sealed partial class ShellPage
         DocumentPanel.Visibility = showDocument ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceTerminal.Visibility = showTerminal ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceHome.ShowDirectory(CurrentWorkspaceDirectory(), ActiveChatId is not null);
-        WorkspaceHome.ShowMounts(CurrentWorkspaceProject()?.Mounts ?? [], CurrentWorkspaceMount()?.Id);
         WorkspaceHome.ShowProjectScope(CurrentWorkspaceProject() is not null);
         if (_filesConversation != ActiveChatId || _filesBinding != CurrentWorkspaceFilesBinding())
         { CancelWorkspaceFileRead(forgetScope: true); WorkspaceHome.HideFiles(); }
@@ -300,7 +309,7 @@ public sealed partial class ShellPage
         var source = ScreenshotPanel.SelectedSource;
         if (!sidebarVisible || source is null || source.ConversationId != ActiveChatId || selected?.Key != ScreenshotTabKey(source))
             ScreenshotPanel.SetPreviewEnabled(false);
-        if (!sidebarVisible || selected?.Kind is not ("document" or "diagram" or "browser" or "changes")) DocumentPanel.SetPreviewEnabled(false);
+        if (!sidebarVisible || selected?.Kind is not ("document" or "diagram" or "browser" or "changes" or "workbench")) DocumentPanel.SetPreviewEnabled(false);
         if (!sidebarVisible || selected?.Kind != "terminal") WorkspaceTerminal.SetPreviewEnabled(false);
     }
 }

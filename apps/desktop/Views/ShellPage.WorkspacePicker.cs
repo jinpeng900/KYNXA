@@ -72,8 +72,8 @@ public sealed partial class ShellPage
             button.Click += (_, _) =>
             {
                 menu.Hide();
-                // Let the flyout close before presenting the name dialog or native folder picker.
-                // 先让浮出菜单关闭，再显示名称对话框或原生文件夹选择器。
+                // Close this menu before opening the inline editor in the existing workspace pane.
+                // 先收起菜单，再在现有工作区右栏展开行内编辑。
                 DispatcherQueue.TryEnqueue(async () => await action());
             };
             actions.Children.Add(button);

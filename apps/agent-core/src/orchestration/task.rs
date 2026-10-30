@@ -249,7 +249,7 @@ pub(crate) fn successful_completion_receipt(receipt: &Value) -> bool {
 /// 只有写入工具真实提交内容的回执可证明输出路径；输入路径及普通读取不能冒充产物。
 pub(crate) fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> {
     if !successful_completion_receipt(receipt)
-        || !matches!(name, "filesystem.write" | "filesystem.edit" | "document.create") {
+        || !matches!(name, "filesystem.write" | "filesystem.edit" | "document.create" | "attachment.export") {
         return Vec::new();
     }
     let content = &receipt["content"];
@@ -471,9 +471,34 @@ pub(crate) fn model_visual_hashes(body:&Value)->Vec<String> {
     hashes.sort();hashes.dedup();hashes
 }
 
+/// A text attachment observation needs real text and its original version and returned UTF-16 range.
+/// 文字附件须带真实正文、原件版本和实际 UTF-16 返回范围；元数据或解析失败不构成原文证据。
+pub(super) fn attachment_read_has_content(content: &Value) -> bool {
+    let body = content.get("structuredContent").filter(|value| value.is_object())
+        .or_else(|| content.get("value").filter(|value| value.is_object()))
+        .unwrap_or(content);
+    let valid_hash = |value: &Value| value.as_str().is_some_and(|hash|
+        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let Some(text) = body["text"].as_str().filter(|text| !text.trim().is_empty()) else { return false; };
+    let Some((start, end, total)) = body["offset"].as_u64().zip(body["nextOffset"].as_u64())
+        .zip(body["totalCharacters"].as_u64().or_else(|| body["totalChars"].as_u64()))
+        .map(|((start, end), total)| (start, end, total)) else { return false; };
+    body["sourceId"].as_str().is_some_and(|source| !source.trim().is_empty())
+        && (valid_hash(&body["sourceVersion"]) || valid_hash(&body["sha256"]))
+        && start.checked_add(text.encode_utf16().count() as u64) == Some(end)
+        && end <= total
+        && body["hasMore"].as_bool() == Some(end < total)
+        && (body["offsetUnit"].is_null() || body["offsetUnit"] == "utf16-code-units")
+        && content["isError"] != true && body["isError"] != true && body["evidenceUsable"] != false
+        && ["error", "errorCode"].iter().all(|field| body[*field].is_null() || body[*field] == "")
+}
+
 /// Successful readback tools return observable content or state; discovery and mutation receipts are excluded.
 /// 成功的回读工具返回可观察内容或状态，发现目录和修改回执不能冒充回读。
 pub(crate) fn receipt_is_readback(tool: &str, canonical: &Value) -> bool {
+    if tool == "attachment.read" {
+        return attachment_read_has_content(canonical);
+    }
     if receipt_has_visual_observation(canonical) { return true; }
     if tool.starts_with("terminal.") && (canonical["exitCode"].is_i64() || canonical["command"]["exitCode"].is_i64()) {
         return true;
@@ -1660,7 +1685,16 @@ fn boolean_field(value: &Value, key: &str) -> bool {
 /// Repair control syntax separately from task execution; retain only measurable format progress.
 /// 控制格式修正独立于任务执行，仅保留可核对的格式进展。
 pub(crate) fn review_format_repair(checkpoint: &mut Value, text: &str, output_truncated: bool, output_tokens: u64) -> Value {
+    control_format_repair(checkpoint, text, output_truncated, output_tokens, None)
+}
+
+pub(crate) fn steering_format_repair(checkpoint: &mut Value, text: &str, output_truncated: bool, output_tokens: u64) -> Value {
+    control_format_repair(checkpoint, text, output_truncated, output_tokens, Some("unresolved-user-steering"))
+}
+
+fn control_format_repair(checkpoint: &mut Value, text: &str, output_truncated: bool, output_tokens: u64, required_issue: Option<&str>) -> Value {
     let (stage, mut issues, characters) = review_format_diagnostics(text);
+    if let Some(issue) = required_issue { issues.push(issue.to_owned()); }
     if output_truncated { issues.push("provider-output-truncated".into()); }
     if issues.is_empty() {
         if let Some(fields) = checkpoint.as_object_mut() { fields.remove("reviewFormatRepair"); }

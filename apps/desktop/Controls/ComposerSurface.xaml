@@ -9,7 +9,8 @@
              背景跨越两行，填满编辑器下方圆角而不留下接缝。
         -->
         <Border x:Name="FooterBackground" Grid.RowSpan="2" Visibility="Collapsed"
-                Background="{StaticResource KynxaComposerFooterBrush}" CornerRadius="{StaticResource KynxaComposerRadius}" />
+                Background="{StaticResource KynxaComposerFooterBrush}" BorderBrush="{StaticResource KynxaComposerBorderBrush}"
+                BorderThickness="1" CornerRadius="{StaticResource KynxaComposerRadius}" />
         <Border x:Name="EditorSurface" Height="{Binding EditorHeight, ElementName=SurfaceRoot}"
                 Background="{StaticResource KynxaSurfaceBrush}" BorderBrush="{StaticResource KynxaComposerBorderBrush}"
                 BorderThickness="1" CornerRadius="{StaticResource KynxaComposerRadius}" Translation="0,0,12">
