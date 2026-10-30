@@ -116,7 +116,19 @@ try {
     }
     # Keep provenance beside the distributable files, and publish a list for normal MSBuild packaging.
     $outputManifest = Get-TranscriptionPath 'runtime/transcription/manifest.json'
-    $manifestAsset = @{bytes=([IO.FileInfo]::new($manifestPath)).Length;sha256=(Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()}
+    # Hash the original manifest bytes without relying on nested modules' command lookup state.
+    # 直接校验原始清单字节，避免嵌套模块导入影响命令发现；固定摘要校验保持不变。
+    $manifestHasher = [Security.Cryptography.SHA256]::Create()
+    $manifestStream = $null
+    try {
+        $manifestStream = [IO.File]::OpenRead($manifestPath)
+        $manifestHash = [BitConverter]::ToString($manifestHasher.ComputeHash($manifestStream)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($manifestStream) { $manifestStream.Dispose() }
+        $manifestHasher.Dispose()
+    }
+    $manifestAsset = @{bytes=([IO.FileInfo]::new($manifestPath)).Length;sha256=$manifestHash}
     if (-not (Test-TranscriptionFile $outputManifest $manifestAsset)) { Publish-TranscriptionCopy $manifestPath $outputManifest $manifestAsset }
     foreach ($asset in $records) {
         if (-not (Test-TranscriptionFile (Get-TranscriptionPath $asset.path) $asset)) { throw 'Transcription runtime is incomplete or changed during preparation.' }
