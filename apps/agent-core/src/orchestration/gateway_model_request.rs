@@ -188,6 +188,9 @@ pub(crate) async fn request_model(
         Ok(managed) => managed,
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
     };
+    let observed = if managed { None } else {
+        gateway_config::observe_local(connection, model_name, Some(context_window_tokens), cancellation.clone()).await.ok()
+    };
     // Hold model ownership through dispatch and settlement; phase helpers must not shorten these guards.
     // 模型使用权贯穿派发及结算，分阶段处理不缩短保护范围。
     let _managed_generation = match crate::models::gateway_local_engine::request_guard(
@@ -197,16 +200,22 @@ pub(crate) async fn request_model(
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
     };
     run.emit(json!({"type":"task_progress","phase":"waiting-model"})).await;
-    let slot = match runtime.model_slots.acquire_with_priority(
-        connection, model_name, run.parent_task_id.is_none(),
+    let slot = match runtime.model_slots.acquire_with_observation(
+        connection, observed.as_ref(), run.parent_task_id.is_none(),
         !run.is_background_recovery.load(std::sync::atomic::Ordering::Acquire), cancellation.clone(),
     ).await {
         Ok(slot) => slot,
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
     };
+    // Long queue waits can outlive Ollama residency observations; reuse normal cache freshness.
+    // 长排队可能跨过 Ollama 驻留观测有效期；按原缓存时效刷新，避免重复预约旧的装载增量。
+    let observed = if observed.as_ref().is_some_and(|snapshot| snapshot["backend"] == "ollama"
+        && snapshot["observedAt"].as_i64().is_none_or(|at| chrono::Utc::now().timestamp_millis().saturating_sub(at) >= 2000)) {
+        gateway_config::observe_local(connection, model_name, Some(context_window_tokens), cancellation.clone()).await.ok()
+    } else { observed };
     run.emit(json!({"type":"task_progress","phase":"waiting-resource"})).await;
     let leases = match acquire_model_resources(
-        runtime, run, ctx, connection, model_name, context_window_tokens, managed, cancellation.clone(),
+        runtime, run, ctx, context_window_tokens, observed.as_ref(), cancellation.clone(),
     ).await {
         Ok(leases) => leases,
         Err(error) => return ModelRequestOutcome { result: Err(error), dispatched: false, duration_ms: 0 },
@@ -320,10 +329,8 @@ async fn acquire_model_resources(
     runtime: &GatewayRuntime,
     run: &RequestRun,
     ctx: &tools::GatewayToolContext,
-    connection: &Value,
-    model_name: &str,
     context_window_tokens: u64,
-    managed: bool,
+    observed: Option<&Value>,
     cancellation: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Vec<crate::resources::gateway::ResourceLease>, model::ModelError> {
     let mut leases = Vec::new();
@@ -349,13 +356,6 @@ async fn acquire_model_resources(
                 return Err(model::ModelError::new(&error.code, &error.message, error.status));
             }
         }
-        let observed = if managed { None } else { gateway_config::observe_local(
-            connection,
-            model_name,
-            Some(context_window_tokens),
-            cancellation.clone(),
-        )
-        .await.ok() };
         if let Some(snapshot) = observed {
             let hardware = service
                 .request("snapshot", json!({}), Duration::from_secs(5))
