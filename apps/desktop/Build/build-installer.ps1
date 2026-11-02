@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [string]$PackageVersion = '1.8.8',
+    [string]$PackageVersion = '1.8.9',
     [string]$CompilerPath,
     [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
     [string]$ModelDownloadSourcesPath,
@@ -46,7 +46,6 @@ if (-not (Test-Path -LiteralPath $CompilerPath -PathType Leaf)) {
     [IO.Directory]::CreateDirectory($toolRoot) | Out-Null
     $archive = Join-Path $toolRoot 'tools.innosetup.6.7.3.nupkg'
     Save-InstallerAsset -Id 'inno-setup-6.7.3' -Destination $archive
-    # Extract a build tool locally; do not install software, register file associations, or change PATH.
     # 编译工具只解压到项目缓存，不安装系统软件、不注册文件关联、不修改 PATH。
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($archive, (Join-Path $toolRoot 'InnoSetup'))
@@ -99,7 +98,6 @@ Copy-Item -LiteralPath $ModelDownloadSourcesPath -Destination (Join-Path $helper
 $prerequisiteRoot = Join-Path $payloadRoot 'prerequisites'
 [IO.Directory]::CreateDirectory($prerequisiteRoot) | Out-Null
 Copy-Item -LiteralPath $prerequisiteSource -Destination (Join-Path $prerequisiteRoot 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe') -Force
-# The catalog is documentation for installed choices, not preinstalled generation weights.
 # 模型目录仅说明可安装选项，不把对话模型权重或本机数据混入安装包。
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'apps/agent-core/src/models/local_model_catalog.json') -Destination (Join-Path $helperRoot 'local-model-catalog.json') -Force
 Write-Host '[3/3] Compiling the EXE installer without launching it.'
