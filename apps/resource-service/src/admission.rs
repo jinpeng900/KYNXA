@@ -60,7 +60,6 @@ impl AdmissionQueue {
                 index += 1;
             }
         }
-        // Every fourth admission gives background work a chance; aging also overtakes foreground.
         // 每四次准入给后台一次机会；等待超过两秒的后台也可优先，避免持续前台任务饿死索引。
         let mut index = 0;
         while index < self.waiting.len() {

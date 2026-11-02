@@ -42,7 +42,6 @@ impl HostJob {
     }
 }
 
-/// Terminal jobs retain only bounded output and formal receipts, independently of request completion.
 /// 终端作业独立于请求完成，保留受限输出与正式回执。
 #[derive(Default)]
 pub struct HostJobs {

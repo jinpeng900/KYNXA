@@ -133,7 +133,6 @@ fn check_current(
         return Err(stale());
     }
     let current = sqlite_channels::snapshots(connection, Some(&scopes(&query.arguments)?))?;
-    // Scope snapshots originate before candidate generation, not from a later unrelated metadata receipt.
     // 范围快照来自候选生成前，不能用事后读取的元信息冒充候选所属版本。
     if current["scopeSnapshots"] != query.snapshot["scopeSnapshots"] {
         return Err(stale());
@@ -240,7 +239,6 @@ fn begin(arguments: &Value) -> ContractResult {
     let scopes = scopes(arguments)?;
     let root = Path::new(arguments["root"].as_str().unwrap_or(""));
     let path = Path::new(arguments["path"].as_str().unwrap_or(""));
-    // The I/O boundary has admitted memory already; storage only checks in-memory eligibility.
     // I/O 边界已完成内存准入，存储层只读取内存中的缓存可用状态。
     let cache_admitted = crate::retrieval::cache_candidates::admitted();
     let mut connection = sqlite_connections::acquire(
@@ -369,7 +367,6 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
     let mut output = Vec::with_capacity(requested.len());
     for item in requested {
         let mut row = selected.remove(&text(item, "chunkId")).ok_or_else(stale)?;
-        // Recheck scoped metadata above before looking up an immutable body in the process cache.
         // 先在当前快照重新核验范围与来源版本，再复用不可变正文；删除和撤权不能命中旧正文。
         let load_body = || {
             connection.prepare_cached("SELECT text,lexical_text FROM chunks WHERE chunk_id=?")
@@ -379,7 +376,9 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
         };
         let body = if query.arguments["passageCacheAdmitted"] == true {
             crate::retrieval::cache_passages::read(query.database_identity, &row, load_body)?
-        } else { load_body()? };
+        } else {
+            load_body()?
+        };
         row["text"] = body["text"].clone();
         row["lexical_text"] = body["lexical_text"].clone();
         row["score"] = item["score"].clone();
@@ -405,7 +404,6 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
     )
 }
 
-/// Keep bounded query IDs only; hold no text, cursors or transactions across awaits.
 /// 查询上下文仅保留有界标识，异步等待不持正文、游标或事务。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.index.queryBegin" {

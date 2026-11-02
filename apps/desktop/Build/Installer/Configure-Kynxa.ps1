@@ -39,7 +39,6 @@ function Get-InstallerSourceSettings([string]$Path) {
 }
 
 function Merge-InstallerSourceSettings([hashtable]$Template, [hashtable]$Existing, [string]$Preferred) {
-    # Upgrade only missing mappings; an existing custom mirror or asset list remains authoritative.
     # 升级只补缺失映射，保留已有自定义镜像和发布附件列表，不改动下载片段。
     $merged = @{}
     foreach ($key in $Existing.Keys) { $merged[$key] = $Existing[$key] }
@@ -130,7 +129,6 @@ $installerDirectory = Join-Path $DataRoot 'Installer'
 [IO.Directory]::CreateDirectory((Join-Path $DataRoot 'Desktop')) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $DataRoot 'Models')) | Out-Null
 
-# Keep editable pointers outside a protected application directory; never overwrite a migrated user's pointers.
 # 可修改指针位于用户选择的数据目录，不写入受保护的软件目录，也不覆盖用户已有迁移结果。
 $storagePointer = Join-Path $installerDirectory 'storage.json'
 if (-not (Test-Path -LiteralPath $storagePointer)) {
@@ -153,13 +151,11 @@ Set-InstallerJson (Join-Path $ApplicationRoot 'kynxa-installation.json') @{
     language = $Language
 }
 
-# Initial language is an installer preference; upgrades retain the user's complete layout and language.
 # 安装语言仅初始化新用户布局，升级保留已有完整布局及用户语言。
 $activeDataPointer = Get-Content -LiteralPath $storagePointer -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($activeDataPointer.version -ne 1) { throw 'Unsupported KYNXA storage pointer.' }
 $effectiveDataRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($installerDirectory, $activeDataPointer.dataRoot))
 [IO.Directory]::CreateDirectory((Join-Path $effectiveDataRoot 'Desktop')) | Out-Null
-# The installed application's ModelHome follows the effective data pointer, including user migration.
 # 安装版 ModelHome 跟随有效数据指针，数据迁移后仍写入实际 Models 目录，不继承开发机环境变量。
 $effectiveModelHome = Join-Path $effectiveDataRoot 'Models'
 [IO.Directory]::CreateDirectory($effectiveModelHome) | Out-Null

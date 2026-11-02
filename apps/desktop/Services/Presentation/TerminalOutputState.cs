@@ -7,7 +7,6 @@ namespace KYNXA_Desktop.Services;
 public sealed record TerminalRunIdentity(Guid ConversationId, Guid RequestId, string ToolCallId);
 
 /// <summary>
-/// Bounded display cache only. The gateway still owns command receipts and formal output.
 /// 仅作为有容量上限的展示缓存；正式命令回执与输出仍归网关负责。
 /// </summary>
 public sealed class TerminalOutputState
@@ -93,7 +92,6 @@ public sealed class TerminalOutputState
             run.Cwd = StringField(args, "cwd", 4096);
         }
         if (run.Cwd.Length == 0) run.Cwd = activity.WorkspaceRoot ?? "";
-        // A reloaded interrupted reply has no stream to resume. Do not invent a completion receipt.
         // 重开的中断回复没有可恢复的流；不能虚构完成回执。
         run.Status = !requestActive && (activity.Status is "running" or "approval-required") ? "unknown" : activity.Status;
         run.Code = activity.Code;
@@ -179,7 +177,6 @@ public sealed class TerminalOutputState
         {
             using var document = JsonDocument.Parse(result, new JsonDocumentOptions { MaxDepth = 12 });
             var value = document.RootElement;
-            // Only the known receipt envelope is inspected, never _meta or arbitrary parameter objects.
             // 只读取已知回执封装，不检查 _meta 或任意参数对象。
             for (int depth = 0; depth < 4 && value.ValueKind == JsonValueKind.Object; depth++)
             {

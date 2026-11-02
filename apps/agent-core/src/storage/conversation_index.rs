@@ -250,7 +250,6 @@ fn write_database(path: &Path, data: &Value) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Derived metadata publication checks newer formats, preserves corrupt originals and releases all SQLite handles.
 /// 派生元信息发布检查新版本，保留损坏原文件，并在替换前释放所有 SQLite 句柄。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     apply_service(operation, arguments).map_err(|error| {
@@ -283,12 +282,21 @@ fn apply_service(operation: &str, arguments: &Value) -> ContractResult {
         return Err(invalid());
     }
     if exists {
-        // Keep the existing corrupt-index backup path; only a readable old schema enters migration.
         // 保留已有损坏索引备份路径；只有可读的旧版结构进入约束迁移，非法旧记录不被重建删除。
-        if let Ok(connection) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
-            if connection.query_row("PRAGMA user_version", [], |row|row.get::<_,i64>(0)).ok() == Some(1) {
-                super::sqlite_store::migrate_integrity(&connection, 2,
-                    &[("metadata", ""), ("projects", ""), ("sessions", "")], &[])?;
+        if let Ok(connection) =
+            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        {
+            if connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .ok()
+                == Some(1)
+            {
+                super::sqlite_store::migrate_integrity(
+                    &connection,
+                    2,
+                    &[("metadata", ""), ("projects", ""), ("sessions", "")],
+                    &[],
+                )?;
             }
         }
     }

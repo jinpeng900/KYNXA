@@ -1,10 +1,8 @@
-//! Small process-wide cache primitives store only rebuildable values and bounded accounting.
 //! 小型进程共享缓存仅保存可重建的值和有界计量，不承担正式数据或权限真值。
 
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 
-/// Count retained JSON containers and string capacities, rather than only their serialized text.
 /// 计入 JSON 容器、树节点和字符串容量，避免只按序列化长度低估实际常驻内存。
 pub(crate) fn retained_json_bytes(value: &Value) -> usize {
     let own = std::mem::size_of::<Value>();
@@ -34,7 +32,6 @@ struct Entry<V> {
     touched: u64,
 }
 
-/// The caller synchronizes access and counts retained bytes, including strings.
 /// 调用方负责同步，并统计含字符串在内的驻留字节数。
 pub(crate) struct ByteLru<V> {
     entries: HashMap<String, Entry<V>>,
@@ -66,13 +63,13 @@ impl<V> ByteLru<V> {
     }
 
     pub(crate) fn get(&mut self, key: &str) -> Option<Arc<V>> {
-        self.clock = self.clock.saturating_add(1);
+        self.clock += 1;
         if let Some(entry) = self.entries.get_mut(key) {
             entry.touched = self.clock;
-            self.hits = self.hits.saturating_add(1);
+            self.hits += 1;
             Some(entry.value.clone())
         } else {
-            self.misses = self.misses.saturating_add(1);
+            self.misses += 1;
             None
         }
     }
@@ -92,7 +89,7 @@ impl<V> ByteLru<V> {
         while self.bytes.saturating_add(bytes) > self.capacity {
             self.evict_one();
         }
-        self.clock = self.clock.saturating_add(1);
+        self.clock += 1;
         self.bytes = self.bytes.saturating_add(bytes);
         self.entries.insert(
             key,
@@ -114,7 +111,7 @@ impl<V> ByteLru<V> {
         if let Some(key) = key {
             if let Some(entry) = self.entries.remove(&key) {
                 self.bytes = self.bytes.saturating_sub(entry.bytes);
-                self.evictions = self.evictions.saturating_add(1);
+                self.evictions += 1;
             }
         }
     }
@@ -122,7 +119,7 @@ impl<V> ByteLru<V> {
     pub(crate) fn remove(&mut self, key: &str) -> Option<Arc<V>> {
         let entry = self.entries.remove(key)?;
         self.bytes = self.bytes.saturating_sub(entry.bytes);
-        self.invalidations = self.invalidations.saturating_add(1);
+        self.invalidations += 1;
         if self.entries.is_empty() {
             self.entries.shrink_to_fit();
         }
@@ -143,7 +140,7 @@ impl<V> ByteLru<V> {
         self.invalidations = self.invalidations.saturating_add(self.entries.len() as u64);
         self.entries = HashMap::new();
         self.bytes = 0;
-        self.generation = self.generation.saturating_add(1);
+        self.generation += 1;
         self.invalidation_reason = reason;
     }
 

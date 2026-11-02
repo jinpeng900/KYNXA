@@ -87,11 +87,9 @@ fn projected_event_identity(raw: &str) -> Result<(String, String), ContractError
 }
 
 pub(crate) fn event_identity(raw: &str) -> Result<(String, String), ContractError> {
-    // Borrow full bodies without decoding them; only ID/role scalars participate in ordering.
     // 借用完整正文而不解码，仅身份和角色标量参与事件排序，原始 UTF-16 字节继续保留。
     let event: HashMap<String, &RawValue> = match serde_json::from_str(raw) {
         Ok(event) => event,
-        // Legacy scalar projection also accepts isolated UTF-16 in unused object keys.
         // 旧标量投影也接受未使用对象键中的孤立 UTF-16；罕见兼容路径保留原验证行为。
         Err(_) => return projected_event_identity(raw),
     };
@@ -132,7 +130,6 @@ fn expected(bytes: Option<&[u8]>, arguments: &Value) -> Result<(), ContractError
     Ok(())
 }
 
-/// The native writer checks the latest stable ID and role before appending exact codec bytes.
 /// 原生写入器在追加原始编码字节前检查稳定 ID 和角色，恢复重放保持幂等。
 pub(crate) fn append_unlocked(
     root: &Path,
@@ -190,8 +187,6 @@ pub(crate) fn append_unlocked(
     Ok(json!({"appended": true, "hash": managed_files::digest(&committed)}))
 }
 
-/// Byte-compatible parsing remains at the gateway boundary; native code owns snapshot verification,
-/// stable ordering and the only permitted tail-repair/write effects.
 /// 网关保留字节兼容解析；原生代码拥有快照复验、稳定顺序及唯一允许的尾部恢复与写入效果。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let _guard = CONVERSATION_TRANSACTIONS
@@ -210,8 +205,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                         .iter()
                         .rposition(|byte| *byte == b'\n')
                         .map_or(0, |index| index + 1);
-                    // Lossy projection is permitted only to classify an incomplete final scalar;
-                    // the recovery receipt still backs up the original bytes before truncation.
                     // 仅为识别末尾截断字符允许有损投影；恢复回执在截断前备份完整原始残尾字节。
                     if bytes.ends_with(b"\n")
                         || encoding.error_len().is_some()
@@ -226,7 +219,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 }
                 let hash = managed_files::digest(&bytes);
                 check_cancelled()?;
-                // A cache hit still verifies all authoritative bytes, but never copies the body across the bridge.
                 // 缓存命中仍复验全部正式字节，但不再将正文重复复制并传过原生桥接。
                 if arguments["knownHash"].as_str() == Some(hash.as_str()) {
                     Ok(json!({"exists": true, "hash": hash, "unchanged": true}))
@@ -251,7 +243,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         "storage.logs.finalize" => {
             expected(bytes.as_deref(), arguments)?;
             let mut bytes = bytes.unwrap_or_default();
-            // Counting line delimiters does not require another complete decoded copy of the log.
             // 统计行分隔符不必再次完整解码并复制日志，尾部恢复判定仍使用原始字节。
             let record_count = bytes.iter().filter(|byte| **byte == b'\n').count()
                 + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));

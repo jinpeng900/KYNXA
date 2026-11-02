@@ -7,7 +7,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-# Nested MSBuild PowerShell invocations may not auto-load the inbox utility module.
 # 嵌套 MSBuild PowerShell 调用可能不会自动加载系统工具模块。
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force
 Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
@@ -49,7 +48,6 @@ if (-not $ready) {
     $sourceInput = Get-KynxaResourceInputHash -Values @($specification.version, $specification.sha256)
     $sourceState = Read-KynxaPreparedComponent -Root $staging -Component 'office-source'
     if (-not (Test-KynxaPreparedComponent -Root $staging -Component 'office-source' -InputHash $sourceInput -State $sourceState)) {
-        # Administrative extraction prepares a private payload; no system installation or PATH change.
         # 管理提取只准备应用私有文件，不安装到系统，也不修改 PATH。
         Write-Host ('[Office preview] Extracting LibreOffice ' + $specification.version + ' into the application runtime.')
         $arguments = '/a "' + $archive + '" /qn TARGETDIR="' + $staging + '" /L*v "' + $log + '"'
@@ -64,7 +62,6 @@ if (-not $ready) {
         Save-KynxaPreparedComponent -Root $staging -Component 'office-source' -InputHash $sourceInput -Files $sourceRecords
         $sourceState = Read-KynxaPreparedComponent -Root $staging -Component 'office-source'
     }
-    # Administrative extraction may place program/ at the staging root or inside a product folder.
     # 管理提取可能将 program/ 直接放在暂存根目录，也可能放在产品子目录中。
     $relativeExecutable = $specification.executable.Replace('\','/')
     $sourceEntry = @($sourceState['files'] | Where-Object {

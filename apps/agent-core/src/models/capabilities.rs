@@ -16,7 +16,6 @@ fn exact_official_endpoint(endpoint: &Value) -> bool {
         && ["", "/", "/v1", "/v1/"].contains(&string(&endpoint["pathname"]))
 }
 
-/// Summary modes do not establish proxy quotas or change normal reply settings.
 /// 摘要专用模式不代表代理额度，也不改变正常回复设置。
 fn summary_controls(args: &Value) -> Value {
     let endpoint = &args["endpoint"];
@@ -189,7 +188,6 @@ fn official(host: &str, model: &str) -> Option<Value> {
     Some(value)
 }
 
-/// Exact snapshot capability declarations do not infer quotas for proxies, aliases or credential holders.
 /// 精确快照能力声明不推测代理、未知别名或凭据拥有者的可用额度；保留现有已核验表。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     let endpoint = &args["endpoint"];
@@ -197,11 +195,14 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
         return Ok(summary_controls(args));
     }
     if operation == "models.capabilities.lookup" {
-        // DeepSeek's Messages route serves the same official models under /anthropic.
         // DeepSeek 的 Messages 路线在 /anthropic 下提供同一批官方模型，窗口与输出上限保持一致。
         let deepseek_messages = endpoint["hostname"] == "api.deepseek.com"
             && ["/anthropic", "/anthropic/"].contains(&string(&endpoint["pathname"]))
-            && exact_official_endpoint(&{ let mut root = endpoint.clone(); root["pathname"] = json!("/"); root });
+            && exact_official_endpoint(&{
+                let mut root = endpoint.clone();
+                root["pathname"] = json!("/");
+                root
+            });
         if !(exact_official_endpoint(endpoint) || deepseek_messages) || !args["model"].is_string() {
             return Ok(json!({}));
         }
@@ -290,18 +291,28 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
             value["capabilitySource"] = source.clone();
         }
     }
-    // Return input, output and total limits separately; they are not interchangeable.
     // 分别返回输入、输出和总窗口上限，三者不能互相代替。
-    for (source, target) in [("maxInputTokens", "providerMaxInputTokens"), ("maxOutputTokens", "providerMaxOutputTokens")] {
+    for (source, target) in [
+        ("maxInputTokens", "providerMaxInputTokens"),
+        ("maxOutputTokens", "providerMaxOutputTokens"),
+    ] {
         let mut limits = Vec::new();
-        if let Some(limit) = valid_limit(&args["connection"][source]) { limits.push(limit); }
+        if let Some(limit) = valid_limit(&args["connection"][source]) {
+            limits.push(limit);
+        }
         if official.is_some() {
-            if let Some(limit) = valid_limit(&capabilities[source]) { limits.push(limit); }
+            if let Some(limit) = valid_limit(&capabilities[source]) {
+                limits.push(limit);
+            }
         }
         if trusted_local {
-            if let Some(limit) = valid_limit(&local_model[source]) { limits.push(limit); }
+            if let Some(limit) = valid_limit(&local_model[source]) {
+                limits.push(limit);
+            }
         }
-        if let Some(limit) = limits.into_iter().min() { value[target] = json!(limit); }
+        if let Some(limit) = limits.into_iter().min() {
+            value[target] = json!(limit);
+        }
     }
     Ok(value)
 }
@@ -319,21 +330,28 @@ mod dispatch_limit_tests {
         assert_eq!(context["providerMaxInputTokens"], 272000);
         assert_eq!(context["providerMaxOutputTokens"], 32000);
         let unknown = calculate("models.capabilities.automaticContext", &json!({"endpoint":{"protocol":"https:","hostname":"proxy.invalid"},"connection":{},"capabilities":{}})).unwrap();
-        assert!(unknown.get("providerMaxInputTokens").is_none() && unknown.get("providerMaxOutputTokens").is_none());
+        assert!(
+            unknown.get("providerMaxInputTokens").is_none()
+                && unknown.get("providerMaxOutputTokens").is_none()
+        );
     }
 
     #[test]
     fn actual_tiny_managed_window_is_not_inflated_before_output_allocation() {
-        for window in [512,1024] {
+        for window in [512, 1024] {
             let context = calculate("models.capabilities.automaticContext",&json!({
                 "endpoint":{"protocol":"http:","hostname":"127.0.0.1","origin":"http://127.0.0.1:19385"},
                 "connection":{"contextWindowTokens":32768},"capabilities":{},
                 "localModel":{"backend":"llama.cpp","source":"llama-cpp-props","observationOnly":true,
                     "endpointOrigin":"http://127.0.0.1:19385","runtimeContextTokens":window,"modelMaximumContextTokens":32768}})).unwrap();
-            assert_eq!(context["effectiveTokens"],window);
-            assert_eq!(context["source"],"local-runtime");
+            assert_eq!(context["effectiveTokens"], window);
+            assert_eq!(context["source"], "local-runtime");
             let output = crate::models::output::calculate("context.outputBudget",&json!({"contextWindowTokens":context["effectiveTokens"],"requiredInputTokens":100})).unwrap();
-            assert!(output["inputBudgetTokens"].as_u64().unwrap() + output["maxOutputTokens"].as_u64().unwrap() < window);
+            assert!(
+                output["inputBudgetTokens"].as_u64().unwrap()
+                    + output["maxOutputTokens"].as_u64().unwrap()
+                    < window
+            );
         }
     }
 }

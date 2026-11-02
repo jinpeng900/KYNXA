@@ -104,7 +104,6 @@ fn capacity(document: &Value) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// The repository owns deduplication, dismissals, proposal targets and confirmation transitions.
 /// 仓储服务拥有去重、撤销来源、提案目标与确认状态迁移；引用验证回调仍由受保护调用端提供。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let mut document = arguments["document"].clone();

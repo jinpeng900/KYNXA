@@ -22,7 +22,6 @@ public static class MathFormulaRenderer
             int end = token.Index + token.Length;
             if (token.Value is @"\dfrac" or @"\tfrac")
             {
-                // Group the complete fraction so its style cannot leak into later terms.
                 // 整体包裹分数，避免其样式泄漏到后续项。
                 int numeratorEnd = ArgumentEnd(latex, end);
                 int denominatorEnd = numeratorEnd < 0 ? -1 : ArgumentEnd(latex, numeratorEnd);
@@ -39,7 +38,6 @@ public static class MathFormulaRenderer
             }
             else if (token.Value == @"\bmod")
             {
-                // Binary remainder operator: upright text with medium math spacing.
                 // 二元余数运算符使用直立文本与中等数学间距。
                 edits.Add((token.Index, token.Length, @"\:\mathrm{mod}\:"));
             }
@@ -47,8 +45,6 @@ public static class MathFormulaRenderer
             {
                 int argumentEnd = ArgumentEnd(latex, end);
                 if (argumentEnd < 0) continue;
-                // Congruence annotations consume one TeX argument. Keep it in math
-                // typeface; only "mod" is upright. Display annotations get more space.
                 // 同余标注消耗一个 TeX 参数并保持数学字体，只有 mod 直立；块级标注增加间距。
                 bool parenthesized = token.Value != @"\mod";
                 string spacing = block ? @"\quad" : parenthesized ? @"\;\," : @"\:\:\:";
@@ -87,8 +83,6 @@ public static class MathFormulaRenderer
         return -1;
     }
 
-    // CSharpMath supports automatic delimiters but not TeX's fixed-size big/Big family.
-    // Adapt only the image source. Stored and selectable LaTeX remains unchanged.
     // CSharpMath 支持自动定界符，但不支持 TeX 固定尺寸的 big/Big 系列；只适配图片源文，保存与可选择的 LaTeX 不变。
     private static string NormalizeSizedDelimiters(string latex)
     {
@@ -128,7 +122,6 @@ public static class MathFormulaRenderer
         for (int i = 0; i < edits.Count; i++)
         {
             var edit = edits[i];
-            // An unmatched invisible delimiter is left to the original parser's fallback.
             // 无法配对的不可见定界符留给原解析器回退处理。
             replacements[i] = edit.Delimiter == "." ? latex.Substring(edit.Start, edit.Length) : edit.Delimiter;
             if (!pending.TryGetValue(edit.Scope, out var stack)) pending[edit.Scope] = stack = new();
@@ -174,7 +167,6 @@ public static class MathFormulaRenderer
             var size = painter.Measure();
             if (!float.IsFinite(size.Width) || !float.IsFinite(size.Height)
                 || size.Width <= 0 || size.Height <= 0 || size.Width > 4096 || size.Height > 1024) return null;
-            // Explicit padding avoids clipping ascenders/descenders at fractional pixel bounds.
             // 明确留出边距，避免小数像素边界裁切字符的上升部或下降部。
             int width = (int)Math.Ceiling(size.Width) + 8, height = (int)Math.Ceiling(size.Height) + 8;
             using var surface = SKSurface.Create(new SKImageInfo(width, height));

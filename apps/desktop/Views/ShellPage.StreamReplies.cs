@@ -63,7 +63,6 @@ public sealed partial class ShellPage
         bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text) || HasAttachmentDrafts;
         SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
             && hasInput);
-        // Retain the shared theme brush while the durable-task action determines the visible icon.
         // 保留共享主题画刷；可见图标由持久任务的当前动作决定。
         SendArrow.Stroke = AppearanceService.GetBrush(SendButton.IsEnabled ? "KynxaOnAccentBrush" : "KynxaDisabledTextBrush");
         bool pause = active && !hasInput;
@@ -122,7 +121,6 @@ public sealed partial class ShellPage
         if (!pending.Dirty && !final) return;
         bool textChanged = pending.Message.Content.Length != pending.Content.Length
             || pending.Message.Reasoning.Length != pending.Reasoning.Length;
-        // Use a 120 ms snapshot interval above 256 KiB of growing text; anchors and final state flush immediately.
         // 增长中的文本超过 256 KiB 时按 120 毫秒合并快照；新回复锚和终态立即刷新。
         if (!final && textChanged && (long)pending.Content.Length + pending.Reasoning.Length >= 128 * 1024
             && pending.LastTextFlushMessageId == pending.Message.Id && pending.LastTextFlushTimestamp != 0
@@ -141,7 +139,6 @@ public sealed partial class ShellPage
             }
         }
         pending.DirtySegments.Clear();
-        // Absolute replacements update Message too; unchanged channels reuse their existing strings.
         // 绝对快照同步更新 Message；未增长的通道直接复用已有字符串。
         if (pending.Message.Content.Length != pending.Content.Length) pending.Message.Content = pending.Content.ToString();
         if (pending.Message.Reasoning.Length != pending.Reasoning.Length) pending.Message.Reasoning = pending.Reasoning.ToString();
@@ -166,7 +163,6 @@ public sealed partial class ShellPage
             {
                 try
                 {
-                    // Storage and connection preparation follow the already visible user and waiting rows.
                     // 用户消息与等待占位已显示后再准备正式提交与连接；失败保留本轮稳定身份供重试。
                     if (!isPrepared)
                     {
@@ -186,7 +182,6 @@ public sealed partial class ShellPage
                     isSubmitted = true;
                     await foreach (var update in updates)
                     {
-                        // Exit blocks new dispatches while the existing stream awaits its pause acknowledgement.
                         // 退出阻止新派发；已有观察保留到暂停受理，窗口关闭后不再处理界面事件。
                         if (_projectViewClosed || _chatClosing && !_savingOnClose ||
                             !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
@@ -194,14 +189,12 @@ public sealed partial class ShellPage
                             or "assistant_segment" or "content_snapshot") continue;
                         if (pending.WaitingReplyAnchorId is Guid expectedReply && (update.Type is "completed" or "cancelled" or "failed")
                             && update.ReplyMessageId != expectedReply) continue;
-                        // Transport acceptance can precede the durable write; model output confirms execution reached it.
                         // 传输接受可能早于正式写入；收到模型输出后才确认用户消息已进入持久化执行流程。
                         if (!pending.UserPersisted && update.Type is "reasoning_delta" or "text_delta" or "assistant_segment" or "completed")
                         {
                             _projectStore.AcceptSubmittedMessage(pending.ConversationId, pending.UserMessageId);
                             pending.UserPersisted = true;
                         }
-                        // Timing is independent of visible prose; buffered tool-only work still starts the clock.
                         // 计时独立于可见正文；隐藏阶段文字的纯工具执行也必须启表，恢复沿用网关累计值。
                         if (update.Type != "reply_anchor" && update.GenerationElapsedMs is long elapsed && update.GenerationActive is bool generationActive)
                         {
@@ -292,7 +285,6 @@ public sealed partial class ShellPage
                                 }
                                 break;
                             case "content_snapshot":
-                                // Reattached streams publish absolute snapshots, including an intentionally empty current reply.
                                 // 重附事件流给出绝对快照；当前回复为空也应覆盖旧投影，避免重复文字或遗留上一段内容。
                                 AcceptReplyTextSnapshot(pending, update.Content, update.Reasoning);
                                 break;
@@ -345,7 +337,6 @@ public sealed partial class ShellPage
                     && error is not GatewayApiException && error is (IOException or UnauthorizedAccessException or
                         InvalidOperationException or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException))
                 {
-                    // Yield the UI thread, then observe the same request after a presentation failure.
                     // 展示失败不等于执行失败；让出界面线程后重接原请求，不重发消息或操作。
                     pending.Dirty = true;
                     observedTaskId = null;
@@ -380,7 +371,6 @@ public sealed partial class ShellPage
             {
                 CloseReplyApprovals(pending);
                 pending.ThinkingTime.Stop();
-                // Never leave a departed stream looking live, even if an unexpected exception escapes the handler.
                 // 即使意外异常未被上面的处理器接住，已退出的流也不能继续显示为生成中。
                 if (pending.Message.Status == "streaming")
                 {
@@ -398,7 +388,6 @@ public sealed partial class ShellPage
             }
             finally
             {
-                // Presentation-cache failure must not retain the running marker or cancellation resources.
                 // 展示缓存失败也必须释放运行占位与取消资源，避免发送按钮永久停留在停止状态。
                 if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
                     _pendingReplies.Remove(pending.ConversationId);
@@ -419,7 +408,6 @@ public sealed partial class ShellPage
                     }
                 }
             }
-            // Formal terminal state releases execution first; display-cache maintenance cannot hold the queue.
             // 正式终态先释放执行状态；展示缓存维护不能拖住发送和后续队列。
             if (cachePresentation) await CacheReplyPresentationAsync(pending);
         }
@@ -435,7 +423,6 @@ public sealed partial class ShellPage
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException
             or System.Text.Json.JsonException or System.Runtime.InteropServices.COMException)
         {
-            // Display-cache failures must not alter committed replies or stop the queue.
             // 展示缓存失败不改已提交回复，也不阻断后续队列。
             Debug.WriteLine($"Reply presentation cache deferred: {error.GetType().Name}");
         }
@@ -452,7 +439,6 @@ public sealed partial class ShellPage
             throw new OperationCanceledException(pending.Cancellation.Token);
         }
 
-        // The gateway commits existing text-only chats by stable ID; new scopes and attachment owners are saved first.
         // 已有聊天纯文字由流式入口按稳定 ID 正式提交；新聊天归属与附件所属消息仍先保存。
         if (!chat.IsPersisted || _messageAttachmentDrafts.ContainsKey(pending.UserMessageId))
             await SaveChatChangesAsync(project);
@@ -472,7 +458,6 @@ public sealed partial class ShellPage
 
     private static void StartReplyTimer(PendingChatReply pending)
     {
-        // Start timing at the first model segment, not transport acceptance or later rounds.
         // 首个模型段开始计时；接受传输不启表，后续轮次不重置。
         pending.Message.StartGenerationTiming();
     }
@@ -527,7 +512,6 @@ public sealed partial class ShellPage
             if (_chatClosing || IsReplyInProgress(chat.Id) || FindChat(chat.Id).Chat != chat) return;
             if (detail is not null)
             {
-                // Retry continues the original task and receipts; its old reply remains visible.
                 // 重试续接原任务和回执，已有回复保留，不重发原问题或删除正文。
                 var receipt = await _tasksApiClient.ControlAsync(chat.Id, detail.Task.TaskId, detail.Task.Version,
                     "resume", project?.Id, deadline.Token);

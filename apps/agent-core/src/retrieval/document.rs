@@ -103,7 +103,6 @@ impl Blocks<'_> {
     }
 }
 
-/// Recognize only supported Markdown/text blocks; untouched gaps remain explicit raw context upstream.
 /// 只识别已支持的 Markdown/文本块；未解析区间由上层保留原文，不能扩大语法覆盖声明。
 pub fn parse(args: &Value) -> Result<Value, String> {
     let lines = args["lines"]

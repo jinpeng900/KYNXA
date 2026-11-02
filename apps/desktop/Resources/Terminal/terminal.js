@@ -38,7 +38,6 @@
       if (terminal.hasSelection()) post({ type: "copy", text: terminal.getSelection() });
       return false;
     }
-    // Plain Ctrl+C remains terminal input (ETX), including when a command is running.
     // 普通 Ctrl+C 保持 ETX 终端输入，执行中的命令可以正常中断。
     return true;
   });

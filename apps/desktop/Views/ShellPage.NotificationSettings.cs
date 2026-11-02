@@ -50,7 +50,6 @@ public sealed partial class ShellPage
         {
             if (!refreshing) error.IsOpen = !TrySetCompletionNotifications(toggle.IsOn);
         };
-        // The workbench, navigation menu and settings use the same preference and live card.
         // 工作台、导航菜单和设置共用同一偏好及当前卡片，不复制布局或重置既有开关。
         _refreshCompletionNotificationSettings = Refresh;
         window.Closed += (_, _) =>

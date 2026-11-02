@@ -119,7 +119,6 @@ fn failure_plan(arguments: &Value) -> ServiceResult<Value> {
     }
     let web_expired =
         arguments["webDeadlineAborted"] == true && arguments["originalAborted"] != true;
-    // Closing an unissued approval has a typed refusal, even though SDK shutdown also aborts its signal.
     // 尚未派发的审批在关闭时返回明确拒绝码，即使 SDK 关闭同时取消了信号。
     let closed_before_dispatch = arguments["executionStarted"] != true
         && error["codeIsString"] != false
@@ -229,7 +228,14 @@ mod lifecycle_regression_tests {
         facts["executionStarted"] = json!(true);
         facts["name"] = json!("attachment.read");
         assert_eq!(failure_plan(&facts).unwrap()["unknown"], false);
-        assert_eq!(super::apply("broker.completion.trackVersion", &json!({"name":"attachment.export"})).unwrap(), true);
+        assert_eq!(
+            super::apply(
+                "broker.completion.trackVersion",
+                &json!({"name":"attachment.export"})
+            )
+            .unwrap(),
+            true
+        );
     }
 }
 
@@ -252,7 +258,6 @@ fn public_descriptor(descriptor: &Value) -> Value {
     value
 }
 
-/// Completion plans use actual dispatch and SDK receipt facts; cancellation never invents an unexecuted effect.
 /// 完成计划依据实际派发与 SDK 回执事实；取消不能虚构副作用尚未执行。
 pub(super) fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> {
     match operation {
@@ -505,13 +510,13 @@ pub(super) fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> 
         "broker.completion.trackVersion" => Ok(json!(
             string(&arguments["name"]) == "attachment.export"
                 || string(&arguments["name"]).starts_with("filesystem.")
-                && ![
-                    "filesystem.read",
-                    "filesystem.list",
-                    "filesystem.search",
-                    "filesystem.stat"
-                ]
-                .contains(&string(&arguments["name"]))
+                    && ![
+                        "filesystem.read",
+                        "filesystem.list",
+                        "filesystem.search",
+                        "filesystem.stat"
+                    ]
+                    .contains(&string(&arguments["name"]))
         )),
         "broker.completion.searchProtected" => Ok(
             if arguments["outsideWorkspace"] == true || arguments["managedWorkspace"] == true {

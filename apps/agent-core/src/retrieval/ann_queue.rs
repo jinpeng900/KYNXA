@@ -68,7 +68,6 @@ impl BuildJob {
     }
 }
 
-/// Track background generations, capacity, retries and completion independently of runtime futures.
 /// 独立维护后台代次、容量、重试和完成记录，不依赖运行时 Future。
 #[derive(Default)]
 struct BuildQueue {
@@ -369,7 +368,6 @@ struct AnnStore {
     batches: HashMap<u64, BackgroundBatch>,
 }
 
-/// Expose operation receipts only; keep runtime objects and vector buffers with the caller.
 /// 仅返回操作回执，运行时对象与向量缓冲由调用方持有。
 #[derive(Default)]
 pub struct AnnSession {
@@ -946,7 +944,6 @@ impl AnnStore {
                     })?;
                     ids.push((id, count));
                 }
-                // Replace the current shard with ordered partition IDs; keep queue state here.
                 // 按顺序用分区 ID 替换当前分片，队列状态由本模块管理。
                 for part in ids.iter().rev() {
                     batch.pending.push_front(*part);
@@ -1472,7 +1469,6 @@ impl AnnStore {
                 ))
             }
             "store.searchDispatch" => {
-                // Validate and update one request-scoped metadata projection; no cross-query JS ledger is cached.
                 // 核验并更新本次请求的元信息投影，不在 JS 缓存跨查询业务账本。
                 self.apply("store.assertBuild", arguments)?;
                 let limit = self.apply("store.searchCurrent", arguments)?;

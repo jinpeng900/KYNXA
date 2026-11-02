@@ -8,7 +8,6 @@ pub struct HandleIdentity {
     pub is_link: bool,
 }
 
-/// Check the opened object with shared link and file-identity rules.
 /// 按统一规则核对已打开对象的链接和文件身份。
 pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
     #[cfg(windows)]
@@ -39,7 +38,6 @@ pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
             ) -> i32;
         }
         let mut information = HandleInformation::default();
-        // Keep the BY_HANDLE_FILE_INFORMATION buffer valid for the borrowed handle call.
         // 借用句柄调用期间，BY_HANDLE_FILE_INFORMATION 缓冲保持有效。
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
             return Err(std::io::Error::last_os_error());
@@ -74,7 +72,6 @@ pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
     }
 }
 
-/// Windows change stamps detect edits despite restored write times; otherwise hash the bytes.
 /// Windows 变更时间可识别写入时间被还原的修改；不支持时核对文件哈希。
 pub fn change_stamp(file: &File) -> std::io::Result<Option<i64>> {
     #[cfg(windows)]
@@ -109,7 +106,6 @@ pub fn change_stamp(file: &File) -> std::io::Result<Option<i64>> {
             ) -> i32;
         }
         let mut filesystem_name = [0u16; 16];
-        // Coarse timestamps cannot prove unchanged content; hash the full file.
         // 粗粒度时间戳不足以证明内容未变，仍核对完整哈希。
         if unsafe {
             GetVolumeInformationByHandleW(
@@ -133,7 +129,6 @@ pub fn change_stamp(file: &File) -> std::io::Result<Option<i64>> {
             return Ok(None);
         }
         let mut information = BasicInformation::default();
-        // Read FileBasicInfo from the checked handle, not a cached path.
         // 从已核对的句柄读取 FileBasicInfo，避免缓存路径指向其他文件。
         if unsafe {
             GetFileInformationByHandleEx(

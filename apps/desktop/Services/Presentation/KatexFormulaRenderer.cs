@@ -14,7 +14,6 @@ using Windows.Storage.Streams;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// One local, noninteractive KaTeX worker per XAML root; native text remains selectable.
 /// 每个 XAML 根节点共用一个本地、非交互 KaTeX 工作器；原生文本仍可选择。
 /// </summary>
 public sealed class KatexFormulaRenderer
@@ -117,7 +116,6 @@ public sealed class KatexFormulaRenderer
     {
         try
         {
-            // Collect formulas created by one native Markdown layout into the same capture.
             // 同一次原生 Markdown 布局生成的公式合并为同一次捕获。
             await Task.Delay(16);
             _initialization ??= InitializeAsync();
@@ -132,7 +130,6 @@ public sealed class KatexFormulaRenderer
         }
         catch
         {
-            // A missing runtime or a stalled browser must leave readable source, not stuck tasks.
             // 运行环境缺失或浏览器停滞时保留可阅读源文，不能留下永久等待的任务。
             _retryAfter = DateTime.UtcNow.AddSeconds(15);
             ResetView();

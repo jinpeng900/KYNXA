@@ -1,4 +1,3 @@
-//! Immutable user-selected attachments belong to one saved user message and move with its conversation.
 //! 用户选择的附件归属于已保存用户消息；不可变快照随会话移动、删除，不把二进制写入 JSONL。
 
 use super::{
@@ -24,7 +23,6 @@ fn id(value: &Value) -> Result<String, ContractError> {
         .to_ascii_lowercase())
 }
 
-/// Store only identity and display metadata in the formal message; local paths and data URLs stay outside it.
 /// 正式消息仅保存身份和显示元信息；本机路径、Data URL 和解析内容不进入附件描述符。
 pub(crate) fn normalize_descriptors(message: &mut Value) -> Result<(), ContractError> {
     let Some(items) = message
@@ -128,7 +126,6 @@ pub(crate) fn validate_repeated_descriptors(
     Ok(())
 }
 
-/// Only submitted attachment messages require an identity lookup; unrelated old histories remain untouched.
 /// 仅为提交了附件的消息查身份；不为校验新附件而读取其他旧聊天或全量正文。
 pub(crate) fn validate_catalog_submission(
     root: &Path,
@@ -276,11 +273,20 @@ pub fn list(root: &Path, conversation: &str, message: &str) -> ContractResult {
     })
 }
 
-/// Retain the formal catalog's checked snapshot without creating layout files or recovering transactions in a read.
 /// 复用正式目录的受检快照；列表读取不新建布局文件，也不在读取旁路恢复尚未完成的事务。
 fn saved_catalog(root: &Path) -> Result<(Value, Option<String>), ContractError> {
-    if managed_files::inspect(root, &root.join(".catalog-transaction.json"), false, true, 64 * 1024 * 1024)? {
-        return Err(gateway::error("工作目录正在更新，请稍后重试。", "CATALOG_CONFLICT", 409));
+    if managed_files::inspect(
+        root,
+        &root.join(".catalog-transaction.json"),
+        false,
+        true,
+        64 * 1024 * 1024,
+    )? {
+        return Err(gateway::error(
+            "工作目录正在更新，请稍后重试。",
+            "CATALOG_CONFLICT",
+            409,
+        ));
     }
     let (document, hash) = gateway::read_catalog_snapshot(root)?;
     Ok((document.unwrap_or(json!({"Projects":[],"Chats":[]})), hash))
@@ -289,7 +295,11 @@ fn saved_catalog(root: &Path) -> Result<(Value, Option<String>), ContractError> 
 fn check_saved_catalog(root: &Path, expected_hash: Option<&str>) -> Result<(), ContractError> {
     let (_, actual_hash) = saved_catalog(root)?;
     if actual_hash.as_deref() != expected_hash {
-        return Err(gateway::error("附件读取期间聊天归属已改变，请刷新列表。", "CATALOG_CONFLICT", 409));
+        return Err(gateway::error(
+            "附件读取期间聊天归属已改变，请刷新列表。",
+            "CATALOG_CONFLICT",
+            409,
+        ));
     }
     Ok(())
 }
@@ -302,7 +312,6 @@ struct SavedAttachmentRow {
     metadata: Value,
 }
 
-/// Enumerate only message-identity directories, never attachment bytes or linked project folders.
 /// 仅枚举消息身份目录，不读取附件内容或工作关联文件夹，也不跟随目录链接。
 fn saved_message_ids(root: &Path, directory: &Path) -> Result<HashSet<String>, ContractError> {
     let mut selected = HashSet::new();
@@ -312,40 +321,72 @@ fn saved_message_ids(root: &Path, directory: &Path) -> Result<HashSet<String>, C
     for entry in std::fs::read_dir(directory).map_err(conversation_logs::io_error)? {
         conversation_logs::check_cancelled()?;
         let entry = entry.map_err(conversation_logs::io_error)?;
-        if !entry.file_type().map_err(conversation_logs::io_error)?.is_dir() {
+        if !entry
+            .file_type()
+            .map_err(conversation_logs::io_error)?
+            .is_dir()
+        {
             continue;
         }
-        let Ok(message_id) = id(&json!(entry.file_name().to_string_lossy())) else { continue };
-        if managed_files::inspect(root, &entry.path(), false, false, u64::MAX).is_ok_and(|exists| exists) {
+        let Ok(message_id) = id(&json!(entry.file_name().to_string_lossy())) else {
+            continue;
+        };
+        if managed_files::inspect(root, &entry.path(), false, false, u64::MAX)
+            .is_ok_and(|exists| exists)
+        {
             selected.insert(message_id);
         }
     }
     Ok(selected)
 }
 
-fn saved_blob_matches(root: &Path, folder: &Path, item: &Value, saved: &Value, message_id: &str) -> bool {
-    if saved["version"] != 1 || id(&saved["id"]).ok().as_deref() != item["Id"].as_str()
+fn saved_blob_matches(
+    root: &Path,
+    folder: &Path,
+    item: &Value,
+    saved: &Value,
+    message_id: &str,
+) -> bool {
+    if saved["version"] != 1
+        || id(&saved["id"]).ok().as_deref() != item["Id"].as_str()
         || id(&saved["messageId"]).ok().as_deref() != Some(message_id)
-        || saved["name"] != item["Name"] || saved["sizeBytes"] != item["SizeBytes"]
-        || !matches!(saved["status"].as_str(), Some("pending" | "ready" | "error"))
-        || saved["sha256"].as_str().is_none_or(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+        || saved["name"] != item["Name"]
+        || saved["sizeBytes"] != item["SizeBytes"]
+        || !matches!(
+            saved["status"].as_str(),
+            Some("pending" | "ready" | "error")
+        )
+        || saved["sha256"].as_str().is_none_or(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
         return false;
     }
-    let Some(name) = item["Name"].as_str() else { return false };
+    let Some(name) = item["Name"].as_str() else {
+        return false;
+    };
     let path = folder.join(blob_name(name));
-    let Ok(Some(reader)) = managed_files::open_reader(root, &path, MAXIMUM_FILE_BYTES) else { return false };
-    reader.file.metadata().is_ok_and(|metadata| Some(metadata.len()) == item["SizeBytes"].as_u64())
+    let Ok(Some(reader)) = managed_files::open_reader(root, &path, MAXIMUM_FILE_BYTES) else {
+        return false;
+    };
+    reader
+        .file
+        .metadata()
+        .is_ok_and(|metadata| Some(metadata.len()) == item["SizeBytes"].as_u64())
         && reader.verify().is_ok()
 }
 
-fn collect_saved_attachments(root: &Path, location: &Value, rows: &mut Vec<SavedAttachmentRow>) -> Result<(), ContractError> {
+fn collect_saved_attachments(
+    root: &Path,
+    location: &Value,
+    rows: &mut Vec<SavedAttachmentRow>,
+) -> Result<(), ContractError> {
     let conversation = id(&location["Id"])?;
     let directory = conversation_logs::directory(root, location)?.join("attachments");
     let selected = saved_message_ids(root, &directory)?;
     if selected.is_empty() {
         return Ok(());
     }
-    // The shared latest-message index excludes stale/deleted message revisions and unsubmitted upload reservations.
     // 共用的最新消息索引排除旧消息版本、已删除消息及尚未提交正式引用的预留上传。
     let mut read = conversation_history::read_latest(root, location, Some(&selected), true)?;
     for raw in &read.messages {
@@ -353,16 +394,28 @@ fn collect_saved_attachments(root: &Path, location: &Value, rows: &mut Vec<Saved
         let message: Value = serde_json::from_str(&super::raw_json::scalar_projection(raw))
             .map_err(|_| invalid("附件所属消息格式无效。"))?;
         let message = gateway::normalize_message(&message)?;
-        if message["Role"] != "user" { continue; }
+        if message["Role"] != "user" {
+            continue;
+        }
         let message_id = id(&message["Id"])?;
-        let created_ms = message["CreatedAt"].as_str()
+        let created_ms = message["CreatedAt"]
+            .as_str()
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.timestamp_millis()).unwrap_or(0);
+            .map(|value| value.timestamp_millis())
+            .unwrap_or(0);
         for item in message["Attachments"].as_array().into_iter().flatten() {
             let attachment = id(&item["Id"])?;
             let message_directory = directory.join(&message_id);
-            let Some(saved) = manifest(root, &message_directory, &attachment)? else { continue };
-            if !saved_blob_matches(root, &message_directory.join(&attachment), item, &saved, &message_id) {
+            let Some(saved) = manifest(root, &message_directory, &attachment)? else {
+                continue;
+            };
+            if !saved_blob_matches(
+                root,
+                &message_directory.join(&attachment),
+                item,
+                &saved,
+                &message_id,
+            ) {
                 continue;
             }
             let mut metadata = public_metadata(&conversation, &message_id, item, Some(&saved));
@@ -371,8 +424,13 @@ fn collect_saved_attachments(root: &Path, location: &Value, rows: &mut Vec<Saved
             metadata["projectId"] = location["ProjectId"].clone();
             metadata["messageId"] = json!(message_id);
             metadata["createdAt"] = message["CreatedAt"].clone();
-            rows.push(SavedAttachmentRow { created_ms, conversation: conversation.clone(),
-                message: message_id.clone(), attachment, metadata });
+            rows.push(SavedAttachmentRow {
+                created_ms,
+                conversation: conversation.clone(),
+                message: message_id.clone(),
+                attachment,
+                metadata,
+            });
         }
     }
     read.verify()?;
@@ -380,24 +438,36 @@ fn collect_saved_attachments(root: &Path, location: &Value, rows: &mut Vec<Saved
 }
 
 fn saved_page(mut rows: Vec<SavedAttachmentRow>, offset: usize, limit: usize) -> Value {
-    // Timestamp ties use immutable identities so adjacent pages do not reshuffle identical-time uploads.
     // 时间相同时按不可变身份排序，避免同刻上传在相邻分页中重排。
-    rows.sort_by(|left, right| right.created_ms.cmp(&left.created_ms)
-        .then_with(|| left.conversation.cmp(&right.conversation))
-        .then_with(|| left.message.cmp(&right.message))
-        .then_with(|| left.attachment.cmp(&right.attachment)));
+    rows.sort_by(|left, right| {
+        right
+            .created_ms
+            .cmp(&left.created_ms)
+            .then_with(|| left.conversation.cmp(&right.conversation))
+            .then_with(|| left.message.cmp(&right.message))
+            .then_with(|| left.attachment.cmp(&right.attachment))
+    });
     let limit = limit.clamp(1, MAXIMUM_SAVED_PAGE_SIZE);
     let total = rows.len();
-    let attachments = rows.into_iter().skip(offset).take(limit).map(|row| row.metadata).collect::<Vec<_>>();
+    let attachments = rows
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|row| row.metadata)
+        .collect::<Vec<_>>();
     let next = offset.saturating_add(attachments.len());
     let has_more = next < total;
     json!({"attachments":attachments,"offset":offset,"limit":limit,"total":total,"hasMore":has_more,
         "nextOffset":if has_more {Some(next)} else {None}})
 }
 
-/// Return saved snapshots referenced by this chat; ordinary message-level listing keeps its existing contract.
 /// 汇总本聊天正式引用的已保存快照；普通消息级附件列表继续使用原有合同。
-pub fn conversation_list(root: &Path, conversation: &str, offset: usize, limit: usize) -> ContractResult {
+pub fn conversation_list(
+    root: &Path,
+    conversation: &str,
+    offset: usize,
+    limit: usize,
+) -> ContractResult {
     let conversation = id(&json!(conversation))?;
     let (document, hash) = saved_catalog(root)?;
     let location = gateway::locate(&document, &conversation)?;
@@ -407,13 +477,19 @@ pub fn conversation_list(root: &Path, conversation: &str, offset: usize, limit: 
     Ok(saved_page(rows, offset, limit))
 }
 
-/// A project page uses only its catalog-owned chats and rechecks ownership before returning any metadata.
 /// 工作分页仅使用正式目录归属的聊天，并在返回元信息前再次核验归属。
 pub fn project_list(root: &Path, project: &str, offset: usize, limit: usize) -> ContractResult {
     let project = id(&json!(project))?;
     let (document, hash) = saved_catalog(root)?;
-    let selected = document["Projects"].as_array().into_iter().flatten()
-        .find(|candidate| candidate["Id"].as_str().is_some_and(|value| value.eq_ignore_ascii_case(&project)))
+    let selected = document["Projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|candidate| {
+            candidate["Id"]
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(&project))
+        })
         .ok_or_else(|| gateway::error("工作不存在。", "PROJECT_NOT_FOUND", 404))?;
     let mut rows = Vec::new();
     for chat in selected["Chats"].as_array().into_iter().flatten() {
@@ -424,7 +500,6 @@ pub fn project_list(root: &Path, project: &str, offset: usize, limit: usize) -> 
     Ok(saved_page(rows, offset, limit))
 }
 
-/// Exact retries reuse the immutable snapshot; reusing an attachment ID for different bytes is a conflict.
 /// 同字节重试复用不可变快照；同一附件 ID 不能替换成另一份文件。
 pub fn save(
     root: &Path,
@@ -442,7 +517,6 @@ pub fn save(
         let (directory, item) = match scope(root, document, conversation, message) {
             Ok((directory, saved_message)) => (directory, descriptor(&saved_message, attachment)?),
             Err(error) if error.code() == "MESSAGE_NOT_FOUND" => {
-                // Steering uploads may reserve bytes before its user message is committed; reads still require that message.
                 // 引导上传可在用户消息提交前预留字节；读取和模型使用仍必须核对正式消息引用。
                 let location = gateway::locate(document, conversation)?;
                 let directory = conversation_logs::directory(root, &location)?
@@ -625,9 +699,14 @@ mod tests {
     }
 
     fn save_text_fixture(root: &Path, conversation: &str, message: &str, attachment: &str) {
-        gateway::upsert_message(root, conversation, &json!({"Id":message,"Role":"user","Content":"saved attachment",
+        gateway::upsert_message(
+            root,
+            conversation,
+            &json!({"Id":message,"Role":"user","Content":"saved attachment",
             "CreatedAt":"2026-10-21T00:00:00.000Z",
-            "Attachments":[{"Id":attachment,"Name":"notes.txt","SizeBytes":3}]})).unwrap();
+            "Attachments":[{"Id":attachment,"Name":"notes.txt","SizeBytes":3}]}),
+        )
+        .unwrap();
         save(root, conversation, message, attachment, "notes.txt", b"abc").unwrap();
     }
 
@@ -637,8 +716,14 @@ mod tests {
         while let Some(directory) = directories.pop() {
             for entry in std::fs::read_dir(directory).unwrap() {
                 let entry = entry.unwrap();
-                if entry.file_type().unwrap().is_dir() { directories.push(entry.path()); }
-                else { files.push((entry.path().strip_prefix(root).unwrap().to_path_buf(), std::fs::read(entry.path()).unwrap())); }
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(entry.path());
+                } else {
+                    files.push((
+                        entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(entry.path()).unwrap(),
+                    ));
+                }
             }
         }
         files.sort_by(|left, right| left.0.cmp(&right.0));
@@ -652,7 +737,6 @@ mod tests {
         let foreign = gateway::new_id();
         gateway::ensure_conversation(&root, &second, "Second chat").unwrap();
         gateway::ensure_conversation(&root, &foreign, "Foreign chat").unwrap();
-        // Commit real user messages before moving chats; empty provisional chats are not retained by catalog saves.
         // 先提交真实用户消息再移动聊天；目录保存不会保留尚无正式输入的临时空聊天。
         let first_message = gateway::new_id();
         let first_attachment = gateway::new_id();
@@ -671,8 +755,15 @@ mod tests {
             {"Id":other_project,"Name":"Other work","Chats":[chat(&foreign)]}
         ]);
         catalog["Chats"] = json!([]);
-        gateway::handle("PUT", "/api/conversations/catalog", &[("includeMessages".into(),"false".into())], &catalog, &root)
-            .unwrap().unwrap();
+        gateway::handle(
+            "PUT",
+            "/api/conversations/catalog",
+            &[("includeMessages".into(), "false".into())],
+            &catalog,
+            &root,
+        )
+        .unwrap()
+        .unwrap();
         let before = file_snapshot(&root);
         let first_page = project_list(&root, &project, 0, 1).unwrap();
         let second_page = project_list(&root, &project, 1, 1).unwrap();
@@ -681,22 +772,36 @@ mod tests {
         assert_eq!(first_page["nextOffset"], 1);
         assert_eq!(second_page["hasMore"], false);
         assert_eq!(second_page["nextOffset"], Value::Null);
-        let mut expected = vec![(first.clone(), first_message, first_attachment), (second.clone(), second_message, second_attachment)];
+        let mut expected = vec![
+            (first.clone(), first_message, first_attachment),
+            (second.clone(), second_message, second_attachment),
+        ];
         expected.sort();
-        for (page, (conversation, message, attachment)) in [first_page,second_page].iter().zip(expected) {
+        for (page, (conversation, message, attachment)) in
+            [first_page, second_page].iter().zip(expected)
+        {
             let metadata = &page["attachments"][0];
             assert_eq!(metadata["projectId"], project);
             assert_eq!(metadata["conversationId"], conversation);
             assert_eq!(metadata["messageId"], message);
             assert_eq!(metadata["id"], attachment);
-            assert!(metadata["contentUrl"].as_str().unwrap().contains(&format!("messageId={message}")));
+            assert!(
+                metadata["contentUrl"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("messageId={message}"))
+            );
         }
         assert_eq!(conversation_list(&root, &first, 0, 50).unwrap()["total"], 1);
         let outside_page = project_list(&root, &project, usize::MAX, 0).unwrap();
         assert_eq!(outside_page["limit"], 1);
         assert_eq!(outside_page["attachments"], json!([]));
         assert_eq!(outside_page["hasMore"], false);
-        assert_eq!(file_snapshot(&root), before, "listing must not create or rewrite formal files");
+        assert_eq!(
+            file_snapshot(&root),
+            before,
+            "listing must not create or rewrite formal files"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -711,15 +816,29 @@ mod tests {
             entries.push((message, attachment));
         }
         let reserved_message = gateway::new_id();
-        save(&root, &conversation, &reserved_message, &gateway::new_id(), "reserved.txt", b"abc").unwrap();
+        save(
+            &root,
+            &conversation,
+            &reserved_message,
+            &gateway::new_id(),
+            "reserved.txt",
+            b"abc",
+        )
+        .unwrap();
         let document = gateway::load_catalog(&root).unwrap();
-        let directory = conversation_logs::directory(&root, &gateway::locate(&document, &conversation).unwrap()).unwrap().join("attachments");
+        let directory = conversation_logs::directory(
+            &root,
+            &gateway::locate(&document, &conversation).unwrap(),
+        )
+        .unwrap()
+        .join("attachments");
         for (index, (message, attachment)) in entries.iter().enumerate().take(4) {
             let folder = directory.join(message).join(attachment);
             if index < 2 {
                 let path = folder.join("manifest.json");
-                let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-                saved[if index == 0 {"id"} else {"messageId"}] = json!(gateway::new_id());
+                let mut saved: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                saved[if index == 0 { "id" } else { "messageId" }] = json!(gateway::new_id());
                 std::fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
             } else if index == 2 {
                 std::fs::remove_file(folder.join("content.txt")).unwrap();
@@ -734,16 +853,36 @@ mod tests {
         let journal = root.join(".catalog-transaction.json");
         std::fs::write(&journal, b"{\"pending\":true}").unwrap();
         let before = file_snapshot(&root);
-        assert_eq!(conversation_list(&root, &conversation, 0, 50).unwrap_err().code(), "CATALOG_CONFLICT");
-        assert_eq!(file_snapshot(&root), before, "read-only listing must not run transaction recovery");
+        assert_eq!(
+            conversation_list(&root, &conversation, 0, 50)
+                .unwrap_err()
+                .code(),
+            "CATALOG_CONFLICT"
+        );
+        assert_eq!(
+            file_snapshot(&root),
+            before,
+            "read-only listing must not run transaction recovery"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn listing_an_unknown_scope_never_initializes_a_new_data_root() {
-        let root = std::env::temp_dir().join(format!("kynxa-attachment-list-{}", gateway::new_id()));
-        assert_eq!(conversation_list(&root, &gateway::new_id(), 0, 50).unwrap_err().code(), "CONVERSATION_NOT_FOUND");
-        assert_eq!(project_list(&root, &gateway::new_id(), 0, 50).unwrap_err().code(), "PROJECT_NOT_FOUND");
+        let root =
+            std::env::temp_dir().join(format!("kynxa-attachment-list-{}", gateway::new_id()));
+        assert_eq!(
+            conversation_list(&root, &gateway::new_id(), 0, 50)
+                .unwrap_err()
+                .code(),
+            "CONVERSATION_NOT_FOUND"
+        );
+        assert_eq!(
+            project_list(&root, &gateway::new_id(), 0, 50)
+                .unwrap_err()
+                .code(),
+            "PROJECT_NOT_FOUND"
+        );
         assert!(!root.exists());
     }
 
@@ -752,7 +891,6 @@ mod tests {
         let (root, conversation, message, attachment) = setup();
         let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
-        // A steering upload can precede the user message, but is not readable until the formal reference exists.
         // 引导可先上传附件；正式消息引用提交前，不能读取该预留附件。
         save(
             &root,

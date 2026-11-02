@@ -63,7 +63,6 @@ struct JobOwner {
     acknowledged: usize,
 }
 
-/// Queue admission, durable cancellation and per-pass publication decisions belong to one native owner.
 /// 队列准入、持久取消和逐轮发布决策由统一原生拥有者维护；实际作业写入/回执及 AbortController 留给适配器。
 #[derive(Default)]
 pub struct SourceJobState {
@@ -285,7 +284,6 @@ impl SourceJobState {
                         json!({"kind": "blocked", "jobId": self.stops[&key(project)]["jobId"]}),
                     );
                 }
-                // Select against immutable metadata before mutating the selected owner's refresh marker.
                 // 先按不可变元信息选择，再修改该拥有者的刷新标记。
                 let selected = self
                     .active_order

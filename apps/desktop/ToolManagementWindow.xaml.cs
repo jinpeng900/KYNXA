@@ -12,7 +12,6 @@ using Windows.Storage.Pickers;
 namespace KYNXA_Desktop;
 
 /// <summary>
-/// Edits gateway configuration and displays skills as text; reading never starts an MCP process.
 /// 编辑网关配置并以文本展示技能；读取配置不会启动 MCP 进程。
 /// </summary>
 public sealed partial class ToolManagementWindow : Window
@@ -44,7 +43,6 @@ public sealed partial class ToolManagementWindow : Window
     private McpCatalogResponse _catalog = new([], []);
     private McpConnectionDiagnostic[] _connections = [];
     /// <summary>
-    /// Longest per-call MCP execution deadline the gateway accepts, in seconds.
     /// 网关接受的 MCP 单次调用执行期限上限（秒）。
     /// </summary>
     private const int MaximumTimeoutSeconds = 21_600;
@@ -82,7 +80,6 @@ public sealed partial class ToolManagementWindow : Window
     }
 
     public bool HasUnsavedChanges => _serverDirty || _directoriesDirty || _toolDirty || _skillDirty;
-    // Active operations still guard storage and scope changes; loading is not an unsaved edit.
     // 进行中的操作仍保护存储与范围切换；加载不等于未保存的编辑。
     public bool HasPendingChanges => _busy || HasUnsavedChanges;
     public bool BlocksSettingsClose => _busy && _operationBlocksClose || _dialogOpen;
@@ -102,7 +99,6 @@ public sealed partial class ToolManagementWindow : Window
     public bool IsEmbedded => _settingsOwner is not null;
 
     /// <summary>
-    /// Reveals the first pending editor without changing its draft or executing a gateway action.
     /// 定位首个未保存的编辑区，保留草稿，也不执行网关操作。
     /// </summary>
     public void RevealUnsavedChanges()
@@ -124,7 +120,6 @@ public sealed partial class ToolManagementWindow : Window
     }
 
     /// <summary>
-    /// Hosts the actual tool editors in settings without opening a second visible window.
     /// 将真实工具编辑器放入设置，避免另开可见窗口；目录选择和确认使用设置所属窗口。
     /// </summary>
     public FrameworkElement AttachToSettings(Window owner)
@@ -151,7 +146,6 @@ public sealed partial class ToolManagementWindow : Window
     public void ShowSection(bool skills)
     {
         if (_closed || _dialogOpen) return;
-        // Both editors stay alive; switching the visible section does not discard any draft.
         // 两个编辑器始终保留；只切换可见页签，不丢弃任何草稿。
         AgentTabs.SelectedIndex = skills ? 1 : 0;
     }
@@ -186,7 +180,6 @@ public sealed partial class ToolManagementWindow : Window
         bool narrow = width > 0 && width < 780;
         var full = new GridLength(1, GridUnitType.Star);
         double listHeight = narrow ? Math.Clamp(AgentRoot.ActualHeight * 0.22, 92, 180) : double.PositiveInfinity;
-        // Move controls into the scrollable form on short windows without rebuilding their state.
         // 短窗上下布局时，将额外操作移入滚动表单，保留草稿和展开状态。
         if (narrow && !AgentServerEditorBody.Children.Contains(AgentConnectionPanel))
         {
@@ -280,7 +273,6 @@ public sealed partial class ToolManagementWindow : Window
 
     private void SetBusy(bool value, bool? blocksClose = null)
     {
-        // Read-only loading can be canceled by closing settings; refreshes of an active operation retain its close policy.
         // 只读加载可随设置关闭而取消；刷新进行中操作的界面状态时，保留原有关闭策略。
         if (!value) _operationBlocksClose = false;
         else if (!_busy || blocksClose.HasValue) _operationBlocksClose = blocksClose ?? true;
@@ -538,7 +530,6 @@ public sealed partial class ToolManagementWindow : Window
 
     private void RefreshFilteredHints()
     {
-        // Hidden editors retain stable identities and drafts independently of list selection.
         // 列表选择只作展示；隐藏编辑器保留稳定身份和未保存字段。
         AgentServerFilteredHint.Visibility = _editingServerId is not null && !_servers.Any(server => server.Id == _editingServerId)
             ? Visibility.Visible : Visibility.Collapsed;
@@ -658,7 +649,6 @@ public sealed partial class ToolManagementWindow : Window
 
     private static void BindPresetName(TextBlock label)
     {
-        // Recycled preset templates must drop the previous localization binding before displaying another catalog item.
         // 预设模板复用时先清除旧本地化绑定，避免语言切换将上一项文字写到当前目录项。
         label.ClearValue(TextBlock.TextProperty);
         if (label.DataContext is not McpPreset preset) return;
@@ -679,7 +669,6 @@ public sealed partial class ToolManagementWindow : Window
 
     private static string ReusedCapabilityLabel(string capability)
     {
-        // Localize catalog labels for display while retaining unknown capability identifiers unchanged.
         // 目录能力只转换显示文案；未知能力标识保留原文，不改写后端协议值。
         string? key = capability switch
         {
@@ -869,7 +858,6 @@ public sealed partial class ToolManagementWindow : Window
             string? cwd = string.IsNullOrWhiteSpace(AgentServerCwdBox.Text) ? null : AgentServerCwdBox.Text.Trim();
             if (!http && cwd is not null && (!Path.IsPathFullyQualified(cwd) || cwd.Contains('\0'))) throw new JsonException();
             string? url = http ? AgentServerUrlBox.Text.Trim() : null;
-            // Seconds in the editor, milliseconds in the contract; empty keeps the gateway default.
             // 界面以秒填写，合同保存毫秒；留空使用网关默认执行期限。
             int? timeoutMs = null;
             if (!string.IsNullOrWhiteSpace(AgentServerTimeoutBox.Text))
@@ -954,7 +942,6 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (_updating || _api is null || _closed) return;
         if (ReferenceEquals(sender, AgentBrowserEndpointBox) && _browserSettings is null) return;
-        // Refresh the save gate before text rendering; defer browser fields and visual layout to TextChanged.
         // 文字渲染前同步更新保存按钮；浏览器字段刷新及视觉布局仍由 TextChanged 完成。
         if (ReferenceEquals(sender, AgentBrowserEndpointBox) && _browserSettings is not null)
         {
@@ -999,7 +986,6 @@ public sealed partial class ToolManagementWindow : Window
 
     private void RefreshDirectoriesDirty()
     {
-        // Discovery resolves name conflicts in configured-directory order, so preserve order while comparing the saved baseline.
         // 技能发现按配置目录顺序处理同名冲突；比较已保存基线时保留顺序，并消除恢复原列表后的误判。
         _directoriesDirty = !_directories.SequenceEqual(_config?.SkillDirectories ?? [], StringComparer.OrdinalIgnoreCase);
     }
@@ -1089,7 +1075,6 @@ public sealed partial class ToolManagementWindow : Window
         if (skill?.Conflict is { } conflict) diagnostics.Add(UiText.Get(conflict.Preferred ?
             "此技能是同名技能的优先来源。" : "存在更高优先级的同名技能，请核对来源。"));
         AgentSkillDiagnosticsLabel.Text = string.Join("\n", diagnostics);
-        // Empty diagnostics must not reserve a text row and duplicate the detail panel's spacing.
         // 无诊断时不预留文字行，避免叠加详情区间距而形成大块空白。
         AgentSkillDiagnosticsLabel.Visibility = string.IsNullOrWhiteSpace(AgentSkillDiagnosticsLabel.Text)
             ? Visibility.Collapsed : Visibility.Visible;
@@ -1174,7 +1159,6 @@ public sealed partial class ToolManagementWindow : Window
         var replacement = server with { DisabledTools = disabled.ToArray() };
         var servers = _config.McpServers.Select(item => item.Id == server.Id ? replacement : item).ToArray();
         if (await SaveAsync(servers, saveDirectories: false) && !_closed) FillTool(_editingTool);
-        // A conflict preserves this checkbox draft. An explicit second save uses the freshly loaded revision.
         // 发生冲突时保留复选框草稿；用户再次明确保存时使用新加载的版本号。
     }
 

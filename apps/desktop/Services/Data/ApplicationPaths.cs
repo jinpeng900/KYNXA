@@ -3,7 +3,6 @@ using System.Text.Json;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Resolves portable paths from this installation, independent of the working directory.
 /// 按当前安装位置解析便携路径，不依赖启动工作目录或用户目录。
 /// </summary>
 public static class ApplicationPaths
@@ -39,7 +38,6 @@ public static class ApplicationPaths
         get
         {
             string data = DataRoot;
-            // Agent alone may contain a new task ledger; it does not identify legacy extensions.
             // Agent 目录也可能只有新任务账本，不能据此判定旧扩展位置。
             return UsesPackagedStorage && (Directory.Exists(Path.Combine(data, "MCP")) || Directory.Exists(Path.Combine(data, "Skills")))
                 ? data : null;
@@ -52,7 +50,6 @@ public static class ApplicationPaths
     public static string WebViewDirectory => Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER") is string configured && !string.IsNullOrWhiteSpace(configured)
         ? Resolve(configured) : Path.Combine(DataRoot, "Desktop", "WebView2");
 
-    // Packaged payloads are replaceable/read-only; preserve the established writable roots.
     // 包载荷可能只读且会被更新替换；继续使用既有的可写数据与指针位置。
     public static void ConfigurePackagedStorage(string stateRoot, string pointerDirectory,
         string? legacyModelHome = null, string? legacyDesktopDirectory = null)
@@ -64,7 +61,6 @@ public static class ApplicationPaths
     }
 
     /// <summary>
-    /// Resolve installer-owned defaults before packaged storage chooses its legacy fallback.
     /// 安装器路径优先于包身份的旧目录回退；可迁移指针放在用户选择的可写数据目录中。
     /// </summary>
     public static bool TryConfigureInstallation()
@@ -110,7 +106,6 @@ public static class ApplicationPaths
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path, applicationRoot ?? Root));
     }
 
-    // Keep installation-owned selections relative when the entire folder is moved.
     // 安装目录内部的自选位置保存为相对路径，整个文件夹搬移后继续适配。
     public static string Store(string path, string? applicationRoot = null)
     {

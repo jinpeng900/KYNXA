@@ -7,7 +7,6 @@ use super::protocol::{
     text_parts, truthy, validate_buffer, validate_count,
 };
 
-/// A single upstream stream owns bounded incremental state. Open never resets an existing stream.
 /// 单次上游流拥有有界增量状态；重复 open 不能重置已接收内容与参数账目。
 #[derive(Default)]
 pub struct StreamState {
@@ -18,7 +17,6 @@ pub struct StreamState {
     allow_truncated_text: bool,
     content: String,
     reasoning: String,
-    // Account only the new delta; rescanning an entire long reply per frame would be quadratic.
     // 只计算新增片段；每帧重扫完整长回复会形成二次方开销。
     content_characters: usize,
     reasoning_characters: usize,
@@ -69,14 +67,29 @@ mod tests {
     #[test]
     fn anthropic_output_limit_keeps_tool_truncation_facts_and_never_returns_calls() {
         let mut stream = StreamState::default();
-        stream.apply("models.stream.open", &json!({"protocol":"anthropic-messages","allowTruncatedText":true})).unwrap();
+        stream
+            .apply(
+                "models.stream.open",
+                &json!({"protocol":"anthropic-messages","allowTruncatedText":true}),
+            )
+            .unwrap();
         for item in [
             json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"fixture","input":{}}}),
             json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
         ] {
-            stream.apply("models.stream.frame", &json!({"frame":{"data":item.to_string()}})).unwrap();
+            stream
+                .apply(
+                    "models.stream.frame",
+                    &json!({"frame":{"data":item.to_string()}}),
+                )
+                .unwrap();
         }
-        let failure = stream.apply("models.stream.frame", &json!({"frame":{"data":json!({"type":"message_stop"}).to_string()}})).unwrap();
+        let failure = stream
+            .apply(
+                "models.stream.frame",
+                &json!({"frame":{"data":json!({"type":"message_stop"}).to_string()}}),
+            )
+            .unwrap();
         assert_eq!(failure["error"]["code"], "MODEL_TOOL_OUTPUT_TRUNCATED");
         assert_eq!(failure["error"]["finishReason"], "max_tokens");
         assert_eq!(failure["error"]["outputTruncated"], true);

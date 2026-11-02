@@ -37,7 +37,6 @@ fn u16_be(bytes: &[u8], offset: usize) -> Option<u16> {
     ))
 }
 
-/// Media structure and scope are verified before any bytes become a local-viewer artifact.
 /// 媒体结构与读取范围在字节成为本地查看附件前完成验证。
 fn dimensions(bytes: &[u8], declared: &Value) -> Option<Value> {
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {

@@ -2,7 +2,6 @@ use serde_json::{Value, json};
 
 const DEFAULT_OUTPUT_TOKENS: f64 = 262_144.0;
 
-/// One model contract owns output caps and input reservation; orchestration only delegates.
 /// 同一模型合同拥有输出硬限及输入预留；编排只调用该服务，不复制预算规则。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
@@ -54,15 +53,15 @@ fn output_budget(args: &Value) -> Result<Value, String> {
         value => integer(value, 1.0, f64::MAX, "INVALID_OUTPUT_BUDGET")?,
     };
     let requested = output_tokens(args.get("requestedOutputTokens"))?;
-    let safety = (window * 0.1).ceil().clamp((window / 4.0).min(256.0), 8192.0);
+    let safety = (window * 0.1)
+        .ceil()
+        .clamp((window / 4.0).min(256.0), 8192.0);
     let usable = window - safety;
     let provider_input_budget = provider_input - safety;
     if required > provider_input_budget {
         return Err("CONTEXT_INPUT_TOO_LARGE".to_owned());
     }
-    // Output reservation and provider input/output caps are separate contracts.
     // 输出预留与供应商输入、输出硬上限是不同合同，均必须落实到最终额度。
-    // Tool turns reserve room for the next schema and receipts; prose turns retain their normal output share.
     // 工具阶段为下一步定义及回执留出空间；正文阶段仍使用原有输出比例，不增加固定字数上限。
     let share = if args["phase"] == "tool" {
         0.2
@@ -71,10 +70,12 @@ fn output_budget(args: &Value) -> Result<Value, String> {
     } else {
         0.3
     };
-    // Tiny measured windows may carry a short answer; immutable input still has to fit honestly.
     // 实测极小窗口可容纳短答复，但不可缩减的必要输入仍必须真正放得下。
     let minimum_output = if window < 2048.0 { 32.0 } else { 256.0 };
-    let context_output = (usable * share).floor().max(minimum_output).min(usable - required);
+    let context_output = (usable * share)
+        .floor()
+        .max(minimum_output)
+        .min(usable - required);
     let output = requested.min(provider_output).min(context_output);
     if output < minimum_output {
         return Err("CONTEXT_INPUT_TOO_LARGE".to_owned());
@@ -110,25 +111,48 @@ mod tiny_window_tests {
     #[test]
     fn measured_small_windows_reserve_real_input_and_can_emit_short_answers() {
         for window in [512, 1024, 2048] {
-            let budget = calculate("context.outputBudget", &json!({"contextWindowTokens":window,"requiredInputTokens":128,"phase":"tool"})).unwrap();
+            let budget = calculate(
+                "context.outputBudget",
+                &json!({"contextWindowTokens":window,"requiredInputTokens":128,"phase":"tool"}),
+            )
+            .unwrap();
             assert!(budget["inputBudgetTokens"].as_u64().unwrap() >= 128);
             assert!(budget["maxOutputTokens"].as_u64().unwrap() >= 32);
-            assert!(budget["inputBudgetTokens"].as_u64().unwrap() + budget["maxOutputTokens"].as_u64().unwrap() + budget["safetyMarginTokens"].as_u64().unwrap() <= window);
+            assert!(
+                budget["inputBudgetTokens"].as_u64().unwrap()
+                    + budget["maxOutputTokens"].as_u64().unwrap()
+                    + budget["safetyMarginTokens"].as_u64().unwrap()
+                    <= window
+            );
         }
-        assert_eq!(calculate("context.outputBudget", &json!({"contextWindowTokens":512,"requiredInputTokens":400})).unwrap_err(), "CONTEXT_INPUT_TOO_LARGE");
+        assert_eq!(
+            calculate(
+                "context.outputBudget",
+                &json!({"contextWindowTokens":512,"requiredInputTokens":400})
+            )
+            .unwrap_err(),
+            "CONTEXT_INPUT_TOO_LARGE"
+        );
     }
 
     #[test]
     fn small_window_reserves_irreducible_input_before_answer_output() {
         for required_input in [5218, 5266] {
-            let budget = calculate("context.outputBudget", &json!({
-                "contextWindowTokens":8192,"requiredInputTokens":required_input,"phase":"answer"
-            })).unwrap();
+            let budget = calculate(
+                "context.outputBudget",
+                &json!({
+                    "contextWindowTokens":8192,"requiredInputTokens":required_input,"phase":"answer"
+                }),
+            )
+            .unwrap();
             assert!(budget["inputBudgetTokens"].as_u64().unwrap() >= required_input);
             assert!(budget["maxOutputTokens"].as_u64().unwrap() >= 256);
-            assert_eq!(budget["inputBudgetTokens"].as_u64().unwrap()
-                + budget["maxOutputTokens"].as_u64().unwrap()
-                + budget["safetyMarginTokens"].as_u64().unwrap(), 8192);
+            assert_eq!(
+                budget["inputBudgetTokens"].as_u64().unwrap()
+                    + budget["maxOutputTokens"].as_u64().unwrap()
+                    + budget["safetyMarginTokens"].as_u64().unwrap(),
+                8192
+            );
         }
     }
 
@@ -136,12 +160,20 @@ mod tiny_window_tests {
     fn sufficient_windows_keep_the_normal_output_share() {
         for window in [32768, 131072] {
             for phase in ["answer", "tool"] {
-                let previous = calculate("context.outputBudget", &json!({
-                    "contextWindowTokens":window,"requiredInputTokens":0,"phase":phase
-                })).unwrap();
-                let reserved = calculate("context.outputBudget", &json!({
-                    "contextWindowTokens":window,"requiredInputTokens":5218,"phase":phase
-                })).unwrap();
+                let previous = calculate(
+                    "context.outputBudget",
+                    &json!({
+                        "contextWindowTokens":window,"requiredInputTokens":0,"phase":phase
+                    }),
+                )
+                .unwrap();
+                let reserved = calculate(
+                    "context.outputBudget",
+                    &json!({
+                        "contextWindowTokens":window,"requiredInputTokens":5218,"phase":phase
+                    }),
+                )
+                .unwrap();
                 assert_eq!(reserved, previous);
             }
         }

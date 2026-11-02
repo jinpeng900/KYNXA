@@ -76,7 +76,6 @@ impl std::ops::Deref for StoredVectorRow {
     }
 }
 
-/// Retained vectors never leave Rust: keep their owned BLOB alongside metadata, without a base64 round trip.
 /// 保留向量始终留在 Rust，元信息旁持有原生 BLOB，不进行 base64 编解码往返。
 fn stored_vectors(
     connection: &Connection,
@@ -191,7 +190,6 @@ fn publish_relations(
     )
 }
 
-/// Publish sources, chunks, alternate spaces, relations and all generation counters in one transaction.
 /// 来源、分块、多向量空间、关系及全部代次计数在同一事务中发布。
 fn publish(connection: &Connection, arguments: &Value) -> ContractResult {
     let sources = arguments["sources"]
@@ -428,7 +426,6 @@ fn publish(connection: &Connection, arguments: &Value) -> ContractResult {
                     .as_str()
                     .is_some_and(|value| !value.is_empty());
             if has_active_space {
-                // The inserted row already owns these validated values; avoid reading and base64-encoding it again.
                 // 刚插入的行已拥有这些校验后的字段；不再逐块回查并重新编码向量。
                 spaces
                     .retain(|vector| vector["embedding_space_id"].as_str() != Some(&vector_space));
@@ -533,7 +530,6 @@ fn retire_chat_batch(connection: &Connection, arguments: &Value) -> ContractResu
         .strip_prefix("chat:")
         .ok_or_else(|| failure("invalid retired chat scope"))?;
     super::identity(&json!(id))?;
-    // Small atomic batches make progress even for a large chat; formal catalog revocation already hides the scope.
     // 小批原子清理使大聊天也能持续前进；正式目录已撤销此scope，不会在分批期间重新暴露残留内容。
     let chunks = sql_execute(
         connection,

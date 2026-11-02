@@ -24,12 +24,10 @@ public sealed class ChatMessageState
         }
     }
     public string Error { get; set; } = string.Empty;
-    // Steering freezes prior output above the guidance and links the next reply to that guidance.
     // 引导前的输出停留在上方，新回复关联引导消息；历史正文保持可见。
     public Guid? SupersededByUserMessageId { get; set; }
     public Guid? InReplyToUserMessageId { get; set; }
     public Guid? OriginUserMessageId { get; set; }
-    // Display task outcomes separately from reply transport status.
     // 分开展示任务结果和传输状态；界面投影不能决定正式结果。
     [JsonIgnore]
     public string TaskCompletionState { get; set; } = string.Empty;
@@ -46,7 +44,6 @@ public sealed class ChatMessageState
     public string Model { get; set; } = string.Empty;
     public long ReasoningDurationMs { get; set; }
     public long DurationMs { get; set; }
-    // The live UI clock is process-local; persisted totals remain owned by the gateway.
     // 活动计时仅存在于当前进程；正式总用时仍由网关保存，不持久化 Stopwatch 时间戳。
     [JsonIgnore]
     public long? GenerationStartedTimestamp { get; set; }
@@ -78,7 +75,6 @@ public sealed class ChatMessageState
         GenerationStartedTimestamp ??= Stopwatch.GetTimestamp();
     }
 
-    // Restore the gateway's cumulative clock independently of visible reply segments.
     // 网关累计计时独立于可见回复分段；恢复等待时保持已知值，不把离线时间算进去。
     public void ApplyGenerationTiming(long elapsedMs, bool active)
     {
@@ -97,7 +93,6 @@ public sealed class ChatMessageState
         GenerationStartedTimestamp = null;
     }
 
-    // Steering changes the visible reply anchor while retaining the same task clock.
     // 中途引导只换回复锚点，沿用任务时钟；新回复使用新的时钟标识。
     public void InheritGenerationTiming(ChatMessageState source)
     {
@@ -118,7 +113,6 @@ public sealed class ChatMessageState
 }
 
 /// <summary>
-/// Preserve legacy plain-string user messages when loading transcripts.
 /// 加载时兼容旧版预览保存的纯字符串用户消息。
 /// </summary>
 public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
@@ -138,7 +132,6 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
             Attachments = value.TryGetProperty("Attachments", out var attachments) || value.TryGetProperty("attachments", out attachments)
                 ? attachments.Deserialize<List<ChatAttachment>>(ToolOptions) ?? [] : [],
             Reasoning = ReadString(value, "Reasoning"),
-            // A process that exited during generation cannot resume the old HTTP stream.
             // 生成期间进程退出后，无法恢复旧 HTTP 流。
             Status = status == "streaming" ? "interrupted" : status,
             Error = ReadString(value, "Error"),
@@ -215,7 +208,6 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
     {
         var segments = value.Deserialize<List<AssistantSegment>>(ToolOptions) ?? [];
         if (!AssistantSegmentRules.IsValidSequence(segments)) throw new JsonException("Invalid assistant segments.");
-        // A stopped process has no live stream even when its last durable round was still generating.
         // 停止的进程没有活动流，即使最后保存的一轮仍处于生成状态。
         return messageStatus == "streaming"
             ? segments.Select(segment => segment.Status == "streaming" ? segment with { Status = "interrupted" } : segment).ToList()

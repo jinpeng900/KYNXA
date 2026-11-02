@@ -84,9 +84,19 @@ pub fn import_package(
     let root = absolute_path(string(&arguments["root"]));
     let target = absolute_path(string(&arguments["target"]));
     let files = &arguments["files"];
-    let scope=arguments["scope"].as_str().unwrap_or("global");
-    if !["project","global"].contains(&scope) {return Err(ServiceError::new("INVALID_SKILL_SCOPE","Skill scope is invalid.",400));}
-    let skills=root.join(if scope=="project" {"skills"} else {"Skills"});
+    let scope = arguments["scope"].as_str().unwrap_or("global");
+    if !["project", "global"].contains(&scope) {
+        return Err(ServiceError::new(
+            "INVALID_SKILL_SCOPE",
+            "Skill scope is invalid.",
+            400,
+        ));
+    }
+    let skills = root.join(if scope == "project" {
+        "skills"
+    } else {
+        "Skills"
+    });
     if !within(&skills, &target) || target == skills {
         return Err(ServiceError::new(
             "UNSAFE_SKILL_RESOURCE_PATH",
@@ -162,7 +172,6 @@ pub fn import_package(
                 json!({"imported":false,"reused":true,"directory":path_text(&target),"origin":"data"}),
             );
         }
-        // Only the validated complete staging package can be committed; later cancellation preserves the commit receipt.
         // 只有完整且经过校验的暂存包才能提交；随后取消仍保留真实提交回执。
         match fs::rename(&stage, &target) {
             Ok(()) => Ok(
@@ -184,7 +193,6 @@ pub fn import_package(
             Err(error) => Err(ServiceError::io(error)),
         }
     })();
-    // Verify the canonical staging boundary before any recursive cleanup, including replacement/link races.
     // 递归清理前核验真实暂存边界，同时拒绝目录替换和链接竞态。
     if !within(&staging_parent, &stage) || stage == staging_parent {
         return Err(ServiceError::new(
@@ -214,17 +222,26 @@ mod project_scope_tests {
 
     #[test]
     fn project_import_stays_in_project_and_reuses_the_checked_identical_package() {
-        let root=std::env::temp_dir().join(format!("kynxa-project-skill-import-{}",uuid::Uuid::new_v4()));
-        let source=root.join("source");fs::create_dir_all(&source).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-project-skill-import-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
         fs::write(source.join("SKILL.md"),"---\nname: import-fixture\ndescription: Isolated imported fixture\n---\nUse the current project only.\n").unwrap();
-        let files=inventory(&source,&None).unwrap()["files"].clone();
-        let project=root.join("work/.kynxa");let target=project.join("skills/import-fixture");
-        let args=json!({"root":project,"target":target,"scope":"project","files":files});
-        assert_eq!(import_package(&args,&None).unwrap()["imported"],true);
+        let files = inventory(&source, &None).unwrap()["files"].clone();
+        let project = root.join("work/.kynxa");
+        let target = project.join("skills/import-fixture");
+        let args = json!({"root":project,"target":target,"scope":"project","files":files});
+        assert_eq!(import_package(&args, &None).unwrap()["imported"], true);
         assert!(target.join("SKILL.md").is_file());
-        assert_eq!(import_package(&args,&None).unwrap()["reused"],true);
-        let mut outside=args.clone();outside["target"]=json!(root.join("extensions/Skills/import-fixture"));
-        assert_eq!(import_package(&outside,&None).unwrap_err().code,"UNSAFE_SKILL_RESOURCE_PATH");
+        assert_eq!(import_package(&args, &None).unwrap()["reused"], true);
+        let mut outside = args.clone();
+        outside["target"] = json!(root.join("extensions/Skills/import-fixture"));
+        assert_eq!(
+            import_package(&outside, &None).unwrap_err().code,
+            "UNSAFE_SKILL_RESOURCE_PATH"
+        );
         assert!(!root.join("extensions").exists());
         fs::remove_dir_all(root).unwrap();
     }

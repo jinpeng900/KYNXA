@@ -126,7 +126,6 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
         if (scope is not ("once" or "task") || scope == "task" &&
             (!request.Approved || request.Scope != "task" || result.TaskId is null || result.TaskId == Guid.Empty))
             throw new InvalidDataException(UiText.Get("工具接口返回了无效的审批响应。"));
-        // Older gateways can acknowledge only the invocation; never present that as a task grant.
         // 旧网关可能只批准当前调用，不能把该响应展示为已授予整个任务范围。
         return result with { Scope = scope };
     }

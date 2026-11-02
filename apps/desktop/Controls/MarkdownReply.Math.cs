@@ -36,7 +36,6 @@ public sealed partial class MarkdownReply
         string source = block ? "$$" + latex + "$$" : "$" + latex + "$";
         var run = new Run { Text = source, FontFamily = CodeFont, FontSize = 14 };
         target.Add(run);
-        // Keep readable source until the local KaTeX worker has a complete image.
         // 本地 KaTeX 完整生成图片之前，保留可阅读的公式源文。
         if (_formulas.Count >= 256) return;
         _formulas.Add(new FormulaVisual(run, latex, (Paragraph)_document.Blocks.Last(), block));
@@ -62,7 +61,6 @@ public sealed partial class MarkdownReply
             rendered = worker is null ? null : await worker.RenderAsync(entry.Latex, entry.Block);
         }
         catch (Exception) { rendered = null; }
-        // The native renderer remains an offline fallback when WebView2 cannot start.
         // WebView2 无法启动时，原生渲染器继续提供离线回退。
         rendered ??= MathFormulaRenderer.Render(entry.Latex, entry.Block);
         if (!_formulas.Contains(entry)) return; // A changed tail/chat must never receive an old image.
@@ -105,19 +103,15 @@ public sealed partial class MarkdownReply
         entry.Image.Source = bitmap;
         entry.Image.Width = formula.Width;
         entry.Image.Height = formula.Height;
-        // Native source text retains selection, keyboard copy and screen-reader access.
-        // A matching non-interactive image supplies mathematical layout above the native text.
         // 原生源文保留选择、键盘复制与屏幕阅读器能力；对应的非交互图片只补充公式排版。
         var measure = new TextBlock { Text = entry.Source.Text, FontFamily = CodeFont, FontSize = 14 };
         measure.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        // Keep the source run at the body font size so its ascent cannot shift the line baseline.
         // 源文保持正文字号，避免其上升部改变整行基线。
         entry.Source.CharacterSpacing = (int)Math.Round((formula.Width - measure.DesiredSize.Width) * 1000 / (14 * Math.Max(1, entry.Source.Text.Length)));
         entry.Source.Foreground = _formulaTransparent;
         InvalidateTableFormula(entry.Source);
         var paragraph = entry.Paragraph;
         paragraph.LineHeight = Math.Max(paragraph.LineHeight > 0 ? paragraph.LineHeight : 23, formula.Height + (entry.Block ? 4 : 0));
-        // Completion order depends on batching/cache hits; keep the visual tree in source order.
         // 批处理和缓存命中会改变完成顺序；视觉树始终保持源文顺序。
         int imageIndex = _formulas.TakeWhile(formula => !ReferenceEquals(formula, entry))
             .Count(formula => _formulaLayer.Children.Contains(formula.Image));
@@ -141,8 +135,6 @@ public sealed partial class MarkdownReply
             image.Width = formula.Width;
             image.Height = formula.Height;
             Canvas.SetLeft(image, first.X);
-            // Measure the same paragraph with the same font/line-height. All inline formulas
-            // share its baseline; fraction and matrix ascent must not change their alignment.
             // 用同一字体与行高测量同一段落；行内公式共享基线，分数和矩阵的上升部不改变对齐。
             if (!_formulaBaselines.TryGetValue(paragraph, out double baseline))
             {

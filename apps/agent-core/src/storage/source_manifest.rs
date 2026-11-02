@@ -190,7 +190,6 @@ fn files(arguments: &Value) -> ContractResult {
     Ok(json!(normalized))
 }
 
-/// Native storage verifies bounded manifests and their path identity; no scanned metadata grants source authority.
 /// 原生存储核验有界清单及路径身份，任何扫描元信息都不能授予来源权威。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.manifest.binding" {

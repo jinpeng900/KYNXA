@@ -1,4 +1,3 @@
-//! Actual asynchronous tool execution for the native Windows gateway.
 //! 原生 Windows 网关的实际异步工具执行；沿用原生规则，不再经过 Node。
 
 use std::collections::HashMap;
@@ -13,7 +12,9 @@ use std::sync::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-pub(crate) use super::gateway_mcp::{explicit_tool_error, foreground, reusable_catalog as reusable_mcp_catalog};
+pub(crate) use super::gateway_mcp::{
+    explicit_tool_error, foreground, reusable_catalog as reusable_mcp_catalog,
+};
 pub(crate) use super::gateway_tool_memory::rank_tool_hints;
 use super::service::ToolSession;
 use crate::gateway_contract::GatewayError;
@@ -37,14 +38,16 @@ pub struct ToolRuntime {
     pub(crate) browsers: tokio::sync::Mutex<
         HashMap<String, Arc<tokio::sync::Mutex<super::gateway_browser::BrowserSession>>>,
     >,
-    pub(crate) workspace_browser:
-        tokio::sync::Mutex<Option<Arc<tokio::sync::Mutex<super::gateway_browser::WorkspaceBrowser>>>>,
+    pub(crate) workspace_browser: tokio::sync::Mutex<
+        Option<Arc<tokio::sync::Mutex<super::gateway_browser::WorkspaceBrowser>>>,
+    >,
     pub(crate) cdp: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_browser::CdpClient>>>,
     pub(crate) jobs: tokio::sync::Mutex<HashMap<String, super::gateway_process::HostJob>>,
     pub(crate) schemas: tokio::sync::RwLock<Vec<Value>>,
     pub(crate) tool_memory: super::gateway_tool_memory::ToolMemoryRuntime,
     pub(crate) semantic: super::gateway_semantic::SemanticRuntime,
-    pub(crate) experience_repository: std::sync::OnceLock<crate::storage::task_repository::TaskRepository>,
+    pub(crate) experience_repository:
+        std::sync::OnceLock<crate::storage::task_repository::TaskRepository>,
     searches: Mutex<HashMap<String, Arc<Mutex<ToolSession>>>>,
     code_versions: Mutex<HashMap<String, Arc<Mutex<super::service_code_versions::CodeVersions>>>>,
     skill_headers: Mutex<HashMap<PathBuf, CachedSkillHeader>>,
@@ -52,12 +55,14 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
-    /// Model connection home for built-in sources that reuse a configured provider key.
     /// 模型连接目录，供复用已配置供应商密钥的内置来源按需读取。
     pub(crate) model_home: std::sync::OnceLock<PathBuf>,
     pub(crate) web_fetch: super::gateway_web_snapshot::FetchState,
-    pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
-    pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
+    pub(crate) preview_grants:
+        Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
+    pub(crate) terminals: tokio::sync::Mutex<
+        HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>,
+    >,
     configuration_updates: tokio::sync::RwLock<()>,
     configuration_generation: AtomicU64,
 }
@@ -108,16 +113,19 @@ pub(crate) fn prewarm(context: &GatewayToolContext) -> Value {
     super::gateway_mcp::prewarm(context)
 }
 
-pub(crate) fn experience_identities(context: &GatewayToolContext, names: &[String]) -> Result<Value,GatewayError> {
-    super::gateway_tool_memory::experience_identities(context,names)
+pub(crate) fn experience_identities(
+    context: &GatewayToolContext,
+    names: &[String],
+) -> Result<Value, GatewayError> {
+    super::gateway_tool_memory::experience_identities(context, names)
 }
 
 pub(crate) async fn verified_experience_hint(context: &GatewayToolContext, query: &str) -> Value {
-    super::gateway_experience::hint(query,context).await
-        .unwrap_or_else(|_|json!({"entries":[],"navigationOnly":true}))
+    super::gateway_experience::hint(query, context)
+        .await
+        .unwrap_or_else(|_| json!({"entries":[],"navigationOnly":true}))
 }
 
-/// Approval belongs to this invocation, never to a model-supplied explanation.
 /// 审批仅属于本次调用；模型生成的 reason、policy 等说明不能授予执行权限。
 #[derive(Clone)]
 pub struct GatewayToolContext {
@@ -143,16 +151,14 @@ pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch:
             break;
         }
         if cancellation.changed().await.is_err() {
-            // A closed signal channel is not an explicit cancellation request.
             // 信号通道关闭不等于用户明确取消，继续等待外层执行或超时结束。
             std::future::pending::<()>().await;
         }
     }
 }
 
-/// Cancel parsing and release the blocking reader's monitor when its caller drops.
 /// 调用方退出时取消解析并释放阻塞读取的监听任务。
-pub(super) struct WorkerCancellation {
+pub(crate) struct WorkerCancellation {
     pub signal: Arc<AtomicBool>,
     monitor: tokio::task::JoinHandle<()>,
 }
@@ -189,11 +195,24 @@ pub(crate) fn decode_native(result: Result<Value, String>) -> Result<Value, Gate
             error["message"].as_str().unwrap_or("工具执行失败。"),
             error["statusCode"].as_u64().unwrap_or(500) as u16,
         );
-        // Only copy the safe pagination contract, never arbitrary native error bodies.
         // 仅保留安全的分页纠错合同，不将任意原生错误正文带入模型上下文。
-        if ["INVALID_SKILL_LIST_PAGINATION", "INVALID_SKILL_RESOURCE_PAGINATION"].contains(&mapped.code.as_str()) {
+        if [
+            "INVALID_SKILL_LIST_PAGINATION",
+            "INVALID_SKILL_RESOURCE_PAGINATION",
+        ]
+        .contains(&mapped.code.as_str())
+        {
             let mut details = serde_json::Map::new();
-            for field in ["tool", "parameter", "type", "minimum", "maximum", "executed", "requestDispatched", "recoverable"] {
+            for field in [
+                "tool",
+                "parameter",
+                "type",
+                "minimum",
+                "maximum",
+                "executed",
+                "requestDispatched",
+                "recoverable",
+            ] {
                 if let Some(value) = error.get(field) {
                     details.insert(field.into(), value.clone());
                 }
@@ -245,7 +264,6 @@ pub(crate) async fn native(
 fn cancellation_lease(
     ctx: &GatewayToolContext,
 ) -> Result<crate::service_cancellation::CancellationLease, GatewayError> {
-    // Set cancellation TLS only on the blocking worker; Tokio threads can switch requests at await.
     // 取消 TLS 仅设在阻塞 worker 内；Tokio 线程在 await 时可能切换请求。
     let id = ctx.config["nativeCancellationId"]
         .as_str()
@@ -305,7 +323,6 @@ fn observe_code_target(ctx: &GatewayToolContext, binding: &Value) -> Result<(), 
     Ok(())
 }
 
-/// Hash only the current request's authorized observed targets, never all users' files.
 /// 只核对当前请求实际获准访问的目标；不扫描全仓，也不共享其他请求的文件账。
 pub async fn capture_code_version(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     check_cancelled(ctx)?;
@@ -358,7 +375,6 @@ pub async fn capture_code_version(ctx: &GatewayToolContext) -> Result<Value, Gat
     result?
 }
 
-/// Release after the final snapshot, including failed and cancelled requests.
 /// 最终核对后在请求 finally 释放，失败和取消也不能留下无界目标账。
 pub fn release_request(ctx: &GatewayToolContext) {
     if let Some(key) = version_request_key(ctx) {
@@ -368,7 +384,6 @@ pub fn release_request(ctx: &GatewayToolContext) {
     }
 }
 
-/// A later observation can confirm an owned job's dispatch, never generic MCP/file task success.
 /// 后续真实观察仅能确认自有任务已派发；不能泛化为 MCP/文件操作成功，更不能自动重放。
 pub async fn verify_unknown_effects(
     ctx: &GatewayToolContext,
@@ -381,10 +396,15 @@ pub async fn verify_unknown_effects(
         let proof = &result["_mcpTaskProof"];
         if result["isError"] != true && proof["terminalStatus"] == "completed" {
             for record in records {
-                let handle = record["result"].get("recoveryHandle").unwrap_or(&record["result"]["content"]["recoveryHandle"]);
-                if handle["kind"] == "mcp-task" && handle["taskId"] == proof["taskId"]
-                    && handle["serverId"] == proof["serverId"] && handle["configurationFingerprint"] == proof["configurationFingerprint"]
-                    && record["call"]["id"] == proof["toolCallId"] {
+                let handle = record["result"]
+                    .get("recoveryHandle")
+                    .unwrap_or(&record["result"]["content"]["recoveryHandle"]);
+                if handle["kind"] == "mcp-task"
+                    && handle["taskId"] == proof["taskId"]
+                    && handle["serverId"] == proof["serverId"]
+                    && handle["configurationFingerprint"] == proof["configurationFingerprint"]
+                    && record["call"]["id"] == proof["toolCallId"]
+                {
                     proofs.push(json!({"toolCallId":record["call"]["id"],"observationToolCallId":observation["call"]["id"],
                         "outcome":"dispatch-confirmed","result":{"value":result,"isError":false,"status":"completed"}}));
                 }
@@ -447,7 +467,6 @@ pub fn builtin_catalog() -> Vec<Value> {
     tools
 }
 
-/// Discovery includes diagnostics; model declarations include only actual executable definitions.
 /// 发现目录包含能力诊断；模型函数声明仅包含当前运行时确实可执行的定义。
 pub fn executable_descriptor(tool: &Value) -> bool {
     tool["inputSchema"].is_object()
@@ -459,19 +478,29 @@ pub fn executable_descriptor(tool: &Value) -> bool {
 pub async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, GatewayError> {
     check_cancelled(ctx)?;
     let mut tools = builtin_catalog();
-    // Discovery failures stay visible per service; one unavailable MCP must not hide all tools.
     // 发现失败按服务保留；一个 MCP 不可用不能把其余工具目录一起隐藏。
     tools.extend(super::gateway_mcp::catalog(ctx).await?);
     *ctx.runtime.schemas.write().await = tools.clone();
     Ok(tools)
 }
 
-pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Result<(), GatewayError> {
+pub(super) fn validate_schema(
+    schema: &Value,
+    value: &Value,
+    label: &str,
+) -> Result<(), GatewayError> {
     let invalid = || {
         let mut details = json!({"parameter":label,"executed":false,"requestDispatched":false,"recoverable":true});
-        // Parameter rejection precedes dispatch; do not record it as an executed tool or retry a side effect.
         // 参数校验发生在派发前，不将其记作工具已执行，也不因此重试任何副作用。
-        for field in ["type", "minimum", "maximum", "minLength", "maxLength", "maxItems", "required"] {
+        for field in [
+            "type",
+            "minimum",
+            "maximum",
+            "minLength",
+            "maxLength",
+            "maxItems",
+            "required",
+        ] {
             if let Some(value) = schema.get(field) {
                 details[field] = value.clone();
             }
@@ -547,91 +576,219 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","document.create","attachment.export","media.transcribe","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.")
+        || [
+            "document.read",
+            "document.create",
+            "attachment.export",
+            "media.transcribe",
+            "terminal.run",
+            "terminal.workspace.open",
+            "terminal.workspace.write",
+            "terminal.workspace.run",
+            "terminal.host.run",
+            "terminal.host.start",
+        ]
+        .contains(&name)
         || name == "image.read" && arguments["path"].is_string()
-        || name == "artifact.open" && !arguments["url"].is_string() && !arguments["resultId"].is_string()
+        || name == "artifact.open"
+            && !arguments["url"].is_string()
+            && !arguments["resultId"].is_string()
 }
 
-pub(crate) fn operation_mount_binding(ctx: &GatewayToolContext, arguments: &Value) -> Result<Value, GatewayError> {
-    let mounts = ctx.config["workspaceMounts"].as_array().or_else(||ctx.config["bindingSnapshot"]["mounts"].as_array());
-    let Some(mounts) = mounts else { return Ok(Value::Null); };
-    let requested_id = arguments["mountId"].as_str().or_else(||ctx.config["activeMountId"].as_str());
+pub(crate) fn operation_mount_binding(
+    ctx: &GatewayToolContext,
+    arguments: &Value,
+) -> Result<Value, GatewayError> {
+    let mounts = ctx.config["workspaceMounts"]
+        .as_array()
+        .or_else(|| ctx.config["bindingSnapshot"]["mounts"].as_array());
+    let Some(mounts) = mounts else {
+        return Ok(Value::Null);
+    };
+    let requested_id = arguments["mountId"]
+        .as_str()
+        .or_else(|| ctx.config["activeMountId"].as_str());
     if mounts.is_empty() && requested_id.is_none() {
         return Ok(Value::Null);
     }
     if let Some(id) = requested_id {
-        return mounts.iter().find(|mount|mount["id"] == id).cloned()
-            .ok_or_else(||failure("WORKSPACE_MOUNT_UNAVAILABLE", "该目录不在本次任务的已授权挂载中。", 409));
+        return mounts
+            .iter()
+            .find(|mount| mount["id"] == id)
+            .cloned()
+            .ok_or_else(|| {
+                failure(
+                    "WORKSPACE_MOUNT_UNAVAILABLE",
+                    "该目录不在本次任务的已授权挂载中。",
+                    409,
+                )
+            });
     }
-    if let Some(path) = arguments["path"].as_str().or_else(||arguments["cwd"].as_str()).filter(|path|Path::new(path).is_absolute()) {
-        return Ok(mounts.iter().filter(|mount|mount["path"].as_str().is_some_and(|root|super::local_files::within(Path::new(root),Path::new(path))))
-            .max_by_key(|mount|mount["path"].as_str().unwrap_or("").len()).cloned()
+    if let Some(path) = arguments["path"]
+        .as_str()
+        .or_else(|| arguments["cwd"].as_str())
+        .filter(|path| Path::new(path).is_absolute())
+    {
+        return Ok(mounts
+            .iter()
+            .filter(|mount| {
+                mount["path"].as_str().is_some_and(|root| {
+                    super::local_files::within(Path::new(root), Path::new(path))
+                })
+            })
+            .max_by_key(|mount| mount["path"].as_str().unwrap_or("").len())
+            .cloned()
             .unwrap_or(Value::Null));
     }
-    Ok(mounts.iter().find(|mount|mount["id"] == ctx.config["defaultMountId"]).cloned().unwrap_or(Value::Null))
+    Ok(mounts
+        .iter()
+        .find(|mount| mount["id"] == ctx.config["defaultMountId"])
+        .cloned()
+        .unwrap_or(Value::Null))
 }
 
-/// Retain the task identity while limiting restored access to the current work folder.
 /// 保留任务原身份；恢复权限只与当前工作目录取交集，不重新放回已移除目录。
-pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot: &Value) -> Result<(), GatewayError> {
-    if !snapshot.is_object() { return Ok(()); }
+pub(crate) fn restrict_workspace_context(
+    ctx: &mut GatewayToolContext,
+    snapshot: &Value,
+) -> Result<(), GatewayError> {
+    if !snapshot.is_object() {
+        return Ok(());
+    }
     if let Some(mounts) = snapshot["mounts"].as_array() {
-        let current = ctx.config["workspaceMounts"].as_array().cloned().unwrap_or_default();
-        let mounts = mounts.iter().filter(|old|current.iter().any(|live|
-            crate::storage::workspace_mounts::same_mount(old,live))).take(1).cloned().collect::<Vec<_>>();
-        ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
+        let current = ctx.config["workspaceMounts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mounts = mounts
+            .iter()
+            .filter(|old| {
+                current
+                    .iter()
+                    .any(|live| crate::storage::workspace_mounts::same_mount(old, live))
+            })
+            .take(1)
+            .cloned()
+            .collect::<Vec<_>>();
+        ctx.config["defaultMountId"] = mounts
+            .first()
+            .map(|mount| mount["id"].clone())
+            .unwrap_or(Value::Null);
         ctx.config["workspaceMounts"] = json!(mounts);
         ctx.config["bindingSnapshot"] = snapshot.clone();
-        ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
+        ctx.authorized_roots = mounts
+            .iter()
+            .filter_map(|mount| mount["path"].as_str().map(PathBuf::from))
+            .collect();
     } else if let Some(folder) = snapshot["folderPath"].as_str() {
-        let mounts = ctx.config["workspaceMounts"].as_array().into_iter().flatten()
-            .filter(|mount|mount["path"] == folder).cloned().collect::<Vec<_>>();
-        ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
+        let mounts = ctx.config["workspaceMounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|mount| mount["path"] == folder)
+            .cloned()
+            .collect::<Vec<_>>();
+        ctx.config["defaultMountId"] = mounts
+            .first()
+            .map(|mount| mount["id"].clone())
+            .unwrap_or(Value::Null);
         ctx.config["workspaceMounts"] = json!(mounts);
-        ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
+        ctx.authorized_roots = mounts
+            .iter()
+            .filter_map(|mount| mount["path"].as_str().map(PathBuf::from))
+            .collect();
     }
-    if let Some(folder) = snapshot["folderPath"].as_str().filter(|folder|!folder.is_empty()) {
+    if let Some(folder) = snapshot["folderPath"]
+        .as_str()
+        .filter(|folder| !folder.is_empty())
+    {
         let folder = PathBuf::from(folder);
-        if ctx.authorized_roots.iter().any(|root|super::local_files::within(root,&folder) && super::local_files::within(&folder,root)) {
+        if ctx.authorized_roots.iter().any(|root| {
+            super::local_files::within(root, &folder) && super::local_files::within(&folder, root)
+        }) {
             ctx.workdir = folder;
         }
     }
     Ok(())
 }
 
-pub(crate) async fn select_workspace_context(ctx: &GatewayToolContext, arguments: &Value) -> Result<GatewayToolContext, GatewayError> {
-    let selected = if (arguments["input"].is_string() || arguments["command"].is_string()) && arguments["sessionId"].is_string() {
-        super::gateway_workspace_terminal::session_mount(ctx,arguments["sessionId"].as_str().unwrap()).await?
-    } else { operation_mount_binding(ctx, arguments)? };
-    if selected.is_null() { return Ok(ctx.clone()); }
+pub(crate) async fn select_workspace_context(
+    ctx: &GatewayToolContext,
+    arguments: &Value,
+) -> Result<GatewayToolContext, GatewayError> {
+    let selected = if (arguments["input"].is_string() || arguments["command"].is_string())
+        && arguments["sessionId"].is_string()
+    {
+        super::gateway_workspace_terminal::session_mount(
+            ctx,
+            arguments["sessionId"].as_str().unwrap(),
+        )
+        .await?
+    } else {
+        operation_mount_binding(ctx, arguments)?
+    };
+    if selected.is_null() {
+        return Ok(ctx.clone());
+    }
     let root = ctx.data_home.clone();
     let conversation = ctx.conversation_id.clone();
-    let relation = tokio::task::spawn_blocking(move ||crate::storage::gateway::current_relationship(&root,&conversation)).await
-        .map_err(|_|failure("WORKSPACE_SCOPE_FAILED", "工作挂载核验线程结束。", 503))??;
+    let relation = tokio::task::spawn_blocking(move || {
+        crate::storage::gateway::current_relationship(&root, &conversation)
+    })
+    .await
+    .map_err(|_| failure("WORKSPACE_SCOPE_FAILED", "工作挂载核验线程结束。", 503))??;
     if relation["projectId"].as_str() != ctx.project_id.as_deref()
-        || !relation["mounts"].as_array().into_iter().flatten().any(|mount|crate::storage::workspace_mounts::same_mount(&selected,mount)) {
-        return Err(failure("WORKSPACE_MOUNT_CHANGED", "该挂载已移除或改变；任务进度已保留，请核对后继续。", 409));
+        || !relation["mounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|mount| crate::storage::workspace_mounts::same_mount(&selected, mount))
+    {
+        return Err(failure(
+            "WORKSPACE_MOUNT_CHANGED",
+            "该挂载已移除或改变；任务进度已保留，请核对后继续。",
+            409,
+        ));
     }
     let mut selected_context = ctx.clone();
     selected_context.workdir = PathBuf::from(selected["path"].as_str().unwrap());
     selected_context.authorized_roots = vec![selected_context.workdir.clone()];
     selected_context.config["activeMountId"] = selected["id"].clone();
     selected_context.config["activeMount"] = selected;
-    if let Some(path) = arguments["path"].as_str().or_else(||arguments["cwd"].as_str()) {
-        let (_, outside) = canonical_authorized(&selected_context,path,true)?;
+    if let Some(path) = arguments["path"]
+        .as_str()
+        .or_else(|| arguments["cwd"].as_str())
+    {
+        let (_, outside) = canonical_authorized(&selected_context, path, true)?;
         if outside {
-            if arguments["mountId"].is_string() { return Err(failure("WORKSPACE_PATH_OUTSIDE", "文件路径不属于指定挂载。", 403)); }
+            if arguments["mountId"].is_string() {
+                return Err(failure(
+                    "WORKSPACE_PATH_OUTSIDE",
+                    "文件路径不属于指定挂载。",
+                    403,
+                ));
+            }
             return Ok(ctx.clone());
         }
     }
     Ok(selected_context)
 }
 
-pub(crate) async fn workspace_files(arguments: &Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    let selected = select_workspace_context(ctx,arguments).await?;
+pub(crate) async fn workspace_files(
+    arguments: &Value,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
+    let selected = select_workspace_context(ctx, arguments).await?;
     let path = arguments["path"].as_str().unwrap_or(".");
-    let (absolute_path, outside) = canonical_authorized(&selected,path,false)?;
-    if outside { return Err(failure("WORKSPACE_PATH_OUTSIDE", "文件列表只能浏览选定挂载。", 403)); }
+    let (absolute_path, outside) = canonical_authorized(&selected, path, false)?;
+    if outside {
+        return Err(failure(
+            "WORKSPACE_PATH_OUTSIDE",
+            "文件列表只能浏览选定挂载。",
+            403,
+        ));
+    }
     let mut value = filesystem("filesystem.list", json!({"path":path}), &selected).await?;
     value["mountId"] = selected.config["activeMountId"].clone();
     value["path"] = json!(absolute_path);
@@ -654,25 +811,60 @@ pub(crate) fn canonical_authorized(
         .authorized_roots
         .iter()
         .chain(std::iter::once(&ctx.workdir))
-        .filter_map(|root| std::fs::canonicalize(root).ok()).collect::<Vec<_>>();
-    let originally_inside = roots.iter().any(|root|super::local_files::within(root,&path));
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect::<Vec<_>>();
+    let originally_inside = roots
+        .iter()
+        .any(|root| super::local_files::within(root, &path));
     let current_roots = if let Some(mounts) = ctx.config["workspaceMounts"].as_array() {
-        let relation = crate::storage::gateway::current_relationship(&ctx.data_home,&ctx.conversation_id)?;
+        let relation =
+            crate::storage::gateway::current_relationship(&ctx.data_home, &ctx.conversation_id)?;
         if relation["projectId"].as_str() != ctx.project_id.as_deref() {
-            return Err(failure("WORKSPACE_MOUNT_CHANGED","当前聊天的工作归属已变化。",409));
+            return Err(failure(
+                "WORKSPACE_MOUNT_CHANGED",
+                "当前聊天的工作归属已变化。",
+                409,
+            ));
         }
-        let mut allowed = mounts.iter().filter(|old|relation["mounts"].as_array().into_iter().flatten()
-            .any(|new|crate::storage::workspace_mounts::same_mount(old,new)))
-            .filter_map(|mount|mount["path"].as_str().and_then(|path|std::fs::canonicalize(path).ok())).collect::<Vec<_>>();
+        let mut allowed = mounts
+            .iter()
+            .filter(|old| {
+                relation["mounts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|new| crate::storage::workspace_mounts::same_mount(old, new))
+            })
+            .filter_map(|mount| {
+                mount["path"]
+                    .as_str()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+            })
+            .collect::<Vec<_>>();
         if mounts.is_empty() {
-            if let Ok(sandbox) = std::fs::canonicalize(ctx.data_home.join("Sandboxes").join(&ctx.conversation_id)) { allowed.push(sandbox); }
+            if let Ok(sandbox) =
+                std::fs::canonicalize(ctx.data_home.join("Sandboxes").join(&ctx.conversation_id))
+            {
+                allowed.push(sandbox);
+            }
         }
-        roots.iter().filter(|root|allowed.contains(root)).cloned().collect::<Vec<_>>()
-    } else { roots };
-    let inside = current_roots.iter()
+        roots
+            .iter()
+            .filter(|root| allowed.contains(root))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        roots
+    };
+    let inside = current_roots
+        .iter()
         .any(|root| super::local_files::within(&root, &path));
     if originally_inside && !inside {
-        return Err(failure("WORKSPACE_MOUNT_CHANGED","原授权挂载已移除或改变，不能继续读取或修改。",409));
+        return Err(failure(
+            "WORKSPACE_MOUNT_CHANGED",
+            "原授权挂载已移除或改变，不能继续读取或修改。",
+            409,
+        ));
     }
     Ok((path, !inside))
 }
@@ -709,16 +901,32 @@ pub(super) async fn filesystem(
     filesystem_bound(name, args, ctx, None).await
 }
 
-pub(super) async fn filesystem_binary_write(args: Value, bytes: Vec<u8>, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+pub(super) async fn filesystem_binary_write(
+    args: Value,
+    bytes: Vec<u8>,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     filesystem_bound("filesystem.write", args, ctx, Some(bytes)).await
 }
 
-pub(super) async fn filesystem_binary_export(args: Value, bytes: Vec<u8>, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+pub(crate) async fn filesystem_binary_export(
+    args: Value,
+    bytes: Vec<u8>,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     filesystem_bound("attachment.export", args, ctx, Some(bytes)).await
 }
 
-async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, binary: Option<Vec<u8>>) -> Result<Value, GatewayError> {
-    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create" | "attachment.export");
+async fn filesystem_bound(
+    name: &str,
+    args: Value,
+    ctx: &GatewayToolContext,
+    binary: Option<Vec<u8>>,
+) -> Result<Value, GatewayError> {
+    let missing = matches!(
+        name,
+        "filesystem.write" | "filesystem.mkdir" | "document.create" | "attachment.export"
+    );
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -775,20 +983,41 @@ async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, bin
         let cancellation = WorkerCancellation::new(ctx);
         let signal = cancellation.signal.clone();
         let attachment_export = name == "attachment.export";
-        if attachment_export && super::intent::path_domain(&super::local_files::path_text(&path)) == "code" {
+        if attachment_export
+            && super::intent::path_domain(&super::local_files::path_text(&path)) == "code"
+        {
             observe_code_target(ctx, &binding)?;
         }
-        return tokio::task::spawn_blocking(move || (if attachment_export {
-            super::service_filesystem::commit_binary_new(&path, &bytes, &binding, &Some(signal),
-                crate::storage::message_attachments::MAXIMUM_FILE_BYTES)
-        } else {
-            super::service_filesystem::commit_binary(&path, &bytes, &expected, &binding, &Some(signal))
-        }).map(|mut result| {
-            if attachment_export { result["codeTarget"] = json!(super::intent::path_domain(result["path"].as_str().unwrap_or("")) == "code"); }
-            result
+        return tokio::task::spawn_blocking(move || {
+            (if attachment_export {
+                super::service_filesystem::commit_binary_new(
+                    &path,
+                    &bytes,
+                    &binding,
+                    &Some(signal),
+                    crate::storage::message_attachments::MAXIMUM_FILE_BYTES,
+                )
+            } else {
+                super::service_filesystem::commit_binary(
+                    &path,
+                    &bytes,
+                    &expected,
+                    &binding,
+                    &Some(signal),
+                )
+            })
+            .map(|mut result| {
+                if attachment_export {
+                    result["codeTarget"] = json!(
+                        super::intent::path_domain(result["path"].as_str().unwrap_or("")) == "code"
+                    );
+                }
+                result
+            })
+            .map_err(|error| failure(&error.code, &error.message, error.status_code))
         })
-            .map_err(|error| failure(&error.code, &error.message, error.status_code)))
-            .await.map_err(|_| failure("TOOL_WORKER_FAILED", "文件保存未完成。", 500))?;
+        .await
+        .map_err(|_| failure("TOOL_WORKER_FAILED", "文件保存未完成。", 500))?;
     }
     if name == "artifact.open" {
         return super::gateway_workspace_preview::open(args, path, binding, ctx).await;
@@ -802,7 +1031,6 @@ async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, bin
         return Ok(result);
     }
     if name == "document.create" {
-        // Only the authorized canonical binding reaches the binary writer; model fields cannot supply it.
         // 二进制写入只接收本层授权的规范路径绑定，模型参数不能自行提供该绑定。
         let mut input = args;
         input["path"] = json!(super::local_files::path_text(&path));
@@ -812,7 +1040,6 @@ async fn filesystem_bound(name: &str, args: Value, ctx: &GatewayToolContext, bin
     if name == "filesystem.search" {
         let identity = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"workspaceRoot":ctx.workdir,
             "permissionMode":ctx.permission_mode});
-        // The exact conversation sandbox is already a bounded search root; all other formal data stays protected.
         // 本会话精确沙箱本身就是有界搜索根；其他正式数据依旧受保护，不能放开整个 Data。
         let search_protected = if own_sandbox {
             managed.iter().skip(1).cloned().collect::<Vec<_>>()
@@ -964,18 +1191,23 @@ async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, Gatew
     let Some(execute) = &ctx.external_execute else {
         return Err(failure("TOOL_NOT_IMPLEMENTED", "工作关联服务未接线。", 503));
     };
-    // Binding changes the saved relationship, not this turn's authorized roots.
     // 关联只改变持久关系，不扩大本轮授权根目录。
     let mut normalized = args;
     normalized["path"] = json!(path);
     execute("work.folder.bind".into(), normalized).await
 }
 
-/// Correct a browser launch chosen for an in-app website request before any desktop process is started.
 /// 在启动任何桌面进程前，修正软件内网页请求误选的浏览器启动；明确本机应用请求保持原路径。
-fn workspace_launch_target(args: &Value, ctx: &GatewayToolContext) -> Result<Option<Value>, GatewayError> {
-    let executable = args["appPath"].as_str().unwrap_or("")
-        .rsplit(['/', '\\']).next().unwrap_or("");
+fn workspace_launch_target(
+    args: &Value,
+    ctx: &GatewayToolContext,
+) -> Result<Option<Value>, GatewayError> {
+    let executable = args["appPath"]
+        .as_str()
+        .unwrap_or("")
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
     if !super::intent::is_browser_executable(&executable.to_ascii_lowercase()) {
         return Ok(None);
     }
@@ -1005,10 +1237,10 @@ async fn execute_inner(
     } else {
         schemas
     };
-    if let Some(descriptor) = descriptors
-        .iter()
-        .find(|descriptor| descriptor["name"] == tool_name && (!tool_name.starts_with("mcp.") || super::gateway_mcp::builtin_task(tool_name)))
-    {
+    if let Some(descriptor) = descriptors.iter().find(|descriptor| {
+        descriptor["name"] == tool_name
+            && (!tool_name.starts_with("mcp.") || super::gateway_mcp::builtin_task(tool_name))
+    }) {
         validate_schema(&descriptor["inputSchema"], &args, tool_name)?;
     }
     if tool_name == "work.folder.bind" {
@@ -1017,13 +1249,28 @@ async fn execute_inner(
     if tool_name == "work.folder.list" {
         let root = ctx.data_home.clone();
         let chat = ctx.conversation_id.clone();
-        let relation = tokio::task::spawn_blocking(move ||crate::storage::gateway::current_relationship(&root,&chat)).await
-            .map_err(|_|failure("WORKSPACE_SCOPE_FAILED", "工作挂载读取线程结束。", 503))??;
+        let relation = tokio::task::spawn_blocking(move || {
+            crate::storage::gateway::current_relationship(&root, &chat)
+        })
+        .await
+        .map_err(|_| failure("WORKSPACE_SCOPE_FAILED", "工作挂载读取线程结束。", 503))??;
         let allowed = ctx.config["workspaceMounts"].as_array();
-        let mounts = relation["mounts"].as_array().into_iter().flatten().filter(|mount|
-            allowed.is_none_or(|allowed|allowed.iter().any(|old|crate::storage::workspace_mounts::same_mount(old,mount))))
-            .cloned().collect::<Vec<_>>();
-        return Ok(json!({"mounts":mounts,"defaultMountId":ctx.config.get("defaultMountId").unwrap_or(&relation["defaultMountId"]),"managedWorkspace":mounts.is_empty(),"workspaceRoot":ctx.workdir}));
+        let mounts = relation["mounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|mount| {
+                allowed.is_none_or(|allowed| {
+                    allowed
+                        .iter()
+                        .any(|old| crate::storage::workspace_mounts::same_mount(old, mount))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        return Ok(
+            json!({"mounts":mounts,"defaultMountId":ctx.config.get("defaultMountId").unwrap_or(&relation["defaultMountId"]),"managedWorkspace":mounts.is_empty(),"workspaceRoot":ctx.workdir}),
+        );
     }
     if tool_name == "computer.launch" {
         if let Some(target) = workspace_launch_target(&args, ctx)? {
@@ -1061,18 +1308,41 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "document.create", "image.read", "attachment.export", "artifact.open"].contains(&tool_name)
+        && ![
+            "document.read",
+            "document.create",
+            "image.read",
+            "attachment.export",
+            "artifact.open",
+        ]
+        .contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
         return Ok(approval(tool_name, &args, ctx));
     }
     if tool_name == "artifact.open" {
-        if ["path", "url", "resultId"].iter().filter(|key| args[*key].as_str().is_some_and(|value| !value.trim().is_empty())).count() != 1 {
-            return Err(failure("INVALID_TOOL_ARGUMENTS", "请仅指定文件路径、网页地址或已有图片回执之一。", 400));
+        if ["path", "url", "resultId"]
+            .iter()
+            .filter(|key| {
+                args[*key]
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+            .count()
+            != 1
+        {
+            return Err(failure(
+                "INVALID_TOOL_ARGUMENTS",
+                "请仅指定文件路径、网页地址或已有图片回执之一。",
+                400,
+            ));
         }
         if args["resultId"].is_string() {
-            let execute = ctx.external_execute.as_ref().ok_or_else(|| failure("TOOL_NOT_IMPLEMENTED", "图片归档展示服务未接线。", 503))?;
+            let execute = ctx
+                .external_execute
+                .as_ref()
+                .ok_or_else(|| failure("TOOL_NOT_IMPLEMENTED", "图片归档展示服务未接线。", 503))?;
             return execute(tool_name.to_owned(), args).await;
         }
     }
@@ -1081,7 +1351,10 @@ async fn execute_inner(
         let mut opened = Box::pin(super::gateway_browser::workspace_open(&target, ctx)).await?;
         opened["currentUrl"] = opened["url"].clone();
         for (field, value) in target.as_object().unwrap() {
-            if matches!(field.as_str(), "url" | "path" | "title" | "kind" | "mimeType" | "version") {
+            if matches!(
+                field.as_str(),
+                "url" | "path" | "title" | "kind" | "mimeType" | "version"
+            ) {
                 opened[field] = value.clone();
             }
         }
@@ -1095,34 +1368,99 @@ async fn execute_inner(
         return super::gateway_attachment_read::export(args, ctx).await;
     }
     if tool_name == "image.read" {
-        let has_path = args["path"].as_str().is_some_and(|path| !path.trim().is_empty());
+        let has_path = args["path"]
+            .as_str()
+            .is_some_and(|path| !path.trim().is_empty());
         let has_message = args["messageId"].as_str().is_some_and(|id| !id.is_empty());
-        let has_attachment = args["attachmentId"].as_str().is_some_and(|id| !id.is_empty());
+        let has_attachment = args["attachmentId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty());
         if has_path && (args.get("messageId").is_some() || args.get("attachmentId").is_some())
-            || !has_path && (!has_message || !has_attachment || args.get("path").is_some() || args.get("mountId").is_some()) {
-            return Err(failure("INVALID_TOOL_ARGUMENTS", "请仅指定图片 path，或同时指定 messageId 和 attachmentId；附件读取不使用 mountId。", 400));
+            || !has_path
+                && (!has_message
+                    || !has_attachment
+                    || args.get("path").is_some()
+                    || args.get("mountId").is_some())
+        {
+            return Err(failure(
+                "INVALID_TOOL_ARGUMENTS",
+                "请仅指定图片 path，或同时指定 messageId 和 attachmentId；附件读取不使用 mountId。",
+                400,
+            ));
         }
-        if !has_path { return super::gateway_image::read_attachment(args, ctx).await; }
+        if !has_path {
+            return super::gateway_image::read_attachment(args, ctx).await;
+        }
     }
     if tool_name == "media.transcribe" {
         return super::gateway_workspace_transcription::tool(args, ctx).await;
     }
+    if matches!(tool_name, "training.inspect" | "training.manage") {
+        let action = args["action"].as_str().unwrap_or("");
+        let allowed = if tool_name == "training.inspect" {
+            [
+                "capabilities",
+                "datasets.list",
+                "jobs.list",
+                "jobs.read",
+                "jobs.predict",
+            ]
+            .contains(&action)
+        } else {
+            [
+                "datasets.create",
+                "jobs.create",
+                "jobs.start",
+                "jobs.pause",
+                "jobs.resume",
+                "jobs.stop",
+                "jobs.export",
+            ]
+            .contains(&action)
+        };
+        if !allowed || !args["payload"].is_object() {
+            return Err(failure(
+                "INVALID_TOOL_ARGUMENTS",
+                "请选择此训练工具支持的操作，并提供 payload 对象。",
+                400,
+            ));
+        }
+        return crate::training::tool(&args, ctx).await;
+    }
     if tool_name == "artifact.open" {
-        if !args["path"].as_str().is_some_and(|path| !path.trim().is_empty()) {
-            return Err(failure("INVALID_TOOL_ARGUMENTS", "请选择真实文件路径或网页地址。", 400));
+        if !args["path"]
+            .as_str()
+            .is_some_and(|path| !path.trim().is_empty())
+        {
+            return Err(failure(
+                "INVALID_TOOL_ARGUMENTS",
+                "请选择真实文件路径或网页地址。",
+                400,
+            ));
         }
         let mut target = args;
         target["_metadataOnly"] = json!(true);
         return filesystem(tool_name, target, ctx).await;
     }
     if tool_name == "knowledge.experience" {
-        return super::gateway_experience::query(args,ctx).await;
+        return super::gateway_experience::query(args, ctx).await;
     }
-    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "artifact.open"].contains(&tool_name) {
+    if tool_name.starts_with("filesystem.")
+        || [
+            "document.read",
+            "document.create",
+            "image.read",
+            "artifact.open",
+        ]
+        .contains(&tool_name)
+    {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.workspace.") {
-        return Box::pin(super::gateway_workspace_terminal::execute(tool_name, &args, ctx)).await;
+        return Box::pin(super::gateway_workspace_terminal::execute(
+            tool_name, &args, ctx,
+        ))
+        .await;
     }
     if tool_name.starts_with("terminal.") || tool_name.starts_with("computer.") {
         return super::gateway_process::execute(tool_name, args, ctx).await;
@@ -1131,10 +1469,10 @@ async fn execute_inner(
         return Box::pin(super::gateway_browser::execute(tool_name, args, ctx)).await;
     }
     if super::gateway_extension_install::supports(tool_name) {
-        return super::gateway_extension_install::execute(tool_name,args,ctx).await;
+        return super::gateway_extension_install::execute(tool_name, args, ctx).await;
     }
     if super::gateway_mcp::builtin_task(tool_name) {
-        return super::gateway_mcp::execute_task(tool_name,args,ctx).await;
+        return super::gateway_mcp::execute_task(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("mcp.") {
         return super::gateway_mcp::execute(tool_name, args, ctx).await;
@@ -1146,7 +1484,7 @@ async fn execute_inner(
         return super::gateway_search::search(args, ctx).await;
     }
     if super::gateway_skill_authoring::supports(tool_name) {
-        return super::gateway_skill_authoring::execute(tool_name,args,ctx).await;
+        return super::gateway_skill_authoring::execute(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("skill.") {
         return skills(tool_name, args, ctx).await;
@@ -1157,7 +1495,6 @@ async fn execute_inner(
             let mut known = all.clone();
             known.extend(ctx.runtime.schemas.read().await.iter().cloned());
             known.extend(reusable_mcp_catalog(ctx));
-            // Resolve exact known wire aliases only; model spelling or a guessed hash cannot invent a capability.
             // 只归一化已知工具的精确协议别名；模型拼写或猜出的哈希不能创造能力。
             let names: Vec<Value> = args["names"]
                 .as_array()
@@ -1219,7 +1556,6 @@ async fn execute_inner(
             }
         }
         all.extend(super::gateway_mcp::servers(ctx).iter().map(|server|json!({"name":format!("mcp.{}",server["id"].as_str().unwrap_or("")),"description":format!("MCP service {}. Load this group to discover its actual enabled tools; configured does not imply ready.",server["name"].as_str().unwrap_or("")),"source":format!("mcp:{}",server["id"].as_str().unwrap_or("")),"serverId":server["id"]})));
-        // Keep native aliases and ranking authoritative; transport code must not reinterpret intent.
         // 别名与排序仍由既有原生规则负责；传输接线不重新实现另一套语义识别。
         let indexes = super::discovery::calculate(
             "tools.searchTools",
@@ -1227,9 +1563,16 @@ async fn execute_inner(
         )
         .map_err(|message| failure("TOOL_DISCOVERY_FAILED", &message, 500))?;
         let mut indexes = indexes.as_array().cloned().unwrap_or_default();
-        let semantic = super::gateway_semantic::supplement(ctx,&all,args["query"].as_str().unwrap_or(""),&mut indexes).await;
+        let semantic = super::gateway_semantic::supplement(
+            ctx,
+            &all,
+            args["query"].as_str().unwrap_or(""),
+            &mut indexes,
+        )
+        .await;
         rank_tool_hints(ctx, &all, &mut indexes);
-        let matching = indexes.iter()
+        let matching = indexes
+            .iter()
             .filter_map(|hit| hit.as_u64().or_else(|| hit["index"].as_u64()))
             .filter_map(|index| all.get(index as usize))
             .collect::<Vec<_>>();
@@ -1257,7 +1600,6 @@ fn execution_environment(
 ) -> Result<Value, GatewayError> {
     let descriptor =
         json!({"name":tool_name,"source":if tool_name.starts_with("mcp."){"mcp"}else{"builtin"}});
-    // Trust provenance only from native browser/search adapters; MCP results cannot select a host.
     // 仅信任原生浏览器和搜索来源信息；MCP 结果不能选择执行主机。
     if (tool_name.starts_with("browser.") || tool_name == "web.search")
         && result["executionEnvironment"].is_object()
@@ -1281,7 +1623,6 @@ fn execution_environment(
         && result["tokenVerified"] == true
         && result["activeProcessesAfterExit"] == 0
     {
-        // runner.sandboxReceipt checked these facts before returning; they are not model-supplied capabilities.
         // runner.sandboxReceipt 已在返回前核验这些事实；它们不是模型自报的能力。
         json!({"available":true,"sandbox":"appcontainer","failClosed":true,"checksChildToken":true,"network":result["network"]})
     } else {
@@ -1294,7 +1635,6 @@ fn execution_environment(
     .map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))
 }
 
-/// Saved request snapshots can lose capabilities, but configuration changes cannot grant them new ones.
 /// 已保存的请求快照可以被撤销能力，配置更新不能给旧请求扩大能力。
 pub(crate) async fn checked_configuration(
     ctx: &GatewayToolContext,
@@ -1305,7 +1645,6 @@ pub(crate) async fn checked_configuration(
     checked.config["configurationGeneration"] = json!(generation);
     checked.config["mcpConfigurationGeneration"] =
         json!(super::gateway_mcp::configuration_generation(ctx));
-    // Unpersisted contexts are internal discovery/test inputs; formal requests always carry a saved revision.
     // 未持久化的上下文用于内部发现或夹具；正式请求始终带有已保存的配置修订号。
     if ctx.config["revision"].is_u64() {
         let current = get_config(ctx).await?;
@@ -1381,32 +1720,63 @@ pub(crate) fn check_configuration_generation(ctx: &GatewayToolContext) -> Result
     check_cancelled(ctx)
 }
 
-/// Build authority only from the selected native context, not caller-supplied approval fields.
 /// 授权绑定只取已选择的原生上下文；动态调用ID不影响任务复用，权限/配置/挂载变化会失效。
-async fn task_approval_binding(name: &str, args: &Value, ctx: &GatewayToolContext, invocation: &Value) -> Result<Value, GatewayError> {
+async fn task_approval_binding(
+    name: &str,
+    args: &Value,
+    ctx: &GatewayToolContext,
+    invocation: &Value,
+) -> Result<Value, GatewayError> {
     let target = if name == "filesystem.write" {
         let (path, _) = canonical_authorized(ctx, args["path"].as_str().unwrap_or(""), true)?;
         if protected_path(ctx, &path) {
-            return Err(failure("PROTECTED_APP_DATA", "正式数据、凭据和扩展须通过专用服务访问。", 403));
+            return Err(failure(
+                "PROTECTED_APP_DATA",
+                "正式数据、凭据和扩展须通过专用服务访问。",
+                403,
+            ));
         }
         Some(super::local_files::path_text(&path))
-    } else { None };
+    } else {
+        None
+    };
     let mut configuration = ctx.config.clone();
     if let Some(fields) = configuration.as_object_mut() {
-        for key in ["approvedInvocation", "activeToolCallId", "activeOperationId", "activeRequestId", "nativeCancellationId",
-            "activeAssistantMessageId", "operationNamespace", "renewOperationalExecutionBudget", "attachmentContextChars", "activeSteeringSequence"] {
+        for key in [
+            "approvedInvocation",
+            "activeToolCallId",
+            "activeOperationId",
+            "activeRequestId",
+            "nativeCancellationId",
+            "activeAssistantMessageId",
+            "operationNamespace",
+            "renewOperationalExecutionBudget",
+            "attachmentContextChars",
+            "activeSteeringSequence",
+        ] {
             fields.remove(key);
         }
     }
-    let mut roots = ctx.authorized_roots.iter().map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
-        .map(|root| super::local_files::path_text(&root)).collect::<Vec<_>>();
-    roots.sort(); roots.dedup();
+    let mut roots = ctx
+        .authorized_roots
+        .iter()
+        .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .map(|root| super::local_files::path_text(&root))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
     let schemas = ctx.runtime.schemas.read().await;
-    let schema = schemas.iter().find(|tool| tool["name"] == name).map(|tool| tool["inputSchema"].clone()).unwrap_or(Value::Null);
+    let schema = schemas
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .map(|tool| tool["inputSchema"].clone())
+        .unwrap_or(Value::Null);
     drop(schemas);
     let mut proof = invocation.clone();
     if let Some(fields) = proof.as_object_mut() {
-        for key in ["id", "arguments", "taskApproval"] { fields.remove(key); }
+        for key in ["id", "arguments", "taskApproval"] {
+            fields.remove(key);
+        }
     }
     let host = std::fs::metadata(&ctx.toolhost_exe).ok().map(|metadata|
         json!({"bytes":metadata.len(),"modified":metadata.modified().ok().and_then(|time|time.duration_since(std::time::UNIX_EPOCH).ok()).map(|time|time.as_nanos().to_string())}));
@@ -1414,8 +1784,10 @@ async fn task_approval_binding(name: &str, args: &Value, ctx: &GatewayToolContex
         "dataRoot":ctx.data_home,"extensionRoot":ctx.extension_root,"workdir":std::fs::canonicalize(&ctx.workdir).unwrap_or_else(|_|ctx.workdir.clone()),"authorizedRoots":roots,
         "configuration":configuration,"configurationGeneration":ctx.runtime.configuration_generation.load(Ordering::Acquire),
         "mcpGeneration":super::gateway_mcp::configuration_generation(ctx),"schema":schema,"toolhost":ctx.toolhost_exe,"hostVersion":host});
-    Ok(json!({"fingerprint":super::approval_grant::fingerprint(name,args,target.as_deref(),&scope,&proof),
-        "kind":if target.is_some(){"same-file-write"}else{"exact-invocation"}}))
+    Ok(
+        json!({"fingerprint":super::approval_grant::fingerprint(name,args,target.as_deref(),&scope,&proof),
+        "kind":if target.is_some(){"same-file-write"}else{"exact-invocation"}}),
+    )
 }
 
 pub async fn execute(
@@ -1423,7 +1795,6 @@ pub async fn execute(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    // Invalid read pages are correctable before configuration, discovery or schema execution.
     // 错误读取分页在配置、发现和通用 schema 校验前返回可纠正回执，不扫描目录或改变读取游标。
     let pagination = match tool_name {
         "skill.list" => super::service_skill_discovery::list_page(&args).map(|_| ()),
@@ -1434,9 +1805,11 @@ pub async fn execute(
         failure(&error.code, &error.message, error.status_code)
             .with_details(Value::Object(error.details))
     })?;
-    let selected = if workspace_path_tool(tool_name,&args) {
-        Some(select_workspace_context(ctx,&args).await?)
-    } else { None };
+    let selected = if workspace_path_tool(tool_name, &args) {
+        Some(select_workspace_context(ctx, &args).await?)
+    } else {
+        None
+    };
     let ctx = selected.as_ref().unwrap_or(ctx);
     let checked = if tool_name.starts_with("skill.")
         || tool_name.starts_with("mcp.")
@@ -1449,22 +1822,33 @@ pub async fn execute(
     };
     let ctx = checked.as_ref().unwrap_or(ctx);
     let approval_arguments = args.clone();
-    // Invalidate approval if its target or configuration changes while waiting; execution checks again.
     // 等待时目标或配置变化使旧审批失效；执行前再次核验。
     if ctx.approved && ctx.config["approvedInvocation"]["taskApproval"].is_object() {
-        let binding = task_approval_binding(tool_name, &approval_arguments, ctx, &ctx.config["approvedInvocation"]).await?;
-        if binding["fingerprint"] != ctx.config["approvedInvocation"]["taskApproval"]["fingerprint"] {
-            return Err(failure("TOOL_APPROVAL_SCOPE_CHANGED", "审批目标、参数或权限范围已变化，操作未派发，请重新批准。", 409));
+        let binding = task_approval_binding(
+            tool_name,
+            &approval_arguments,
+            ctx,
+            &ctx.config["approvedInvocation"],
+        )
+        .await?;
+        if binding["fingerprint"] != ctx.config["approvedInvocation"]["taskApproval"]["fingerprint"]
+        {
+            return Err(failure(
+                "TOOL_APPROVAL_SCOPE_CHANGED",
+                "审批目标、参数或权限范围已变化，操作未派发，请重新批准。",
+                409,
+            ));
         }
     }
-    // Keep the largest native dispatch branch off the caller's async frame.
     // 将较大的原生执行分支放到堆上，避免调试构建的浏览器握手层层占用线程栈。
     let started = std::time::Instant::now();
     let outcome = Box::pin(execute_inner(tool_name, args, ctx)).await;
     super::gateway_tool_memory::remember_outcome(tool_name, &outcome, started.elapsed(), ctx).await;
     let mut result = outcome?;
     if result["requiresApproval"] == true && result["invocation"].is_object() {
-        result["invocation"]["taskApproval"] = task_approval_binding(tool_name, &approval_arguments, ctx, &result["invocation"]).await?;
+        result["invocation"]["taskApproval"] =
+            task_approval_binding(tool_name, &approval_arguments, ctx, &result["invocation"])
+                .await?;
     }
     if result.is_object() && ctx.config["activeMount"].is_object() {
         result["mountId"] = ctx.config["activeMountId"].clone();
@@ -1486,10 +1870,11 @@ pub async fn execute(
     Ok(result)
 }
 
-/// Cache only discovery metadata; reading or running a skill always obtains its current original body.
 /// 只缓存发现元信息；读取或运行技能始终取得当前原文，缓存不提供执行或权限依据。
 pub(crate) fn invalidate_skill_metadata(ctx: &GatewayToolContext) {
-    if let Ok(mut cache) = ctx.runtime.skill_headers.lock() { cache.clear(); }
+    if let Ok(mut cache) = ctx.runtime.skill_headers.lock() {
+        cache.clear();
+    }
 }
 
 async fn skill_metadata(
@@ -1499,18 +1884,20 @@ async fn skill_metadata(
     ctx: &GatewayToolContext,
 ) -> Result<Option<Value>, GatewayError> {
     if !include_body {
-        if let Some(cached) = ctx.runtime.skill_headers.lock().ok()
-            .and_then(|cache| cache.get(path).filter(|entry| entry.version == version).cloned())
-        {
+        if let Some(cached) = ctx.runtime.skill_headers.lock().ok().and_then(|cache| {
+            cache
+                .get(path)
+                .filter(|entry| entry.version == version)
+                .cloned()
+        }) {
             return Ok(cached.metadata);
         }
     }
     let source = path.to_owned();
     let (text, hash) = tokio::task::spawn_blocking(move || {
-        let bytes = super::local_files::read_checked(
-            &source, 2 * 1024 * 1024, false, "APP_SKILL_CHANGED",
-        )
-        .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
+        let bytes =
+            super::local_files::read_checked(&source, 2 * 1024 * 1024, false, "APP_SKILL_CHANGED")
+                .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| failure("INVALID_APP_SKILL", "技能正文不是 UTF-8。", 400))?
             .trim_start_matches('\u{feff}')
@@ -1519,60 +1906,101 @@ async fn skill_metadata(
     })
     .await
     .map_err(|_| failure("TOOL_WORKER_FAILED", "技能读取线程退出。", 500))??;
-    let header = text.strip_prefix("---")
+    let header = text
+        .strip_prefix("---")
         .and_then(|text| text.split_once("\n---").map(|(header, _)| header))
         .and_then(|header| serde_yaml::from_str::<Value>(header).ok())
-        .filter(|header| header["name"].as_str().is_some_and(|name| !name.is_empty())
-            && header["description"].as_str().is_some_and(|description| !description.is_empty()));
-    let mut metadata = header.map(|header| json!({
-        "name":header["name"],"description":header["description"],
-        "sha256":hash,"standardCompliant":true,
-    }));
+        .filter(|header| {
+            header["name"].as_str().is_some_and(|name| !name.is_empty())
+                && header["description"]
+                    .as_str()
+                    .is_some_and(|description| !description.is_empty())
+        });
+    let mut metadata = header.map(|header| {
+        json!({
+            "name":header["name"],"description":header["description"],
+            "sha256":hash,"standardCompliant":true,
+        })
+    });
     if let Ok(mut cache) = ctx.runtime.skill_headers.lock() {
-        if cache.len() >= 512 { cache.clear(); }
-        cache.insert(path.to_owned(), CachedSkillHeader { version, metadata:metadata.clone() });
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+        cache.insert(
+            path.to_owned(),
+            CachedSkillHeader {
+                version,
+                metadata: metadata.clone(),
+            },
+        );
     }
     if include_body {
-        if let Some(metadata) = &mut metadata { metadata["content"] = json!(text); }
+        if let Some(metadata) = &mut metadata {
+            metadata["content"] = json!(text);
+        }
     }
     Ok(metadata)
 }
 
-/// Select task-related skill headers without loading their bodies or executing a discovery tool call.
 /// 按当前任务选择技能头，不加载正文、不额外派发发现工具；普通聊天无需调用此入口。
 pub(crate) async fn relevant_skill_headers(
     ctx: &GatewayToolContext,
     query: &str,
 ) -> Result<Vec<Value>, GatewayError> {
-    if query.trim().is_empty() { return Ok(Vec::new()); }
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let checked = checked_configuration(ctx).await?;
     let inventory = skills("skill.list", json!({}), &checked).await?;
     let headers = inventory["skills"].as_array().cloned().unwrap_or_default();
-    // Reuse bilingual task signals so Chinese requests can find the shipped English skill names.
     // 复用双语任务信号，使中文要求也能找到随包英文技能名，不增加模型判断调用。
     let signals = super::discovery::selection_signals(&json!({"message":query}));
     let mut topics = [
-        ("web", "web-research"), ("browser", "browser-workflow"),
-        ("desktop", "desktop-workflow"), ("hostTerminal", "terminal-workflow"),
-        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect"),
-    ].into_iter().filter(|(signal, _)| signals[*signal] == true)
-        .map(|(_, topic)| topic).collect::<Vec<_>>();
+        ("web", "web-research"),
+        ("browser", "browser-workflow"),
+        ("desktop", "desktop-workflow"),
+        ("hostTerminal", "terminal-workflow"),
+        ("deviceState", "terminal-workflow"),
+        ("docs", "workspace-inspect"),
+    ]
+    .into_iter()
+    .filter(|(signal, _)| signals[*signal] == true)
+    .map(|(_, topic)| topic)
+    .collect::<Vec<_>>();
     topics.extend(super::discovery::authoring_topics(query));
-    if super::intent::matches(r"代码|编程|修复|重构|\b(?:code|coding|refactor|debug|implementation)\b", &query.to_lowercase()) {
+    if super::intent::matches(
+        r"代码|编程|修复|重构|\b(?:code|coding|refactor|debug|implementation)\b",
+        &query.to_lowercase(),
+    ) {
         topics.push("code-workflow");
     }
-    if super::intent::matches(r"记忆|记住|偏好|\b(?:memory|remember|preference)\b", &query.to_lowercase()) {
+    if super::intent::matches(
+        r"记忆|记住|偏好|\b(?:memory|remember|preference)\b",
+        &query.to_lowercase(),
+    ) {
         topics.push("memory-workflow");
     }
-    if super::intent::matches(r"修改|编辑|删除|新建文件|\b(?:edit|modify|delete)\b", &query.to_lowercase()) {
+    if super::intent::matches(
+        r"修改|编辑|删除|新建文件|\b(?:edit|modify|delete)\b",
+        &query.to_lowercase(),
+    ) {
         topics.push("safe-file-edit");
     }
     let topics = topics.join(" ");
     let query = format!("{topics} {query}");
-    let indices = super::discovery::calculate("tools.searchTools", &json!({"query":query,"descriptors":headers}))
-        .map_err(|code| failure(&code, "技能头索引不可用。", 500))?;
-    Ok(indices.as_array().into_iter().flatten().filter_map(Value::as_u64)
-        .filter_map(|index| headers.get(index as usize).cloned()).take(16).collect())
+    let indices = super::discovery::calculate(
+        "tools.searchTools",
+        &json!({"query":query,"descriptors":headers}),
+    )
+    .map_err(|code| failure(&code, "技能头索引不可用。", 500))?;
+    Ok(indices
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .filter_map(|index| headers.get(index as usize).cloned())
+        .take(16)
+        .collect())
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1623,7 +2051,6 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             if !metadata.is_file() {
                 continue;
             }
-            // A selected skill needs only its own body; unrelated packages must not slow or break that read.
             // 已选择技能只读取自身正文，其他包的大小或损坏不能拖慢、阻断该次读取。
             let identity = super::service_skill_discovery::identity(
                 &path,
@@ -1632,10 +2059,16 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             let id = identity["id"].as_str().unwrap_or("");
             if id.is_empty()
                 || name != "skill.list" && args["id"] != id
-                || ctx.config["disabledSkills"].as_array().is_some_and(|disabled| {
-                    disabled.iter().any(|entry| entry == id
-                        || identity["legacyIds"].as_array().is_some_and(|aliases| aliases.contains(entry)))
-                })
+                || ctx.config["disabledSkills"]
+                    .as_array()
+                    .is_some_and(|disabled| {
+                        disabled.iter().any(|entry| {
+                            entry == id
+                                || identity["legacyIds"]
+                                    .as_array()
+                                    .is_some_and(|aliases| aliases.contains(entry))
+                        })
+                    })
                 || available.iter().any(|entry: &Value| entry["id"] == id)
             {
                 continue;
@@ -1643,7 +2076,9 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             let Ok(version) = super::local_files::file_version(&path, &metadata) else {
                 continue;
             };
-            let Some(mut metadata) = skill_metadata(&path, version, name != "skill.list", ctx).await? else {
+            let Some(mut metadata) =
+                skill_metadata(&path, version, name != "skill.list", ctx).await?
+            else {
                 continue;
             };
             metadata["id"] = json!(id);
@@ -1656,10 +2091,8 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
     }
     if name == "skill.list" {
         available.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-        return Ok(
-            json!({"skills":available.into_iter().skip(list_offset)
-            .take(list_limit).map(|mut entry| {entry.as_object_mut().unwrap().remove("content");entry}).collect::<Vec<_>>() }),
-        );
+        return Ok(json!({"skills":available.into_iter().skip(list_offset)
+            .take(list_limit).map(|mut entry| {entry.as_object_mut().unwrap().remove("content");entry}).collect::<Vec<_>>() }));
     }
     let skill = available
         .into_iter()
@@ -1739,7 +2172,6 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             pending["invocation"]["skillIdentity"] = identity;
             return Ok(pending);
         }
-        // A resumed approval authorizes the inspected package, not a replacement at the same path.
         // 恢复审批仅授权已检查的技能包，不能执行相同路径后来被替换的脚本。
         if ctx.approved
             && ctx.config["approvedInvocation"].is_object()
@@ -1899,7 +2331,6 @@ pub fn mcp_presets(ctx: &GatewayToolContext) -> Vec<Value> {
                 Some((application.clone(), node, entry, browser))
             });
             if let Some((application, node, entry, browser)) = installed {
-                // Only verified bundled defaults are trusted here; user overrides retain their own trust and credentials.
                 // 此处仅信任固定随包默认项；用户覆盖仍保留自己的信任决定及凭据配置。
                 let args = preset["server"]["args"]
                     .as_array()
@@ -1924,7 +2355,6 @@ pub fn mcp_presets(ctx: &GatewayToolContext) -> Vec<Value> {
                     args.push(json!(browser));
                 }
                 if preset["id"] == "playwright" {
-                    // Installed files stay read-only; browser artifacts belong to the managed extension cache.
                     // 安装文件保持只读；浏览器产物写入应用管理的扩展缓存。
                     let args = preset["server"]["args"].as_array_mut().unwrap();
                     args.push(json!("--output-dir"));
@@ -1957,7 +2387,6 @@ pub fn mcp_presets(ctx: &GatewayToolContext) -> Vec<Value> {
 }
 
 pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    // Inspect preset files on a blocking thread; initialize and read configuration under one lock.
     // 在阻塞线程检查预设文件；一次加锁完成配置初始化和读取。
     let preset_context = ctx.clone();
     let presets = tokio::task::spawn_blocking(move || mcp_presets(&preset_context))
@@ -1973,7 +2402,6 @@ pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError>
 pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let _update = ctx.runtime.configuration_updates.write().await;
     get_config(ctx).await?;
-    // Invalidate already checked dispatches before the first write can yield to another task.
     // 首次配置写入进入异步等待前使已检查的派发失效，避免检查与保存之间的竞争。
     ctx.runtime
         .configuration_generation
@@ -1991,7 +2419,6 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     Ok(result)
 }
 
-/// Read saved source credentials and resolved MCP state; settings never initiate a connection handshake.
 /// 只读取来源已存凭据及已有 MCP 状态；打开设置不握手，也不把已配置说成网络已经连通。
 pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     let diagnostics = super::gateway_mcp::diagnostics(ctx).await;
@@ -2010,11 +2437,12 @@ pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
     drop(loaded);
-    // Reuse official model credentials without copying keys or searching when settings opens.
     // 复用官方模型凭据，不复制密钥，也不因打开设置发起搜索。
     let builtin = super::gateway_deepseek_search::source(ctx).await;
     let has_credential = builtin.is_some();
-    let cooling = builtin.as_ref().and_then(|source| ctx.runtime.web_search.cooling(source));
+    let cooling = builtin
+        .as_ref()
+        .and_then(|source| ctx.runtime.web_search.cooling(source));
     rows.push(json!({"id":super::gateway_deepseek_search::SOURCE_ID,"name":"DeepSeek Search",
         "origin":"builtin","enabled":true,"ready":has_credential && cooling.is_none(),
         "state":if !has_credential{"credential-required"}else if cooling.is_some(){"cooldown"}else{"configured"},
@@ -2023,7 +2451,6 @@ pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     json!({"selectedId":selected_id,"providers":rows})
 }
 
-/// Existing settings routes do not grant model approval; execution still checks per-call context.
 /// 原设置路由不授予模型审批；执行仍校验每次调用的上下文。
 pub async fn handle_route(
     method: &str,
@@ -2106,13 +2533,23 @@ pub async fn handle_route(
             json!({"tools":catalog(&configured).await?,"errors":[],"connections":super::gateway_mcp::diagnostics(&configured).await})
         }
         ("POST", "/api/agent/mcp/oauth/start") => {
-            super::gateway_mcp_oauth::start(body["serverId"].as_str().unwrap_or(""), &configured).await?
+            super::gateway_mcp_oauth::start(body["serverId"].as_str().unwrap_or(""), &configured)
+                .await?
         }
         ("GET", "/api/agent/mcp/oauth/status") => {
-            super::gateway_mcp_oauth::status(query.get("serverId").map(String::as_str).unwrap_or(""), query.get("authorizationId").map(String::as_str).unwrap_or(""), &configured).await?
+            super::gateway_mcp_oauth::status(
+                query.get("serverId").map(String::as_str).unwrap_or(""),
+                query
+                    .get("authorizationId")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                &configured,
+            )
+            .await?
         }
         ("POST", "/api/agent/mcp/oauth/logout") => {
-            super::gateway_mcp_oauth::logout(body["serverId"].as_str().unwrap_or(""), &configured).await?
+            super::gateway_mcp_oauth::logout(body["serverId"].as_str().unwrap_or(""), &configured)
+                .await?
         }
         ("POST", "/api/agent/mcp/disconnect") | ("POST", "/api/agent/mcp/reconnect") => {
             let id = body["serverId"]
@@ -2209,7 +2646,10 @@ pub async fn handle_route(
     Ok(Some((200, result)))
 }
 
-pub(crate) async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+pub(crate) async fn import_skill(
+    body: Value,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     let directory = body["directory"]
         .as_str()
         .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "请指定导入目录。", 400))?;
@@ -2251,9 +2691,25 @@ pub(crate) async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Resul
             400,
         ));
     }
-    let scope=body["scope"].as_str().unwrap_or("global");
-    let import_root=match scope {"project"=>ctx.workdir.join(".kynxa"),"global"=>ctx.extension_root.clone(),_=>return Err(failure("INVALID_SKILL_SCOPE","技能范围须为 project 或 global。",400))};
-    let target = import_root.join(if scope=="project" {"skills"} else {"Skills"}).join(name);
+    let scope = body["scope"].as_str().unwrap_or("global");
+    let import_root = match scope {
+        "project" => ctx.workdir.join(".kynxa"),
+        "global" => ctx.extension_root.clone(),
+        _ => {
+            return Err(failure(
+                "INVALID_SKILL_SCOPE",
+                "技能范围须为 project 或 global。",
+                400,
+            ));
+        }
+    };
+    let target = import_root
+        .join(if scope == "project" {
+            "skills"
+        } else {
+            "Skills"
+        })
+        .join(name);
     let result = native(
         ctx,
         "skill.import",
@@ -2268,10 +2724,13 @@ pub(crate) async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Resul
     .await?;
     let mut skill = skills("skill.read", json!({"id":identity["id"]}), ctx).await?;
     skill["enabled"] = json!(true);
-    Ok(json!({"imported":result["imported"],"reused":result["reused"],"scope":scope,"skill":skill,"runtimeVerified":false}))
+    Ok(
+        json!({"imported":result["imported"],"reused":result["reused"],"scope":scope,"skill":skill,"runtimeVerified":false}),
+    )
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    crate::training::shutdown(&ctx.data_home).await;
     super::gateway_mcp_oauth::shutdown(ctx).await;
     super::gateway_workspace_terminal::shutdown(ctx).await;
     super::gateway_process::shutdown(ctx).await;
@@ -2279,15 +2738,18 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
     super::gateway_browser::shutdown(ctx).await;
 }
 
-/// Resume a journaled MCP task without replaying its original mutation.
 /// 恢复事件日志中的 MCP 任务身份，禁止重做原写操作。
-pub async fn recover_mcp_task_checkpoint(handle: &Value, original_call_id: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+pub async fn recover_mcp_task_checkpoint(
+    handle: &Value,
+    original_call_id: &str,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     super::gateway_mcp::recover_checkpoint(handle, original_call_id, ctx).await
 }
 
-/// Migration requires verified cleanup; best-effort application shutdown is not a readiness receipt.
 /// 迁移必须取得核验清理结果；尽力退出应用不能作为迁移就绪回执。
 pub async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+    crate::training::shutdown_checked(&ctx.data_home).await?;
     super::gateway_mcp_oauth::shutdown(ctx).await;
     super::gateway_workspace_terminal::shutdown_checked(ctx).await?;
     super::gateway_process::shutdown_checked(ctx).await?;
@@ -2333,8 +2795,12 @@ mod tests {
         let (ctx, _sender) = test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
         let missing = providers(&ctx, "deepseek-search").await;
-        let row = missing["providers"].as_array().unwrap().iter()
-            .find(|row| row["id"] == "deepseek-search").unwrap();
+        let row = missing["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "deepseek-search")
+            .unwrap();
         assert_eq!(row["ready"], false);
         assert_eq!(row["credentialState"], "unavailable");
         let home = root.join("models-home");
@@ -2345,40 +2811,100 @@ mod tests {
             "apiKey":"fixture-provider-list-secret","models":["deepseek-flash"],"protocol":"openai-completions"
         }]}).to_string()).unwrap();
         let configured = providers(&ctx, "deepseek-search").await;
-        let row = configured["providers"].as_array().unwrap().iter()
-            .find(|row| row["id"] == "deepseek-search").unwrap();
+        let row = configured["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "deepseek-search")
+            .unwrap();
         assert_eq!(row["state"], "configured");
         assert_eq!(row["credentialState"], "configured");
         assert_eq!(row["origin"], "builtin");
-        assert!(!configured.to_string().contains("fixture-provider-list-secret"));
-        assert!(super::super::gateway_mcp::diagnostics(&ctx).await.is_empty());
+        assert!(
+            !configured
+                .to_string()
+                .contains("fixture-provider-list-secret")
+        );
+        assert!(
+            super::super::gateway_mcp::diagnostics(&ctx)
+                .await
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
-    async fn task_file_write_binding_preserves_live_hash_protection_and_rejects_target_or_configuration_changes() {
-        let (mut context, _sender)=test_context();context.permission_mode="ask".into();
-        let root=context.workdir.parent().unwrap().to_owned();
-        let initial=json!({"path":"report.md","content":"first","expectedHash":null});
-        let pending=execute("filesystem.write",initial.clone(),&context).await.unwrap();
-        assert_eq!(pending["requiresApproval"],true);
-        let mut approved=context.clone();approved.approved=true;approved.config["approvedInvocation"]=pending["invocation"].clone();
-        let first=execute("filesystem.write",initial,&approved).await.unwrap();
-        let update=json!({"path":context.workdir.join("report.md"),"content":"updated","expectedHash":first["sha256"]});
-        let current=execute("filesystem.write",update.clone(),&context).await.unwrap();
-        assert_eq!(pending["invocation"]["taskApproval"]["fingerprint"],current["invocation"]["taskApproval"]["fingerprint"]);
-        execute("filesystem.write",update.clone(),&approved).await.unwrap();
-        assert_eq!(std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),"updated");
-        // Matching authorization is not a substitute for the newest overwrite precondition.
+    async fn task_file_write_binding_preserves_live_hash_protection_and_rejects_target_or_configuration_changes()
+     {
+        let (mut context, _sender) = test_context();
+        context.permission_mode = "ask".into();
+        let root = context.workdir.parent().unwrap().to_owned();
+        let initial = json!({"path":"report.md","content":"first","expectedHash":null});
+        let pending = execute("filesystem.write", initial.clone(), &context)
+            .await
+            .unwrap();
+        assert_eq!(pending["requiresApproval"], true);
+        let mut approved = context.clone();
+        approved.approved = true;
+        approved.config["approvedInvocation"] = pending["invocation"].clone();
+        let first = execute("filesystem.write", initial, &approved)
+            .await
+            .unwrap();
+        let update = json!({"path":context.workdir.join("report.md"),"content":"updated","expectedHash":first["sha256"]});
+        let current = execute("filesystem.write", update.clone(), &context)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending["invocation"]["taskApproval"]["fingerprint"],
+            current["invocation"]["taskApproval"]["fingerprint"]
+        );
+        execute("filesystem.write", update.clone(), &approved)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),
+            "updated"
+        );
         // 相同授权不能替代最新覆盖前提，旧哈希即使已有任务授权也不能改写文件。
-        assert!(execute("filesystem.write",update.clone(),&approved).await.is_err());
-        assert_eq!(std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),"updated");
-        let mut changed=update.clone();changed["path"]=json!("other.md");
-        assert_eq!(execute("filesystem.write",changed,&approved).await.unwrap_err().code,"TOOL_APPROVAL_SCOPE_CHANGED");
-        let mut protected=update.clone();protected["path"]=json!(context.data_home.join("formal.json"));protected["reason"]=json!("A grant cannot bypass protected data");
-        assert_eq!(execute("filesystem.write",protected,&approved).await.unwrap_err().code,"PROTECTED_APP_DATA");
-        context.runtime.configuration_generation.fetch_add(1,Ordering::AcqRel);
-        assert_eq!(execute("filesystem.write",update,&approved).await.unwrap_err().code,"TOOL_APPROVAL_SCOPE_CHANGED");
+        assert!(
+            execute("filesystem.write", update.clone(), &approved)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),
+            "updated"
+        );
+        let mut changed = update.clone();
+        changed["path"] = json!("other.md");
+        assert_eq!(
+            execute("filesystem.write", changed, &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "TOOL_APPROVAL_SCOPE_CHANGED"
+        );
+        let mut protected = update.clone();
+        protected["path"] = json!(context.data_home.join("formal.json"));
+        protected["reason"] = json!("A grant cannot bypass protected data");
+        assert_eq!(
+            execute("filesystem.write", protected, &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "PROTECTED_APP_DATA"
+        );
+        context
+            .runtime
+            .configuration_generation
+            .fetch_add(1, Ordering::AcqRel);
+        assert_eq!(
+            execute("filesystem.write", update, &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "TOOL_APPROVAL_SCOPE_CHANGED"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2389,38 +2915,100 @@ mod tests {
         let root = ctx.workdir.parent().unwrap().to_owned();
         let second = root.join("second folder");
         std::fs::create_dir_all(&second).unwrap();
-        std::fs::write(ctx.workdir.join("same.txt"),"DEFAULT").unwrap();
-        std::fs::write(second.join("same.txt"),"SECOND").unwrap();
+        std::fs::write(ctx.workdir.join("same.txt"), "DEFAULT").unwrap();
+        std::fs::write(second.join("same.txt"), "SECOND").unwrap();
         let project_id = uuid::Uuid::new_v4().to_string();
         let first_id = uuid::Uuid::new_v4().to_string();
         let second_id = uuid::Uuid::new_v4().to_string();
-        data::ensure_conversation(&ctx.data_home,&ctx.conversation_id,"Folder fixture").unwrap();
+        data::ensure_conversation(&ctx.data_home, &ctx.conversation_id, "Folder fixture").unwrap();
         let old = data::load_catalog(&ctx.data_home).unwrap();
         let mut catalog = json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Folder fixture",
             "Mounts":[{"Id":first_id,"Name":"Current","Path":ctx.workdir,"BindingRevision":1},{"Id":second_id,"Name":"Removed","Path":second,"BindingRevision":1}],
             "DefaultMountId":first_id,"Chats":[{"Id":ctx.conversation_id,"Title":"Folder","Messages":[
                 {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Folder fixture","Status":"completed"}]}]}]});
-        assert_eq!(data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap_err().code(),"INVALID_WORKSPACE_MOUNTS");
-        assert_eq!(data::handle_raw("PUT","/api/conversations/catalog",&[],&catalog,&catalog.to_string(),&ctx.data_home).unwrap().unwrap_err().code(),"INVALID_WORKSPACE_MOUNTS");
-        assert_eq!(data::load_catalog(&ctx.data_home).unwrap()["Revision"],old["Revision"]);
-        catalog["Projects"][0]["Mounts"].as_array_mut().unwrap().truncate(1);
-        data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap();
-        let relation = data::relationship(&ctx.data_home,&ctx.conversation_id).unwrap();
+        assert_eq!(
+            data::handle(
+                "PUT",
+                "/api/conversations/catalog",
+                &[],
+                &catalog,
+                &ctx.data_home
+            )
+            .unwrap()
+            .unwrap_err()
+            .code(),
+            "INVALID_WORKSPACE_MOUNTS"
+        );
+        assert_eq!(
+            data::handle_raw(
+                "PUT",
+                "/api/conversations/catalog",
+                &[],
+                &catalog,
+                &catalog.to_string(),
+                &ctx.data_home
+            )
+            .unwrap()
+            .unwrap_err()
+            .code(),
+            "INVALID_WORKSPACE_MOUNTS"
+        );
+        assert_eq!(
+            data::load_catalog(&ctx.data_home).unwrap()["Revision"],
+            old["Revision"]
+        );
+        catalog["Projects"][0]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        data::handle(
+            "PUT",
+            "/api/conversations/catalog",
+            &[],
+            &catalog,
+            &ctx.data_home,
+        )
+        .unwrap()
+        .unwrap();
+        let relation = data::relationship(&ctx.data_home, &ctx.conversation_id).unwrap();
         ctx.project_id = Some(project_id);
         ctx.permission_mode = "full".into();
         ctx.config["workspaceMounts"] = relation["mounts"].clone();
         ctx.config["defaultMountId"] = relation["defaultMountId"].clone();
         let mut snapshot = workspace_mounts::snapshot(&relation);
-        snapshot["mounts"].as_array_mut().unwrap().push(json!({"id":second_id,"name":"Old second root","path":second,"bindingRevision":1}));
-        restrict_workspace_context(&mut ctx,&snapshot).unwrap();
-        assert_eq!(ctx.config["workspaceMounts"].as_array().unwrap().len(),1);
+        snapshot["mounts"].as_array_mut().unwrap().push(
+            json!({"id":second_id,"name":"Old second root","path":second,"bindingRevision":1}),
+        );
+        restrict_workspace_context(&mut ctx, &snapshot).unwrap();
+        assert_eq!(ctx.config["workspaceMounts"].as_array().unwrap().len(), 1);
         assert!(!ctx.authorized_roots.contains(&second));
-        assert_eq!(execute("work.folder.list",json!({}),&ctx).await.unwrap()["mounts"].as_array().unwrap().len(),1);
-        let default_read = execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap();
-        assert_eq!(default_read["content"],"DEFAULT");
-        assert_eq!(execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_UNAVAILABLE");
+        assert_eq!(
+            execute("work.folder.list", json!({}), &ctx).await.unwrap()["mounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let default_read = execute("filesystem.read", json!({"path":"same.txt"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(default_read["content"], "DEFAULT");
+        assert_eq!(
+            execute(
+                "filesystem.read",
+                json!({"mountId":second_id,"path":"same.txt"}),
+                &ctx
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "WORKSPACE_MOUNT_UNAVAILABLE"
+        );
         execute("filesystem.read",json!({"path":second.join("same.txt"),"reason":"Read the user-selected external file without associating another folder"}),&ctx).await.unwrap();
-        assert_eq!(std::fs::read_to_string(second.join("same.txt")).unwrap(),"SECOND");
+        assert_eq!(
+            std::fs::read_to_string(second.join("same.txt")).unwrap(),
+            "SECOND"
+        );
         assert!(root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2434,12 +3022,23 @@ mod tests {
         let workspace_input = json!({});
         let dispatch = future_bytes(|| execute("browser.open", json!({}), &ctx));
         let inner = future_bytes(|| execute_inner("browser.open", json!({}), &ctx));
-        let browser = future_bytes(|| super::super::gateway_browser::execute("browser.open", json!({}), &ctx));
-        let workspace = future_bytes(|| super::super::gateway_browser::workspace_open(&workspace_input, &ctx));
-        eprintln!("async frame bytes: dispatch={dispatch}, inner={inner}, browser={browser}, workspace={workspace}");
+        let browser = future_bytes(|| {
+            super::super::gateway_browser::execute("browser.open", json!({}), &ctx)
+        });
+        let workspace =
+            future_bytes(|| super::super::gateway_browser::workspace_open(&workspace_input, &ctx));
+        eprintln!(
+            "async frame bytes: dispatch={dispatch}, inner={inner}, browser={browser}, workspace={workspace}"
+        );
         std::fs::remove_dir_all(ctx.workdir.parent().unwrap()).unwrap();
-        assert!(dispatch < 64 * 1024, "Native dispatch must not inline the browser handshake frame.");
-        assert!(browser < 64 * 1024, "Browser dispatch must not inline the WebSocket handshake frame.");
+        assert!(
+            dispatch < 64 * 1024,
+            "Native dispatch must not inline the browser handshake frame."
+        );
+        assert!(
+            browser < 64 * 1024,
+            "Browser dispatch must not inline the WebSocket handshake frame."
+        );
     }
 
     #[test]
@@ -2456,9 +3055,17 @@ mod tests {
         ctx.config["trustedUserText"] = json!("用本机 Chrome 打开这个网站");
         assert!(workspace_launch_target(&args, &ctx).unwrap().is_none());
         ctx.config["trustedUserText"] = json!("在右侧打开这个网站");
-        assert_eq!(workspace_launch_target(&json!({"appPath":"C:/Browser/chrome.exe"}), &ctx)
-            .unwrap_err().code, "WORKSPACE_BROWSER_REQUIRED");
-        assert!(workspace_launch_target(&json!({"appPath":"C:/Apps/notepad.exe"}), &ctx).unwrap().is_none());
+        assert_eq!(
+            workspace_launch_target(&json!({"appPath":"C:/Browser/chrome.exe"}), &ctx)
+                .unwrap_err()
+                .code,
+            "WORKSPACE_BROWSER_REQUIRED"
+        );
+        assert!(
+            workspace_launch_target(&json!({"appPath":"C:/Apps/notepad.exe"}), &ctx)
+                .unwrap()
+                .is_none()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2503,7 +3110,6 @@ mod tests {
         {
             let file = root.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            // The fixture verifies discovery paths only; no fake executable or dependency is started.
             // 夹具只核验发现路径；不运行模拟执行文件或依赖。
             std::fs::write(file, "private dependency discovery fixture").unwrap();
         }
@@ -2792,23 +3398,52 @@ mod tests {
         let first = relevant_skill_headers(&ctx, "搜索网页").await.unwrap();
         assert_eq!(first[0]["name"], "web-research");
         assert!(first[0].get("content").is_none());
-        assert!(ctx.runtime.skill_headers.lock().unwrap().get(&path).unwrap()
-            .metadata.as_ref().unwrap().get("content").is_none());
+        assert!(
+            ctx.runtime
+                .skill_headers
+                .lock()
+                .unwrap()
+                .get(&path)
+                .unwrap()
+                .metadata
+                .as_ref()
+                .unwrap()
+                .get("content")
+                .is_none()
+        );
         let cached = skills("skill.list", json!({}), &ctx).await.unwrap();
         assert_eq!(cached["skills"][0]["sha256"], first[0]["sha256"]);
 
         std::fs::write(&path, "---\nname: web-research\ndescription: Search updated public websites and verify evidence\n---\nUpdated original procedure.").unwrap();
         let updated = skills("skill.list", json!({}), &ctx).await.unwrap();
-        assert_eq!(updated["skills"][0]["description"], "Search updated public websites and verify evidence");
+        assert_eq!(
+            updated["skills"][0]["description"],
+            "Search updated public websites and verify evidence"
+        );
         assert_ne!(updated["skills"][0]["sha256"], first[0]["sha256"]);
         let id = first[0]["id"].clone();
         let read = skills("skill.read", json!({"id":id}), &ctx).await.unwrap();
-        assert!(read["content"].as_str().unwrap().contains("Updated original procedure."));
+        assert!(
+            read["content"]
+                .as_str()
+                .unwrap()
+                .contains("Updated original procedure.")
+        );
         ctx.config["disabledSkills"] = json!([id]);
-        assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
+        assert!(
+            skills("skill.list", json!({}), &ctx).await.unwrap()["skills"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         ctx.config["disabledSkills"] = json!([]);
         std::fs::remove_file(&path).unwrap();
-        assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
+        assert!(
+            skills("skill.list", json!({}), &ctx).await.unwrap()["skills"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2816,18 +3451,36 @@ mod tests {
     async fn document_skill_discovery_reads_only_relevant_headers_until_explicit_read() {
         let (ctx, _sender) = test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
-        for name in ["document-authoring", "slides-authoring", "spreadsheets-authoring", "memory-workflow"] {
+        for name in [
+            "document-authoring",
+            "slides-authoring",
+            "spreadsheets-authoring",
+            "memory-workflow",
+        ] {
             let directory = root.join("official/Skills").join(name);
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join("SKILL.md"), format!("---\nname: {name}\ndescription: {name} native workflow\n---\nPRIVATE-BODY-{name}\n")).unwrap();
         }
-        let headers = relevant_skill_headers(&ctx, "生成一份报告.docx").await.unwrap();
+        let headers = relevant_skill_headers(&ctx, "生成一份报告.docx")
+            .await
+            .unwrap();
         assert_eq!(headers[0]["name"], "document-authoring");
         assert!(headers.len() <= 16);
         assert!(headers.iter().all(|header| header.get("content").is_none()));
-        assert!(!serde_json::to_string(&headers).unwrap().contains("PRIVATE-BODY"));
-        let loaded = execute("skill.read", json!({"id":headers[0]["id"]}), &ctx).await.unwrap();
-        assert!(loaded["content"].as_str().unwrap().contains("PRIVATE-BODY-document-authoring"));
+        assert!(
+            !serde_json::to_string(&headers)
+                .unwrap()
+                .contains("PRIVATE-BODY")
+        );
+        let loaded = execute("skill.read", json!({"id":headers[0]["id"]}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            loaded["content"]
+                .as_str()
+                .unwrap()
+                .contains("PRIVATE-BODY-document-authoring")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2838,12 +3491,34 @@ mod tests {
         let missing = root.join("never-created-skill-directory");
         ctx.config["officialToolsRoot"] = json!(missing);
         for (name, arguments, code, parameter, maximum) in [
-            ("skill.list", json!({"offset":-1}), "INVALID_SKILL_LIST_PAGINATION", "offset", 128),
-            ("skill.list", json!({"limit":129}), "INVALID_SKILL_LIST_PAGINATION", "limit", 128),
-            ("skill.resource.read", json!({"id":"not-loaded","path":"notes.md","offset":2_097_153}),
-                "INVALID_SKILL_RESOURCE_PAGINATION", "offset", 2_097_152),
-            ("skill.resource.read", json!({"id":"not-loaded","path":"notes.md","limit":"8"}),
-                "INVALID_SKILL_RESOURCE_PAGINATION", "limit", 16_000),
+            (
+                "skill.list",
+                json!({"offset":-1}),
+                "INVALID_SKILL_LIST_PAGINATION",
+                "offset",
+                128,
+            ),
+            (
+                "skill.list",
+                json!({"limit":129}),
+                "INVALID_SKILL_LIST_PAGINATION",
+                "limit",
+                128,
+            ),
+            (
+                "skill.resource.read",
+                json!({"id":"not-loaded","path":"notes.md","offset":2_097_153}),
+                "INVALID_SKILL_RESOURCE_PAGINATION",
+                "offset",
+                2_097_152,
+            ),
+            (
+                "skill.resource.read",
+                json!({"id":"not-loaded","path":"notes.md","limit":"8"}),
+                "INVALID_SKILL_RESOURCE_PAGINATION",
+                "limit",
+                16_000,
+            ),
         ] {
             let error = execute(name, arguments, &ctx).await.unwrap_err();
             assert_eq!(error.code, code);
@@ -2861,10 +3536,15 @@ mod tests {
         for name in ["first", "second"] {
             let skill = official.join(name);
             std::fs::create_dir_all(&skill).unwrap();
-            std::fs::write(skill.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: Pagination fixture.\n---\nBody.")).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Pagination fixture.\n---\nBody."),
+            )
+            .unwrap();
         }
-        let page = execute("skill.list", json!({"offset":1,"limit":1}), &ctx).await.unwrap();
+        let page = execute("skill.list", json!({"offset":1,"limit":1}), &ctx)
+            .await
+            .unwrap();
         let all = execute("skill.list", json!({}), &ctx).await.unwrap();
         assert_eq!(page["skills"].as_array().unwrap().len(), 1);
         assert_eq!(page["skills"][0], all["skills"][1]);
@@ -2891,7 +3571,8 @@ mod tests {
             &json!({"type":"integer","minimum":1,"maximum":128}),
             &json!(0),
             "skill.list.limit",
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(error.code, "INVALID_TOOL_ARGUMENTS");
         assert_eq!(error.details["parameter"], "skill.list.limit");
         assert_eq!(error.details["minimum"], 1);
@@ -3034,16 +3715,34 @@ mod tests {
             let captured = captured.clone();
             Box::pin(async move {
                 captured.lock().unwrap().push((name, args.clone()));
-                Ok(json!({"kind":"screenshot","presentation":"workspace","sourceResultRef":{"id":args["resultId"]}}))
+                Ok(
+                    json!({"kind":"screenshot","presentation":"workspace","sourceResultRef":{"id":args["resultId"]}}),
+                )
             })
         }));
         let input = json!({"resultId":uuid::Uuid::new_v4().to_string(),"title":"Final result"});
         assert!(!workspace_path_tool("artifact.open", &input));
-        assert_eq!(execute("artifact.open", input.clone(), &ctx).await.unwrap()["kind"], "screenshot");
-        assert_eq!(displayed.lock().unwrap().as_slice(), &[("artifact.open".to_owned(), input)]);
-        for invalid in [json!({}), json!({"path":"report.png","resultId":"saved"}),
-            json!({"url":"https://example.org","resultId":"saved"}), json!({"path":"report.png","url":"https://example.org"})] {
-            assert_eq!(execute("artifact.open", invalid, &ctx).await.unwrap_err().code, "INVALID_TOOL_ARGUMENTS");
+        assert_eq!(
+            execute("artifact.open", input.clone(), &ctx).await.unwrap()["kind"],
+            "screenshot"
+        );
+        assert_eq!(
+            displayed.lock().unwrap().as_slice(),
+            &[("artifact.open".to_owned(), input)]
+        );
+        for invalid in [
+            json!({}),
+            json!({"path":"report.png","resultId":"saved"}),
+            json!({"url":"https://example.org","resultId":"saved"}),
+            json!({"path":"report.png","url":"https://example.org"}),
+        ] {
+            assert_eq!(
+                execute("artifact.open", invalid, &ctx)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "INVALID_TOOL_ARGUMENTS"
+            );
         }
         assert_eq!(displayed.lock().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
@@ -3144,7 +3843,6 @@ mod tests {
                 .code,
             "APP_SKILL_NOT_FOUND"
         );
-        // A task grant bound to the skill call cannot be reused for another tool.
         // 绑定到技能调用的任务授权不能挪用于其他工具。
         assert_eq!(
             execute("mcp.fixture.echo", json!({}), &approved)

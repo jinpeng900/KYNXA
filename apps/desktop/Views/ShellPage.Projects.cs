@@ -49,7 +49,6 @@ public sealed partial class ShellPage
         {
             var catalog = await _projectStore.LoadMetadataAsync();
             if (_projectViewClosed) return;
-            // Loading metadata cannot discard a chat draft created while startup was waiting on the gateway.
             // 启动等待网关时新建的聊天草稿仍属于用户，目录返回不能丢掉它及当前对象身份。
             var drafts = _standaloneChats.Where(chat => !chat.IsPersisted
                 && !catalog.Chats.Any(saved => saved.Id == chat.Id)).ToArray();
@@ -96,7 +95,6 @@ public sealed partial class ShellPage
         });
     }
 
-    // Both sidebar add actions create the same RAM-only draft; the first user message commits it.
     // 两处侧栏新增动作创建同一类仅在内存中的草稿；首条用户消息才提交保存。
     private void StartNewProjectChat(ProjectState project)
     {
@@ -201,7 +199,6 @@ public sealed partial class ShellPage
         string? path = ProjectMountPresentation.WorkspaceMount(project)?.Path ?? project.FolderPath;
         if (string.IsNullOrWhiteSpace(path))
         {
-            // A blank project keeps its managed runtime directory without turning it into an external mount.
             // 空白项目保留运行时托管目录，不为打开资源管理器而新建并写入虚假的外部挂载。
             var chat = project.Chats.FirstOrDefault(chat => chat.Id == ActiveChatId && chat.IsPersisted) ??
                 project.Chats.FirstOrDefault(chat => chat.IsPersisted);
@@ -218,7 +215,6 @@ public sealed partial class ShellPage
             }
             catch (GatewayApiException error) when (error.ErrorCode == "ENOENT")
             {
-                // Saved empty chats have metadata before their managed workspace is created on demand.
                 // 空聊天可先保存元数据，托管工作目录仍按需创建；仅根目录缺失时提供操作引导。
                 ShowActionFeedback(unavailable);
                 return;
@@ -403,7 +399,6 @@ public sealed partial class ShellPage
                 _undoSidebarChange = null;
                 ProjectNotice.IsOpen = false;
             }
-            // Roll back visible metadata to the last successfully saved catalog.
             // 将可见元数据回退到最近一次成功保存的正式目录。
             try
             {

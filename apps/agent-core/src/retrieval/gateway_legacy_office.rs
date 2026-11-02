@@ -1,4 +1,3 @@
-//! Binary Office decoders read live structured storage without Office or subprocesses.
 //! 旧版 Office 解码读取真实活动结构，不要求 Office，也不创建转换子进程。
 
 use super::gateway_office_documents::{cancelled, failure};
@@ -17,7 +16,6 @@ mod powerpoint;
 #[path = "gateway_legacy_word.rs"]
 mod word;
 
-/// Registry canonical names select exactly one versioned binary parser.
 /// 注册表规范格式名选择唯一版本化二进制解析器；别名在入口统一归一化。
 pub(crate) fn decode(
     format: &str,
@@ -34,7 +32,6 @@ pub(crate) fn decode(
     }
 }
 
-/// Compound streams are not compressed; their declared sizes are checked before allocation.
 /// CFB 流没有压缩；分配前核验实际容器、单流和总量，读取与建目录期间均支持取消。
 pub(super) struct CompoundDocument<'a> {
     inner: cfb::CompoundFile<CancelReader<'a>>,

@@ -61,7 +61,6 @@ fn absolute(value: &Value) -> Result<PathBuf, ContractError> {
     Ok(path)
 }
 
-/// Resolve portable settings against the application location, never the process working directory.
 /// 便携配置相对软件所在目录解析，不随进程工作目录或用户账户变化。
 pub(crate) fn configured_path(value: &Value, base: &Path) -> Result<PathBuf, ContractError> {
     let value = value
@@ -160,7 +159,6 @@ fn hash(path: &Path) -> Result<String, ContractError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-/// Copies use private temporary files and verified streaming hashes; old data is never deleted.
 /// 复制使用私有临时文件和流式哈希核验；永不删除原始数据。
 fn copy_file(source: &Path, target: &Path, allow_existing: bool) -> Result<String, ContractError> {
     let digest = hash(source)?;
@@ -597,7 +595,6 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
                 configured_path(&arguments["pointer"], &application)?
             };
             let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
-                // Packaged hosts keep legacy writable defaults outside the immutable payload.
                 // 包身份宿主将既有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
                 if !arguments["defaultModelHome"].is_null() {
                     return Ok(json!(configured_path(

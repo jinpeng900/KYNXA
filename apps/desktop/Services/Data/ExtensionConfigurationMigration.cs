@@ -6,7 +6,6 @@ using System.Text.Json.Nodes;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Only extension-owned paths change; external installations and unknown disabled IDs stay intact.
 /// 只改扩展自身拥有的路径；外部安装及未知的禁用 ID 保持原样。
 /// </summary>
 internal static class ExtensionConfigurationMigration
@@ -81,7 +80,6 @@ internal static class ExtensionConfigurationMigration
                 if (!string.Equals(Path.GetFileName(relative), "SKILL.md", StringComparison.OrdinalIgnoreCase)) continue;
                 string original = Path.Combine(owned.Source, relative);
                 idMap[SkillId(original)] = SkillId(Path.Combine(targetRoot, name, relative));
-                // Discovery hashes lexical configured paths, including their original casing.
                 // 发现过程按配置路径的原始写法计算哈希，包括原来的大小写。
                 foreach (string directory in originalDirectories)
                     if (StorageMigrationService.IsWithin(directory, owned.Source) && StorageMigrationService.IsWithin(original, directory))
@@ -101,9 +99,6 @@ internal static class ExtensionConfigurationMigration
         await File.WriteAllTextAsync(path, config.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
     }
 
-    // uv-managed Windows environments keep their base interpreter in pyvenv.cfg.
-    // Only these known text metadata fields change: wheel contents, launchers,
-    // requirements, arbitrary package configuration and external paths remain exact.
     // uv 的 Windows 基础解释器路径位于 pyvenv.cfg；仅改已知路径字段，包、启动器、依赖、其他配置和外部路径不变。
     private static async Task RelocateUvRuntimeConfigAsync(string sourceRoot, string targetRoot, CancellationToken cancellationToken)
     {
@@ -157,8 +152,6 @@ internal static class ExtensionConfigurationMigration
 
         string RelocateReceipt(string text)
         {
-            // uv 0.12 writes [tool].python and entrypoints=[{install-path=...}].
-            // Token boundaries prevent quoted requirements/comments from matching keys.
             // uv 0.12 使用 [tool].python 与 entrypoints 的 install-path；按 token 边界识别键，避免误匹配引号中的依赖或注释。
             var tokens = TokenizeToml(text);
             var replacements = new List<(int Start, int Length, string Text)>();
@@ -211,7 +204,6 @@ internal static class ExtensionConfigurationMigration
                 catch (JsonException error) { throw new InvalidDataException(UiText.Get("工具配置文件损坏，原文件已保留。"), error); }
                 string? relocated = RelocateRuntimePath(value);
                 if (relocated is null) return;
-                // JSON strings are valid TOML basic strings; replace only known text fields.
                 // JSON 字符串符合 TOML 基本字符串语法；仅替换已知文本字段。
                 replacements.Add((token.Start, token.Value.Length, JsonSerializer.Serialize(relocated.Replace('\\', '/'))));
             }

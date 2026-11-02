@@ -5,7 +5,6 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Saved files enter the catalog; explicit display and delivered outputs receive automatic presentation priority.
 /// 保存文件进入目录；明确展示和实际交付的成果才获得自动展示优先级。
 /// </summary>
 public static class ConversationWorkspaceSources
@@ -41,7 +40,6 @@ public static class ConversationWorkspaceSources
         string? url = String(reference, "url");
         if (Uri.TryCreate(path, UriKind.Absolute, out var pathAddress) && pathAddress.Scheme is "http" or "https")
         {
-            // A live browser can still report about:blank while its requested website is loading.
             // 已打开的浏览器仍可能暂报 about:blank；用展示路径定位正在加载的网站，不丢弃真实导航状态。
             if (!Uri.TryCreate(url, UriKind.Absolute, out var currentAddress) || currentAddress.Scheme is not ("http" or "https"))
                 url = path;
@@ -82,7 +80,6 @@ public static class ConversationWorkspaceSources
             bool relative = !Path.IsPathRooted(target) && !target.Contains(':');
             var matches = files.Where(file => file.Target.Equals(target, StringComparison.OrdinalIgnoreCase) || relative &&
                 file.Target.EndsWith("\\" + target, StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
-            // A delivery link can promote an existing receipt, never invent a file or pick an ambiguous basename.
             // 交付链接只提升已有真实回执，不能凭链接捏造文件，也不能猜测重名文件。
             if (matches.Length == 1) deliveredKeys.Add(matches[0].Tab.Key);
         }

@@ -1,9 +1,7 @@
-//! Root tool dispatch and durable receipt settlement, separate from model planning.
 //! 根任务工具派发与正式回执结算，与模型规划分开。
 
 use super::*;
 
-/// Borrow only this tool round; no state or ledger is copied.
 /// 只借用本轮所需状态，不复制任务状态或账本。
 pub(super) struct ToolRound<'a> {
     pub runtime: &'a Arc<GatewayRuntime>,
@@ -32,9 +30,25 @@ pub(super) struct ToolRoundOutcome {
 
 impl ToolRound<'_> {
     pub(super) async fn execute(self) -> Result<ToolRoundOutcome, GatewayError> {
-        let Self { runtime, run, input, mut state, ctx, all, mut system, live_memory,
-            mut cancellation, protocol_name, limits, response, declared_tools, round, segment_initial_calls,
-            segment_initial_active_ms, summarized_work_changed } = self;
+        let Self {
+            runtime,
+            run,
+            input,
+            mut state,
+            ctx,
+            all,
+            mut system,
+            live_memory,
+            mut cancellation,
+            protocol_name,
+            limits,
+            response,
+            declared_tools,
+            round,
+            segment_initial_calls,
+            segment_initial_active_ms,
+            summarized_work_changed,
+        } = self;
         let mut stopped = None;
         let mut review_invalidated = false;
         let permission = input["permissionMode"].as_str().unwrap_or("smart");
@@ -43,18 +57,24 @@ impl ToolRound<'_> {
             evidence_changed: summarized_work_changed,
             ..Default::default()
         };
-        // Batch independent reads; settle receipts, history and archives in original call order.
         // 独立读取批量执行，回执、历史及归档仍按原调用顺序结算。
         let batch_catalog = ctx.runtime.schemas.read().await.clone();
-        let experience_names = response.calls.iter().filter_map(|call|call["name"].as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let experience_identities = tools::experience_identities(&ctx, &experience_names).unwrap_or_else(|_|json!({}));
+        let experience_names = response
+            .calls
+            .iter()
+            .filter_map(|call| call["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let experience_identities =
+            tools::experience_identities(&ctx, &experience_names).unwrap_or_else(|_| json!({}));
         let tool_batches = gateway_tool_batch::plan_with_catalog(&response.calls, &batch_catalog);
         let mut prefetched = HashMap::new();
         let mut memory_plan_invalidated = false;
         for (call_index, call) in response.calls.iter().enumerate() {
             let mut prefetch = prefetched.remove(&call_index);
-            if prefetch.is_none() && (run.active_elapsed(run.created).as_millis() as u64).saturating_sub(segment_initial_active_ms)
-                >= limits["maxDurationMs"].as_u64().unwrap_or(1800000)
+            if prefetch.is_none()
+                && (run.active_elapsed(run.created).as_millis() as u64)
+                    .saturating_sub(segment_initial_active_ms)
+                    >= limits["maxDurationMs"].as_u64().unwrap_or(1800000)
             {
                 stopped = Some(GatewayError::new(
                     "TOOL_RUN_TIMEOUT",
@@ -67,19 +87,29 @@ impl ToolRound<'_> {
                 stopped = Some(GatewayError::new("ABORT_ERR", "任务已取消。", 499));
                 break;
             }
-            // Recheck revocations before the next batch; settle completed prefetched reads normally.
             // 下一批派发前重核撤回，已完成的预取回执正常结算。
-            if prefetch.is_none() && !memory_plan_invalidated
-                && let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
+            if prefetch.is_none()
+                && !memory_plan_invalidated
+                && let Some(status) = live_memory
+                    .refresh(
+                        &runtime.config.data_root,
+                        &run.conversation_id,
+                        &run.request_id,
+                        &mut system,
+                    )
+                    .await?
+            {
                 memory_refresh_notice(&mut state, &status);
                 review_invalidated = true;
                 memory_plan_invalidated = true;
             }
             if prefetch.is_none() && (memory_plan_invalidated || steering_pending(&run, &ctx)) {
-                // Pair undispatched calls with skipped results before applying steering.
                 // 应用插话前，为未派发调用配对跳过结果。
                 for skipped in &response.calls {
-                    if !results.iter().any(|result:&Value|result["call"]["id"]==skipped["id"]) {
+                    if !results
+                        .iter()
+                        .any(|result: &Value| result["call"]["id"] == skipped["id"])
+                    {
                         let skipped_receipt = if memory_plan_invalidated {
                             tool_execution_receipt(Ok(memory_replanning_result()))
                         } else {
@@ -91,25 +121,48 @@ impl ToolRound<'_> {
                 }
                 break;
             }
-            if let Some(batch) = tool_batches.iter().find(|batch| batch.start == call_index && prefetch.is_none()) {
-                prefetched = prefetch_tool_batch(&mut state, &run, &runtime, &ctx, &response.calls, batch.clone(), round,
-                    segment_initial_calls.saturating_add(limits["maxToolCalls"].as_u64().unwrap_or(256))).await?;
+            if let Some(batch) = tool_batches
+                .iter()
+                .find(|batch| batch.start == call_index && prefetch.is_none())
+            {
+                prefetched = prefetch_tool_batch(
+                    &mut state,
+                    &run,
+                    &runtime,
+                    &ctx,
+                    &response.calls,
+                    batch.clone(),
+                    round,
+                    segment_initial_calls
+                        .saturating_add(limits["maxToolCalls"].as_u64().unwrap_or(256)),
+                )
+                .await?;
                 prefetch = prefetched.remove(&call_index);
             }
             let name = call["name"].as_str().unwrap_or("");
-            let (version_context, workspace_failure) = if tools::workspace_path_tool(name, &call["arguments"]) {
-                match tools::select_workspace_context(&ctx, &call["arguments"]).await {
-                    Ok(selected) => (selected, None),
-                    Err(error) => (ctx.clone(), Some(error)),
-                }
-            } else { (ctx.clone(), None) };
+            let (version_context, workspace_failure) =
+                if tools::workspace_path_tool(name, &call["arguments"]) {
+                    match tools::select_workspace_context(&ctx, &call["arguments"]).await {
+                        Ok(selected) => (selected, None),
+                        Err(error) => (ctx.clone(), Some(error)),
+                    }
+                } else {
+                    (ctx.clone(), None)
+                };
             let operation_id = gateway_tool_batch::operation_id(&version_context, call, round);
             let mut tool_execution_ms = 0u64;
             let mut operation_dispatched = false;
-            let control_correction = super::super::task::native_task_control_receipt(call, &state.completion.acceptance_requirements);
-            let is_observation = control_correction.is_some() || crate::tools::policy::is_read_only_call(name, &call["arguments"])
+            let control_correction = super::super::task::native_task_control_receipt(
+                call,
+                &state.completion.acceptance_requirements,
+            );
+            let is_observation = control_correction.is_some()
+                || crate::tools::policy::is_read_only_call(name, &call["arguments"])
                 || matches!(name, "tool.load" | "task.document" | "context.compact");
-            let _workspace_write = if workspace_failure.is_none() && !is_observation && !name.starts_with("task.") {
+            let _workspace_write = if workspace_failure.is_none()
+                && !is_observation
+                && !name.starts_with("task.")
+            {
                 Some(tokio::select! {
                     guard = runtime.tasks.workspace_mutation_guard(&version_context.workdir) => guard?,
                     _ = tools::wait_for_cancellation(&mut cancellation) => return Err(GatewayError::new("ABORT_ERR", "任务等待写入时已取消。", 499)),
@@ -133,15 +186,27 @@ impl ToolRound<'_> {
             let failure_definition = tool_failure_definition(call, &all, &batch_catalog);
             let failure_snapshot = if before_version.is_null() {
                 state.progress.verification()["codeVersionCoverage"]["latestSnapshot"].clone()
-            } else { before_version.clone() };
-            let mut failure_environment = tool_failure_environment(&version_context,
-                &failure_snapshot, state.completion.mutation_sequence);
-            failure_environment["configuration"]["acceptanceRequirements"] = json!(state.completion.acceptance_requirements);
+            } else {
+                before_version.clone()
+            };
+            let mut failure_environment = tool_failure_environment(
+                &version_context,
+                &failure_snapshot,
+                state.completion.mutation_sequence,
+            );
+            failure_environment["configuration"]["acceptanceRequirements"] =
+                json!(state.completion.acceptance_requirements);
             failure_environment["operationIdentity"] = json!(operation_id);
-            let failure_correction = state.work_progress.failed_actions()
-                .before_dispatch(call, &failure_definition, &failure_environment);
+            let failure_correction = state.work_progress.failed_actions().before_dispatch(
+                call,
+                &failure_definition,
+                &failure_environment,
+            );
             let count = count_tool_attempts(&state.assistant);
-            if prefetch.is_none() && count.saturating_sub(segment_initial_calls) >= limits["maxToolCalls"].as_u64().unwrap_or(256) {
+            if prefetch.is_none()
+                && count.saturating_sub(segment_initial_calls)
+                    >= limits["maxToolCalls"].as_u64().unwrap_or(256)
+            {
                 stopped = Some(GatewayError::new(
                     "TOOL_RUN_CALL_LIMIT",
                     "工具调用额度已用完。",
@@ -149,14 +214,15 @@ impl ToolRound<'_> {
                 ));
                 break;
             }
-            let tool_start = prefetch.as_ref().map_or_else(Instant::now, |prefetched| prefetched.started);
+            let tool_start = prefetch
+                .as_ref()
+                .map_or_else(Instant::now, |prefetched| prefetched.started);
             let saved = native(state.tools.effects.apply(
                 "effects.previous",
                 &json!({"call":call,"observation":is_observation}),
             ))?;
             state.delivery.timeline_order += 1;
             let tool_order = state.delivery.timeline_order;
-            // The batch already announced these call orders; do not register them again.
             // 批次已公布这些调用顺序，不重复登记。
             if prefetch.is_none() {
                 let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":"running","summary":"执行中","round":round,"order":tool_order});
@@ -167,8 +233,12 @@ impl ToolRound<'_> {
                     .push(activity.clone());
                 state.save(&runtime, &run, "streaming", None).await?;
             }
-            let mut definition_failure = control_correction.or_else(|| workspace_failure.map(|error|json!({"status":"error","executed":false,"isError":true,
-                "code":error.code,"content":error.response()})));
+            let mut definition_failure = control_correction.or_else(|| {
+                workspace_failure.map(|error| {
+                    json!({"status":"error","executed":false,"isError":true,
+                "code":error.code,"content":error.response()})
+                })
+            });
             if definition_failure.is_none() && saved.is_null() && prefetch.is_none() {
                 definition_failure = failure_correction;
             }
@@ -179,46 +249,65 @@ impl ToolRound<'_> {
             {
                 let candidate = {
                     let cached = ctx.runtime.schemas.read().await;
-                    all.iter().chain(cached.iter()).find(|tool| {
-                        tools::executable_descriptor(tool) && tool["name"] == name
-                    }).map(|tool| tool["name"].clone())
+                    all.iter()
+                        .chain(cached.iter())
+                        .find(|tool| tools::executable_descriptor(tool) && tool["name"] == name)
+                        .map(|tool| tool["name"].clone())
                 };
                 if let Some(candidate) = candidate {
-                    // Load the undispatched call once, then execute its original arguments; never replay unknown effects.
                     // 未派发调用加载一次后执行原参数，不重放未知副作用。
                     ctx.config["activeToolCallId"] = call["id"].clone();
                     match tools::execute("tool.load", json!({"names":[candidate]}), &ctx).await {
                         Ok(loaded) => {
                             select_loaded_tools(&mut state, &loaded, &json!([name]));
-                            if !loaded["tools"].as_array().into_iter().flatten().any(|tool| {
-                                tool["name"] == name && tools::executable_descriptor(tool)
-                            }) {
-                                definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":"TOOL_NOT_LOADED",
-                                    "content":{"notice":"The real loader did not return an executable definition; this call was not dispatched.","requestedName":name,"loadResult":loaded}}));
+                            if !loaded["tools"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|tool| {
+                                    tool["name"] == name && tools::executable_descriptor(tool)
+                                })
+                            {
+                                definition_failure = Some(
+                                    json!({"status":"error","executed":false,"isError":true,"code":"TOOL_NOT_LOADED",
+                                    "content":{"notice":"The real loader did not return an executable definition; this call was not dispatched.","requestedName":name,"loadResult":loaded}}),
+                                );
                             }
                         }
                         Err(error) => {
                             let mut content = error.response();
                             content["requestedName"] = json!(name);
-                            definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":error.code,
-                                "content":content}));
+                            definition_failure = Some(
+                                json!({"status":"error","executed":false,"isError":true,"code":error.code,
+                                "content":content}),
+                            );
                         }
                     }
                 } else {
-                    definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":"TOOL_NOT_DISCOVERED",
-                        "content":{"notice":"No exact executable definition is known. Discover the actual capability through tool.search; this call was not dispatched.","requestedName":name}}));
+                    definition_failure = Some(
+                        json!({"status":"error","executed":false,"isError":true,"code":"TOOL_NOT_DISCOVERED",
+                        "content":{"notice":"No exact executable definition is known. Discover the actual capability through tool.search; this call was not dispatched.","requestedName":name}}),
+                    );
                 }
             }
             let was_prefetched = prefetch.is_some();
-            let (mut prefetched_result, prefetched_receipt, archived_reference) = match prefetch.take() {
+            let (mut prefetched_result, prefetched_receipt, archived_reference) = match prefetch
+                .take()
+            {
                 None => (None, None, None),
                 Some(prefetched) => {
                     operation_dispatched = prefetched.dispatched;
                     tool_execution_ms = prefetched.execution_ms;
                     match prefetched.outcome {
-                        gateway_tool_batch::PrefetchOutcome::NotDispatched(receipt) => (None, Some(receipt), None),
-                        gateway_tool_batch::PrefetchOutcome::AwaitingApproval(result) => (Some(result), None, None),
-                        gateway_tool_batch::PrefetchOutcome::Archived { receipt, reference } => (None, Some(receipt), Some(reference)),
+                        gateway_tool_batch::PrefetchOutcome::NotDispatched(receipt) => {
+                            (None, Some(receipt), None)
+                        }
+                        gateway_tool_batch::PrefetchOutcome::AwaitingApproval(result) => {
+                            (Some(result), None, None)
+                        }
+                        gateway_tool_batch::PrefetchOutcome::Archived { receipt, reference } => {
+                            (None, Some(receipt), Some(reference))
+                        }
                         gateway_tool_batch::PrefetchOutcome::Failed(error) => return Err(error),
                     }
                 }
@@ -235,17 +324,30 @@ impl ToolRound<'_> {
                 receipt
             } else {
                 if !was_prefetched && let Some(journal) = &run.journal {
-                    gateway_tool_batch::record_dispatch(journal, &run, &version_context, call, round, &operation_id, is_observation)?;
+                    gateway_tool_batch::record_dispatch(
+                        journal,
+                        &run,
+                        &version_context,
+                        call,
+                        round,
+                        &operation_id,
+                        is_observation,
+                    )?;
                     operation_dispatched = true;
                 }
                 ctx.config["activeToolCallId"] = call["id"].clone();
                 ctx.config["activeOperationId"] = json!(operation_id);
-                ctx.config["acceptanceRequirements"] = json!(state.completion.acceptance_requirements);
+                ctx.config["acceptanceRequirements"] =
+                    json!(state.completion.acceptance_requirements);
                 if name.starts_with("task.") || name.starts_with("knowledge.") {
-                    // Capture this dispatch identity, not the context from the start of the request.
                     // 捕获本次实际派发身份，不能沿用请求开始时的旧上下文。
-                    ctx.external_execute = Some(specialist_executor(&runtime, &run, &ctx, permission,
-                        input["message"].as_str().unwrap_or("")));
+                    ctx.external_execute = Some(specialist_executor(
+                        &runtime,
+                        &run,
+                        &ctx,
+                        permission,
+                        input["message"].as_str().unwrap_or(""),
+                    ));
                 }
                 let dispatched_at = Instant::now();
                 let result = if let Some(result) = prefetched_result.take() {
@@ -255,9 +357,8 @@ impl ToolRound<'_> {
                 } else {
                     tools::execute(name, call["arguments"].clone(), &ctx).await
                 };
-                tool_execution_ms = tool_execution_ms.saturating_add(
-                    dispatched_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                );
+                tool_execution_ms =
+                    tool_execution_ms.saturating_add(dispatched_at.elapsed().as_millis() as u64);
                 let result = match result {
                     Ok(result) if result["requiresApproval"] == true => {
                         match runtime
@@ -275,9 +376,16 @@ impl ToolRound<'_> {
                             .await
                         {
                             Ok(true) => {
-                                // Recheck memory after approval; withdrawn memory remains invalid.
                                 // 审批后重核记忆，等待期间撤回的内容仍无效。
-                                if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &run.request_id, &mut system).await? {
+                                if let Some(status) = live_memory
+                                    .refresh(
+                                        &runtime.config.data_root,
+                                        &run.conversation_id,
+                                        &run.request_id,
+                                        &mut system,
+                                    )
+                                    .await?
+                                {
                                     memory_refresh_notice(&mut state, &status);
                                     review_invalidated = true;
                                     memory_plan_invalidated = true;
@@ -288,10 +396,8 @@ impl ToolRound<'_> {
                                     ctx.config["approvedInvocation"] = result["invocation"].clone();
                                     let result =
                                         tools::execute(name, call["arguments"].clone(), &ctx).await;
-                                    tool_execution_ms = tool_execution_ms.saturating_add(
-                                        dispatched_at.elapsed().as_millis().min(u64::MAX as u128)
-                                            as u64,
-                                    );
+                                    tool_execution_ms = tool_execution_ms
+                                        .saturating_add(dispatched_at.elapsed().as_millis() as u64);
                                     ctx.approved = false;
                                     ctx.config
                                         .as_object_mut()
@@ -313,7 +419,12 @@ impl ToolRound<'_> {
                 tool_execution_receipt(result)
             };
             normalize_reused_receipt(name, &mut receipt);
-            state.work_progress.failed_actions_mut().observe(call, &failure_definition, &failure_environment, &receipt);
+            state.work_progress.failed_actions_mut().observe(
+                call,
+                &failure_definition,
+                &failure_environment,
+                &receipt,
+            );
             let canonical = receipt["content"].clone();
             let root = runtime.config.data_root.clone();
             let id = run.conversation_id.clone();
@@ -321,38 +432,63 @@ impl ToolRound<'_> {
             let stored_call = call.clone();
             let environment = canonical.get("executionEnvironment").cloned();
             let archived_value = canonical.clone();
-            let reference = if let Some(reference) = archived_reference.clone() { reference } else { tokio::task::spawn_blocking(move || {
-                data::save_tool_result(
-                    &root,
-                    &id,
-                    &request,
-                    &stored_call,
-                    &archived_value,
-                    environment.as_ref(),
-                )
-            })
-            .await
-            .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "工具回执保存失败。", 500))?? };
+            let reference = if let Some(reference) = archived_reference.clone() {
+                reference
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    data::save_tool_result(
+                        &root,
+                        &id,
+                        &request,
+                        &stored_call,
+                        &archived_value,
+                        environment.as_ref(),
+                    )
+                })
+                .await
+                .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "工具回执保存失败。", 500))??
+            };
             receipt["resultRef"] = reference.clone();
-            let mut completion_proof = super::super::completion_evidence::from_receipt(&call, &receipt);
-            // Batch calls settled on completion; settle only other dispatches here.
+            let mut completion_proof =
+                super::super::completion_evidence::from_receipt(&call, &receipt);
             // 批次调用完成时已结算，此处仅结算其他派发。
-            if operation_dispatched && archived_reference.is_none() && let Some(journal) = &run.journal {
-                gateway_tool_batch::finish_dispatch(journal, &operation_id, &receipt, &reference, name, tool_execution_ms)?;
+            if operation_dispatched
+                && archived_reference.is_none()
+                && let Some(journal) = &run.journal
+            {
+                gateway_tool_batch::finish_dispatch(
+                    journal,
+                    &operation_id,
+                    &receipt,
+                    &reference,
+                    name,
+                    tool_execution_ms,
+                )?;
             }
             if successful_completion_receipt(&receipt) {
                 if let Some(journal) = &run.journal {
-                    round_progress.evidence_changed |= state.documents.observe_output_version(journal, &canonical).await?;
+                    round_progress.evidence_changed |= state
+                        .documents
+                        .observe_output_version(journal, &canonical)
+                        .await?;
                 }
                 if name == "tool.search" && canonical["tools"].is_array() {
-                    if !state.completion.review_checkpoint.is_object() { state.completion.review_checkpoint = json!({}); }
-                    state.completion.review_checkpoint["executionCapabilities"] = json!(canonical["tools"].as_array().into_iter().flatten()
-                        .filter_map(|tool| tool["name"].as_str()).filter(|name| !matches!(*name,"tool.search" | "tool.load"))
-                        .take(6).collect::<Vec<_>>());
+                    if !state.completion.review_checkpoint.is_object() {
+                        state.completion.review_checkpoint = json!({});
+                    }
+                    state.completion.review_checkpoint["executionCapabilities"] = json!(
+                        canonical["tools"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|tool| tool["name"].as_str())
+                            .filter(|name| !matches!(*name, "tool.search" | "tool.load"))
+                            .take(6)
+                            .collect::<Vec<_>>()
+                    );
                 }
             }
             let source_metadata = crate::models::tool_context::source_metadata(&receipt["content"]);
-            // Derive identity from full native text/structuredContent, not shortened projections.
             // 按完整原生 text/structuredContent 判定身份，不受展示缩短影响。
             if let Ok(observation) = crate::tools::observations::calculate(
                 "observations.source",
@@ -369,9 +505,15 @@ impl ToolRound<'_> {
             }
             if matches!(
                 name,
-                "filesystem.read" | "document.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
-            ) || name == "attachment.read" && successful_completion_receipt(&receipt)
-                && super::super::task::attachment_read_has_content(&canonical) {
+                "filesystem.read"
+                    | "document.read"
+                    | "knowledge.read"
+                    | "web.fetch"
+                    | "tool.result.read"
+            ) || name == "attachment.read"
+                && successful_completion_receipt(&receipt)
+                && super::super::task::attachment_read_has_content(&canonical)
+            {
                 round_progress.source_reads += 1;
                 if receipt["isError"] != true
                     && receipt["status"] == "completed"
@@ -421,27 +563,32 @@ impl ToolRound<'_> {
                             })
                 })
             {
-                let summary = state.context.history_sources.iter().rev().find_map(|source| {
-                    let summary = &source["checkpointSemanticSummary"];
-                    (summary["archive"]["verified"] == true
-                        && summary["archive"]["resultRef"] == source_metadata["resultRef"])
-                        .then_some(summary)
-                });
+                let summary = state
+                    .context
+                    .history_sources
+                    .iter()
+                    .rev()
+                    .find_map(|source| {
+                        let summary = &source["checkpointSemanticSummary"];
+                        (summary["archive"]["verified"] == true
+                            && summary["archive"]["resultRef"] == source_metadata["resultRef"])
+                            .then_some(summary)
+                    });
                 receipt["content"] =
                     repeated_read_projection(&canonical, &reference, None, summary);
             }
             if name == "task.document" && receipt["content"]["informationAdded"] == true {
                 round_progress.artifact_updated = true;
             }
-            // Sidecars retain the archived source identity even when repeated projections shrink.
             // 重复投影缩短时，侧车仍保留真实归档来源身份。
             state.context.result_sources.push(json!({"callId":call["id"],"name":call["name"],"arguments":call["arguments"],"sourceMetadata":source_metadata,"originalResultRef":if call["name"]=="tool.result.read" {source_metadata["resultRef"].clone()} else {Value::Null},"observation":is_observation,"executed":receipt["executed"]!=false,"originalExcerpt":crate::models::tool_context::source_excerpt(&canonical,512),"round":round,"status":receipt["status"],"resultRef":reference,"archiveOwner":{"requestId":run.request_id,"toolCallId":call["id"],"toolName":call["name"]}}));
             let _=state.tools.effects.apply("effects.observe",&json!({"call":call,"result":receipt,"observation":is_observation,"workspaceRoot":version_context.workdir}));
             if is_observation && receipt["isError"] != true {
-                let records = native(state.tools.effects.apply("effects.state", &json!({})))?["unknown"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let records =
+                    native(state.tools.effects.apply("effects.state", &json!({})))?["unknown"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
                 let mut proofs = tools::verify_unknown_effects(
                     &ctx,
                     &records,
@@ -488,13 +635,14 @@ impl ToolRound<'_> {
                     }
                 }
                 if !proofs.is_empty() {
-                    let _ = state.tools.effects
+                    let _ = state
+                        .tools
+                        .effects
                         .apply("effects.resolve", &json!({"proofs":proofs}));
                 }
             }
             let _=state.progress.apply("progress.recordTool",&json!({"id":call["id"],"round":round,"durationMs":tool_start.elapsed().as_millis() as u64,"approvalMs":0,"reused":receipt["reused"]==true,"dispatched":receipt["executed"]!=false}));
             let after_version = if track_version && !before_version.is_null() {
-                // Keep execution receipts when verification fails or is cancelled; retain unknown verification state.
                 // 核验失败或取消时保留执行回执，核验状态保持未知。
                 match tools::capture_code_version(&version_context).await {
                     Ok(snapshot) => snapshot,
@@ -507,23 +655,36 @@ impl ToolRound<'_> {
                 Value::Null
             };
             if operation_dispatched && !is_observation {
-                round_progress.artifact_updated |= super::super::gateway_tool_execution::artifact_version_changed(
-                    call, &receipt, &before_version, &after_version);
+                round_progress.artifact_updated |=
+                    super::super::gateway_tool_execution::artifact_version_changed(
+                        call,
+                        &receipt,
+                        &before_version,
+                        &after_version,
+                    );
             }
-            // Compute completion coverage from settled originals, not shortened read projections.
             // 完成覆盖按已结算原文计算，不用缩短的读取投影。
             let acceptance_scope = if super::super::progress::validation_call(call) {
                 let mut records = completion_review(state).records;
                 records.push(completion_proof.clone());
                 super::super::completion_evidence::validation_scope(
-                    &state.completion.acceptance_requirements, &records,
-                ).checkpoint()
-            } else { Value::Null };
+                    &state.completion.acceptance_requirements,
+                    &records,
+                )
+                .checkpoint()
+            } else {
+                Value::Null
+            };
             let _=state.progress.apply("progress.observeOutcome",&json!({"call":call,"result":receipt,"canonicalResult":canonical,"beforeVersion":before_version,"afterVersion":after_version,
                 "validationScope":{"cwd":version_context.workdir,"acceptanceScope":acceptance_scope}}));
-            if completion_proof.is_object() && super::super::progress::validation_call(&call)
-                && let Some(validation) = state.progress.verification()["receipts"].as_array().into_iter().flatten()
-                    .find(|validation| validation["toolCallId"] == call["id"]) {
+            if completion_proof.is_object()
+                && super::super::progress::validation_call(&call)
+                && let Some(validation) = state.progress.verification()["receipts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|validation| validation["toolCallId"] == call["id"])
+            {
                 completion_proof["validation"] = validation.clone();
             }
             let public = data::public_tool_result(
@@ -573,8 +734,10 @@ impl ToolRound<'_> {
                 ));
                 rebound.config["activeRequestId"] = json!(run.request_id);
                 rebound.config["activeAssistantMessageId"] = state.assistant["Id"].clone();
-                rebound.config["operationNamespace"] = state.assistant["OperationNamespace"].clone();
-                rebound.config["renewOperationalExecutionBudget"] = ctx.config["renewOperationalExecutionBudget"].clone();
+                rebound.config["operationNamespace"] =
+                    state.assistant["OperationNamespace"].clone();
+                rebound.config["renewOperationalExecutionBudget"] =
+                    ctx.config["renewOperationalExecutionBudget"].clone();
                 rebound.config["nativeCancellationId"] = json!(run.cancellation_key);
                 *ctx = rebound;
                 state.broker_note(&format!("Broker: the formal work binding now resolves relative files within {}. This is the current authorized work scope; unrelated formal/private stores remain protected.",ctx.workdir.to_string_lossy()));
@@ -582,9 +745,12 @@ impl ToolRound<'_> {
             if name == "tool.load" {
                 select_loaded_tools(&mut state, &receipt["content"], &call["arguments"]["names"]);
             }
-            super::super::task::settle_unexecuted_tool_intent(&mut state.completion.review_checkpoint, name, &receipt);
+            super::super::task::settle_unexecuted_tool_intent(
+                &mut state.completion.review_checkpoint,
+                name,
+                &receipt,
+            );
             if name == "tool.search" && receipt["isError"] != true {
-                // Prefer already loaded matches without loading new tools or granting permissions.
                 // 优先保留已加载匹配项，不新增加载或授权。
                 if let Some(index) = receipt["content"]["tools"]
                     .as_array()
@@ -596,16 +762,20 @@ impl ToolRound<'_> {
                             .any(|tool| tool["name"] == candidate["name"])
                     })
                     .find_map(|candidate| {
-                        state.tools.selected
+                        state
+                            .tools
+                            .selected
                             .iter()
                             .position(|tool| tool["name"] == candidate["name"])
                     })
                 {
                     let loaded = state.tools.selected.remove(index);
-                    state.tools.selected.insert(state.tools.selected.len().min(2), loaded);
+                    state
+                        .tools
+                        .selected
+                        .insert(state.tools.selected.len().min(2), loaded);
                 }
             }
-            // Archive full originals; assign short references only to selected evidence without shrinking candidates.
             // 归档保留全文，仅选中证据分配短引用，不缩小候选池。
             if ["knowledge.search", "knowledge.plan"].contains(&name) && receipt["isError"] != true
             {
@@ -623,22 +793,40 @@ impl ToolRound<'_> {
                 content.remove("fullText");
                 content.remove("_meta");
             }
-            let declared_read_only = ctx.runtime.schemas.read().await.iter().any(|descriptor|
-                descriptor["name"] == name && descriptor["annotations"]["readOnlyHint"] == true);
-            let scene_read_only = name.rsplit('.').next().is_some_and(|method|
-                matches!(method, "get_scene_info" | "get_object_info" | "list_scene_items" | "get_world_state_snapshot"));
-            let mutating = !is_observation && !declared_read_only && !scene_read_only && receipt["executed"] != false && receipt["reused"] != true && successful_completion_receipt(&receipt)
-                && !name.starts_with("task.") && !matches!(name, "tool.load" | "context.compact");
+            let declared_read_only = ctx.runtime.schemas.read().await.iter().any(|descriptor| {
+                descriptor["name"] == name && descriptor["annotations"]["readOnlyHint"] == true
+            });
+            let scene_read_only = name.rsplit('.').next().is_some_and(|method| {
+                matches!(
+                    method,
+                    "get_scene_info"
+                        | "get_object_info"
+                        | "list_scene_items"
+                        | "get_world_state_snapshot"
+                )
+            });
+            let mutating = !is_observation
+                && !declared_read_only
+                && !scene_read_only
+                && receipt["executed"] != false
+                && receipt["reused"] != true
+                && successful_completion_receipt(&receipt)
+                && !name.starts_with("task.")
+                && !matches!(name, "tool.load" | "context.compact");
             if mutating {
-                state.completion.mutation_sequence = state.completion.mutation_sequence.saturating_add(1);
+                state.completion.mutation_sequence =
+                    state.completion.mutation_sequence.saturating_add(1);
                 state.completion.acceptance_reviewed = false;
                 state.visual.visual_readback_delivered = false;
                 state.visual.pending_visual_readback = false;
                 state.visual.pending_visual_hashes.clear();
             }
-            if successful_completion_receipt(&receipt) && super::super::task::receipt_has_visual_observation(&receipt["content"]) {
+            if successful_completion_receipt(&receipt)
+                && super::super::task::receipt_has_visual_observation(&receipt["content"])
+            {
                 state.visual.pending_visual_readback = true;
-                state.visual.pending_visual_hashes = super::super::task::receipt_visual_hashes(&receipt["content"]);
+                state.visual.pending_visual_hashes =
+                    super::super::task::receipt_visual_hashes(&receipt["content"]);
             }
             if completion_proof.is_object() {
                 completion_proof["mutationSequence"] = json!(state.completion.mutation_sequence);
@@ -647,7 +835,9 @@ impl ToolRound<'_> {
             results.push(json!({"call":call,"result":receipt,"observation":is_observation,
                 "mutationSequence":state.completion.mutation_sequence,"completionProof":completion_proof}));
             if results.last().unwrap()["result"]["status"] == "unknown" {
-                let _ = state.tools.effects
+                let _ = state
+                    .tools
+                    .effects
                     .apply("effects.protect", &json!({"includeCurrent":true}));
             }
         }
@@ -666,14 +856,24 @@ impl ToolRound<'_> {
         round_progress.completed_source_count = analyzed_document_count(&state.documents);
         let previous_stagnation = state.work_progress.stagnant_rounds();
         let outcome = crate::orchestration::gateway_tool_execution::observe_progress_round(
-            &mut state.work_progress, &mut state.tools.observations, round_progress, &results,
+            &mut state.work_progress,
+            &mut state.tools.observations,
+            round_progress,
+            &results,
         )?;
         let work_plan = outcome.plan;
         let guard = outcome.observation;
-        let added = work_plan.no_progress_rounds.saturating_sub(previous_stagnation);
-        if added > 0 { let _ = state.progress.apply("progress.noProgress", &json!({"count":added})); }
+        let added = work_plan
+            .no_progress_rounds
+            .saturating_sub(previous_stagnation);
+        if added > 0 {
+            let _ = state
+                .progress
+                .apply("progress.noProgress", &json!({"count":added}));
+        }
         if stopped.is_none() {
-            stopped = crate::orchestration::gateway_tool_execution::progress_interruption(&work_plan);
+            stopped =
+                crate::orchestration::gateway_tool_execution::progress_interruption(&work_plan);
         }
         if work_plan.correction_due {
             state.broker_note(&format!("Work stalled: {}. Use saved analyses to produce the requested artifact; stop repeating directory or capability listings. Read only a specific missing saved fact. Report the actual output and remaining gap.",serde_json::to_value(&work_plan).unwrap_or(Value::Null)));
@@ -683,7 +883,9 @@ impl ToolRound<'_> {
             .is_none_or(|entries| entries.is_empty())
         {
             if let Some(tool) = all.iter().find(|tool| tool["name"] == "task.document") {
-                if !state.tools.selected
+                if !state
+                    .tools
+                    .selected
                     .iter()
                     .any(|selected| selected["name"] == "task.document")
                 {
@@ -696,7 +898,6 @@ impl ToolRound<'_> {
             refresh_document_navigation(&mut state);
         }
         if guard["warning"] == true || guard["finalize"] == true {
-            // Keep corrective guidance through compaction without appending permanent user turns.
             // 压缩后保留纠偏指导，不不断追加永久用户轮次。
             if !system.contains(REPEATED_READ_GUIDANCE) {
                 system.push_str(REPEATED_READ_GUIDANCE);
@@ -704,6 +905,9 @@ impl ToolRound<'_> {
         }
         state.save(&runtime, &run, "streaming", None).await?;
 
-        Ok(ToolRoundOutcome { stopped, review_invalidated })
+        Ok(ToolRoundOutcome {
+            stopped,
+            review_invalidated,
+        })
     }
 }

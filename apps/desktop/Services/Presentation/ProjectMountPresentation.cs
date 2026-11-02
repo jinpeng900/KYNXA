@@ -3,7 +3,6 @@ using KYNXA_Desktop.Models.UI;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Pure display projection: legacy app-managed directories are not external mounts.
 /// 纯展示投影；旧版应用托管目录不算用户挂载的外部文件夹。
 /// </summary>
 public static class ProjectMountPresentation

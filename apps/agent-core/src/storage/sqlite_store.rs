@@ -18,18 +18,20 @@ pub fn failure(error: impl std::fmt::Display) -> ContractError {
 
 pub fn sql_failure(error: rusqlite::Error) -> ContractError {
     if matches!(&error, rusqlite::Error::SqliteFailure(details, _)
-        if details.code == rusqlite::ErrorCode::OperationInterrupted) {
+        if details.code == rusqlite::ErrorCode::OperationInterrupted)
+    {
         return match cancelled() {
             Err(cancelled) => cancelled,
             Ok(()) => ContractError::new(
                 "SQLite execution deadline reached; the transaction did not complete. / SQLite 执行期限已到，事务未完成。",
-                "RETRIEVAL_SEARCH_TIMEOUT", 504),
+                "RETRIEVAL_SEARCH_TIMEOUT",
+                504,
+            ),
         };
     }
     failure(error)
 }
 
-/// Upgrade relational constraints in one transaction, preserving rows, column order, indexes and triggers.
 /// 在同一事务中升级关系约束，保留全部记录、列序、索引与触发器；旧记录不合格时回滚，不删数据。
 pub(crate) fn migrate_integrity(
     connection: &Connection,
@@ -37,52 +39,126 @@ pub(crate) fn migrate_integrity(
     tables: &[(&str, &str)],
     preflight: &[&str],
 ) -> Result<(), ContractError> {
-    let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(failure)?;
-    if current >= target_version { return Ok(()); }
-    let rejected = |message: &str| ContractError::new(
-        format!("Integrity migration requires review; original records are preserved. / 完整性迁移需核对旧记录，原数据已保留：{message}"),
-        "STORAGE_INTEGRITY_MIGRATION_REQUIRED", 409);
-    if !connection.is_autocommit() { return Err(rejected("an existing transaction is active")); }
-    let foreign_keys: i64 = connection.query_row("PRAGMA foreign_keys", [], |row|row.get(0)).map_err(failure)?;
-    let legacy_alter: i64 = connection.query_row("PRAGMA legacy_alter_table", [], |row|row.get(0)).map_err(failure)?;
-    if let Err(error) = connection.execute_batch("PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON;BEGIN IMMEDIATE") {
-        let _ = connection.execute_batch(&format!("PRAGMA foreign_keys={foreign_keys};PRAGMA legacy_alter_table={legacy_alter}"));
+    let current: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(failure)?;
+    if current >= target_version {
+        return Ok(());
+    }
+    let rejected = |message: &str| {
+        ContractError::new(
+            format!(
+                "Integrity migration requires review; original records are preserved. / 完整性迁移需核对旧记录，原数据已保留：{message}"
+            ),
+            "STORAGE_INTEGRITY_MIGRATION_REQUIRED",
+            409,
+        )
+    };
+    if !connection.is_autocommit() {
+        return Err(rejected("an existing transaction is active"));
+    }
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .map_err(failure)?;
+    let legacy_alter: i64 = connection
+        .query_row("PRAGMA legacy_alter_table", [], |row| row.get(0))
+        .map_err(failure)?;
+    if let Err(error) = connection
+        .execute_batch("PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON;BEGIN IMMEDIATE")
+    {
+        let _ = connection.execute_batch(&format!(
+            "PRAGMA foreign_keys={foreign_keys};PRAGMA legacy_alter_table={legacy_alter}"
+        ));
         return Err(failure(error));
     }
     let result = (|| {
-        let locked_version:i64 = connection.query_row("PRAGMA user_version", [], |row|row.get(0)).map_err(failure)?;
+        let locked_version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(failure)?;
         if locked_version >= target_version {
             connection.execute_batch("COMMIT").map_err(failure)?;
             return Ok(());
         }
         for query in preflight {
-            let invalid: bool = connection.query_row(query, [], |row| row.get(0)).map_err(failure)?;
-            if invalid { return Err(rejected(query)); }
+            let invalid: bool = connection
+                .query_row(query, [], |row| row.get(0))
+                .map_err(failure)?;
+            if invalid {
+                return Err(rejected(query));
+            }
         }
-        let invalid_foreign_key: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)", [], |row|row.get(0)).map_err(failure)?;
-        if invalid_foreign_key { return Err(rejected("foreign-key ownership mismatch")); }
+        let invalid_foreign_key: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if invalid_foreign_key {
+            return Err(rejected("foreign-key ownership mismatch"));
+        }
         let primary_key = regex::Regex::new(r"(?i)\bTEXT\s+PRIMARY\s+KEY\b").unwrap();
         let mut rebuilt = Vec::new();
         let mut ancillary = Vec::new();
         for (table, constraints) in tables {
-            let mut statement = connection.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").map_err(failure)?;
-            let sql = statement.query_map([table], |row| row.get::<_,String>(0)).map_err(failure)?.next().transpose().map_err(failure)?;
-            let Some(sql) = sql else { continue; };
+            let mut statement = connection
+                .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?")
+                .map_err(failure)?;
+            let sql = statement
+                .query_map([table], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .next()
+                .transpose()
+                .map_err(failure)?;
+            let Some(sql) = sql else {
+                continue;
+            };
             drop(statement);
-            let null_primary: bool = connection.query_row(&format!(
-                "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE {})",
-                rows(connection, &format!("PRAGMA table_info(\"{table}\")"), vec![])?.iter()
-                    .filter(|column| column["pk"].as_i64().unwrap_or(0)>0)
-                    .map(|column| format!("\"{}\" IS NULL", column["name"].as_str().unwrap_or("").replace('"', "\"\"")))
-                    .collect::<Vec<_>>().join(" OR ")
-            ), [], |row|row.get(0)).map_err(failure)?;
-            if null_primary { return Err(rejected(&format!("{table}: null primary key"))); }
-            let saved = rows(connection,"SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",vec![sql_text(*table)])?;
-            ancillary.extend(saved.into_iter().filter_map(|row|row["sql"].as_str().map(str::to_owned)));
-            let opening = sql.find('(').ok_or_else(||rejected("table definition is invalid"))?;
-            let mut definition = primary_key.replace_all(&sql[opening..], "TEXT NOT NULL PRIMARY KEY").into_owned();
+            let null_primary: bool = connection
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE {})",
+                        rows(
+                            connection,
+                            &format!("PRAGMA table_info(\"{table}\")"),
+                            vec![]
+                        )?
+                        .iter()
+                        .filter(|column| column["pk"].as_i64().unwrap_or(0) > 0)
+                        .map(|column| format!(
+                            "\"{}\" IS NULL",
+                            column["name"].as_str().unwrap_or("").replace('"', "\"\"")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(failure)?;
+            if null_primary {
+                return Err(rejected(&format!("{table}: null primary key")));
+            }
+            let saved = rows(
+                connection,
+                "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",
+                vec![sql_text(*table)],
+            )?;
+            ancillary.extend(
+                saved
+                    .into_iter()
+                    .filter_map(|row| row["sql"].as_str().map(str::to_owned)),
+            );
+            let opening = sql
+                .find('(')
+                .ok_or_else(|| rejected("table definition is invalid"))?;
+            let mut definition = primary_key
+                .replace_all(&sql[opening..], "TEXT NOT NULL PRIMARY KEY")
+                .into_owned();
             if !constraints.is_empty() {
-                let closing = definition.rfind(')').ok_or_else(||rejected("table definition is invalid"))?;
+                let closing = definition
+                    .rfind(')')
+                    .ok_or_else(|| rejected("table definition is invalid"))?;
                 definition.insert_str(closing, &format!(", {constraints}"));
             }
             let temporary = format!("__kynxa_integrity_{table}");
@@ -90,16 +166,44 @@ pub(crate) fn migrate_integrity(
                 .map_err(|error|rejected(&error.to_string()))?;
             rebuilt.push((*table, temporary));
         }
-        for (table, _) in &rebuilt { connection.execute_batch(&format!("DROP TABLE \"{table}\";")).map_err(failure)?; }
-        for (table, temporary) in &rebuilt { connection.execute_batch(&format!("ALTER TABLE \"{temporary}\" RENAME TO \"{table}\";")).map_err(failure)?; }
-        for sql in ancillary { connection.execute_batch(&sql).map_err(failure)?; }
-        let invalid_foreign_key: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)", [], |row|row.get(0)).map_err(failure)?;
-        if invalid_foreign_key { return Err(rejected("migrated foreign-key ownership mismatch")); }
-        connection.execute_batch(&format!("PRAGMA user_version={target_version};COMMIT")).map_err(failure)?;
+        for (table, _) in &rebuilt {
+            connection
+                .execute_batch(&format!("DROP TABLE \"{table}\";"))
+                .map_err(failure)?;
+        }
+        for (table, temporary) in &rebuilt {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE \"{temporary}\" RENAME TO \"{table}\";"
+                ))
+                .map_err(failure)?;
+        }
+        for sql in ancillary {
+            connection.execute_batch(&sql).map_err(failure)?;
+        }
+        let invalid_foreign_key: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if invalid_foreign_key {
+            return Err(rejected("migrated foreign-key ownership mismatch"));
+        }
+        connection
+            .execute_batch(&format!("PRAGMA user_version={target_version};COMMIT"))
+            .map_err(failure)?;
         Ok(())
     })();
-    if result.is_err() { let _ = connection.execute_batch("ROLLBACK"); }
-    connection.execute_batch(&format!("PRAGMA foreign_keys={foreign_keys};PRAGMA legacy_alter_table={legacy_alter}")).map_err(failure)?;
+    if result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK");
+    }
+    connection
+        .execute_batch(&format!(
+            "PRAGMA foreign_keys={foreign_keys};PRAGMA legacy_alter_table={legacy_alter}"
+        ))
+        .map_err(failure)?;
     result
 }
 pub fn cancelled() -> Result<(), ContractError> {
@@ -124,7 +228,6 @@ pub fn inspect_path(
     })
 }
 
-/// A closing SQLite connection may unlink WAL/SHM between metadata and handle inspection.
 /// SQLite 连接关闭可能在元信息与句柄检查之间移除并重建 WAL/SHM；有界重试仍执行完整路径及链接核验。
 pub(crate) fn inspect_sidecar(root: &Path, path: &Path) -> Result<bool, ContractError> {
     let mut previous = None;
@@ -248,7 +351,9 @@ pub fn open(root: &Path, path: &Path, create: bool) -> Result<Connection, Contra
     connection
         .progress_handler(
             256,
-            Some(move || cancellation::is_cancelled() || started.elapsed() >= Duration::from_secs(120)),
+            Some(move || {
+                cancellation::is_cancelled() || started.elapsed() >= Duration::from_secs(120)
+            }),
         )
         .map_err(failure)?;
     Ok(connection)
@@ -337,17 +442,21 @@ pub fn finish(connection: &Connection, result: super::ContractResult) -> super::
 }
 
 fn rollback_failure(connection: &Connection, original: ContractError) -> ContractError {
-    // SQLITE_INTERRUPT and conflict policies can already roll back the transaction.
     // SQLITE_INTERRUPT 及冲突策略可能已自动回滚，不能再用二次回滚错误覆盖原始失败。
-    if connection.is_autocommit() { return original; }
-    // Cleanup must bypass the expired request callback; it never authorizes a late commit.
+    if connection.is_autocommit() {
+        return original;
+    }
     // 清理须绕过过期请求回调，只执行回滚，不允许超时后补提交。
-    let cleanup = connection.progress_handler(0, None::<fn() -> bool>)
+    let cleanup = connection
+        .progress_handler(0, None::<fn() -> bool>)
         .and_then(|_| connection.execute_batch("ROLLBACK"));
     if cleanup.is_err() && !connection.is_autocommit() {
-        // The lease independently discards a handle whose transaction cannot be cleaned.
         // 租约会另行丢弃无法清理事务的句柄；此处保留原错误类别并补清理诊断。
-        return ContractError::new(format!("{} / SQLite rollback cleanup failed.", original.message), original.code, original.status_code);
+        return ContractError::new(
+            format!("{} / SQLite rollback cleanup failed.", original.message),
+            original.code,
+            original.status_code,
+        );
     }
     original
 }
@@ -360,28 +469,56 @@ mod tests {
     fn already_rolled_back_transaction_preserves_the_original_constraint_failure() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch("CREATE TABLE sample(value INTEGER UNIQUE); BEGIN IMMEDIATE; INSERT INTO sample VALUES(1);").unwrap();
-        let error = sql_execute(&connection, "INSERT OR ROLLBACK INTO sample VALUES(1)", vec![]).unwrap_err();
+        let error = sql_execute(
+            &connection,
+            "INSERT OR ROLLBACK INTO sample VALUES(1)",
+            vec![],
+        )
+        .unwrap_err();
         let message = error.message().to_owned();
-        assert!(connection.is_autocommit(), "SQLite already rolled back this failed statement's transaction.");
+        assert!(
+            connection.is_autocommit(),
+            "SQLite already rolled back this failed statement's transaction."
+        );
         let error = finish(&connection, Err(error)).unwrap_err();
         assert_eq!(error.code(), "RETRIEVAL_INDEX_FAILED");
         assert_eq!(error.message(), message);
-        assert_eq!(connection.query_row("SELECT count(*) FROM sample", [], |row|row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM sample", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
     fn interrupted_write_keeps_timeout_classification_and_rolls_back_prior_changes() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(1); BEGIN IMMEDIATE; INSERT INTO sample VALUES(2);").unwrap();
-        connection.progress_handler(256, Some(||true)).unwrap();
-        let result = sql_execute(&connection,
-            "WITH RECURSIVE spin(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM spin WHERE x<1000000) INSERT INTO sample SELECT x FROM spin", vec![]);
-        assert_eq!(result.as_ref().unwrap_err().code(), "RETRIEVAL_SEARCH_TIMEOUT");
-        let error = finish(&connection, result.map(|_|Value::Null)).unwrap_err();
+        connection.progress_handler(256, Some(|| true)).unwrap();
+        let result = sql_execute(
+            &connection,
+            "WITH RECURSIVE spin(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM spin WHERE x<1000000) INSERT INTO sample SELECT x FROM spin",
+            vec![],
+        );
+        assert_eq!(
+            result.as_ref().unwrap_err().code(),
+            "RETRIEVAL_SEARCH_TIMEOUT"
+        );
+        let error = finish(&connection, result.map(|_| Value::Null)).unwrap_err();
         assert_eq!(error.code(), "RETRIEVAL_SEARCH_TIMEOUT");
         assert!(connection.is_autocommit());
-        connection.progress_handler(0, None::<fn()->bool>).unwrap();
-        assert_eq!(connection.query_row("SELECT count(*) FROM sample", [], |row|row.get::<_,i64>(0)).unwrap(), 1);
+        connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM sample", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -391,6 +528,12 @@ mod tests {
         let error = finish(&connection, Ok(json!({"pending":true}))).unwrap_err();
         assert_eq!(error.code(), "RETRIEVAL_INDEX_FAILED");
         assert!(connection.is_autocommit());
-        assert_eq!(connection.query_row("SELECT count(*) FROM children", [], |row|row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM children", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }

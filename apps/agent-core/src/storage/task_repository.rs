@@ -1,18 +1,17 @@
-//! Transactional task tree and recovery references owned by the Rust gateway.
 //! Rust 网关拥有事务化任务树；执行者更换不改变任务身份，派发未知不能被续接当作未执行。
 
 #[path = "task_repository_cleanup.rs"]
 mod cleanup;
 #[path = "task_repository_contracts.rs"]
 mod contracts;
-#[path = "task_repository_experiences.rs"]
-mod verified_experiences;
-#[path = "task_repository_schema.rs"]
-mod schema;
 #[path = "task_event_codec.rs"]
 mod event_codec;
+#[path = "task_repository_schema.rs"]
+mod schema;
 #[path = "task_stream_projection.rs"]
 mod stream_projection;
+#[path = "task_repository_experiences.rs"]
+mod verified_experiences;
 pub use cleanup::{TaskCleanupFile, TaskCleanupPlan};
 pub use contracts::*;
 
@@ -122,13 +121,22 @@ fn row_task(connection: &Connection, task_id: &str) -> Result<TaskRecord> {
         ContractError::new("Task was not found. / 任务不存在。", "TASK_NOT_FOUND", 404)
     })?)
 }
-fn steering_roots(connection: &Connection, conversation_id: &str, message_id: &str) -> Result<Vec<String>> {
+fn steering_roots(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<Vec<String>> {
     let mut query = connection.prepare_cached(
         "SELECT t.task_id FROM tasks t JOIN task_events e ON e.task_id=t.task_id WHERE t.conversation_id=? AND t.parent_task_id IS NULL AND e.event_id=? ORDER BY t.task_id",
     ).map_err(|_| failure())?;
-    let rows = query.query_map(params![conversation_id, format!("steer:{message_id}")], |row| row.get::<_, String>(0))
+    let rows = query
+        .query_map(
+            params![conversation_id, format!("steer:{message_id}")],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(|_| failure())?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|_| failure())
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| failure())
 }
 fn save_task(connection: &Connection, task: &mut TaskRecord) -> Result<()> {
     task.updated_at_ms = now_ms();
@@ -170,7 +178,6 @@ fn verify_fence(
     if lease.is_none_or(|(ended, expires)| ended != 0 || expires <= now_ms()) {
         return Err(stale());
     }
-    // Cancellation blocks new work while keeping an already dispatched receipt observable.
     // 取消阻止后续工作，但仍允许当前尝试记录已经派发操作的真实回执。
     if !allow_controlled_receipt && (task.state.is_terminal() || task.state == TaskState::Paused) {
         return Err(blocked("Task is paused or ended. / 任务已暂停或结束。"));
@@ -229,18 +236,28 @@ fn extend_budget(
 ) -> Result<()> {
     let previous = task.budget.clone();
     task.budget.max_model_requests = task.budget.max_model_requests.max(min_model_requests);
-    // None already means unlimited; renewal cannot introduce a cap or alter token limits.
     // None 已表示不限时；续展不能新增时限，也不修改 token 上限。
-    task.budget.max_execution_ms = task.budget.max_execution_ms.map(|limit|limit.max(min_execution_ms));
-    if task.budget == previous { return Ok(()); }
+    task.budget.max_execution_ms = task
+        .budget
+        .max_execution_ms
+        .map(|limit| limit.max(min_execution_ms));
+    if task.budget == previous {
+        return Ok(());
+    }
     task.version += 1;
     let event_id = format!("budget:{attempt_id}:{}", task.version);
-    let payload = json!({"previous":previous,"budget":task.budget,"reason":reason,"attemptId":attempt_id});
-    append(connection, task, &event_id, "task.budget.extended", &payload)?;
+    let payload =
+        json!({"previous":previous,"budget":task.budget,"reason":reason,"attemptId":attempt_id});
+    append(
+        connection,
+        task,
+        &event_id,
+        "task.budget.extended",
+        &payload,
+    )?;
     Ok(())
 }
 
-/// Use GatewayConfig.data_root; do not hardcode paths or duplicate tool/body stores.
 /// 使用 GatewayConfig.data_root，不写死路径或另建工具正文存储。
 #[derive(Clone)]
 pub struct TaskRepository {
@@ -249,7 +266,6 @@ pub struct TaskRepository {
 }
 
 impl TaskRepository {
-    /// Validate ledgers without creating schemas or rewriting rows; preserve corrupt or future-version files.
     /// 核验账本不建表或改行，损坏及未来版本文件保留原样并报错。
     pub fn validate_existing(root: &Path) -> Result<()> {
         let path = root.join("Agent/tasks.sqlite");
@@ -315,22 +331,36 @@ impl TaskRepository {
             ));
         }
         if version == 1 {
-            super::sqlite_store::migrate_integrity(&connection, 2, &[
-                ("tasks", ""), ("task_dependencies", ""),
-                ("task_attempts", "UNIQUE(task_id,attempt_id)"),
-                ("task_events", ""),
-                ("task_operations", "FOREIGN KEY(task_id,attempt_id) REFERENCES task_attempts(task_id,attempt_id)"),
-                ("task_checkpoints", ""), ("task_artifacts", ""), ("task_usage", ""),
-                ("task_model_reservations", "FOREIGN KEY(task_id,attempt_id) REFERENCES task_attempts(task_id,attempt_id)"),
-                ("task_cleanup_plans", ""),
-            ], &[
-                "SELECT EXISTS(SELECT 1 FROM task_operations o LEFT JOIN task_attempts a ON a.attempt_id=o.attempt_id AND a.task_id=o.task_id WHERE a.attempt_id IS NULL)",
-                "SELECT EXISTS(SELECT 1 FROM task_model_reservations r LEFT JOIN task_attempts a ON a.attempt_id=r.attempt_id AND a.task_id=r.task_id WHERE a.attempt_id IS NULL)",
-                "SELECT EXISTS(SELECT 1 FROM tasks WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.taskId') IS NOT task_id OR json_extract(document,'$.state') IS NOT state OR json_extract(document,'$.version') IS NOT version OR json_extract(document,'$.executionVersion') IS NOT execution_version OR json_extract(document,'$.currentAttemptId') IS NOT current_attempt_id ELSE 1 END)",
-                "SELECT EXISTS(SELECT 1 FROM task_attempts WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.token.taskId') IS NOT task_id OR json_extract(document,'$.token.attemptId') IS NOT attempt_id OR json_extract(document,'$.token.executionVersion') IS NOT execution_version ELSE 1 END)",
-                "SELECT EXISTS(SELECT 1 FROM task_operations WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.taskId') IS NOT task_id OR json_extract(document,'$.attemptId') IS NOT attempt_id OR json_extract(document,'$.state') IS NOT state OR json_extract(document,'$.intent.effect') IS NOT effect ELSE 1 END)",
-                "SELECT EXISTS(SELECT 1 FROM task_model_reservations WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.taskId') IS NOT task_id OR json_extract(document,'$.attemptId') IS NOT attempt_id OR json_extract(document,'$.reservationId') IS NOT reservation_id OR json_extract(document,'$.state') IS NOT state ELSE 1 END)",
-            ])?;
+            super::sqlite_store::migrate_integrity(
+                &connection,
+                2,
+                &[
+                    ("tasks", ""),
+                    ("task_dependencies", ""),
+                    ("task_attempts", "UNIQUE(task_id,attempt_id)"),
+                    ("task_events", ""),
+                    (
+                        "task_operations",
+                        "FOREIGN KEY(task_id,attempt_id) REFERENCES task_attempts(task_id,attempt_id)",
+                    ),
+                    ("task_checkpoints", ""),
+                    ("task_artifacts", ""),
+                    ("task_usage", ""),
+                    (
+                        "task_model_reservations",
+                        "FOREIGN KEY(task_id,attempt_id) REFERENCES task_attempts(task_id,attempt_id)",
+                    ),
+                    ("task_cleanup_plans", ""),
+                ],
+                &[
+                    "SELECT EXISTS(SELECT 1 FROM task_operations o LEFT JOIN task_attempts a ON a.attempt_id=o.attempt_id AND a.task_id=o.task_id WHERE a.attempt_id IS NULL)",
+                    "SELECT EXISTS(SELECT 1 FROM task_model_reservations r LEFT JOIN task_attempts a ON a.attempt_id=r.attempt_id AND a.task_id=r.task_id WHERE a.attempt_id IS NULL)",
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.taskId') IS NOT task_id OR json_extract(document,'$.state') IS NOT state OR json_extract(document,'$.version') IS NOT version OR json_extract(document,'$.executionVersion') IS NOT execution_version OR json_extract(document,'$.currentAttemptId') IS NOT current_attempt_id ELSE 1 END)",
+                    "SELECT EXISTS(SELECT 1 FROM task_attempts WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.token.taskId') IS NOT task_id OR json_extract(document,'$.token.attemptId') IS NOT attempt_id OR json_extract(document,'$.token.executionVersion') IS NOT execution_version ELSE 1 END)",
+                    "SELECT EXISTS(SELECT 1 FROM task_operations WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.taskId') IS NOT task_id OR json_extract(document,'$.attemptId') IS NOT attempt_id OR json_extract(document,'$.state') IS NOT state OR json_extract(document,'$.intent.effect') IS NOT effect ELSE 1 END)",
+                    "SELECT EXISTS(SELECT 1 FROM task_model_reservations WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.taskId') IS NOT task_id OR json_extract(document,'$.attemptId') IS NOT attempt_id OR json_extract(document,'$.reservationId') IS NOT reservation_id OR json_extract(document,'$.state') IS NOT state ELSE 1 END)",
+                ],
+            )?;
         }
         connection
             .execute_batch(schema::SCHEMA)
@@ -363,7 +393,6 @@ impl TaskRepository {
         row_task(&connection, task_id)
     }
 
-    /// Let the owner name and list its existing task without changing execution or usage.
     /// 执行模型可为已有任务命名和展示，不改执行事实或用量。
     pub fn describe_task(
         &self,
@@ -491,7 +520,6 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
-    /// Read at most two paused roots in the exact chat/work scope to detect ambiguity.
     /// 在当前聊天和工作范围内最多查两个暂停根任务，足以识别歧义。
     pub fn paused_roots_for_conversation(
         &self,
@@ -515,7 +543,6 @@ impl TaskRepository {
             .collect()
     }
 
-    /// Read earlier roots newest-first, pinned to task creation time, to resolve continuation goals.
     /// 按新到旧读取先前根任务，固定于本任务创建时刻，用于恢复续作目标。
     pub fn previous_roots_for_conversation(
         &self,
@@ -529,15 +556,15 @@ impl TaskRepository {
             .prepare_cached("SELECT document FROM tasks WHERE conversation_id=?1 AND parent_task_id IS NULL AND json_extract(document,'$.createdAtMs')<?2 ORDER BY json_extract(document,'$.createdAtMs') DESC LIMIT ?3")
             .map_err(|_| failure())?;
         let rows = query
-            .query_map(params![conversation_id, before_created_ms, limit.min(16) as i64], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_map(
+                params![conversation_id, before_created_ms, limit.min(16) as i64],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|_| failure())?;
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
 
-    /// Recovery lists the exact chat's unfinished roots; display preferences do not hide recoverable work.
     /// 恢复列表限定当前聊天的未结束根任务，展示偏好不能隐藏可恢复工作。
     pub fn recoverable_roots_for_conversation(
         &self,
@@ -549,8 +576,19 @@ impl TaskRepository {
         identifier(conversation_id)?;
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         let mut query = connection.prepare_cached("SELECT document FROM tasks WHERE conversation_id=?1 AND project_id IS ?2 AND parent_task_id IS NULL AND state IN ('partial','paused','waiting-network','waiting-config','waiting-approval','waiting-verification','waiting-children') AND task_id>?3 ORDER BY task_id LIMIT ?4").map_err(|_| failure())?;
-        let rows = query.query_map(params![conversation_id, project_id, after_task_id.unwrap_or(""), limit.clamp(1, 256) as i64], |row| row.get::<_, String>(0)).map_err(|_| failure())?;
-        rows.map(|row| decode(row.map_err(|_| failure())?)).collect()
+        let rows = query
+            .query_map(
+                params![
+                    conversation_id,
+                    project_id,
+                    after_task_id.unwrap_or(""),
+                    limit.clamp(1, 256) as i64
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| failure())?;
+        rows.map(|row| decode(row.map_err(|_| failure())?))
+            .collect()
     }
     pub fn find_by_request_id(
         &self,
@@ -705,7 +743,6 @@ impl TaskRepository {
         })
     }
 
-    /// Expired ownership blocks internal writes but cannot prove external work stopped.
     /// 执行权过期阻止内部写入，不证明外部操作已停止，接管仍保留未知。
     pub fn start_attempt(
         &self,
@@ -714,10 +751,15 @@ impl TaskRepository {
         executor_id: &str,
         lease_ms: u64,
     ) -> Result<TaskAttempt> {
-        self.start_attempt_with_budget_extension(task_id, expected_version, executor_id, lease_ms, &[])
+        self.start_attempt_with_budget_extension(
+            task_id,
+            expected_version,
+            executor_id,
+            lease_ms,
+            &[],
+        )
     }
 
-    /// Renew proven implicit segments atomically with takeover; failed claims change no ancestor budget.
     /// 已确认的隐式执行段随接管原子续展，接管失败不能改变祖先预算。
     pub fn start_attempt_with_budget_extension(
         &self,
@@ -879,7 +921,6 @@ impl TaskRepository {
             let mut task=verify_fence(connection,token,false)?;
             if task.version!=expected_version {return Err(conflict("Task changed before transition. / 状态提交前任务已变化。"));}
             if state==TaskState::Completed {
-                // Historical uncertainty is not a global barrier; actual in-flight I/O must still settle.
                 // 历史未知不阻塞整个任务；真正仍在途的调用仍须先结算。
                 let inflight:bool=connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT EXISTS(SELECT 1 FROM task_operations o JOIN tree t ON o.task_id=t.id WHERE o.state='dispatched') OR EXISTS(SELECT 1 FROM task_model_reservations r JOIN tree t ON r.task_id=t.id WHERE r.state='reserved')", [&task.task_id], |row|row.get(0)).map_err(|_|failure())?;
                 if inflight { return Err(blocked("In-flight operations must settle before completion. / 在途操作须先结算再记录完成。")); }
@@ -908,7 +949,6 @@ impl TaskRepository {
             if replayed {return Ok(task);}
             if task.version!=expected_version {return Err(conflict("Task changed before user control. / 用户控制前任务已变化。"));}
             let resume_partial = control==TaskControl::Resume && task.state==TaskState::Partial;
-            // A user-requested revision reopens only this settled root; ordinary resume stays unchanged.
             // 用户明确要求修订时只重开已结算的原根任务，普通继续规则保持不变。
             let revise_root = control==TaskControl::Revise && task.parent_task_id.is_none()
                 && matches!(task.state,TaskState::Completed|TaskState::Partial);
@@ -941,13 +981,20 @@ impl TaskRepository {
         })
     }
 
-    /// Verify child settlement, version and outputs, then save parent acceptance in one transaction.
     /// 同一事务核对子任务结算、版本和产物，再保存父级验收。
-    pub fn accept_child_output(&self, parent_token: &AttemptToken, child_id: &str, expected_version: u64,
-        reason: &str, output_ref: &Value) -> Result<TaskRecord> {
+    pub fn accept_child_output(
+        &self,
+        parent_token: &AttemptToken,
+        child_id: &str,
+        expected_version: u64,
+        reason: &str,
+        output_ref: &Value,
+    ) -> Result<TaskRecord> {
         identifier(child_id)?;
-        if reason.trim().is_empty() || reason.chars().count()>2000 || !output_ref.is_object() {
-            return Err(invalid("Acceptance needs a reason and current output reference. / 接纳须提供原因与当前产物引用。"));
+        if reason.trim().is_empty() || reason.chars().count() > 2000 || !output_ref.is_object() {
+            return Err(invalid(
+                "Acceptance needs a reason and current output reference. / 接纳须提供原因与当前产物引用。",
+            ));
         }
         self.write(|connection| {
             let mut parent=verify_fence(connection,parent_token,false)?;
@@ -975,7 +1022,6 @@ impl TaskRepository {
         })
     }
 
-    /// Only the active direct parent may return current child output for revision; ordinary resume cannot.
     /// 仅活动直属父任务可退回当前子产物修订，普通恢复不具备此权限。
     pub fn request_child_revision(
         &self,
@@ -986,8 +1032,10 @@ impl TaskRepository {
         output_ref: &Value,
     ) -> Result<TaskRecord> {
         identifier(child_id)?;
-        if reason.trim().is_empty() || reason.chars().count()>2000 || !output_ref.is_object() {
-            return Err(invalid("Revision needs a reason and the reviewed output reference. / 退回须提供原因与被核对的产物引用。"));
+        if reason.trim().is_empty() || reason.chars().count() > 2000 || !output_ref.is_object() {
+            return Err(invalid(
+                "Revision needs a reason and the reviewed output reference. / 退回须提供原因与被核对的产物引用。",
+            ));
         }
         self.write(|connection| {
             let mut parent=verify_fence(connection,parent_token,false)?;
@@ -1040,7 +1088,6 @@ impl TaskRepository {
             append(connection, &mut task, event_id, kind, payload)
         })
     }
-    /// Steering uses formal messages without changing scope, goal or the active attempt.
     /// 插话引用正式消息，不改变范围、原目标或活动尝试。
     pub fn record_user_steering(
         &self,
@@ -1066,7 +1113,6 @@ impl TaskRepository {
                 if event.payload != payload { return Err(conflict("Steering identity was reused. / 插话身份不能复用于其他内容。")); }
                 return Ok(task);
             }
-            // Preserve legacy receipts, but never bind the same chat message to another root.
             // 保留旧回执；同一聊天的同条消息不得新增绑定到另一根任务。
             if !steering_roots(connection, &task.scope.conversation_id, message_id)?.is_empty() {
                 return Err(ContractError::new("Steering is already bound to another task. / 这条引导已关联其他任务，请重连原任务。", "TASK_STEERING_TARGET_CONFLICT", 409));
@@ -1079,7 +1125,6 @@ impl TaskRepository {
             if task.state == TaskState::Paused { task.stop_reason = Some(event_id.clone()); }
             append(connection, &mut task, &event_id, "task.user-steering", &payload)?;
             if action == "update" && task.state == TaskState::Paused {
-                // Plan changes retain old delegate receipts and cannot silently restart unknown effects.
                 // 方案变更保留旧委派回执，不能静默重启未知操作。
                 let mut query = connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;
                 let ids = query.query_map([task_id], |row|row.get::<_,String>(0)).map_err(|_|failure())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|_|failure())?;
@@ -1098,9 +1143,12 @@ impl TaskRepository {
             Ok(task)
         })
     }
-    /// Read immutable steering ownership before changing formal messages.
     /// 修改正式消息前查询原有引导归属，事务写入仍会再次核验。
-    pub fn user_steering_roots(&self, conversation_id: &str, message_id: &str) -> Result<Vec<String>> {
+    pub fn user_steering_roots(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<String>> {
         identifier(conversation_id)?;
         super::identity(&json!(message_id))?;
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
@@ -1150,41 +1198,79 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
-    /// Read committed display deltas after the message watermark without model settlement or tool replay.
     /// 从消息水位后读取已提交展示增量，不结算模型或重放工具。
-    pub fn stream_projection(&self, task_id: &str, request_id: &str, reply_id: &str, after_stream_sequence: u64) -> Result<Value> {
-        identifier(task_id)?; identifier(request_id)?; identifier(reply_id)?;
+    pub fn stream_projection(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        reply_id: &str,
+        after_stream_sequence: u64,
+    ) -> Result<Value> {
+        identifier(task_id)?;
+        identifier(request_id)?;
+        identifier(reply_id)?;
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         let task = row_task(&connection, task_id)?;
-        if task.request_id != request_id && !(task.parent_task_id.is_some() && task.task_id == request_id) {
-            return Err(invalid("Stream request does not belong to this task. / 流请求不属于本任务。"));
+        if task.request_id != request_id
+            && !(task.parent_task_id.is_some() && task.task_id == request_id)
+        {
+            return Err(invalid(
+                "Stream request does not belong to this task. / 流请求不属于本任务。",
+            ));
         }
-        let mut projection = stream_projection::StreamProjection::new(&task.scope.conversation_id, request_id, reply_id, after_stream_sequence);
+        let mut projection = stream_projection::StreamProjection::new(
+            &task.scope.conversation_id,
+            request_id,
+            reply_id,
+            after_stream_sequence,
+        );
         let mut query = connection.prepare_cached("SELECT document FROM task_events WHERE task_id=? AND json_extract(document,'$.kind') IN ('text_delta','reasoning_delta','assistant_segment','content_snapshot') ORDER BY sequence")
             .map_err(|_| failure())?;
-        let rows = query.query_map([task_id], |row| row.get::<_, String>(0)).map_err(|_| failure())?;
-        for row in rows { projection.observe(&decode::<TaskEvent>(row.map_err(|_| failure())?)?); }
+        let rows = query
+            .query_map([task_id], |row| row.get::<_, String>(0))
+            .map_err(|_| failure())?;
+        for row in rows {
+            projection.observe(&decode::<TaskEvent>(row.map_err(|_| failure())?)?);
+        }
         Ok(projection.finish())
     }
 
-    /// Page committed events by task keyset; callers verify pages and persist watermarks.
     /// 按任务键集分页读取已提交事件，调用方逐页核验并保存水位。
-    pub fn stream_projection_page(&self, task_id: &str, request_id: &str, reply_id: &str,
-        after_task_sequence: u64, through_task_sequence: Option<u64>, maximum_events: usize,
-        maximum_bytes: usize) -> Result<Value> {
-        identifier(task_id)?; identifier(request_id)?; identifier(reply_id)?;
-        let connection = sqlite_connections::acquire(&self.root,&self.path,30_000)?;
-        let task = row_task(&connection,task_id)?;
-        if task.request_id != request_id && !(task.parent_task_id.is_some() && task.task_id == request_id) {
-            return Err(invalid("Stream request does not belong to this task. / 流请求不属于本任务。"));
+    pub fn stream_projection_page(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        reply_id: &str,
+        after_task_sequence: u64,
+        through_task_sequence: Option<u64>,
+        maximum_events: usize,
+        maximum_bytes: usize,
+    ) -> Result<Value> {
+        identifier(task_id)?;
+        identifier(request_id)?;
+        identifier(reply_id)?;
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
+        let task = row_task(&connection, task_id)?;
+        if task.request_id != request_id
+            && !(task.parent_task_id.is_some() && task.task_id == request_id)
+        {
+            return Err(invalid(
+                "Stream request does not belong to this task. / 流请求不属于本任务。",
+            ));
         }
-        let horizon = through_task_sequence.unwrap_or(task.event_sequence).min(task.event_sequence);
-        let limit = maximum_events.clamp(1,512);
-        let byte_limit = maximum_bytes.clamp(1,8*1024*1024);
+        let horizon = through_task_sequence
+            .unwrap_or(task.event_sequence)
+            .min(task.event_sequence);
+        let limit = maximum_events.clamp(1, 512);
+        let byte_limit = maximum_bytes.clamp(1, 8 * 1024 * 1024);
         let mut query = connection.prepare_cached("SELECT sequence,document FROM task_events WHERE task_id=? AND sequence>? AND sequence<=? AND json_extract(document,'$.kind') IN ('text_delta','reasoning_delta','assistant_segment','content_snapshot') ORDER BY sequence LIMIT ?")
             .map_err(|_|failure())?;
-        let rows = query.query_map(params![task_id,after_task_sequence,horizon,(limit+1) as i64],
-            |row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?))).map_err(|_|failure())?;
+        let rows = query
+            .query_map(
+                params![task_id, after_task_sequence, horizon, (limit + 1) as i64],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|_| failure())?;
         let mut events = Vec::<TaskEvent>::new();
         let mut cursor = after_task_sequence;
         let mut bytes = 0usize;
@@ -1192,58 +1278,123 @@ impl TaskRepository {
         let mut has_more = false;
         let mut stream_sequence = 0u64;
         for row in rows {
-            let (sequence,document) = row.map_err(|_|failure())?;
-            if visited == limit {has_more=true;break;}
-            let event:TaskEvent = decode(document)?;
+            let (sequence, document) = row.map_err(|_| failure())?;
+            if visited == limit {
+                has_more = true;
+                break;
+            }
+            let event: TaskEvent = decode(document)?;
             let owned = event.payload["conversationId"] == task.scope.conversation_id
-                && event.payload["requestId"] == request_id && event.payload["replyMessageId"] == reply_id;
-            let size = if owned {raw(&event)?.len()} else {0};
-            // Return oversized events intact within the 64-KiB record cap; do not split UTF-8 or metadata.
+                && event.payload["requestId"] == request_id
+                && event.payload["replyMessageId"] == reply_id;
+            let size = if owned { raw(&event)?.len() } else { 0 };
             // 大事件在 64 KiB 记录限额内完整返回，不拆 UTF-8 或元数据。
-            if owned && !events.is_empty() && bytes.saturating_add(size)>byte_limit {has_more=true;break;}
-            visited+=1; cursor=sequence;
+            if owned && !events.is_empty() && bytes.saturating_add(size) > byte_limit {
+                has_more = true;
+                break;
+            }
+            visited += 1;
+            cursor = sequence;
             if owned {
-                stream_sequence=stream_sequence.max(event.payload["eventSequence"].as_u64().unwrap_or(0));
-                bytes=bytes.saturating_add(size); events.push(event);
+                stream_sequence =
+                    stream_sequence.max(event.payload["eventSequence"].as_u64().unwrap_or(0));
+                bytes = bytes.saturating_add(size);
+                events.push(event);
             }
         }
-        if !has_more {cursor=horizon.max(cursor);}
-        Ok(json!({"schemaVersion":1,"kind":"committed-stream-page","taskId":task_id,
+        if !has_more {
+            cursor = horizon.max(cursor);
+        }
+        Ok(
+            json!({"schemaVersion":1,"kind":"committed-stream-page","taskId":task_id,
             "conversationId":task.scope.conversation_id,"requestId":request_id,"replyMessageId":reply_id,
             "afterTaskSequence":after_task_sequence,"nextTaskSequence":cursor,"throughTaskSequence":horizon,
             "throughStreamSequence":stream_sequence,"hasMore":has_more,"events":events,
             "pageBytes":bytes,"maximumPageBytes":byte_limit,"indivisibleEventBytes":MAX_RECORD_BYTES,
-            "evidence":"committed-display-only; no execution or completion proof"}))
+            "evidence":"committed-display-only; no execution or completion proof"}),
+        )
     }
 
-    /// Publish restored pages only after prefix/overlap checks; cancellation or conflict preserves the watermark.
     /// 分页恢复须通过前缀及重叠核验，取消或冲突不推进水位。
-    pub fn recover_stream(&self, task_id:&str, request_id:&str, reply_id:&str, after_stream_sequence:u64,
-        baseline:Value, cancelled:impl FnMut()->bool) -> Result<Value> {
-        self.recover_stream_with_limits(task_id,request_id,reply_id,after_stream_sequence,baseline,256,1024*1024,cancelled)
+    pub fn recover_stream(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        reply_id: &str,
+        after_stream_sequence: u64,
+        baseline: Value,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Value> {
+        self.recover_stream_with_limits(
+            task_id,
+            request_id,
+            reply_id,
+            after_stream_sequence,
+            baseline,
+            256,
+            1024 * 1024,
+            cancelled,
+        )
     }
 
-    fn recover_stream_with_limits(&self, task_id:&str, request_id:&str, reply_id:&str, after_stream_sequence:u64,
-        baseline:Value, maximum_events:usize, maximum_bytes:usize, mut cancelled:impl FnMut()->bool) -> Result<Value> {
-        let mut recovery=stream_projection::StreamRecovery::new(baseline,after_stream_sequence);
-        if !recovery.complete() {return Ok(recovery.finish());}
-        let mut cursor=0u64;let mut horizon=None;let mut pages=0u64;
+    fn recover_stream_with_limits(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        reply_id: &str,
+        after_stream_sequence: u64,
+        baseline: Value,
+        maximum_events: usize,
+        maximum_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Value> {
+        let mut recovery = stream_projection::StreamRecovery::new(baseline, after_stream_sequence);
+        if !recovery.complete() {
+            return Ok(recovery.finish());
+        }
+        let mut cursor = 0u64;
+        let mut horizon = None;
+        let mut pages = 0u64;
         loop {
-            if cancelled() {return Ok(json!({"complete":false,"cancelled":true,"incompleteReasons":["recovery-cancelled"]}));}
-            let mut page=self.stream_projection_page(task_id,request_id,reply_id,cursor,horizon,maximum_events,maximum_bytes)?;
-            horizon=page["throughTaskSequence"].as_u64();pages=pages.saturating_add(1);
-            let events=page["events"].as_array_mut().map(std::mem::take).unwrap_or_default();
-            for event in events {
-                recovery.observe(&serde_json::from_value::<TaskEvent>(event).map_err(|_|failure())?);
-                if !recovery.complete() {return Ok(recovery.finish());}
+            if cancelled() {
+                return Ok(
+                    json!({"complete":false,"cancelled":true,"incompleteReasons":["recovery-cancelled"]}),
+                );
             }
-            let next=page["nextTaskSequence"].as_u64().ok_or_else(failure)?;
-            if page["hasMore"]!=true {
-                let mut result=recovery.finish();result["pageCount"]=json!(pages);
+            let mut page = self.stream_projection_page(
+                task_id,
+                request_id,
+                reply_id,
+                cursor,
+                horizon,
+                maximum_events,
+                maximum_bytes,
+            )?;
+            horizon = page["throughTaskSequence"].as_u64();
+            pages += 1;
+            let events = page["events"]
+                .as_array_mut()
+                .map(std::mem::take)
+                .unwrap_or_default();
+            for event in events {
+                recovery
+                    .observe(&serde_json::from_value::<TaskEvent>(event).map_err(|_| failure())?);
+                if !recovery.complete() {
+                    return Ok(recovery.finish());
+                }
+            }
+            let next = page["nextTaskSequence"].as_u64().ok_or_else(failure)?;
+            if page["hasMore"] != true {
+                let mut result = recovery.finish();
+                result["pageCount"] = json!(pages);
                 return Ok(result);
             }
-            if next<=cursor {return Err(invalid("Stream page made no keyset progress. / 流分页键集未推进。"));}
-            cursor=next;
+            if next <= cursor {
+                return Err(invalid(
+                    "Stream page made no keyset progress. / 流分页键集未推进。",
+                ));
+            }
+            cursor = next;
         }
     }
 
@@ -1257,7 +1408,6 @@ impl TaskRepository {
         find_operation(&connection, task_id, operation_id)
     }
 
-    /// Read the latest event of one kind without paging the full stream.
     /// 直接读取指定类型的最新事件，不分页遍历整段流。
     pub fn latest_event(&self, task_id: &str, kind: &str) -> Result<Option<TaskEvent>> {
         identifier(kind)?;
@@ -1275,14 +1425,16 @@ impl TaskRepository {
             .transpose()
     }
 
-    /// Read dispatch/receipt evidence without replaying token events.
     /// 仅查派发及回执证据，不重放 token 事件。
     pub fn recovery_receipts(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         row_task(&connection, task_id)?;
         let mut query = connection.prepare_cached("SELECT document FROM task_events WHERE task_id=? AND json_extract(document,'$.kind') IN ('task.model.receipt','task.operation.receipt','task.operation.dispatched','mcp_task_checkpoint') ORDER BY sequence").map_err(|_| failure())?;
-        let rows = query.query_map([task_id], |row| row.get::<_, String>(0)).map_err(|_| failure())?;
-        rows.map(|row| decode(row.map_err(|_| failure())?)).collect()
+        let rows = query
+            .query_map([task_id], |row| row.get::<_, String>(0))
+            .map_err(|_| failure())?;
+        rows.map(|row| decode(row.map_err(|_| failure())?))
+            .collect()
     }
     pub fn record_operation(
         &self,
@@ -1314,10 +1466,12 @@ impl TaskRepository {
     ) -> Result<TaskOperation> {
         self.dispatch_operation_with_ancestor_scope(token, operation_id, &Value::Null)
     }
-    /// Compare the caller's observed ancestor steering within the dispatch transaction.
     /// 派发事务内核对调用方已读取的祖先引导，刷新后的新限制不能被旧调用越过。
     pub fn dispatch_operation_with_ancestor_scope(
-        &self, token: &AttemptToken, operation_id: &str, observed_ancestors: &Value,
+        &self,
+        token: &AttemptToken,
+        operation_id: &str,
+        observed_ancestors: &Value,
     ) -> Result<TaskOperation> {
         self.write(|connection| {
             let mut task=verify_fence(connection,token,false)?;
@@ -1369,7 +1523,6 @@ impl TaskRepository {
             append(connection,&mut task,&uuid::Uuid::new_v4().to_string(),"task.operation.result",&json!({"operationId":operation_id,"state":operation.state,"resultReference":operation.result_reference,"verificationReference":operation.verification_reference}))?;Ok(operation)
         })
     }
-    /// Extend authorized operating segments monotonically; audit changes and preserve token/ancestor caps.
     /// 按授权单调扩展执行段并记审计，保留 token 及祖先上限。
     pub fn extend_operational_budget(
         &self,
@@ -1381,32 +1534,58 @@ impl TaskRepository {
         identifier(reason)?;
         self.write(|connection| {
             let mut task = verify_fence(connection, token, false)?;
-            extend_budget(connection, &mut task, u64::from(min_model_requests), min_execution_ms, reason, &token.attempt_id)?;
+            extend_budget(
+                connection,
+                &mut task,
+                u64::from(min_model_requests),
+                min_execution_ms,
+                reason,
+                &token.attempt_id,
+            )?;
             Ok(task)
         })
     }
 
-    /// Add only new effective wall time above the high-water mark, excluding parallel child totals.
     /// 仅累计高水位以上新增有效墙钟，不叠加并行子任务耗时。
-    pub fn record_active_duration(&self, token: &AttemptToken, cumulative_attempt_ms: u64) -> Result<TaskRecord> {
+    pub fn record_active_duration(
+        &self,
+        token: &AttemptToken,
+        cumulative_attempt_ms: u64,
+    ) -> Result<TaskRecord> {
         self.write(|connection| {
             let mut task = verify_fence(connection, token, true)?;
-            let document: String = connection.query_row("SELECT document FROM task_attempts WHERE attempt_id=?", [&token.attempt_id], |row| row.get(0))
+            let document: String = connection
+                .query_row(
+                    "SELECT document FROM task_attempts WHERE attempt_id=?",
+                    [&token.attempt_id],
+                    |row| row.get(0),
+                )
                 .map_err(|_| failure())?;
             let mut attempt: TaskAttempt = decode(document)?;
-            if cumulative_attempt_ms <= attempt.active_duration_ms && task.usage.active_duration_ms.is_some() {
+            if cumulative_attempt_ms <= attempt.active_duration_ms
+                && task.usage.active_duration_ms.is_some()
+            {
                 return Ok(task);
             }
             let delta = cumulative_attempt_ms.saturating_sub(attempt.active_duration_ms);
             attempt.active_duration_ms = attempt.active_duration_ms.max(cumulative_attempt_ms);
-            task.usage.active_duration_ms = Some(task.usage.active_duration_ms.unwrap_or(0).saturating_add(delta));
-            connection.execute("UPDATE task_attempts SET document=? WHERE attempt_id=?", params![raw(&attempt)?,token.attempt_id]).map_err(|_|failure())?;
+            task.usage.active_duration_ms = Some(
+                task.usage
+                    .active_duration_ms
+                    .unwrap_or(0)
+                    .saturating_add(delta),
+            );
+            connection
+                .execute(
+                    "UPDATE task_attempts SET document=? WHERE attempt_id=?",
+                    params![raw(&attempt)?, token.attempt_id],
+                )
+                .map_err(|_| failure())?;
             save_task(connection, &mut task)?;
             Ok(task)
         })
     }
 
-    /// Settle each usage ID once, including child failures/retries/compactions; track unknown tokens separately.
     /// 每个计量 ID 仅结算一次，含子任务失败、重试及压缩；未知 token 单独统计。
     pub fn record_usage(
         &self,
@@ -1415,7 +1594,8 @@ impl TaskRepository {
         delta: &TaskUsage,
     ) -> Result<TaskRecord> {
         identifier(usage_id)?;
-        if delta.active_duration_ms.is_some() || delta.failed_requests > delta.model_requests
+        if delta.active_duration_ms.is_some()
+            || delta.failed_requests > delta.model_requests
             || delta.unknown_token_requests > delta.model_requests
         {
             return Err(invalid(
@@ -1453,7 +1633,6 @@ impl TaskRepository {
             row_task(connection, &token.task_id)
         })
     }
-    /// Count dispatched requests and outstanding child reservations; recovery cannot reset the parent budget.
     /// 同时计入已派发请求与子任务未兑现预约，恢复不重置父预算。
     pub fn reserve_model_request(
         &self,
@@ -1484,14 +1663,29 @@ impl TaskRepository {
         self.settle_reservation(token, reservation_id, dispatched, usage, None, None)
     }
     pub fn settle_model_request_with_provider_usage(
-        &self, token: &AttemptToken, reservation_id: &str, dispatched: bool,
-        usage: &TaskUsage, provider_usage: Option<ProviderTokenUsage>,
+        &self,
+        token: &AttemptToken,
+        reservation_id: &str,
+        dispatched: bool,
+        usage: &TaskUsage,
+        provider_usage: Option<ProviderTokenUsage>,
     ) -> Result<ModelRequestReservation> {
-        self.settle_reservation(token, reservation_id, dispatched, usage, provider_usage, None)
+        self.settle_reservation(
+            token,
+            reservation_id,
+            dispatched,
+            usage,
+            provider_usage,
+            None,
+        )
     }
-    /// After model I/O ends without a durable receipt, retain unknown dispatch and cost.
     /// 模型 I/O 结束但回执未落盘时，派发及成本保持未知。
-    pub fn mark_model_request_unknown(&self, token: &AttemptToken, reservation_id: &str, reason: &str) -> Result<ModelRequestReservation> {
+    pub fn mark_model_request_unknown(
+        &self,
+        token: &AttemptToken,
+        reservation_id: &str,
+        reason: &str,
+    ) -> Result<ModelRequestReservation> {
         identifier(reservation_id)?;
         identifier(reason)?;
         self.write(|connection| {
@@ -1534,13 +1728,27 @@ impl TaskRepository {
         )
     }
     pub fn reconcile_model_request_with_provider_usage(
-        &self, token: &AttemptToken, reservation_id: &str, dispatched: bool,
-        usage: &TaskUsage, provider_usage: Option<ProviderTokenUsage>, verification_reference: Value,
+        &self,
+        token: &AttemptToken,
+        reservation_id: &str,
+        dispatched: bool,
+        usage: &TaskUsage,
+        provider_usage: Option<ProviderTokenUsage>,
+        verification_reference: Value,
     ) -> Result<ModelRequestReservation> {
         if !verification_reference.is_object() {
-            return Err(invalid("Unknown dispatch needs a verified original reference. / 未知派发须提供已核验的原文引用。"));
+            return Err(invalid(
+                "Unknown dispatch needs a verified original reference. / 未知派发须提供已核验的原文引用。",
+            ));
         }
-        self.settle_reservation(token, reservation_id, dispatched, usage, provider_usage, Some(verification_reference))
+        self.settle_reservation(
+            token,
+            reservation_id,
+            dispatched,
+            usage,
+            provider_usage,
+            Some(verification_reference),
+        )
     }
     fn settle_reservation(
         &self,
@@ -1552,7 +1760,8 @@ impl TaskRepository {
         verification_reference: Option<Value>,
     ) -> Result<ModelRequestReservation> {
         identifier(reservation_id)?;
-        if usage.active_duration_ms.is_some() || usage.model_requests > 1
+        if usage.active_duration_ms.is_some()
+            || usage.model_requests > 1
             || usage.failed_requests > 1
             || usage.unknown_token_requests > 1
             || (!dispatched && *usage != TaskUsage::default())
@@ -1564,19 +1773,38 @@ impl TaskRepository {
         let mut delta = usage.clone();
         delta.model_requests = u64::from(dispatched);
         if let Some(provider) = &provider_usage {
-            let observed_input = [provider.cache_read_tokens, provider.cache_creation_tokens, provider.uncached_input_tokens]
-                .into_iter().flatten().try_fold(0_u64, u64::checked_add);
+            let observed_input = [
+                provider.cache_read_tokens,
+                provider.cache_creation_tokens,
+                provider.uncached_input_tokens,
+            ]
+            .into_iter()
+            .flatten()
+            .try_fold(0_u64, u64::checked_add);
             if !dispatched
-                || provider.input_tokens.is_some_and(|input| input != usage.input_tokens)
-                || provider.output_tokens.is_some_and(|output| output != usage.output_tokens)
-                || provider.cache_read_tokens.is_some_and(|read| provider.input_tokens.is_some_and(|input| read > input))
-                || observed_input.is_none_or(|sum| provider.input_tokens.is_some_and(|input| sum > input)) {
-                return Err(invalid("Provider usage must match its actual request receipt. / 供应商用量必须匹配本次真实回执。"));
+                || provider
+                    .input_tokens
+                    .is_some_and(|input| input != usage.input_tokens)
+                || provider
+                    .output_tokens
+                    .is_some_and(|output| output != usage.output_tokens)
+                || provider
+                    .cache_read_tokens
+                    .is_some_and(|read| provider.input_tokens.is_some_and(|input| read > input))
+                || observed_input
+                    .is_none_or(|sum| provider.input_tokens.is_some_and(|input| sum > input))
+            {
+                return Err(invalid(
+                    "Provider usage must match its actual request receipt. / 供应商用量必须匹配本次真实回执。",
+                ));
             }
         }
-        // Keep legacy settlement fingerprints; new provider facts form part of new receipt IDs.
         // 旧结算沿用原指纹，新供应商事实计入新回执身份。
-        let digest = fingerprint(&if provider_usage.is_some() { json!([dispatched, delta, provider_usage]) } else { json!([dispatched, delta]) })?;
+        let digest = fingerprint(&if provider_usage.is_some() {
+            json!([dispatched, delta, provider_usage])
+        } else {
+            json!([dispatched, delta])
+        })?;
         self.write(|connection| {
             let task=verify_fence(connection,token,true)?;
             let mut reservation=find_reservation(connection,&token.task_id,reservation_id)?.ok_or_else(||invalid("Model request was not reserved. / 模型请求尚未预约。"))?;
@@ -1591,16 +1819,24 @@ impl TaskRepository {
             Ok(reservation)
         })
     }
-    /// Count each reservation once; parent totals already include descendants.
     /// 每个预约只统计一次，父任务总量已包含后代。
-    pub fn usage_summary(&self, conversation_id: Option<&str>, project_id: Option<&str>) -> Result<Value> {
+    pub fn usage_summary(
+        &self,
+        conversation_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Result<Value> {
         if conversation_id.is_none() && project_id.is_none() {
-            return Err(invalid("Usage needs an explicit chat or work scope. / 用量须限定聊天或工作范围。"));
+            return Err(invalid(
+                "Usage needs an explicit chat or work scope. / 用量须限定聊天或工作范围。",
+            ));
         }
-        if let Some(id) = conversation_id { identifier(id)?; }
-        if let Some(id) = project_id { identifier(id)?; }
+        if let Some(id) = conversation_id {
+            identifier(id)?;
+        }
+        if let Some(id) = project_id {
+            identifier(id)?;
+        }
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
-        // Concrete scope predicates let SQLite seek scoped tasks before their unique reservations.
         // 具体范围等值条件允许 SQLite 先定位聊天或工作任务，再读取各任务的唯一预约。
         let (sql, scope_parameters) = match (conversation_id, project_id) {
             (Some(chat), Some(project)) => (
@@ -1618,64 +1854,108 @@ impl TaskRepository {
             (None, None) => unreachable!("usage scope was checked above"),
         };
         let mut query = connection.prepare_cached(sql).map_err(|_| failure())?;
-        let rows = query.query_map(rusqlite::params_from_iter(scope_parameters), |row| row.get::<_, String>(0))
+        let rows = query
+            .query_map(rusqlite::params_from_iter(scope_parameters), |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|_| failure())?;
-        let (mut requests, mut input, mut output, mut known, mut unknown, mut pending) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
-        let (mut cache_read, mut cache_input, mut cache_known, mut updated) = (0u64, 0u64, 0u64, 0i64);
-        let (mut cache_creation, mut uncached_input, mut creation_known, mut uncached_known) = (0u64, 0u64, 0u64, 0u64);
+        let (mut requests, mut input, mut output, mut known, mut unknown, mut pending) =
+            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+        let (mut cache_read, mut cache_input, mut cache_known, mut updated) =
+            (0u64, 0u64, 0u64, 0i64);
+        let (mut cache_creation, mut uncached_input, mut creation_known, mut uncached_known) =
+            (0u64, 0u64, 0u64, 0u64);
         let (mut first_visible_total, mut first_visible_known) = (0u64, 0u64);
-        let mut prefix_counts = json!({"baseline":0,"none":0,"route":0,"system":0,"tools":0,"message":0});
-        let (mut prefix_observed, mut prefix_incomplete, mut prefix_lost_estimate) = (0u64, 0u64, 0u64);
+        let mut prefix_counts =
+            json!({"baseline":0,"none":0,"route":0,"system":0,"tools":0,"message":0});
+        let (mut prefix_observed, mut prefix_incomplete, mut prefix_lost_estimate) =
+            (0u64, 0u64, 0u64);
         for row in rows {
             let reservation: ModelRequestReservation = decode(row.map_err(|_| failure())?)?;
             updated = updated.max(reservation.updated_at_ms);
-            if matches!(reservation.state, ModelReservationState::Reserved | ModelReservationState::Unknown) {
-                pending = pending.saturating_add(1);
-                if reservation.state == ModelReservationState::Unknown { unknown = unknown.saturating_add(1); }
+            if matches!(
+                reservation.state,
+                ModelReservationState::Reserved | ModelReservationState::Unknown
+            ) {
+                pending += 1;
+                if reservation.state == ModelReservationState::Unknown {
+                    unknown += 1;
+                }
                 continue;
             }
-            if reservation.dispatched != Some(true) { continue; }
-            requests = requests.saturating_add(1);
+            if reservation.dispatched != Some(true) {
+                continue;
+            }
+            requests += 1;
             if let Some(usage) = &reservation.usage {
                 input = input.saturating_add(usage.input_tokens);
                 output = output.saturating_add(usage.output_tokens);
-                if usage.unknown_token_requests == 0 { known = known.saturating_add(1); }
-                else { unknown = unknown.saturating_add(1); }
-            } else { unknown = unknown.saturating_add(1); }
+                if usage.unknown_token_requests == 0 {
+                    known += 1;
+                } else {
+                    unknown += 1;
+                }
+            } else {
+                unknown += 1;
+            }
             if let Some(provider) = &reservation.provider_usage {
-                // Treat client prefix estimates as diagnostics, not actual provider cache hits.
                 // 客户端前缀估算仅作诊断，不算供应商实际缓存命中。
-                if let Some(prefix) = provider.client_metrics.as_ref()
-                    .and_then(|metrics| metrics.cache_policy.as_ref()).and_then(|policy| policy.get("prefix"))
-                    .filter(|prefix| prefix["schemaVersion"] == 1 && prefix["scope"] == "main-request")
+                if let Some(prefix) = provider
+                    .client_metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.cache_policy.as_ref())
+                    .and_then(|policy| policy.get("prefix"))
+                    .filter(|prefix| {
+                        prefix["schemaVersion"] == 1 && prefix["scope"] == "main-request"
+                    })
                 {
-                    if let Some(segment) = prefix["breakAt"].as_str().filter(|segment| prefix_counts.get(*segment).is_some()) {
-                        prefix_counts[segment] = json!(prefix_counts[segment].as_u64().unwrap_or(0).saturating_add(1));
-                        prefix_observed = prefix_observed.saturating_add(1);
-                        if prefix["state"] == "incomplete" { prefix_incomplete = prefix_incomplete.saturating_add(1); }
-                        prefix_lost_estimate = prefix_lost_estimate.saturating_add(prefix["lostTokensEstimate"].as_u64().unwrap_or(0));
+                    if let Some(segment) = prefix["breakAt"]
+                        .as_str()
+                        .filter(|segment| prefix_counts.get(*segment).is_some())
+                    {
+                        prefix_counts[segment] = json!(
+                            prefix_counts[segment]
+                                .as_u64()
+                                .unwrap_or(0)
+                                .saturating_add(1)
+                        );
+                        prefix_observed += 1;
+                        if prefix["state"] == "incomplete" {
+                            prefix_incomplete += 1;
+                        }
+                        prefix_lost_estimate = prefix_lost_estimate
+                            .saturating_add(prefix["lostTokensEstimate"].as_u64().unwrap_or(0));
                     }
                 }
-                if let Some(milliseconds) = provider.client_metrics.as_ref().and_then(|metrics| metrics.first_visible_text_ms) {
+                if let Some(milliseconds) = provider
+                    .client_metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.first_visible_text_ms)
+                {
                     first_visible_total = first_visible_total.saturating_add(milliseconds);
-                    first_visible_known = first_visible_known.saturating_add(1);
+                    first_visible_known += 1;
                 }
                 if let Some(tokens) = provider.cache_creation_tokens {
-                    cache_creation = cache_creation.saturating_add(tokens); creation_known += 1;
+                    cache_creation = cache_creation.saturating_add(tokens);
+                    creation_known += 1;
                 }
                 if let Some(tokens) = provider.uncached_input_tokens {
-                    uncached_input = uncached_input.saturating_add(tokens); uncached_known += 1;
+                    uncached_input = uncached_input.saturating_add(tokens);
+                    uncached_known += 1;
                 }
-                if let (Some(tokens), Some(read)) = (provider.input_tokens, provider.cache_read_tokens) {
+                if let (Some(tokens), Some(read)) =
+                    (provider.input_tokens, provider.cache_read_tokens)
+                {
                     if read <= tokens {
                         cache_read = cache_read.saturating_add(read);
                         cache_input = cache_input.saturating_add(tokens);
-                        cache_known = cache_known.saturating_add(1);
+                        cache_known += 1;
                     }
                 }
             }
         }
-        Ok(json!({"scope":if conversation_id.is_some() {"conversation"} else {"project"},
+        Ok(
+            json!({"scope":if conversation_id.is_some() {"conversation"} else {"project"},
             "conversationId":conversation_id,"projectId":project_id,"modelRequests":requests,
             "inputTokens":input,"outputTokens":output,"knownTokenRequests":known,"unknownTokenRequests":unknown,
             "pendingRequests":pending,"cacheReadTokens":cache_read,"cacheInputTokens":cache_input,
@@ -1690,7 +1970,8 @@ impl TaskRepository {
                 "incompleteRequests":prefix_incomplete,"lostTokensEstimate":prefix_lost_estimate,
                 "coverage":"dispatched main requests with saved client diagnostics; summaries excluded",
                 "method":"structural estimates; separate from provider cacheHitRate"},
-            "updatedAtMs":updated}))
+            "updatedAtMs":updated}),
+        )
     }
 
     pub fn model_reservations(&self, task_id: &str) -> Result<Vec<ModelRequestReservation>> {
@@ -1766,16 +2047,19 @@ impl TaskRepository {
         document.map(decode).transpose()
     }
 
-    /// Read the child's latest parent acceptance without scanning unrelated event history.
     /// 直接读取子任务最新父级验收，不扫描无关事件历史。
-    pub fn latest_child_review(&self, parent_id: &str, child_id: &str) -> Result<Option<TaskEvent>> {
-        identifier(parent_id)?; identifier(child_id)?;
-        let connection=sqlite_connections::acquire(&self.root,&self.path,30_000)?;
+    pub fn latest_child_review(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<Option<TaskEvent>> {
+        identifier(parent_id)?;
+        identifier(child_id)?;
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         let document:Option<String>=connection.query_row("SELECT document FROM task_events WHERE task_id=? AND json_extract(document,'$.kind')='task.child.review' AND json_extract(document,'$.payload.childTaskId')=? ORDER BY sequence DESC LIMIT 1",params![parent_id,child_id],|row|row.get(0)).optional().map_err(|_|failure())?;
         document.map(decode).transpose()
     }
 
-    /// Restore revision instructions from formal events, not in-memory overlays.
     /// 从正式事件恢复修订要求，不依赖内存覆盖层。
     pub fn latest_child_return(&self, child_id: &str) -> Result<Option<TaskEvent>> {
         self.latest_event(child_id, "task.child.review-return")
@@ -1866,65 +2150,172 @@ mod stream_page_tests {
 
     #[test]
     fn stream_projection_pages_are_bounded_lossless_owned_and_use_a_stable_keyset_horizon() {
-        let root=std::env::temp_dir().join(format!("kynxa-stream-pages-{}",uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kynxa-stream-pages-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let repository=TaskRepository::open(&root).unwrap();
-            let request=uuid::Uuid::new_v4().to_string();let chat=uuid::Uuid::new_v4().to_string();
-            let reply=uuid::Uuid::new_v4().to_string();
-            let task=repository.accept_task(&NewTask {request_id:request.clone(),goal:"fixture".into(),
-                acceptance:vec![],scope:TaskScope {project_id:None,conversation_id:chat.clone(),permission_snapshot:json!({})},
-                parent_task_id:None,dependency_ids:vec![],budget:TaskBudget::default(),input_reference:None}).unwrap();
-            let attempt=repository.start_attempt(&task.task_id,task.version,"fixture",60_000).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let repository = TaskRepository::open(&root).unwrap();
+            let request = uuid::Uuid::new_v4().to_string();
+            let chat = uuid::Uuid::new_v4().to_string();
+            let reply = uuid::Uuid::new_v4().to_string();
+            let task = repository
+                .accept_task(&NewTask {
+                    request_id: request.clone(),
+                    goal: "fixture".into(),
+                    acceptance: vec![],
+                    scope: TaskScope {
+                        project_id: None,
+                        conversation_id: chat.clone(),
+                        permission_snapshot: json!({}),
+                    },
+                    parent_task_id: None,
+                    dependency_ids: vec![],
+                    budget: TaskBudget::default(),
+                    input_reference: None,
+                })
+                .unwrap();
+            let attempt = repository
+                .start_attempt(&task.task_id, task.version, "fixture", 60_000)
+                .unwrap();
             repository.append_event(&attempt.token,"segment","assistant_segment",&json!({"conversationId":chat,
                 "requestId":request,"replyMessageId":reply,"eventSequence":1,"segment":{"id":"segment",
                     "round":1,"order":1,"phase":"commentary","status":"streaming","emptyAtEmission":true}})).unwrap();
-            let mut expected=String::new();
+            let mut expected = String::new();
             for index in 0..5 {
-                let delta=if index==0 {"甲🏰".repeat(1024)} else {format!("第{index}页🏰")};
+                let delta = if index == 0 {
+                    "甲🏰".repeat(1024)
+                } else {
+                    format!("第{index}页🏰")
+                };
                 expected.push_str(&delta);
-                repository.append_event(&attempt.token,&format!("owned-{index}"),"text_delta",&json!({
+                repository
+                    .append_event(
+                        &attempt.token,
+                        &format!("owned-{index}"),
+                        "text_delta",
+                        &json!({
                     "conversationId":chat,"requestId":request,"replyMessageId":reply,
-                    "eventSequence":index+2,"segmentId":"segment","delta":delta})).unwrap();
+                    "eventSequence":index+2,"segmentId":"segment","delta":delta}),
+                    )
+                    .unwrap();
             }
             repository.append_event(&attempt.token,"foreign","text_delta",&json!({"conversationId":chat,
                 "requestId":request,"replyMessageId":"another-reply","eventSequence":7,"delta":"FOREIGN"})).unwrap();
-            let first=repository.stream_projection_page(&task.task_id,&request,&reply,0,None,2,1).unwrap();
-            assert_eq!(first["events"].as_array().unwrap().len(),1);
-            assert!(first["pageBytes"].as_u64().unwrap()>first["maximumPageBytes"].as_u64().unwrap());
-            assert!(first["pageBytes"].as_u64().unwrap()<=first["indivisibleEventBytes"].as_u64().unwrap());
-            let horizon=first["throughTaskSequence"].as_u64().unwrap();
+            let first = repository
+                .stream_projection_page(&task.task_id, &request, &reply, 0, None, 2, 1)
+                .unwrap();
+            assert_eq!(first["events"].as_array().unwrap().len(), 1);
+            assert!(
+                first["pageBytes"].as_u64().unwrap() > first["maximumPageBytes"].as_u64().unwrap()
+            );
+            assert!(
+                first["pageBytes"].as_u64().unwrap()
+                    <= first["indivisibleEventBytes"].as_u64().unwrap()
+            );
+            let horizon = first["throughTaskSequence"].as_u64().unwrap();
             repository.append_event(&attempt.token,"later","text_delta",&json!({"conversationId":chat,
                 "requestId":request,"replyMessageId":reply,"eventSequence":8,"segmentId":"segment","delta":"LATER"})).unwrap();
-            let mut page=first;let mut actual=String::new();let mut count=0;
+            let mut page = first;
+            let mut actual = String::new();
+            let mut count = 0;
             loop {
                 for event in page["events"].as_array().unwrap() {
-                    if let Some(delta)=event["payload"]["delta"].as_str() {actual.push_str(delta);count+=1;}
+                    if let Some(delta) = event["payload"]["delta"].as_str() {
+                        actual.push_str(delta);
+                        count += 1;
+                    }
                 }
-                if page["hasMore"]!=true {break;}
-                let after=page["nextTaskSequence"].as_u64().unwrap();
-                let next=repository.stream_projection_page(&task.task_id,&request,&reply,after,Some(horizon),2,1).unwrap();
-                assert!(next["nextTaskSequence"].as_u64().unwrap()>after);
-                let repeated=repository.stream_projection_page(&task.task_id,&request,&reply,after,Some(horizon),2,1).unwrap();
-                assert_eq!(next,repeated,"a committed page has stable identity for retry before saving its watermark");
-                page=next;
+                if page["hasMore"] != true {
+                    break;
+                }
+                let after = page["nextTaskSequence"].as_u64().unwrap();
+                let next = repository
+                    .stream_projection_page(
+                        &task.task_id,
+                        &request,
+                        &reply,
+                        after,
+                        Some(horizon),
+                        2,
+                        1,
+                    )
+                    .unwrap();
+                assert!(next["nextTaskSequence"].as_u64().unwrap() > after);
+                let repeated = repository
+                    .stream_projection_page(
+                        &task.task_id,
+                        &request,
+                        &reply,
+                        after,
+                        Some(horizon),
+                        2,
+                        1,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    next, repeated,
+                    "a committed page has stable identity for retry before saving its watermark"
+                );
+                page = next;
             }
-            assert_eq!(actual,expected);assert_eq!(count,5);
-            assert_eq!(page["nextTaskSequence"],horizon);
-            let baseline=json!({"content":"","reasoning":"","segments":[]});
-            let recovered=repository.recover_stream_with_limits(&task.task_id,&request,&reply,0,baseline.clone(),2,1,||false).unwrap();
-            assert_eq!(recovered["complete"],true,"{recovered}");
-            assert_eq!(recovered["content"],expected+"LATER");
-            assert!(recovered["pageCount"].as_u64().unwrap()>2);
-            let mut checks=0;
-            let cancelled=repository.recover_stream_with_limits(&task.task_id,&request,&reply,0,baseline,2,1,||{checks+=1;checks>1}).unwrap();
-            assert_eq!(cancelled["cancelled"],true);
-            assert!(cancelled.get("content").is_none(),"cancelled shadows cannot advance the formal message or watermark");
-            assert!(repository.stream_projection_page(&task.task_id,&uuid::Uuid::new_v4().to_string(),&reply,0,None,2,1).is_err());
+            assert_eq!(actual, expected);
+            assert_eq!(count, 5);
+            assert_eq!(page["nextTaskSequence"], horizon);
+            let baseline = json!({"content":"","reasoning":"","segments":[]});
+            let recovered = repository
+                .recover_stream_with_limits(
+                    &task.task_id,
+                    &request,
+                    &reply,
+                    0,
+                    baseline.clone(),
+                    2,
+                    1,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(recovered["complete"], true, "{recovered}");
+            assert_eq!(recovered["content"], expected + "LATER");
+            assert!(recovered["pageCount"].as_u64().unwrap() > 2);
+            let mut checks = 0;
+            let cancelled = repository
+                .recover_stream_with_limits(
+                    &task.task_id,
+                    &request,
+                    &reply,
+                    0,
+                    baseline,
+                    2,
+                    1,
+                    || {
+                        checks += 1;
+                        checks > 1
+                    },
+                )
+                .unwrap();
+            assert_eq!(cancelled["cancelled"], true);
+            assert!(
+                cancelled.get("content").is_none(),
+                "cancelled shadows cannot advance the formal message or watermark"
+            );
+            assert!(
+                repository
+                    .stream_projection_page(
+                        &task.task_id,
+                        &uuid::Uuid::new_v4().to_string(),
+                        &reply,
+                        0,
+                        None,
+                        2,
+                        1
+                    )
+                    .is_err()
+            );
         }));
-        let _=super::sqlite_connections::close(&root,&root.join("Agent/tasks.sqlite"));
-        let _=std::fs::remove_dir_all(&root);
-        if let Err(error)=result {std::panic::resume_unwind(error);}
+        let _ = super::sqlite_connections::close(&root, &root.join("Agent/tasks.sqlite"));
+        let _ = std::fs::remove_dir_all(&root);
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
     }
-
 }

@@ -7,7 +7,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Use the framework hash API when MSBuild's PowerShell host lacks Get-FileHash.
 # 使用框架哈希 API，兼容未加载 Get-FileHash 的 MSBuild 宿主。
 function Get-NoticeHash([string]$Path) {
     $noticeStream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
@@ -15,7 +14,6 @@ function Get-NoticeHash([string]$Path) {
     try { return [BitConverter]::ToString($noticeHasher.ComputeHash($noticeStream)).Replace('-', '').ToLowerInvariant() }
     finally { $noticeHasher.Dispose(); $noticeStream.Dispose() }
 }
-# Read the runtime packs selected by ToolHost restore and preserve their original licenses.
 # 读取 ToolHost 实际还原的运行时包，保留许可原文。
 $runtimeAssets = Get-Content -LiteralPath $AssetsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $runtimePackNames = @("Microsoft.NETCore.App.Runtime.$RuntimeIdentifier", "Microsoft.WindowsDesktop.App.Runtime.$RuntimeIdentifier", 'Microsoft.Windows.SDK.NET.Ref')
@@ -35,7 +33,6 @@ foreach ($framework in $runtimeAssets.project.frameworks.PSObject.Properties) {
         if (-not $runtimePackDirectory) { throw "Restored ToolHost runtime pack not found: $($dependency.name) $runtimePackVersion" }
         $runtimeNotices = @(Get-ChildItem -LiteralPath $runtimePackDirectory -File | Where-Object Name -Match '^(LICENSE(\.TXT)?|THIRD-PARTY-NOTICES\.TXT|ThirdPartyNotices\.txt|NOTICE(\.TXT)?)$')
         if ($dependency.name -eq 'Microsoft.Windows.SDK.NET.Ref') {
-            # The targeting pack gives a license URL; bundle the verified official text and source.
             # 目标包仅提供许可网址，随包保留已核验的官方原文和来源。
             $winRtSourcesDirectory = Join-Path $PSScriptRoot 'licenses'
             $winRtSourcesPath = Join-Path $winRtSourcesDirectory 'toolhost-winrt-license-sources.json'

@@ -29,7 +29,6 @@ public sealed partial class ShellPage
         if (_sidebarResize is not { } drag || !double.IsFinite(e.Delta)) return;
         double row = (double)Application.Current.Resources["KynxaSidebarRowHeight"];
         var next = WorkSidebarLayout.Resize(drag.Heights, drag.Boundary, e.Delta, drag.Budget, drag.Maximum, row);
-        // Keep hidden sections' saved sizes; pointer movement only changes layout preferences.
         // 隐藏分区保留原高度；拖动只更新布局偏好，不重建会话列表。
         if (next == drag.Heights)
         {

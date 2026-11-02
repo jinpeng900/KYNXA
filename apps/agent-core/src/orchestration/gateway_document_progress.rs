@@ -1,4 +1,3 @@
-//! Per-document public work records use the existing task artifact store, not a second ledger.
 //! 逐文档公开工作结果复用既有任务产物存储；不再建立第二份状态账本或复制原文。
 
 use super::gateway_task_journal::TaskJournal;
@@ -10,7 +9,6 @@ use std::collections::BTreeMap;
 
 type Result<T> = std::result::Result<T, GatewayError>;
 
-/// In-memory indexes only accelerate the registered, scope-bound artifact records.
 /// 内存目录只加速已登记且绑定任务作用域的产物记录；断点仍保存正式产物引用。
 #[derive(Default)]
 pub struct DocumentWorkRecords {
@@ -19,7 +17,6 @@ pub struct DocumentWorkRecords {
 }
 
 impl DocumentWorkRecords {
-    /// Call only after a successful read and the original result archive have been accepted.
     /// 仅在实际读取成功且原回执已正式归档后调用；元数据不会被当成完成的语义分析。
     pub async fn observe_read(
         &mut self,
@@ -30,17 +27,33 @@ impl DocumentWorkRecords {
     ) -> Result<Option<Value>> {
         let mut source = source_metadata(receipt);
         if tool == "attachment.read" {
-            if !super::task::attachment_read_has_content(receipt) { return Ok(None); }
+            if !super::task::attachment_read_has_content(receipt) {
+                return Ok(None);
+            }
             let body = attachment_payload(receipt);
-            source["sha256"] = json!(valid_hash(&body["sourceVersion"]).or_else(|| valid_hash(&body["sha256"])).unwrap());
-            source["totalCharacters"] = json!(body["totalCharacters"].as_u64().or_else(|| body["totalChars"].as_u64()).unwrap());
+            source["sha256"] = json!(
+                valid_hash(&body["sourceVersion"])
+                    .or_else(|| valid_hash(&body["sha256"]))
+                    .unwrap()
+            );
+            source["totalCharacters"] = json!(
+                body["totalCharacters"]
+                    .as_u64()
+                    .or_else(|| body["totalChars"].as_u64())
+                    .unwrap()
+            );
             if body["complete"] == false || body["extraction"]["complete"] == false {
                 source["complete"] = json!(false);
             }
         }
         if !matches!(
             tool,
-            "filesystem.read" | "document.read" | "attachment.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
+            "filesystem.read"
+                | "document.read"
+                | "attachment.read"
+                | "knowledge.read"
+                | "web.fetch"
+                | "tool.result.read"
         ) || !result_ref["id"].as_str().is_some_and(|id| !id.is_empty())
             || source["sourceTool"] == "context.working-summary"
             || !has_document_locator(&source)
@@ -61,7 +74,6 @@ impl DocumentWorkRecords {
         Ok(Some(entry))
     }
 
-    /// Main-model analysis is stored without a second model call or a claim of semantic proof.
     /// 主模型分析直接保存，不额外调用模型；结论绑定实际读取，仍不声明语义正确或任务完成。
     pub async fn record_analysis(
         &mut self,
@@ -109,7 +121,6 @@ impl DocumentWorkRecords {
         Ok(entry)
     }
 
-    /// Accepted compaction facts supplement document records without replacing explicit analysis.
     /// 已接受的压缩事实补入逐文档记录；不能覆盖主模型显式保存的完整分析结果。
     pub async fn update_from_summary(
         &mut self,
@@ -129,7 +140,6 @@ impl DocumentWorkRecords {
             }
             let mut record = self.observed_record(text(&cursor["tool"]), &source, result_ref)?;
             let key = text(&record["sourceIdentity"]).to_owned();
-            // An archived summary cannot roll the current document version back.
             // 旧归档摘要不能让当前文档版本回退；只有真实新读取可以切换活动版本。
             if record["active"] != true
                 || self.records.iter().any(|(existing_key, existing)| {
@@ -163,24 +173,26 @@ impl DocumentWorkRecords {
         let mut information_added = false;
         for record in updates.into_values() {
             let previous = self.records.get(text(&record["sourceIdentity"]));
-            // New receipt IDs and summary cursors are durable bookkeeping, not new source facts.
             // 新回执 ID 和摘要游标属于持久化元信息；只有原始读取覆盖或事实正文新增才算工作进展。
             information_added |= previous.is_none_or(|previous| {
                 adds_read_coverage(previous, &record)
                     || array(&record["summaryFacts"]).iter().any(|fact| {
                         let body = text(&fact["text"]).trim();
-                        !body.is_empty() && !array(&previous["summaryFacts"]).iter()
-                            .any(|saved| text(&saved["text"]).trim() == body)
+                        !body.is_empty()
+                            && !array(&previous["summaryFacts"])
+                                .iter()
+                                .any(|saved| text(&saved["text"]).trim() == body)
                     })
             });
             if self.persist_record(journal, record).await? {
                 changed += 1;
             }
         }
-        Ok(json!({"changedDocuments":changed,"informationAdded":information_added,"directory":self.directory()}))
+        Ok(
+            json!({"changedDocuments":changed,"informationAdded":information_added,"directory":self.directory()}),
+        )
     }
 
-    /// Restore only registered artifacts in the current task tree; callers validate live source versions.
     /// 仅恢复当前任务树登记过的产物；调用方继续核对实时来源版本，不能把旧快照当新证据。
     pub async fn restore(journal: &TaskJournal, directory: &Value) -> Result<Self> {
         let mut restored = Self::default();
@@ -251,24 +263,37 @@ impl DocumentWorkRecords {
             "guidance":"Reuse saved analyses first. Read a document record for complete conclusions and original references; revisit originals only for invalidated versions or a specific evidence gap. / 优先复用已存分析；读取文档工作记录取得完整结论与原件引用，仅在版本失效或具体证据缺口时回读原文。"})
     }
 
-    /// A trusted current file version invalidates old analysis without deleting the archived observations.
     /// 可信当前文件版本让旧分析立即失效；原始观察与历史归档保持完整。
-    pub async fn observe_output_version(&mut self, journal: &TaskJournal, receipt: &Value) -> Result<bool> {
-        let Some(path) = receipt["path"].as_str() else { return Ok(false); };
-        let Some(hash) = valid_hash(&receipt["sha256"]).or_else(|| valid_hash(&receipt["version"])) else {
+    pub async fn observe_output_version(
+        &mut self,
+        journal: &TaskJournal,
+        receipt: &Value,
+    ) -> Result<bool> {
+        let Some(path) = receipt["path"].as_str() else {
             return Ok(false);
         };
-        let stale: Vec<String> = self.records.iter().filter(|(_, record)| record["active"] == true &&
-            record["source"]["path"] == path && valid_hash(&record["sourceVersion"]["sha256"])
-                .is_some_and(|previous| !previous.eq_ignore_ascii_case(hash)))
-            .map(|(key, _)| key.clone()).collect();
+        let Some(hash) = valid_hash(&receipt["sha256"]).or_else(|| valid_hash(&receipt["version"]))
+        else {
+            return Ok(false);
+        };
+        let stale: Vec<String> = self
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                record["active"] == true
+                    && record["source"]["path"] == path
+                    && valid_hash(&record["sourceVersion"]["sha256"])
+                        .is_some_and(|previous| !previous.eq_ignore_ascii_case(hash))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
         for key in &stale {
-            self.invalidate_source(journal, key, "source-version-changed").await?;
+            self.invalidate_source(journal, key, "source-version-changed")
+                .await?;
         }
         Ok(!stale.is_empty())
     }
 
-    /// Public findings are navigation for the current version, never a copy of the original or a completion certificate.
     /// 仅提供当前有效版本的公开成果导航，不复制原文、内部观察或声明任务完成。
     pub fn saved_findings(&self, source_identity: &str) -> Option<Value> {
         let record = self.records.get(source_identity)?;
@@ -365,11 +390,15 @@ fn array(value: &Value) -> &[Value] {
 }
 
 fn valid_hash(value: &Value) -> Option<&str> {
-    value.as_str().filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    value
+        .as_str()
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn attachment_payload(content: &Value) -> &Value {
-    content.get("structuredContent").filter(|value| value.is_object())
+    content
+        .get("structuredContent")
+        .filter(|value| value.is_object())
         .or_else(|| content.get("value").filter(|value| value.is_object()))
         .unwrap_or(content)
 }
@@ -407,7 +436,6 @@ fn document_identity(source: &Value, result_ref: &Value) -> Result<(Value, Value
             version.insert(field.into(), value.clone());
         }
     }
-    // Unversioned observations must never silently inherit another read's analysis.
     // 未取得真实内容版本时按原回执隔离，不能悄悄复用另一次读取的分析。
     if !version.contains_key("sha256")
         && !version.contains_key("contentHash")
@@ -435,7 +463,9 @@ fn source_range(source: &Value) -> Value {
         range.insert("start".into(), json!(start));
         range.insert("end".into(), json!(end));
         range.insert("totalCharacters".into(), source["totalCharacters"].clone());
-        if source["complete"] == false { range.insert("complete".into(), json!(false)); }
+        if source["complete"] == false {
+            range.insert("complete".into(), json!(false));
+        }
     }
     for field in ["lineRange", "locator"] {
         if let Some(value) = source.get(field).filter(|value| !value.is_null()) {
@@ -449,7 +479,6 @@ fn source_range(source: &Value) -> Value {
     }
 }
 
-/// Count actual archived receipts for the latest tool and returned range within one document-version record.
 /// 在同一文档版本中按最后一次读取的工具和真实返回范围计数；意图说明不参与，不把回执重放当新读取。
 fn matching_read_count(record: &Value) -> usize {
     let observations = array(&record["observations"]);
@@ -463,8 +492,7 @@ fn matching_read_count(record: &Value) -> usize {
     observations
         .iter()
         .filter(|observation| {
-            observation["tool"] == latest["tool"]
-                && source_range(&observation["source"]) == range
+            observation["tool"] == latest["tool"] && source_range(&observation["source"]) == range
         })
         .count()
 }
@@ -473,18 +501,21 @@ fn read_state(record: &Value) -> &'static str {
     let ranges = array(&record["readRanges"]);
     if let Some(page_count) = ranges.iter().find_map(|range| {
         let extraction = &range["locator"]["extraction"];
-        (extraction["format"] == "pdf").then(|| extraction["pageCount"].as_u64()).flatten()
+        (extraction["format"] == "pdf")
+            .then(|| extraction["pageCount"].as_u64())
+            .flatten()
     }) {
-        // Text offsets restart within each PDF window; only fully read windows cover original pages.
         // PDF 各页窗口的字符偏移从头计数；只有正文已读完整的窗口才计入原文页覆盖。
         let mut windows: BTreeMap<(u64, u64), Vec<Value>> = BTreeMap::new();
         for range in ranges {
             let extraction = &range["locator"]["extraction"];
-            if extraction["format"] != "pdf" || extraction["pageCount"].as_u64() != Some(page_count) {
+            if extraction["format"] != "pdf" || extraction["pageCount"].as_u64() != Some(page_count)
+            {
                 continue;
             }
             let window = &extraction["pageWindow"];
-            if let Some((start, end)) = window["startPage"].as_u64().zip(window["endPage"].as_u64()) {
+            if let Some((start, end)) = window["startPage"].as_u64().zip(window["endPage"].as_u64())
+            {
                 let mut text_range = range.clone();
                 text_range.as_object_mut().unwrap().remove("locator");
                 windows.entry((start, end)).or_default().push(text_range);
@@ -500,12 +531,18 @@ fn read_state(record: &Value) -> &'static str {
             }
             covered_page = covered_page.max(end);
         }
-        return if covered_page >= page_count { "complete" } else { "partial" };
+        return if covered_page >= page_count {
+            "complete"
+        } else {
+            "partial"
+        };
     }
     let mut spans: Vec<(u64, u64, u64)> = ranges
         .iter()
         .filter_map(|range| {
-            if range["complete"] == false { return None; }
+            if range["complete"] == false {
+                return None;
+            }
             Some((
                 range["start"].as_u64()?,
                 range["end"].as_u64()?,
@@ -544,7 +581,8 @@ fn adds_read_coverage(previous: &Value, current: &Value) -> bool {
             .iter()
             .filter_map(|old| {
                 (old["unit"] == range["unit"]
-                    && old["locator"]["extraction"]["pageWindow"] == range["locator"]["extraction"]["pageWindow"])
+                    && old["locator"]["extraction"]["pageWindow"]
+                        == range["locator"]["extraction"]["pageWindow"])
                     .then(|| old["start"].as_u64().zip(old["end"].as_u64()))
                     .flatten()
             })
@@ -602,18 +640,29 @@ mod tests {
 
     #[test]
     fn document_page_windows_complete_only_after_all_pages_and_text_are_read() {
-        let range = |first, last, start, end| json!({
-            "unit":"utf16","start":start,"end":end,"totalCharacters":40,
-            "locator":{"extraction":{"format":"pdf","pageCount":101,
-                "pageWindow":{"startPage":first,"endPage":last}}}
-        });
+        let range = |first, last, start, end| {
+            json!({
+                "unit":"utf16","start":start,"end":end,"totalCharacters":40,
+                "locator":{"extraction":{"format":"pdf","pageCount":101,
+                    "pageWindow":{"startPage":first,"endPage":last}}}
+            })
+        };
         let first = range(1, 100, 0, 40);
         let last_head = range(101, 101, 0, 20);
         let last_tail = range(101, 101, 20, 40);
         assert_eq!(read_state(&json!({"readRanges":[first]})), "partial");
-        assert_eq!(read_state(&json!({"readRanges":[first,last_head]})), "partial");
-        assert_eq!(read_state(&json!({"readRanges":[first,last_head,last_tail]})), "complete");
-        assert!(adds_read_coverage(&json!({"readRanges":[first]}), &json!({"readRanges":[last_head]})));
+        assert_eq!(
+            read_state(&json!({"readRanges":[first,last_head]})),
+            "partial"
+        );
+        assert_eq!(
+            read_state(&json!({"readRanges":[first,last_head,last_tail]})),
+            "complete"
+        );
+        assert!(adds_read_coverage(
+            &json!({"readRanges":[first]}),
+            &json!({"readRanges":[last_head]})
+        ));
     }
 
     struct Fixture {
@@ -657,13 +706,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attachment_document_ranges_share_the_original_version_and_reject_empty_or_invalid_text() {
+    async fn attachment_document_ranges_share_the_original_version_and_reject_empty_or_invalid_text()
+     {
         let fixture = Fixture::new();
-        let journal = TaskJournal::begin(&fixture.root, &input("attachment-records", 1), "fixture", 60_000).unwrap();
+        let journal = TaskJournal::begin(
+            &fixture.root,
+            &input("attachment-records", 1),
+            "fixture",
+            60_000,
+        )
+        .unwrap();
         let mut records = DocumentWorkRecords::default();
         let body = json!({"sourceId":"attachment:chat:message:document","sourceVersion":"a".repeat(64),
             "text":"A😀","offset":0,"nextOffset":3,"totalChars":4,"hasMore":true,"complete":true});
-        let first = records.observe_read(&journal, "attachment.read", &body, &reference()).await.unwrap().unwrap();
+        let first = records
+            .observe_read(&journal, "attachment.read", &body, &reference())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(first["sourceVersion"]["sha256"], "a".repeat(64));
         assert_eq!(first["readState"], "partial");
         let mut next = body.clone();
@@ -671,24 +731,54 @@ mod tests {
         next["offset"] = json!(3);
         next["nextOffset"] = json!(4);
         next["hasMore"] = json!(false);
-        let last = records.observe_read(&journal, "attachment.read", &next, &reference()).await.unwrap().unwrap();
+        let last = records
+            .observe_read(&journal, "attachment.read", &next, &reference())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(last["sourceIdentity"], first["sourceIdentity"]);
         assert_eq!(last["readState"], "complete");
-        assert_eq!(records.directory()["documents"].as_array().unwrap().len(), 1);
-        for (field, value) in [("text", json!("")), ("sourceVersion", Value::Null), ("nextOffset", json!(2))] {
+        assert_eq!(
+            records.directory()["documents"].as_array().unwrap().len(),
+            1
+        );
+        for (field, value) in [
+            ("text", json!("")),
+            ("sourceVersion", Value::Null),
+            ("nextOffset", json!(2)),
+        ] {
             let mut invalid = body.clone();
             invalid[field] = value;
-            assert!(!super::super::task::attachment_read_has_content(&invalid), "{field}");
-            assert!(records.observe_read(&journal, "attachment.read", &invalid, &reference()).await.unwrap().is_none());
+            assert!(
+                !super::super::task::attachment_read_has_content(&invalid),
+                "{field}"
+            );
+            assert!(
+                records
+                    .observe_read(&journal, "attachment.read", &invalid, &reference())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
-        assert!(records.observe_read(&journal, "attachment.export", &body, &reference()).await.unwrap().is_none());
+        assert!(
+            records
+                .observe_read(&journal, "attachment.export", &body, &reference())
+                .await
+                .unwrap()
+                .is_none()
+        );
         let mut partial = body;
         partial["sourceId"] = json!("attachment:chat:message:partial");
         partial["text"] = json!("A😀B");
         partial["nextOffset"] = json!(4);
         partial["hasMore"] = json!(false);
         partial["complete"] = json!(false);
-        let partial = records.observe_read(&journal, "attachment.read", &partial, &reference()).await.unwrap().unwrap();
+        let partial = records
+            .observe_read(&journal, "attachment.read", &partial, &reference())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(partial["readState"], "partial");
     }
 
@@ -696,13 +786,25 @@ mod tests {
     async fn summary_receipt_ids_and_cursors_do_not_reset_stagnation_without_new_facts() {
         use super::super::gateway_work_progress::{RoundProgress, WorkProgress};
         let fixture = Fixture::new();
-        let journal = TaskJournal::begin(&fixture.root, &input("summary-progress", 1), "fixture", 60_000).unwrap();
+        let journal = TaskJournal::begin(
+            &fixture.root,
+            &input("summary-progress", 1),
+            "fixture",
+            60_000,
+        )
+        .unwrap();
         let mut records = DocumentWorkRecords::default();
         let original = reference();
-        records.observe_read(&journal, "filesystem.read", &receipt("a", 0, 60), &original).await.unwrap();
+        records
+            .observe_read(&journal, "filesystem.read", &receipt("a", 0, 60), &original)
+            .await
+            .unwrap();
         let mut summary = json!({"facts":[{"resultId":original["id"],"text":"The verified capacity is 138."}],
             "sources":[{"tool":"filesystem.read","resultRef":original,"source":receipt("a",0,60),"processedCharacters":20,"totalCharacters":60}]});
-        let first = records.update_from_summary(&journal, &summary).await.unwrap();
+        let first = records
+            .update_from_summary(&journal, &summary)
+            .await
+            .unwrap();
         assert_eq!(first["informationAdded"], true);
         let mut progress = WorkProgress::default();
         for index in 1..=3 {
@@ -710,18 +812,29 @@ mod tests {
             summary["facts"][0]["resultId"] = alias["id"].clone();
             summary["sources"][0]["resultRef"] = alias;
             summary["sources"][0]["processedCharacters"] = json!(20 + index);
-            let updated = records.update_from_summary(&journal, &summary).await.unwrap();
+            let updated = records
+                .update_from_summary(&journal, &summary)
+                .await
+                .unwrap();
             assert!(updated["changedDocuments"].as_u64().unwrap() > 0);
             assert_eq!(updated["informationAdded"], false);
             let plan = progress.observe_round(&RoundProgress {
                 evidence_changed: updated["informationAdded"] == true,
-                source_reads:1, repeated_reads:1, ..Default::default()
+                source_reads: 1,
+                repeated_reads: 1,
+                ..Default::default()
             });
             assert_eq!(plan.no_progress_rounds, index);
         }
         assert!(progress.needs_strategy_change());
         summary["facts"][0]["text"] = json!("The capacity applies to production only.");
-        assert_eq!(records.update_from_summary(&journal, &summary).await.unwrap()["informationAdded"], true);
+        assert_eq!(
+            records
+                .update_from_summary(&journal, &summary)
+                .await
+                .unwrap()["informationAdded"],
+            true
+        );
     }
 
     #[tokio::test]
@@ -856,7 +969,10 @@ mod tests {
         assert_eq!(findings["conclusions"], saved["analysis"]["conclusions"]);
         assert_eq!(findings["unresolved"], saved["analysis"]["unresolved"]);
         assert_eq!(findings["summaryFacts"], saved["summaryFacts"]);
-        assert_eq!(findings["artifactRef"], restored.directory()["documents"][0]["artifactRef"]);
+        assert_eq!(
+            findings["artifactRef"],
+            restored.directory()["documents"][0]["artifactRef"]
+        );
         assert!(findings["observations"].is_null());
         assert!(findings["source"].is_null());
         assert_eq!(

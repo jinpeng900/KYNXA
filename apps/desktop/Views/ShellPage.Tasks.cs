@@ -26,7 +26,6 @@ public sealed partial class ShellPage
             return await _tasksApiClient.GetAsync(chat.Id, matched[0].TaskId, projectId, cancellationToken);
         if (reply is null && candidates.Count == 1)
             return await _tasksApiClient.GetAsync(chat.Id, candidates[0].TaskId, projectId, cancellationToken);
-        // A later reply may be outside the loaded history window; match its saved checkpoint, never the latest task.
         // 原回复可能不在已加载历史页；按保存的回复检查点匹配，不能默认选择最新任务。
         TaskDetailResponse? found = null;
         if (reply is not null)
@@ -44,7 +43,6 @@ public sealed partial class ShellPage
 
     private async Task<bool> TryContinueSavedTaskAsync(string text)
     {
-        // Explicit continuation is authorization; ordinary questions keep their normal send path.
         // 明确续作才授权恢复；普通新问题保持原发送流程。
         if (!System.Text.RegularExpressions.Regex.IsMatch(text,
             @"(?ix)^\s*(?:请|麻烦|帮我|那就|好的?|please|okay|ok)?\s*(?:(?:继续|接着|续上|重试)(?:\s*[吧啊呀，,。.!！]?\s*$|\s*(?:刚才|上次|之前|原来|当前|这个|上述|剩余|未完成|精修|完善|推进|执行|做|工作|优化|修改|建模|修复|测试|验证|完成))|(?:continue|resume|retry|carry\s+on)(?:\s*[.!]?\s*$|\s+(?:the\s+)?(?:previous|unfinished|remaining|same|current|work|task|refin|build|implement|test|fix)))")) return false;
@@ -86,7 +84,6 @@ public sealed partial class ShellPage
         NotifyApprovalConversationChanged();
         Guid? projectId = ActiveChatId is Guid chat ? FindChat(chat).Project?.Id : null;
         TaskPanel.ShowConversation(ActiveChatId, projectId);
-        // The collapsed header does not poll; expanding this view never changes the task itself.
         // 折叠标题不发起轮询；展开查看不会改变正式任务及暂停恢复状态。
         TaskPanel.SetPreviewEnabled(sidebarVisible && !_chatClosing);
     }
@@ -123,7 +120,6 @@ public sealed partial class ShellPage
         }
         catch (GatewayApiException error) when (error.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            // Registration and stream acceptance can race; pause once the durable task identity arrives.
             // 正式任务登记与流接受可能并发；收到持久任务身份后再暂停，不能替换为取消。
             waitingRegistration = true;
         }
@@ -151,7 +147,6 @@ public sealed partial class ShellPage
         bool CurrentScope() => !_savingOnClose && !_chatClosing && ActiveChatId == conversation &&
             FindChat(conversation).Chat == chat && FindChat(conversation).Project?.Id == project?.Id;
         if (!CurrentScope()) return false;
-        // A selected task is authoritative; never borrow an unregistered reply placeholder's request ID.
         // 已选原任务才是正式目标，不能借用尚未登记的回复占位请求身份。
         prompt.TargetTaskId ??= taskId;
         ChatMessageState? previous = null, submitted = null;
@@ -203,7 +198,6 @@ public sealed partial class ShellPage
             {
                 throw new InvalidOperationException("The task has already ended.");
             }
-            // Bind both durable identities before replacing any visible reply or preparing an upload.
             // 正式任务与原请求身份都固定后，才替换可见回复或准备附件上传。
             previous = pending?.Message ?? FindTaskSteeringReply(chat, boundRequest);
             previousStatus = previous?.Status;
@@ -223,7 +217,6 @@ public sealed partial class ShellPage
                 && error.ErrorCode is "TASK_VERSION_CONFLICT" or "TASK_CONFLICT")
             {
                 prompt.SteeringDeliveryUnconfirmed = false;
-                // Refresh only a rejected version; keep the same task and message identities.
                 // 仅对已明确拒绝的旧版本刷新一次，保持任务及引导消息身份，不重放未知操作。
                 current = await _tasksApiClient.GetAsync(conversation, taskId.Value, project?.Id, deadline.Token);
                 if (current.Task.State == "completed" && CurrentScope())
@@ -241,7 +234,6 @@ public sealed partial class ShellPage
             if (receipt.Task.State is "paused" or "waiting-config" or "waiting-network" or "partial")
             {
                 if (prompt.TargetTaskId is null || !prompt.IsTaskGuidance || !CurrentScope()) return true;
-                // Only this explicit continuation may resume the paused root, through its normal verification gate.
                 // 只有本次明确续作才恢复暂停根，仍走既有核验入口，不能绕过未知副作用检查。
                 receipt = await _tasksApiClient.ControlAsync(conversation, taskId.Value, receipt.Task.Version,
                     "resume", project?.Id, deadline.Token);
@@ -259,7 +251,6 @@ public sealed partial class ShellPage
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException
             or InvalidOperationException or InvalidDataException or System.Text.Json.JsonException or ArgumentException)
         {
-            // A failed observation cannot put an already accepted guidance back in the queue.
             // 接续观察失败不能把已接受的引导退回队列，正式补充与当前回复位置仍保留。
             if (steeringAccepted)
             {
@@ -322,7 +313,6 @@ public sealed partial class ShellPage
         }
         try
         {
-            // Cache invalidation is ordered per message in the background; observing never waits for global disk writes.
             // 缓存失效按消息有序后台落盘；重接观察不能等待所有聊天的磁盘写入。
             _ = MessageTimePresentation.ForgetAsync(chat.Id, message);
             if (_chatClosing || _pendingReplies.ContainsKey(chat.Id)) return;
@@ -331,7 +321,6 @@ public sealed partial class ShellPage
                 _layout.PermissionMode, message) { TaskId = task.TaskId, Started = true, StreamRequestId = requestId,
                     WaitingReplyAnchorId = expectedReplyId };
             pending.TaskRegistered.TrySetResult(task.TaskId);
-            // Seed persisted timing before entering streaming; process-local clocks do not survive a restart.
             // 先接续正式累计值再进入恢复准备；重启后没有本机时钟，等待新模型启动期间也要保留已有用时。
             if (message.GenerationElapsedMs is long resumedElapsed) message.ApplyGenerationTiming(resumedElapsed, false);
             message.Status = "streaming"; message.Error = string.Empty;

@@ -8,7 +8,6 @@ using KYNXA_Desktop.Views;
 namespace KYNXA_Desktop;
 
 /// <summary>
-/// The application window hosting the KYNXA shell.
 /// 承载 KYNXA 主界面的应用窗口。
 /// </summary>
 public sealed partial class MainWindow : Window
@@ -26,7 +25,6 @@ public sealed partial class MainWindow : Window
         _closeDecisionPending = true;
         try
         {
-            // Choose before entering the existing exit pipeline; tray hiding must leave running tasks untouched.
             // 在进入原有退出流程之前选择行为；隐藏到托盘不能触发正在运行任务的退出处理。
             string? action = await page.ConfirmMainWindowCloseAsync();
             if (action == Models.UI.MainWindowClosePreferences.Tray)

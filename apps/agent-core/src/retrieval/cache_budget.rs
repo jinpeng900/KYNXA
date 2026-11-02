@@ -1,4 +1,3 @@
-//! Adaptive cache targets are replaceable optimization policy, never task state or hardware authority.
 //! 自适应缓存目标仅是可重建优化策略，不承担任务状态，也不替代硬件资源服务授额。
 
 use serde_json::{Value, json};
@@ -72,7 +71,9 @@ impl HardwareHeadroom {
         }
         limit
     }
-    fn pressured(self) -> bool { self.queued || self.memory_pressured() }
+    fn pressured(self) -> bool {
+        self.queued || self.memory_pressured()
+    }
     pub(crate) fn memory_pressured(self) -> bool {
         self.available_bytes < self.capacity_bytes / 100
             || self
@@ -145,7 +146,11 @@ impl BudgetController {
         }
     }
     pub(crate) fn manual_cap(&self, kind: CacheKind) -> Option<usize> {
-        Some(self.caps[kind.index()].unwrap_or(usize::MAX).min(kind.maximum_bytes()))
+        Some(
+            self.caps[kind.index()]
+                .unwrap_or(usize::MAX)
+                .min(kind.maximum_bytes()),
+        )
     }
     pub(crate) fn total_limit(&mut self, cap: Option<usize>) {
         if self.total_cap != cap {
@@ -179,10 +184,16 @@ impl BudgetController {
     }
     pub(crate) fn update(&mut self, now_ms: u64, hardware: HardwareHeadroom) {
         let caps = CacheKind::ALL.map(|kind| self.manual_cap(kind));
-        // Per-cache maxima and the physical-memory share apply together, not as additive allowances.
         // 各缓存上限与物理内存份额同时约束；16 GiB 主机也不因此预分配 1 GiB。
-        self.hardware_limit = hardware.limit().min(self.total_cap.unwrap_or(usize::MAX))
-            .min(CacheKind::ALL.into_iter().map(CacheKind::maximum_bytes).sum());
+        self.hardware_limit = hardware
+            .limit()
+            .min(self.total_cap.unwrap_or(usize::MAX))
+            .min(
+                CacheKind::ALL
+                    .into_iter()
+                    .map(CacheKind::maximum_bytes)
+                    .sum(),
+            );
         if let Some(latency) = hardware
             .foreground_latency_micros
             .filter(|latency| Some(*latency) != self.last_latency_sample)
@@ -248,7 +259,7 @@ impl BudgetController {
             .map(|i| self.seeds[i].min(caps[i].unwrap_or(usize::MAX)))
             .fold(0usize, usize::saturating_add);
         if requests == 0 {
-            self.idle_windows = self.idle_windows.saturating_add(1);
+            self.idle_windows += 1;
         } else {
             self.idle_windows = 0;
         }
@@ -275,7 +286,6 @@ impl BudgetController {
         };
         self.total = next.min(self.hardware_limit);
         let mut targets = allocate(self.total, &weights, &caps);
-        // Small normal variations keep their grant; hardware/cap reductions always win immediately.
         // 正常小幅波动保留已有授额；硬件或手动上限降低时立即优先收缩。
         if !must_shrink && !self.dirty {
             for i in 0..3 {
@@ -354,10 +364,7 @@ mod tests {
     fn controller() -> BudgetController {
         let mut state = BudgetController::default();
         for kind in CacheKind::ALL {
-            state.register(
-                kind,
-                32 * MIB,
-            );
+            state.register(kind, 32 * MIB);
         }
         state
     }
@@ -413,10 +420,13 @@ mod tests {
         let mut state = controller();
         state.manual_limit(CacheKind::QueryVectors, Some(512 * MIB));
         assert_eq!(state.manual_cap(CacheKind::QueryVectors), Some(64 * MIB));
-        state.update(0, HardwareHeadroom {
-            physical_total_bytes: Some(1024 * MIB),
-            ..hardware()
-        });
+        state.update(
+            0,
+            HardwareHeadroom {
+                physical_total_bytes: Some(1024 * MIB),
+                ..hardware()
+            },
+        );
         assert!(state.total <= 64 * MIB);
         assert_eq!(state.hardware_limit, 64 * MIB);
         assert!(CacheKind::from_name("rerank-scores").is_none());

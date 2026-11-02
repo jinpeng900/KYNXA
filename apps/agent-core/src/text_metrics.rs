@@ -1,4 +1,3 @@
-/// Match the existing code-point heuristic; this is not a provider tokenizer.
 /// 保持既有按 Unicode 码点的保守估算；该算法不是供应商分词器。
 pub fn estimate_tokens(text: &str) -> u64 {
     let (mut tokens, mut ascii, mut whitespace) = (0_u64, 0_u64, 0_u64);

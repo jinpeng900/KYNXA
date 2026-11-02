@@ -182,7 +182,6 @@ struct Archive {
     content_types: bool,
 }
 
-/// Retain decoder slots and leases until close/release is observed; SDK promises are not proof.
 /// 确认关闭或释放前保留解码槽和租约；SDK Promise 不算执行证明。
 #[derive(Default)]
 pub(crate) struct DocumentExtractionState {
@@ -284,7 +283,6 @@ impl DocumentExtractionState {
                 let format = args["format"].as_str().unwrap_or("pdf");
                 if !["pdf", "png", "jpeg", "bmp", "gif", "tiff", "webp"].contains(&format) || format != "pdf" && pages != &[json!(1)] { return Err(failure("DOCUMENT_INVALID_INPUT")); }
                 self.sequence += 1; let id = self.sequence; self.ocr_outputs.insert(id, json!({"pages": pages, "maximum": args["maximumOutputBytes"], "bytes": 0, "format":format}));
-                // Raster leases cover the bounded original decode, scaled bitmap and helper overhead.
                 // 栅格租约覆盖有界原图解码、缩放位图及辅助进程开销，不能只按压缩字节预约。
                 let decode_memory = if format == "pdf" {384} else {512} * 1024 * 1024;
                 Ok(json!({"id": id, "timeoutMs": number(&args["timeoutMs"], 20000).clamp(1000, 30000), "killWaitMs": 2000, "resource": {"kind": "background", "cpuThreads": 1, "memoryBytes": decode_memory + number(&args["byteLength"], 0) * 4 + number(&args["maximumOutputBytes"], 0) * 6, "waitMs": args["timeoutMs"]}})) }

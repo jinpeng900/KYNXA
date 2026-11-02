@@ -187,7 +187,6 @@ public sealed partial class ConversationDocumentPanel
         if (action is null)
         { SendWorkbenchResult(view, work, renderId, requestId, null, "工作台操作无效。"); return; }
         string identity = view.Key + ":" + renderId + ":" + requestId;
-        // The original in-flight request will supply its receipt; duplicates never dispatch twice.
         // 同一请求沿用原回执，不再派发；取消请求保留一个独立名额。
         if (_workbenchRequests.Contains(identity)) return;
         if (_workbenchRequests.Count >= (action == "media.cancel" ? 13 : 12))
@@ -203,7 +202,11 @@ public sealed partial class ConversationDocumentPanel
             var payload = message.TryGetProperty("payload", out var value) ? value : JsonSerializer.SerializeToElement(new { });
             if (payload.ValueKind != JsonValueKind.Object) throw new InvalidDataException("工作台参数无效。");
             if (payload.GetRawText().Length > 1024 * 1024) throw new InvalidDataException("工作台请求过大。");
-            if (action == "media.cancel")
+            if (action is "training.files.pick" or "training.folder.pick")
+            {
+                result = await PickTrainingSourceAsync(action, payload, work);
+            }
+            else if (action == "media.cancel")
             {
                 if (_transcriptionOperations.TryGetValue(work.Key, out var operation))
                     result = await _workbenchApi.RequestAsync(work.ConversationId, work.MountId, action,

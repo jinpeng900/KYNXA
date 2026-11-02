@@ -45,7 +45,6 @@ fn serialized(value: &Value) -> String {
 }
 
 fn value_tokens(value: &Value, field: &str) -> u64 {
-    // Encoded image bytes are transport data, not text tokens; their model-specific cost stays unobserved.
     // 图片编码字节属于传输数据，不是文本 token；其模型相关消耗仍须标记为未观测。
     if matches!(
         value["type"].as_str(),
@@ -407,12 +406,13 @@ fn decode_turn(args: &Value) -> Value {
                     .any(|part| part["type"] == "refusal")
         })
     };
-    // Encrypted reasoning can consume the output allowance before any public summary or text exists.
     // 加密思考可能先用完输出额度，此时尚无公开摘要或正文，仍须保留原生续接内容。
     let private_reasoning = protocol == "openai-responses"
         && array(&result["output"]).iter().any(|item| {
             item["type"] == "reasoning"
-                && item["encrypted_content"].as_str().is_some_and(|text| !text.is_empty())
+                && item["encrypted_content"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
         });
     if decoded.is_empty()
         && trim(string(&parts["content"])).is_empty()
@@ -692,7 +692,6 @@ pub(crate) fn quote(text: &str) -> String {
     serde_json::to_string(text).unwrap()
 }
 
-/// UTF-16 offsets are the public archive contract; byte offsets never escape this module.
 /// 公开归档坐标始终使用 UTF-16；Rust 字节偏移不传给调用者。
 pub(crate) fn slice(text: &str, start: usize, end: usize) -> String {
     String::from_utf16_lossy(

@@ -39,7 +39,6 @@ fn safe_error(args: &Value) -> Value {
     })
 }
 
-/// Catalog preparation and memory publication own native ledgers; original JSON wires preserve SDK identities.
 /// 目录准备与记忆发布由原生账本拥有；原始 JSON 字节保留 SDK 身份，I/O 关闭不冒充发布完成。
 pub struct SourceCoordinationState {
     fields: Value,

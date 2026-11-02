@@ -12,7 +12,6 @@ fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Allocate request space using provider token costs; preserve formal history and confirmed memory.
 /// 按供应商 token 成本分配请求空间，保留正式历史和确认记忆。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {

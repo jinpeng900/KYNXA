@@ -149,7 +149,6 @@ public sealed partial class ShellPage
             return true;
         }
         if (!content.Contains(StandardDataFormats.Bitmap)) return false;
-        // Clipboard pixels need a temporary file; only Send imports a durable gateway snapshot.
         // 剪贴板像素暂存为文件，点击发送后才由网关接收为持久附件。
         string draftDirectory = StoragePaths.AttachmentDraftDirectory;
         Directory.CreateDirectory(draftDirectory);
@@ -181,10 +180,8 @@ public sealed partial class ShellPage
     private async Task PrepareMessageAttachmentsAsync(Guid conversation, ChatMessageState user, CancellationToken cancellationToken)
     {
         if (!_messageAttachmentDrafts.TryGetValue(user.Id, out var files) || files.Length == 0) return;
-        // Persisted descriptors can default to ready before import; only a gateway receipt completes the draft.
         // 历史描述符可能在导入前就默认为 ready；只有网关接收回执才能结束草稿生命周期。
         var accepted = await _attachmentsApiClient.ImportAsync(conversation, user.Id, files, cancellationToken);
-        // Preserve only in-memory thumbnails while replacing provisional metadata with real receipts.
         // 用真实接收回执替换临时元信息，缩略图仅保留在本机展示状态中。
         user.Attachments = accepted.Select(file => file with
             { ThumbnailDataUrl = user.Attachments.FirstOrDefault(previous => previous.Id == file.Id)?.ThumbnailDataUrl }).ToList();

@@ -1,7 +1,5 @@
-//! Resource observations select MCP scheduling capacity; permits never revoke running protocol exchanges.
 //! 资源观测决定 MCP 调度额度；收缩额度不会撤销已运行的协议交换，也不伪造吞吐反馈。
 //!
-//! Budgets are scheduling targets and quotas count active work; physical resource admission stays with the resource service.
 //! 预算表示调度目标，租位记录活跃工作；真实硬件资源准入仍由资源服务负责。
 
 use serde_json::{Value, json};
@@ -60,7 +58,6 @@ impl McpBudget {
                     .as_u64()
                     .unwrap_or(0),
             );
-        // Utilisation alone is not resource exhaustion: idle background work may use the CPU fully.
         // CPU 使用率高本身不是资源不足，空闲后台工作可以充分使用 CPU；收缩依据真实余量。
         let is_under_pressure = available_memory_bytes < GIB
             || memory_headroom_bytes < 128 * MIB
@@ -121,7 +118,6 @@ impl McpBudget {
     }
 }
 
-/// A lower limit blocks new work until old permits finish; it never invents available semaphore credits.
 /// 降额后等待旧租位完成再准入，既不强取消运行中调用，也不凭归还旧租位放大新额度。
 pub(crate) struct McpQuota {
     state: Mutex<QuotaState>,
@@ -197,7 +193,6 @@ impl McpQuota {
     }
     pub async fn acquire_owned(self: &Arc<Self>) -> McpPermit {
         loop {
-            // Register the waiter before checking capacity so a released permit cannot be missed.
             // 先登记等待者再检查额度，避免租位释放通知落在检查与等待之间。
             let changed = self.changed.notified();
             tokio::pin!(changed);

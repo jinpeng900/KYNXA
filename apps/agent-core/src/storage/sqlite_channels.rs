@@ -3,7 +3,6 @@ use rusqlite::{Connection, types::Value as SqlValue};
 use serde_json::{Value, json};
 
 pub fn chunk_columns() -> String {
-    // Candidate rows retain their public metadata shape; vector bytes have a separate owned read operation.
     // 候选行保留公开元数据形状；向量字节通过独立、具有所有权的读取操作获取，不随候选重复编码。
     format!(
         "c.id,c.chunk_id,c.source_id,c.chunk_index,c.text,c.lexical_text,c.chunk_hash,c.start_offset,c.end_offset,c.start_line,c.end_line,
@@ -53,7 +52,6 @@ fn path_clause(column: &str, path: &str) -> (String, Vec<SqlValue>) {
     }
 }
 
-/// Structure and literal channels share authorized predicates and a single read snapshot.
 /// 结构与字面通道共用授权谓词，并在同一读取快照完成候选选择。
 pub fn candidates(connection: &Connection, arguments: &Value, scopes: &[Value]) -> ContractResult {
     let columns = if arguments["metadataOnly"] == true {

@@ -24,7 +24,6 @@ public sealed partial class ShellPage
         }
         string previousAction = _layout.MainWindowCloseAction;
         bool previousConfirm = _layout.ConfirmMainWindowClose;
-        // Both the settings card and close confirmation save the same live layout; stale copies must not overwrite it.
         // 设置卡片与关闭确认保存同一份当前布局，避免独立加载的旧副本覆盖其他偏好。
         _layout.MainWindowCloseAction = selected.Action;
         _layout.ConfirmMainWindowClose = selected.Confirm;
@@ -111,9 +110,7 @@ public sealed partial class ShellPage
                 Padding = new Thickness(8, 4, 0, 4), IsChecked = action == key };
             var transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             var uncheckedFill = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            // Match the SDK's pointer-over glyph size and reuse idle brushes so hovering changes neither size nor color.
             // 与 SDK 的悬停圆点尺寸一致，并复用静止画刷，悬停时不再改变大小或颜色。
-            // Native press, focus and disabled states remain available; mutable shared brushes still follow the theme.
             // 原生按下、焦点及禁用状态继续保留，共享画刷仍随主题原位更新。
             radio.Resources["RadioButtonCheckGlyphSize"] = 14d;
             foreach ((string prefix, Brush brush) in new (string, Brush)[]
@@ -150,7 +147,6 @@ public sealed partial class ShellPage
                 if (restoreState && !VisualStateManager.GoToState(radio, "Normal", false)) return;
                 try
                 {
-                    // The SDK owns the normal fill, including its theme-specific alpha; recolor the existing state brush.
                     // 普通填充及随主题变化的透明度由 SDK 决定；原位更新已有状态画刷，避免悬停切换底色。
                     if (FindUncheckedFill(root) is { } idleFill && !ReferenceEquals(idleFill, uncheckedFill))
                     {

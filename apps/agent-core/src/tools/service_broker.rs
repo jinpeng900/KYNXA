@@ -350,7 +350,7 @@ impl BrokerState {
                 if expected && previous == current {
                     return Ok(json!({"changed":false,"servers":[]}));
                 }
-                self.configuration_generation = self.configuration_generation.saturating_add(1);
+                self.configuration_generation += 1;
                 self.live_configuration = Some(arguments["current"].clone());
                 let servers = configuration::calculate("tools.changedMcpServerIds", arguments)
                     .map_err(|code| ServiceError::new(&code, "MCP 配置变化分析失败。", 400))?;
@@ -663,7 +663,6 @@ impl BrokerState {
                 {
                     return Ok(json!({"name":name,"builtin":true}));
                 }
-                // An injected SDK schema can preserve a denial diagnosis, but never gains native catalog authority.
                 // 注入的 SDK schema 只能保留拒绝诊断，不能获得原生目录执行权限。
                 let candidate = &arguments["candidate"];
                 if candidate["name"] == name {

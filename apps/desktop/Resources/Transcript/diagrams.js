@@ -10,7 +10,6 @@
   const MAX_EXPORT_PNG_BYTES = 16 * 1024 * 1024;
   const MAX_EXPORT_IMAGE_SIDE_PX = 8192;
   const MAX_EXPORT_IMAGE_PIXELS = 16000000;
-  // Diagram content is a portable white document, independent of application chrome and system theme.
   // 图表内容是可独立保存的白底文档，与应用工具栏和系统主题分开；源码显式样式仍由 Mermaid 保留。
   const DIAGRAM_PALETTE = Object.freeze({ main: '#ffffff', sidebar: '#ffffff', soft: '#edf2fc', accent: '#4568b2',
     selection: '#edf2fc', text: '#24272d', secondary: '#606772', border: '#dce3ef', isDark: false, isHighContrast: false });
@@ -54,7 +53,6 @@
   function sourceValidation(source) {
     if (source.length > MAX_SOURCE_CHARACTERS) return 'diagramTooLarge';
     const inspected = source.replace(/<<[\p{L}\p{N}_ -]+>>/gu, '');
-    // Preflight recognizes executable features, not ordinary node names or comparison labels.
     // 预检查识别可执行功能，不能把普通节点名或比较表达式误当成交互命令与 HTML。
     const unsafeHtml = /<\s*\/?\s*(?:script|style|iframe|object|embed|img|svg|foreignObject|link|meta|base|form|input|button|video|audio|canvas|body|html)(?=[\s/>])[^<>]*>|<[^<>]+\s(?:on[\w-]+|href|src)\s*=/i;
     const interaction = diagramType(source) !== 'mindmap'
@@ -173,7 +171,6 @@
       if (!state || !block.isConnected) continue;
       if (!records.has(state)) {
         state.view.observer.observe(state.viewport);
-        // Cached diagrams may have missed a language change while detached from the active conversation.
         // 缓存图表脱离当前聊天时可能错过语言切换，恢复展示时同步操作文案。
         localize(state);
       }
@@ -221,7 +218,6 @@
           if (!applyResult(state, result)) state.pendingSvg = result;
         } catch {
           if (state.block.isConnected && state.revision === revision) {
-            // A failed repaint keeps a previously valid image and always retains its source.
             // 重绘失败时保留已有有效图像，并始终保留原始源码。
             const result = { revision, error: 'diagramFailed' };
             if (!applyResult(state, result)) state.pendingSvg = result;
@@ -337,7 +333,6 @@
     for (const element of elements) {
       if (element.id && !ids.has(element.id)) ids.set(element.id, prefix + ids.size);
     }
-    // Rebuild a conservative SVG tree. No foreignObject, links, animation, events or external references survive.
     // 重建保守的 SVG 节点树；不保留 foreignObject、链接、动画、事件或外部引用。
     function copyElement(element) {
       if (element.namespaceURI !== SVG_NAMESPACE || !SVG_ELEMENTS.has(element.localName)) return null;
@@ -376,9 +371,7 @@
   }
 
   function centerMindmapCircularLabels(svg) {
-    // Restore missing anchors only on unshifted circular mindmap labels.
     // 仅为未偏移的思维导图圆形标签补齐居中锚点。
-    // Preserve measured negative-x offsets on rectangles and geometry in other diagram types.
     // 保留矩形标签测量后的负 x 偏移，以及其他图表的原始布局。
     for (const node of svg.querySelectorAll('g.mindmap-node')) {
       const circle = node.querySelector(':scope > circle.basic.label-container');
@@ -402,7 +395,6 @@
     'line-height', 'marker-start', 'marker-mid', 'marker-end', 'clip-path', 'rx', 'ry', 'text-overflow', 'overflow',
     'display', 'visibility', 'stop-color', 'stop-opacity'];
   function exportImageSize(width, height) {
-    // Use the largest aspect-preserving raster allowed by both existing memory limits.
     // 自动采用同时满足现有边长与总像素上限的最大等比栅格尺寸，不再让读者选择倍率。
     const scale = Math.min(MAX_EXPORT_IMAGE_SIDE_PX / width, MAX_EXPORT_IMAGE_SIDE_PX / height,
       Math.sqrt(MAX_EXPORT_IMAGE_PIXELS / (width * height)));
@@ -426,12 +418,10 @@
     const clone = svg.cloneNode(true), originals = [svg, ...svg.querySelectorAll('*')], copies = [clone, ...clone.querySelectorAll('*')];
     const ids = new Map(originals.filter(element => element.id).map(element => [element.id, element.id]));
     const exportedIds = new Set();
-    // Freeze colours and fonts while SVG is attached; export without external assets or the zoom/pan wrapper.
     // 在 SVG 仍挂载时固化颜色和字体，导出时不带外部资源或缩放平移容器。
     for (let index = 0; index < originals.length; index++) {
       const original = originals[index], copy = copies[index];
       if (copy.localName === 'style') { copy.remove(); continue; }
-      // Inline styles allow deduplicating mindmap IDs; keep the first target for fragment links.
       // 固化样式后去重思维导图 ID，保留首个目标供片段链接使用。
       if (copy.id) {
         if (exportedIds.has(copy.id)) copy.removeAttribute('id');
@@ -443,14 +433,12 @@
         const value = exportStyleValue(computed.getPropertyValue(property), ids);
         if (value !== null && value.length > 0 && value.length < 1000 && !value.includes(';')) declarations.push(property + ': ' + value + ';');
       }
-      // Preserve longhand properties; CSSOM shorthands such as marker can fail the native whitelist.
       // 保留长属性，避免 CSSOM 合并为 marker 等缩写后无法通过原生白名单。
       copy.setAttribute('style', declarations.join(' '));
     }
     clone.setAttribute('xmlns', SVG_NAMESPACE); clone.setAttribute('width', String(box[2])); clone.setAttribute('height', String(box[3]));
     clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const backgroundColor = DIAGRAM_PALETTE.main;
-    // Standalone SVG documents fit the browser viewport, retaining intrinsic attributes for image consumers.
     // 独立 SVG 文档适应浏览器视口，同时保留原始尺寸属性供图片及 Office 等使用者读取。
     clone.setAttribute('style', clone.getAttribute('style') + ' width: 100%; height: 100vh; display: block; background-color: ' + backgroundColor + ';');
     const background = document.createElementNS(SVG_NAMESPACE, 'rect');
@@ -523,10 +511,8 @@
   function pngExportBytes(task) {
     return new Promise((resolve, reject) => {
       const dimensions = exportImageSize(task.snapshot.width, task.snapshot.height);
-      // Limit the SVG image's intrinsic raster size before decoding, not only the destination canvas.
       // 解码前就限制 SVG 图像的固有栅格尺寸，避免先分配超大图像、再缩进较小画布。
       const parsed = new DOMParser().parseFromString(task.snapshot.serialized, 'image/svg+xml');
-      // Viewport units belong to the standalone document, never to an offscreen PNG image decoder.
       // 视口单位仅用于独立文档，PNG 离屏解码使用已经限幅的明确像素尺寸。
       parsed.documentElement.style.removeProperty('width'); parsed.documentElement.style.removeProperty('height');
       parsed.documentElement.setAttribute('width', String(dimensions.width)); parsed.documentElement.setAttribute('height', String(dimensions.height));
@@ -569,13 +555,11 @@
     clearTimeout(state.exportTimer); state.exportReduced = false;
     let task;
     try {
-      // Snapshot visual data before awaiting; navigation invalidates late results for reused DOM nodes.
       // 等待前保存视觉快照；导航后丢弃迟到结果，避免改写复用的聊天节点。
       const snapshot = exportSnapshot(state);
       task = { requestId: 'diagram-export-' + nonce + '-' + (++exportSequence), snapshot, format, cancelled: false,
         objectUrl: null, image: null, canvas: null, preparationTimer: 0, reduced: false };
       state.exportTask = task; pendingExports.set(task.requestId, state); setExportStatus(state, 'preparing');
-      // A single transcript export bounds raster memory and matches the native picker's ownership.
       // 一份聊天同时只准备或保存一张图，限制栅格内存峰值，并与原生保存选择器的唯一所有权一致。
       refreshExportControls();
       const bytes = format === 'svg' ? snapshot.bytes : await pngExportBytes(task);
@@ -661,7 +645,6 @@
     if (!view.viewport.classList.contains('mermaid-viewport') || !view.canvas.firstElementChild) return true;
     const width = view.viewport.clientWidth;
     if (!width) return true;
-    // Compact diagrams use their natural height; tall diagrams keep a bounded, zoomable viewport.
     // 简单图表按自然高度收紧，较高图表保留有上限且可缩放的查看区域。
     const naturalScale = Math.min(1, Math.max(1, width - 24) / view.width);
     const height = Math.round(Math.max(160, Math.min(380, view.height * naturalScale + 24))) + 'px';
@@ -735,7 +718,6 @@
     dialog.showModal(); setViewSize(view, canvas.firstElementChild, true); viewport.focus({ preventScroll: true });
   }
   function cloneSvg(svg) {
-    // The viewer has separate IDs so markers and clipping never resolve into a different diagram.
     // 查看器使用独立 ID，避免箭头或裁剪引用解析到另一张图表。
     return sanitizeSvg(new XMLSerializer().serializeToString(svg));
   }
@@ -782,7 +764,6 @@
   function revealSource(block) {
     const state = states.get(block);
     if (!state || !block.isConnected) return;
-    // Explicit source navigation has the same permanence as a reader opening the source disclosure.
     // 主动定位源码与读者手动展开源码具有相同持久性，延迟图表绘制不再自动收起它。
     state.sourceWasToggled = true; state.details.open = true;
   }

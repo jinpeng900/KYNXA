@@ -50,7 +50,6 @@ public sealed partial class ShellPage
         if (!_projectsReady) return;
         if (_storageSettingsWindow is { } existing)
         {
-            // Window.Activate already restores an iconic HWND; use one native presentation path for reuse and restore.
             // Window.Activate 自带最小化恢复；复用与恢复只走一次原生展示流程。
             existing.Activate();
             return;
@@ -115,7 +114,6 @@ public sealed partial class ShellPage
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
         titleBar.Children.Add(title);
-        // Categories retain their views, including drafts, downloads and scroll positions.
         // 分类保留原页面实例，包括草稿、下载与滚动位置，不再打开其他设置窗口。
         var workspace = new SettingsWorkspace(font);
         _settingsWorkspace = workspace;
@@ -189,7 +187,6 @@ public sealed partial class ShellPage
         window.SetTitleBar(titleBar);
         AppearanceService.TrackWindow(window);
         var ownerBounds = App.Window.AppWindow;
-        // Resolve DPI from the visible owner and apply final bounds before the first activation.
         // 使用已显示所属窗口的 DPI，在首次激活前设置最终尺寸，避免 Loaded 后再次缩放引起跳变。
         double scale = XamlRoot?.RasterizationScale ?? 1;
         if (window.AppWindow.Presenter is OverlappedPresenter settingsPresenter)
@@ -232,7 +229,6 @@ public sealed partial class ShellPage
         {
             PreventClose(sender, e);
             if (ownerClosing || e.Cancel) return;
-            // Loading is disposable view work, not an unsaved user edit.
             // 加载可随窗口取消，不属于用户尚未保存的编辑。
             string? writing = _memoryManagementWindow is { BlocksSettingsClose: true } ? "memory"
                 : _toolManagementWindow is { BlocksSettingsClose: true } ? "tools"
@@ -344,7 +340,6 @@ public sealed partial class ShellPage
                 maintenance.SetLength(0);
                 await maintenance.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(new { pid = Environment.ProcessId }));
                 maintenance.Flush(true);
-                // Maintenance settles background writers asynchronously; wait without cancelling user work.
                 // 维护状态异步结算后台写入；有界等待，不强制取消用户任务。
                 var maintenanceDeadline = DateTime.UtcNow.AddSeconds(30);
                 do
@@ -393,7 +388,6 @@ public sealed partial class ShellPage
             {
                 try
                 {
-                    // Release maintenance before asking the gateway to load its new root.
                     // 请求网关加载新根目录前，先释放维护状态。
                     Guid? activeWork = _activeProjectChat?.Id, activeChat = _activeStandaloneChat?.Id;
                     var catalog = await _projectStore.LoadAsync();

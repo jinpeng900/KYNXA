@@ -16,7 +16,6 @@ struct CachedMetadata {
     metadata: Value,
 }
 
-/// Run filesystem I/O separately; keep lookup, commit and statistics in foreground state.
 /// 文件系统 I/O 单独执行；查找、提交和统计留在前台状态中。
 #[derive(Default)]
 pub struct SkillMetadata {

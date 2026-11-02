@@ -86,7 +86,6 @@
         post({ type: 'previewError', key: requestScope.key, renderId: message.renderId, message: text });
       }
     } else if (message.kind === 'markdown' || message.kind === 'mermaid' || message.kind === 'code') {
-      // HTML is produced by the existing HTML-disabled Markdown renderer, never passed through from a document.
       // HTML 仅来自现有禁止原生 HTML 的 Markdown 渲染器，绝不直接接受文档内的 HTML。
       content.innerHTML = typeof message.html === 'string' ? message.html : '';
       for (const formula of content.querySelectorAll('.math[data-latex]')) {
@@ -110,7 +109,6 @@
     }
     document.title = message.title || '文件预览';
     requestAnimationFrame(() => { if (revision === current) restoreState(states.get(key) || readState(message.state)); });
-    // Office modules report their usable first view independently from background resource completion.
     // Office 模块将可操作首屏与后台资源完成分开回报，不让字体、图片及后续页阻塞 shown。
     if (!['docx', 'pptx', 'xlsx'].includes(message.kind)) await contentSettled(content, { visibleOnly: true });
     if (revision === current) post({ type: 'shown', key, renderId: message.renderId });
@@ -211,7 +209,6 @@
     if (!window.docx) throw new Error('DOCX renderer unavailable');
     const isCurrent = options.isCurrent;
 
-    // The renderer runs in the trusted parent; document markup lives in a scriptless, network-isolated frame.
     // 渲染器在可信父页面运行；文档标记放入禁脚本、禁外部网络的隔离框架，不共享主页面样式。
     const frame = document.createElement('iframe');
     frame.className = 'docx-view'; frame.title = options.title || 'DOCX';
@@ -252,7 +249,6 @@
       };
       let wrapper, resolveMounted, rejectMounted;
       const mounted = new Promise((resolve, reject) => { resolveMounted = resolve; rejectMounted = reject; });
-      // The public element factory exposes completed page DOM before the library waits for image tasks.
       // 公开元素工厂在页面 DOM 生成时即挂载，避免库内部等待全部图片后才交出首屏；第三方代码不改写。
       function createElement(specification) {
         alive();
@@ -345,7 +341,6 @@
   window.kynxaOffice?.register('docx', renderDocxBytes);
 
   function requestWorkbench(action, payload, scope) {
-    // A detached preview cannot dispatch work against whichever file is now open.
     // 已切走的预览不能把旧操作发到当前文件。
     if (scope.revision !== revision || scope.key !== key || scope.renderId !== renderId || scope.signal?.aborted)
       return Promise.reject(new DOMException('预览已切换', 'AbortError'));

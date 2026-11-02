@@ -17,7 +17,6 @@ struct NativeRequest {
     waiting: bool,
 }
 
-/// Worker state and accepted native work outlive caller promises; only native receipts drain ownership.
 /// Worker 状态与已接纳原生工作独立于调用方 Promise；只有原生回执才能排空所有权。
 #[derive(Default)]
 pub struct InferenceLifecycleState {

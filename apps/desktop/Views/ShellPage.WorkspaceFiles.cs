@@ -40,7 +40,6 @@ public sealed partial class ShellPage
             chat.KeepWorkspace = true;
             if (!chat.IsPersisted) await SaveChatChangesAsync(project);
             if (_chatClosing || !IsLoaded || ActiveChatId != conversation) return;
-            // The picker grants this file's preview, never another folder or model-wide access.
             // 选择器只授权预览此文件，不增加工作文件夹或模型的目录权限。
             WorkspaceHome.CancelFolderEditor();
             AddWorkspaceTab(conversation, ConversationWorkspaceSources.File(file.Path, file.Name, userSelected: true) with
@@ -74,7 +73,6 @@ public sealed partial class ShellPage
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException or InvalidOperationException or InvalidDataException)
         {
-            // Activation is a background hint; retrieval still prepares itself when a real query needs it.
             // 激活只是后台提示，失败不阻断聊天；真正查询仍由后端按需准备检索。
         }
     }
@@ -160,7 +158,6 @@ public sealed partial class ShellPage
         if (_chatClosing || entry.ConversationId == Guid.Empty || entry.MessageId == Guid.Empty || entry.Id == Guid.Empty) return;
         var owner = FindChat(entry.ConversationId);
         if (owner.Chat is null || owner.Project?.Id != CurrentWorkspaceProject()?.Id) return;
-        // Preserve the attachment's real chat identity; project aggregation never rebinds its preview to another chat.
         // 保留附件真实聊天身份；工作聚合不能把预览归属改绑到当前聊天。
         if (ActiveChatId != entry.ConversationId && owner.Project is { } project) SelectProjectChat(project, owner.Chat);
         if (ActiveChatId != entry.ConversationId) return;

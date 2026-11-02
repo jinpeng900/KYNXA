@@ -10,7 +10,6 @@ using Microsoft.Windows.AppLifecycle;
 namespace KYNXA_Desktop;
 
 /// <summary>
-/// Routes repeated launches to the existing desktop before constructing XAML or starting its services.
 /// 在构造 XAML 或启动服务前，将重复启动交回已有桌面实例。
 /// </summary>
 internal static class Program
@@ -26,7 +25,6 @@ internal static class Program
         current.Activated += InstanceActivated;
         try
         {
-            // AppInstance scopes this key to the app identity, including isolated packaged test editions.
             // AppInstance 按应用身份隔离此键，独立打包的测试版本不会占用正式应用实例。
             var primary = AppInstance.FindOrRegisterForKey(AppIdentity.AppUserModelId + ".MainWindow");
             if (!primary.IsCurrent)
@@ -39,7 +37,6 @@ internal static class Program
                 }
                 catch (Exception error)
                 {
-                    // A primary exiting during redirection must not open a duplicate UI or a crash debugger.
                     // 主实例在转交期间退出时，副实例安静结束，不另开界面或触发崩溃调试器。
                     Debug.WriteLine($"Desktop activation redirection failed: {error.GetType().Name}");
                     return 1;
@@ -62,7 +59,6 @@ internal static class Program
 
     private static void InstanceActivated(object? sender, AppActivationArguments args)
     {
-        // An activation arriving before XAML starts needs no extra window: the initial launch will show it.
         // XAML 启动前收到激活时，首次启动本身就会显示窗口，无需额外建窗。
         _dispatcher?.TryEnqueue(() =>
         {
@@ -80,7 +76,6 @@ internal static class Program
             catch (Exception error) { failure = ExceptionDispatchInfo.Capture(error); }
             finally { completed.Set(); }
         });
-        // Pump COM calls on the startup STA while the MTA redirects; a direct Task.Wait can deadlock activation.
         // MTA 转交激活时，启动 STA 继续调度 COM 调用；直接等待 Task 可能使激活死锁。
         try
         {
@@ -90,7 +85,6 @@ internal static class Program
         }
         finally
         {
-            // Even a native wait failure must leave the worker's event alive until it finishes signaling.
             // 即使原生等待失败，也保留事件至工作线程完成通知后再释放。
             if (redirect.IsCompleted) completed.Dispose();
             else _ = redirect.ContinueWith(task => completed.Dispose(), TaskScheduler.Default);

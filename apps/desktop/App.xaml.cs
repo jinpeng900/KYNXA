@@ -20,7 +20,6 @@ public partial class App : Application
             }
             catch
             {
-                // If the configured storage location itself fails, preserve startup diagnostics.
                 // 配置的数据位置本身不可用时，仍尽量保留启动诊断。
                 try { File.WriteAllText(Path.Combine(Windows.Storage.ApplicationData.Current.LocalFolder.Path,
                     "last-ui-error.txt"), error.Exception.ToString()); }
@@ -32,7 +31,6 @@ public partial class App : Application
     private static void ConfigurePersistentStorage()
     {
         if (Services.ApplicationPaths.TryConfigureInstallation()) return;
-        // Isolated package previews explicitly opt into a portable application root.
         // 独立包预览显式指定便携应用根目录，不读取正式应用的用户指针。
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT"))) return;
         try
@@ -41,8 +39,13 @@ public partial class App : Application
         }
         catch (InvalidOperationException)
         {
-            // Unpackaged builds keep upstream's portable folder behavior.
             // 未打包版本继续使用上游的便携目录行为。
+            return;
+        }
+        // 开发注册的包把数据放在构建目录旁，无论通过什么方式启动都使用同一份。
+        if (Windows.ApplicationModel.Package.Current.IsDevelopmentMode)
+        {
+            Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", AppContext.BaseDirectory);
             return;
         }
         string profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa");
@@ -62,7 +65,6 @@ public partial class App : Application
             existingWindow.RestoreFromActivation();
             return;
         }
-        // Restore language and appearance before creating controls to avoid a different first frame.
         // 创建控件前恢复语言与外观，避免首帧使用不同的配色。
         var preferences = new Services.LayoutStateService().Load();
         Services.UiText.Initialize(preferences.InterfaceLanguage);
@@ -78,7 +80,6 @@ public partial class App : Application
         else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.EnvironmentControlled
             ? Services.StoragePaths.DataRoot : Services.ApplicationPaths.LegacyExtensionRoot;
         Services.ExtensionPaths.Reload();
-        // Start transport preparation independently of shell construction and catalog rendering.
         // 模型连接准备与主窗口构造、目录渲染并行，不能等界面线程空闲后才启动。
         _ = Task.Run(WarmUpModelGatewayAsync);
         _ = Task.Run(Services.InstallerModelPreparation.RunAsync);
@@ -97,14 +98,12 @@ public partial class App : Application
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         {
-            // UI preferences belong to application startup; API services receive only stable model identities.
             // UI 偏好由应用启动读取；API 服务仅接收稳定模型身份，偏好失败不能阻止连接或聊天。
             System.Diagnostics.Debug.WriteLine("模型选择偏好不可读，继续缺省准备 / Model selection preference is unreadable; continue default preparation.");
         }
         try { await Services.ModelGatewayService.WarmUpModelsAsync(choice?.ProviderId, choice?.ModelId); }
         catch (Exception error)
         {
-            // The API client retries and shows the actionable error when a model is used.
             // 实际使用模型时由 API 客户端重试，并展示可采取行动的错误信息。
             System.Diagnostics.Debug.WriteLine($"Model gateway startup: {error.Message}");
         }

@@ -1,24 +1,24 @@
 pub mod budget;
 mod completion_evidence;
-mod gateway_live_memory;
-mod gateway_model_request;
-mod gateway_tool_execution;
 pub mod context;
 pub mod embedding_policy;
-pub mod gateway_runtime;
-pub mod gateway_attachments;
-pub mod gateway_loop;
-pub mod gateway_task_journal;
-pub mod gateway_document_progress;
-pub mod gateway_work_progress;
-pub mod gateway_task_input;
-pub mod gateway_task_http;
-pub mod gateway_model_pool;
-pub mod gateway_task_hub;
-pub mod gateway_task_worker;
-pub mod gateway_tool_batch;
 pub mod evidence_projection;
 pub mod evidence_publication;
+pub mod gateway_attachments;
+pub mod gateway_document_progress;
+mod gateway_live_memory;
+pub mod gateway_loop;
+pub mod gateway_model_pool;
+mod gateway_model_request;
+pub mod gateway_runtime;
+pub mod gateway_task_http;
+pub mod gateway_task_hub;
+pub mod gateway_task_input;
+pub mod gateway_task_journal;
+pub mod gateway_task_worker;
+pub mod gateway_tool_batch;
+mod gateway_tool_execution;
+pub mod gateway_work_progress;
 pub mod interpretation;
 pub mod navigation;
 pub mod progress;
@@ -57,7 +57,6 @@ pub fn calculate(
     ) {
         return runtime_policy::calculate(operation, arguments);
     }
-    // Outcome classification belongs to interpretation, before the retrieval policy prefix.
     // 结果分类属于意图解释，须先于检索策略的宽前缀分派，避免合法操作被误拒绝。
     if operation == "orchestration.retrievalOutcome" {
         return interpretation::calculate(operation, arguments);

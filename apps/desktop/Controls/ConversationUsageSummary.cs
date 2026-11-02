@@ -10,7 +10,6 @@ using Microsoft.UI.Xaml.Media;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// A compact usage row with inline details; it never opens a flyout or a separate window.
 /// 紧凑用量行在原位置展开详情，不打开浮出层或独立窗口。
 /// </summary>
 public sealed class ConversationUsageSummary : UserControl

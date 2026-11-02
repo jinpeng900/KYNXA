@@ -8,7 +8,6 @@ fn corpus_source(value: &Value) -> bool {
     matches!(value.as_str(), Some("knowledge" | "work-file"))
 }
 
-/// The persistent identity ledger owns scope binding and revocation before disposable SQLite publication.
 /// 持久身份账本在可重建 SQLite 发布之前拥有范围绑定与永久撤销状态。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let mut registry = arguments["registry"].clone();
@@ -27,18 +26,32 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.registry.observeFiles" {
         let mut changed = false;
         for source in arguments["sources"].as_array().into_iter().flatten() {
-            let Some(id) = source["sourceId"].as_str() else { continue; };
-            let Some(key) = source["key"].as_str().filter(|_| hash(&source["key"])) else { continue; };
+            let Some(id) = source["sourceId"].as_str() else {
+                continue;
+            };
+            let Some(key) = source["key"].as_str().filter(|_| hash(&source["key"])) else {
+                continue;
+            };
             let record = &mut registry["sources"][key];
-            if record["active"] == true && record["sourceId"] == id && record["scopeKey"] == source["scopeKey"]
-                && record["sourceRevision"] == source["sourceRevision"] && record["contentHash"] == source["contentHash"]
+            if record["active"] == true
+                && record["sourceId"] == id
+                && record["scopeKey"] == source["scopeKey"]
+                && record["sourceRevision"] == source["sourceRevision"]
+                && record["contentHash"] == source["contentHash"]
                 && source["fileMetadata"].is_object()
-                && ["fileMetadata", "scanLimitsSignature", "cachedTextBytes"].iter().any(|field| record[*field] != source[*field]) {
-                for field in ["fileMetadata", "scanLimitsSignature", "cachedTextBytes"] { record[field] = source[field].clone(); }
+                && ["fileMetadata", "scanLimitsSignature", "cachedTextBytes"]
+                    .iter()
+                    .any(|field| record[*field] != source[*field])
+            {
+                for field in ["fileMetadata", "scanLimitsSignature", "cachedTextBytes"] {
+                    record[field] = source[field].clone();
+                }
                 changed = true;
             }
         }
-        if changed { registry["revision"] = json!(registry["revision"].as_u64().unwrap() + 1); }
+        if changed {
+            registry["revision"] = json!(registry["revision"].as_u64().unwrap() + 1);
+        }
         return Ok(json!({"registry":registry,"changed":changed}));
     }
     if operation == "storage.registry.retireChat" {
@@ -46,7 +59,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         let scope = format!("chat:{}", id.as_str().unwrap().to_ascii_lowercase());
         let sources = registry["sources"].as_object_mut().unwrap();
         let before = sources.len();
-        // Only derived identities owned by this chat retire; their creation origin is not shared-data ownership.
         // 仅移除归属此聊天的派生身份；创建来源不等于共享资料归属，撤销恢复仍允许按原日志重建。
         sources.retain(|_, source| source["scopeKey"] != scope);
         let removed = before - sources.len();

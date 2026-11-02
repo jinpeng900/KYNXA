@@ -76,7 +76,6 @@
   let article = null;
   let extraction = "dom";
   try {
-    // Readability mutates its document. The live page and action refs must remain untouched.
     // Readability 会改写文档；只解析克隆，保持真实页面及操作引用不变。
     const parsed = new Readability(document.cloneNode(true), { charThreshold: 140, maxElemsToParse: 50000, serializer: element => element }).parse();
     if (parsed?.content && parsed.textContent?.trim().length >= 140) {

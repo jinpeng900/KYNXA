@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-/// Pure context rules operate on bounded metadata and perform no provider, archive or history I/O.
 /// 纯上下文规则只处理受限元信息；供应商、归档与正式历史 I/O 由原生接线层负责。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
@@ -17,7 +16,6 @@ pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
-/// Limit schemas to 40% / 24K; mandatory system, user goals and live guidance leave 40% for working evidence.
 /// 工具定义最多占输入的 40% / 24K；系统、原始目标和实时指引均计入必需输入，再为工作证据保留 40%。
 pub(crate) fn tool_declaration_budget(input_budget: u64, mandatory_tokens: u64) -> u64 {
     let working_tokens = (u128::from(input_budget) * 2 / 5) as u64;
@@ -150,7 +148,6 @@ fn describe_observation(args: &Value) -> Value {
             return Value::Null;
         }
         let target = json!({"sourceId": value["sourceId"], "scopeKey": value["scopeKey"]});
-        // Preserve the legacy JSON field order in the comparison key, without copying source text.
         // 比较键保持既有 JSON 字段顺序，同时不复制来源正文。
         let serialized = format!(
             "{{\"sourceId\":{},\"scopeKey\":{}}}",
@@ -245,10 +242,8 @@ mod tests {
 
     #[test]
     fn tool_schemas_leave_working_capacity_and_respect_small_and_large_input_limits() {
-        // A 16K window's 10.6K input grant must retain evidence after mandatory instructions.
         // 16K 窗口实际约 10.6K 输入授额时，工具定义不能挤占必需提示后的工作证据空间。
         assert_eq!(tool_declaration_budget(10_649, 2_600), 3_790);
-        // The caller reserves the actual original goal and live notices alongside the system prompt.
         // 调用端须把原始目标及实时指引与系统提示一起授额，不能仅按系统文字给工具目录分配空间。
         let mandatory_tokens = 2_600 + 600 + 874;
         let schema_tokens = tool_declaration_budget(10_649, mandatory_tokens);
@@ -289,11 +284,22 @@ mod tests {
 
     #[test]
     fn tool_turns_keep_schemas_and_receipts_without_capping_prose_turns() {
-        let tool = apply("context.outputBudget", &json!({"contextWindowTokens":8192,"phase":"tool"})).unwrap();
+        let tool = apply(
+            "context.outputBudget",
+            &json!({"contextWindowTokens":8192,"phase":"tool"}),
+        )
+        .unwrap();
         let prose = apply("context.outputBudget", &json!({"contextWindowTokens":8192})).unwrap();
-        assert!(tool["inputBudgetTokens"].as_u64().unwrap() > prose["inputBudgetTokens"].as_u64().unwrap());
+        assert!(
+            tool["inputBudgetTokens"].as_u64().unwrap()
+                > prose["inputBudgetTokens"].as_u64().unwrap()
+        );
         assert!(tool["maxOutputTokens"].as_u64().unwrap() >= 1024);
-        let capped = apply("context.outputBudget", &json!({"contextWindowTokens":8192,"phase":"tool","providerMaxOutputTokens":512})).unwrap();
+        let capped = apply(
+            "context.outputBudget",
+            &json!({"contextWindowTokens":8192,"phase":"tool","providerMaxOutputTokens":512}),
+        )
+        .unwrap();
         assert_eq!(capped["maxOutputTokens"], 512);
         assert_eq!(capped["outputBudgetReductionReason"], "provider_limit");
     }

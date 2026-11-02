@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Keeps the main window and its running work alive when it is closed to the notification area.
 /// 主窗口关闭到通知区域时，保留同一个窗口及其正在执行的工作。
 /// </summary>
 internal sealed class MainWindowTrayService : IDisposable
@@ -50,7 +49,6 @@ internal sealed class MainWindowTrayService : IDisposable
     public void Restore()
     {
         if (_isDisposed || _exitRequested) return;
-        // Restore the existing shell, including its draft, streaming replies and workspace instances.
         // 恢复原有界面，保留草稿、流式回复及工作区实例，不重新创建窗口。
         ShowWindow(_windowHandle, IsIconic(_windowHandle) ? 9 : 5);
         _window.Activate();
@@ -68,7 +66,6 @@ internal sealed class MainWindowTrayService : IDisposable
     {
         if (_isDisposed || _sessionEnding || _exitRequested) return;
         _exitRequested = true;
-        // Remove visible entry points immediately; the shell only waits for background shutdown acceptance.
         // 立即移除窗口和托盘入口；界面只等待后台接受退出，不等待任务保存结束。
         _window.AppWindow.Hide();
         RemoveTrayIcon();
@@ -88,9 +85,7 @@ internal sealed class MainWindowTrayService : IDisposable
         data.Flags = 0x0010;
         data.InfoTitle = UiText.Get("回复已完成");
         data.Info = string.IsNullOrWhiteSpace(title) ? UiText.Get("可以返回应用查看回复。") : (title.Length > 180 ? title[..180] : title);
-        // NIIF_USER uses the large app icon instead of the system information symbol.
         // NIIF_USER 使用大尺寸应用图标，替换系统信息符号。
-        // The tray service owns this HICON until disposal; the notification only borrows it.
         // HICON 由托盘服务持有至释放，通知仅借用，不创建额外句柄。
         data.InfoFlags = 0x0004 | 0x0010 | 0x0020;
         data.BalloonIcon = _icon;
@@ -105,7 +100,6 @@ internal sealed class MainWindowTrayService : IDisposable
             else if (message == EndSessionMessage && wParam == 0) _sessionEnding = false;
             else if (message == CloseMessage && !_sessionEnding && !_exitRequested)
             {
-                // Intercept before AppWindow.Closing: a tray close must not pause replies or save as an exit.
                 // 在 AppWindow.Closing 之前拦截；关闭到托盘不能触发暂停回复或退出保存。
                 if (CloseRequested is { } closeRequested)
                 {
@@ -124,7 +118,6 @@ internal sealed class MainWindowTrayService : IDisposable
             else if (_taskbarCreatedMessage != 0 && message == _taskbarCreatedMessage && _isIconRegistered)
             {
                 _isIconRegistered = false;
-                // Re-register the tray icon after Explorer restarts; restore the window if it fails.
                 // 资源管理器重启后重新注册托盘图标，失败则显示窗口，避免无法找回。
                 if (!EnsureTrayIcon() && !IsWindowVisible(_windowHandle)) Restore();
             }
@@ -132,13 +125,11 @@ internal sealed class MainWindowTrayService : IDisposable
         }
         catch (Exception error)
         {
-            // Exceptions must not cross the native callback boundary or swallow the normal close fallback.
             // 异常不能越过原生回调边界，也不能阻断普通关闭的回退路径。
             Debug.WriteLine($"Notification-area window lifecycle: {error.GetType().Name}");
         }
 
         nint result = DefSubclassProc(window, message, wParam, lParam);
-        // A native close veto must keep the ordinary close-to-tray route available.
         // 原生关闭被拒绝时，普通关闭到托盘仍须可用。
         if (message == CloseMessage && _exitRequested && !_isDisposed && IsWindowVisible(window)) _exitRequested = false;
         return result;

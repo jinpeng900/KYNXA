@@ -78,7 +78,6 @@ function Copy-NativeFile([string]$Source, [string]$RelativePath, [switch]$Config
     [void]$bundle.Add($RelativePath.Replace('\', '/'))
 }
 
-# Debug and Release share this publication root, so hold one lock through inventory publication.
 # Debug 与 Release 共用发布缓存；从准备到清单发布都持有同一把锁，避免交叉覆盖。
 $publicationLock = $null
 $publicationDeadline = [DateTime]::UtcNow.AddMinutes(15)
@@ -90,7 +89,6 @@ while (-not $publicationLock) {
     }
 }
 try {
-# Whitelist native assets; external MCP packages are prepared separately without restoring a Node gateway.
 # 原生资产逐项白名单校验；外部 MCP 包单独准备，不恢复 Node 网关。
 $bundle = [Collections.Generic.List[string]]::new()
 $nativeManifestPath = Join-Path $PSScriptRoot 'native-assets/native-runtime.json'
@@ -98,12 +96,10 @@ $nativeManifest = Get-Content -LiteralPath $nativeManifestPath -Raw -Encoding UT
 $localGenerationManifestPath = Join-Path $PSScriptRoot 'native-assets/local-generation.json'
 $localGenerationManifest = Get-Content -LiteralPath $localGenerationManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($ResourcePackRoot) {
-    # Import a versioned local pack first; partial downloads and compiler caches are not runtime resources.
     # 优先导入版本匹配的本地资源包；下载断点与编译器缓存不属于随包运行资源。
     & (Join-Path $PSScriptRoot 'prepare-resource-pack.ps1') -Action Import -ArchivePath $ResourcePackRoot -DestinationRoot $runtimeRoot -VerifyResources:$VerifyResources
 }
 Write-Host "[Runtime] Preparing $Profile resources (offline: $([bool]$Offline))."
-# Optional generation engines extend a Full payload without invalidating existing retrieval resource packs.
 # 可选生成引擎扩展 Full 载荷，保留已有检索资源包的兼容与缓存复用。
 $nativePackages = @($nativeManifest.packages)
 if ($Profile -eq 'Full') { $nativePackages += @($localGenerationManifest.packages) }
@@ -133,7 +129,6 @@ foreach ($package in $nativePackages) {
                         try { $input.CopyTo($output) } finally { $input.Dispose(); $output.Dispose() }
                     }
                     else {
-                        # Extract only the known safe member, without running archive hooks.
                         # 只提取指定的安全文件，不运行归档中的安装钩子。
                         if ($asset.entry -notmatch '^[A-Za-z0-9_./-]+$' -or $asset.entry.Contains('..')) { throw 'Invalid pinned archive member.' }
                         $extractRoot = Get-NativeOutputPath ('extract/' + [Guid]::NewGuid().ToString('N') + '/marker')
@@ -169,10 +164,8 @@ if ($Profile -eq 'Full') {
     Copy-NativeFile $localGenerationManifestPath 'runtime/local-llm/manifest.json' -ConfigurationText
 }
 
-# A private fixed Node serves optional MCP/skill execution only; npm runs on the build machine, never startup.
 # 私有固定 Node 仅供 MCP/技能执行；npm 只在构建机运行，软件启动不下载依赖。
 if ($Profile -eq 'Full') {
-    # Include source notices before MCP hashes the payload to avoid preparing npm twice.
     # 在 MCP 计算资源哈希前放入来源说明，避免重复准备 npm。
     Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json' -ConfigurationText
     & (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath -VerifyResources:$VerifyResources
@@ -198,7 +191,6 @@ if ($Profile -eq 'Full') {
         }
         Copy-NativeFile $manifestPath ($model.Output + '/manifest.json') -ConfigurationText
     }
-    # Office layout preview is optional for an older/offline pack; extracted text remains available.
     # 旧资源包或离线环境缺少 Office 转换器时保留正文预览，不阻断核心构建与聊天。
     try {
         & (Join-Path $PSScriptRoot 'prepare-office-preview-runtime.ps1') -BundleRoot $runtimeRoot -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath -VerifyResources:$VerifyResources
@@ -214,7 +206,6 @@ if ($Profile -eq 'Full') {
 }
 else { Write-Host '[Runtime] Core development profile skips optional models and MCP/browser preparation; release packages use Full.' }
 $assetInputHash = Get-KynxaNativeAssetsInputHash -Profile $Profile -RuntimeIdentifier $RuntimeIdentifier
-# Compiled executables are siblings of these resources; rebuilding them must not invalidate unchanged assets.
 # 编译产物与资源分开记录，重建程序不能使未变化的依赖资源失效。
 Save-KynxaPreparedComponent -Root $runtimeRoot -Component 'native-assets' -InputHash $assetInputHash -Files @($nativePreparedRecords.Values) -Scope @('runtime/native', 'runtime/mcp', 'runtime/embedding', 'runtime/office')
 
@@ -224,6 +215,10 @@ function Get-NativeSourceHash([string]$Directory) {
     try {
         $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $Directory 'src') -File -Recurse) + @(
             Get-Item -LiteralPath (Join-Path $Directory 'Cargo.toml'), (Join-Path $Directory 'Cargo.lock'), $PSCommandPath)
+        $trainingRuntime = Join-Path $Directory 'training-runtime'
+        if (Test-Path -LiteralPath $trainingRuntime -PathType Container) {
+            $sourceFiles += @(Get-ChildItem -LiteralPath $trainingRuntime -File -Filter '*.py' | Where-Object { $_.Name -ne 'verify_worker.py' })
+        }
         foreach ($file in $sourceFiles | Sort-Object FullName) {
             $relative = $file.FullName.Substring($repositoryRoot.Length).Replace('\', '/')
             $name = $utf8.GetBytes($relative + "`n"); $stream.Write($name, 0, $name.Length)
@@ -239,7 +234,6 @@ function Initialize-NativeBuildEnvironment {
     if ((Get-Command cl.exe -ErrorAction SilentlyContinue) -and
         (Get-Command link.exe -ErrorAction SilentlyContinue) -and $env:INCLUDE -and $env:LIB -and
         $env:VSCMD_ARG_TGT_ARCH -eq 'x64') { return }
-    # Rust's compiler discovery may predate a new VS release; use the installed VS developer shell.
     # Rust 的编译器发现可能早于新版 VS；通过已安装的 VS 开发环境加载 C++ 头文件、库及工具。
     $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (-not [IO.File]::Exists($vswherePath)) { throw 'Visual Studio C++ build tools are required to compile the native Windows payload.' }
@@ -247,7 +241,6 @@ function Initialize-NativeBuildEnvironment {
     if ($LASTEXITCODE -ne 0 -or $installationPaths.Count -eq 0) { throw 'Install the Visual Studio MSVC x64/x86 build tools component before preparing the native payload.' }
     $developerCommandPath = Join-Path $installationPaths[0] 'Common7/Tools/VsDevCmd.bat'
     if (-not [IO.File]::Exists($developerCommandPath)) { throw 'The installed Visual Studio developer command script is missing.' }
-    # Explicit UTF-8 avoids the developer shell's ANSI round trip corrupting Chinese TEMP/user paths.
     # 显式使用 UTF-8，避免开发环境的 ANSI 往返转换损坏中文 TEMP 或用户目录。
     $environmentStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $env:SystemRoot 'System32/cmd.exe'))
     $environmentStart.UseShellExecute = $false
@@ -266,13 +259,11 @@ function Initialize-NativeBuildEnvironment {
             [void]$environmentProcess.WaitForExit(5000)
             throw 'Visual Studio C++ environment initialization timed out.'
         }
-        # A descendant can inherit a redirected pipe after cmd exits; bound the final drain too.
         # 后代进程可能在 cmd 退出后仍持有重定向管道，因此最终读取也必须有超时。
         if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($environmentOutput, $environmentErrors), 5000)) {
             throw 'Visual Studio C++ environment output capture timed out.'
         }
         if ($environmentProcess.ExitCode -ne 0) { throw 'Visual Studio C++ environment initialization failed.' }
-        # Consume environment values only in memory; never emit credentials or a full environment dump.
         # 环境值只在内存中使用，不输出凭据或完整环境转储。
         foreach ($line in ($environmentOutput.Result -split '\r?\n')) {
             $separatorIndex = $line.IndexOf('=')
@@ -314,7 +305,6 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
     }
     [void]$bundle.Add($BundleDirectory + '/' + $ExecutableName + '.exe')
     [void]$bundle.Add($BundleDirectory + '/build.json')
-    # Read Cargo's UTF-8 directly; PowerShell 5's console code page can corrupt Chinese source paths.
     # 直接按 UTF-8 读取 Cargo 输出；PowerShell 5 控制台代码页可能损坏中文源码路径。
     $metadataStart = [Diagnostics.ProcessStartInfo]::new()
     $metadataStart.FileName = $script:cargoCommand
@@ -331,7 +321,6 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
         $metadataOutput = $metadataProcess.StandardOutput.ReadToEndAsync()
         $metadataErrors = $metadataProcess.StandardError.ReadToEndAsync()
         if (-not $metadataProcess.WaitForExit(120000)) {
-            # Kill only this owned metadata process; no user Cargo or compiler process is selected by name.
             # 仅终止本次持有的元数据进程，不按名称处理用户其他 Cargo 或编译器进程。
             & (Join-Path $env:SystemRoot 'System32/taskkill.exe') /PID $metadataProcess.Id /T /F | Out-Null
             [void]$metadataProcess.WaitForExit(5000)
@@ -341,7 +330,6 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
         $metadataJson = $metadataOutput.Result
     }
     finally { $metadataProcess.Dispose() }
-    # Cargo feature names are case-sensitive; PowerShell object keys are not.
     # Cargo 特征名区分大小写，PowerShell 对象键不区分。
     if ($PSVersionTable.PSVersion.Major -ge 6) {
         $metadata = ($metadataJson -join [Environment]::NewLine) | ConvertFrom-Json -AsHashtable
@@ -370,7 +358,6 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
     return $hash
 }
 
-# Reuse Cargo's actual local target directory; do not rebuild all dependencies under another target triple.
 # 复用 Cargo 现有 target 缓存；不为了目录形式更换 target triple 而全量重编依赖。
 if (-not $AssetsOnly) {
     $previousBuildEnvironment = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -404,14 +391,12 @@ if (-not $AssetsOnly) {
         [void]$bundle.Add('runtime/agent/runtime.json')
     }
     finally {
-        # A manual invocation must not leave compiler or SDK overrides in the caller's process.
         # 手动调用结束后不把编译器或 SDK 覆盖留在调用方进程中。
         $currentBuildEnvironment = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($entry in Get-ChildItem Env:) {
             $currentBuildEnvironment[$entry.Name] = $entry.Value
             if (-not $previousBuildEnvironment.ContainsKey($entry.Name)) { [Environment]::SetEnvironmentVariable($entry.Name, [NullString]::Value, 'Process') }
         }
-        # Leave unchanged empty values intact; .NET Framework would delete them when assigned again.
         # 保留未变化的空值；.NET Framework 再次赋空字符串时会删除对应环境项。
         foreach ($name in $previousBuildEnvironment.Keys) {
             if (-not $currentBuildEnvironment.ContainsKey($name) -or $currentBuildEnvironment[$name] -cne $previousBuildEnvironment[$name]) {
@@ -420,7 +405,6 @@ if (-not $AssetsOnly) {
         }
     }
 }
-# Components already checked their paths; reuse that result when publishing the inventory.
 # 组件已检查过路径，发布清单时复用结果，避免逐文件重复遍历。
 $bundleFiles = @($bundle | Sort-Object -Unique | ForEach-Object { [IO.Path]::GetFullPath([IO.Path]::Combine($runtimeRoot, $_)) })
 [IO.File]::WriteAllLines((Join-Path $runtimeRoot $(if ($AssetsOnly) {'asset-files.txt'} else {'bundle-files.txt'})), [string[]]$bundleFiles, $utf8)

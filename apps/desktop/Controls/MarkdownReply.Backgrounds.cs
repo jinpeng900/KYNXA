@@ -8,7 +8,6 @@ namespace KYNXA_Desktop.Controls;
 
 public sealed partial class MarkdownReply
 {
-    // Decorations live behind the single text surface, so copying can cross block boundaries.
     // 装饰位于统一文本表面之后，因此复制可以跨越块边界。
     private readonly Canvas _backgrounds = new() { IsHitTestVisible = false };
     private readonly List<(TextElement Element, bool Block)> _backgroundRanges = [];
@@ -32,8 +31,6 @@ public sealed partial class MarkdownReply
                 var last = end.GetCharacterRect(LogicalDirection.Backward);
                 double left = Math.Max(0, ((Paragraph)element).Margin.Left - 12);
                 AddBackground(new Rect(left, Math.Max(0, first.Y - 6),
-                    // RichTextBlock.ActualWidth is the text's natural width, even when
-                    // arranged in a wider stretched reply. Decorations fill that reply.
                     // RichTextBlock.ActualWidth 是文本自然宽度；装饰应填满拉伸后更宽的回复区域。
                     Math.Max(0, ActualWidth - left), Math.Max(first.Height, last.Bottom - first.Y) + 12), true);
             }

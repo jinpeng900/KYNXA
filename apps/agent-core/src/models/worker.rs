@@ -73,7 +73,6 @@ mod tests {
     }
 }
 
-/// The isolated SDK process reports facts; native state owns cancellation, execution shape and qualification.
 /// 隔离 SDK 进程报告真实事实；原生状态拥有取消、执行形状和资格规则，不能以关闭请求冒充 SDK 释放。
 #[derive(Default)]
 pub struct WorkerState {

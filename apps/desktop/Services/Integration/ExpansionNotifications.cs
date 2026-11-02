@@ -1,7 +1,6 @@
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Completion balloons are opt-in and persist only inside the current desktop data directory.
 /// 回复完成通知由用户主动开启，偏好仅保存到当前桌面数据目录。
 /// </summary>
 internal static class ExpansionNotifications
@@ -18,7 +17,6 @@ internal static class ExpansionNotifications
     {
         if (enabled)
         {
-            // Publish the enabled marker only after its write succeeds, retaining the previous state on failure.
             // 写入成功后再发布开启标记，保存失败时保留原开关状态。
             File.WriteAllText(PreferencePath + ".tmp", "enabled");
             File.Move(PreferencePath + ".tmp", PreferencePath, overwrite: true);

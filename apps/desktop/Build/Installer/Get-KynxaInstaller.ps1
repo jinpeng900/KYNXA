@@ -22,7 +22,6 @@ $sources = @($manifest.sources | Where-Object { $_.status -eq 'available' -and (
 $urls = @($sources | ForEach-Object { [string]$_.url })
 if ($SourceUrl) { $urls = @($SourceUrl) + $urls }
 
-# A local installer is reusable without any published download service. Never start it implicitly.
 # 已有完整安装包无需远端已发布来源也能复用，只有显式 -Install 才启动安装。
 $allSources = @($manifest.sources)
 $canonicalUrl = if ($allSources.Count -gt 0) { [string]$allSources[0].url } elseif ($urls.Count -gt 0) { $urls[0] } else { 'https://localhost/installer-not-published' }

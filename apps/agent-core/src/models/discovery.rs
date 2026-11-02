@@ -17,7 +17,6 @@ pub struct ModelDiscoveryState {
     done: bool,
 }
 
-/// Only complete validated pages publish model IDs; unknown pagination never follows credential-bearing URLs.
 /// 只有完整校验后的所有页面才发布模型 ID；未知分页不能跟随可能携带凭据的供应商 URL。
 impl ModelDiscoveryState {
     pub fn apply(&mut self, operation: &str, args: &Value) -> Result<Value, String> {

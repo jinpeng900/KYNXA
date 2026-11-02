@@ -5,7 +5,6 @@ use super::{gateway::ModelError, protocol, stream::StreamState};
 const MAXIMUM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAXIMUM_FRAME_CHARACTERS: usize = 2 * 1024 * 1024;
 
-/// Frame bytes until a complete UTF-8 line exists; CR/LF split boundaries never repair provider data.
 /// 只有完整 UTF-8 行才解码；跨包 CR/LF 不得修补供应商数据或派发末尾未闭合的 SSE 帧。
 #[derive(Default)]
 pub struct FrameDecoder {
@@ -155,7 +154,6 @@ impl ProviderStream {
             }
         }
         if let Some(completion) = &self.completion {
-            // Chat may report usage after finish_reason; never reopen its settled native decoder.
             // Chat 可以在 finish_reason 后补 usage；不得重新打开已经收口的原生解码器。
             if frame["data"] == "[DONE]" {
                 let mut completion = completion.clone();

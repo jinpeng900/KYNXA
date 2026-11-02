@@ -12,7 +12,6 @@ fn missing() -> ContractError {
     ContractError::new("索引任务不存在。", "RETRIEVAL_JOB_NOT_FOUND", 404)
 }
 
-/// Persisted job policy owns lifecycle, monotonic progress and history retention independently of worker effects.
 /// 持久作业策略独立于 worker 执行，拥有生命周期、单调进度与历史保留规则。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let mut document = arguments["document"].clone();
@@ -207,7 +206,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 .as_object_mut()
                 .unwrap()
                 .extend(arguments["patch"].as_object().unwrap().clone());
-            // Only native-admitted optional fields may be cleared; identity, state and monotonic progress remain intact.
             // 仅清除原生准入的可选字段；身份、状态及单调进度仍由原生校验保持。
             for field in cleared {
                 document["jobs"][index]

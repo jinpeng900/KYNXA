@@ -36,7 +36,6 @@ public sealed partial class ShellPage
 
     private async Task WaitForApprovalConversationAsync(ApprovalPresentation presentation)
     {
-        // Inactive conversations retain their pending decision without occupying the inline surface.
         // 非当前聊天保留待审批状态，只等待聊天激活事件，不占用输入区上方的审批位置。
         while (!IsCurrentApproval(presentation.Pending) || XamlRoot is null)
             await _approvalConversationChanged.Task.WaitAsync(presentation.Cancellation.Token);
@@ -79,7 +78,6 @@ public sealed partial class ShellPage
                 if (decision is null && IsCurrentApproval(presentation.Pending)) await changed.WaitAsync(cancellation);
             }
             cancellation.ThrowIfCancellationRequested();
-            // A resumed stream can have a different reply anchor; approval belongs to its transport request.
             // 恢复流可能使用不同回复锚点；审批必须绑定当前传输请求，不能改绑展示消息。
             var response = await _agentApiClient.SubmitApprovalAsync(new(presentation.Pending.ConversationId,
                 presentation.Pending.StreamRequestId, tool.ToolCallId, approvalId, decision.Approved, decision.Scope), cancellation);
@@ -133,7 +131,6 @@ public sealed partial class ShellPage
         try
         {
             var decision = await source.Task;
-            // Changing conversation or closing the card is not an approval or a refusal.
             // 切换聊天或关闭展示不等于批准或拒绝；正式任务决定仍只来自用户按钮。
             return _chatClosing || cancellationToken.IsCancellationRequested || !IsCurrentApproval(pending) ? null : decision;
         }
@@ -153,7 +150,6 @@ public sealed partial class ShellPage
         if (index < 0) activities.Add(tool);
         else activities[index] = tool;
         pending.Dirty = true;
-        // Present live display receipts before the stream can finish and lose its pending marker.
         // 实时展示回执先交给右栏，不等待流结束后才从历史中推断是否应该打开。
         QueueWorkspaceResourceDiscovery(pending.ConversationId, pending.Message.Id, tool, liveReply: true);
     }

@@ -16,7 +16,6 @@ public sealed partial class ModelManagementWindow
         {
             await _api.DeleteAsync(provider.ProviderId, _lifetime.Token);
             if (_closed) return;
-            // Apply the confirmed deletion without a second list request or touching model files.
             // 收到删除回执再更新列表，不重复请求，也不删除模型文件。
             _providers = _providers.Where(candidate => candidate.ProviderId != provider.ProviderId).ToArray();
             if (_providers.FirstOrDefault() is { } next) SelectProvider(next);

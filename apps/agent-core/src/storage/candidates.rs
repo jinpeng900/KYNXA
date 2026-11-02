@@ -101,7 +101,6 @@ fn proposed(
     result
 }
 
-/// Only saved user-message indices are returned; original quotes and their byte-identical hashes remain in the adapter.
 /// 只返回已保存用户消息的下标；原话及其字节一致的哈希仍留在适配器，助手内容仅用于批次节奏。
 pub fn extract(args: &Value) -> ContractResult {
     let phase = args["phase"].as_str().unwrap_or("completed");
@@ -127,7 +126,6 @@ pub fn extract(args: &Value) -> ContractResult {
         .filter(|(_, message)| message["role"] == "user")
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    // Completed assistant events omit their user identity or send null; both select the latest saved user.
     // 助手完成事件可缺省用户身份或发送 null；两者均选择最后一条已保存用户消息。
     let current_id = args.get("userMessageId").filter(|id| !id.is_null());
     let current = current_id

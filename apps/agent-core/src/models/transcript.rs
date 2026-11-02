@@ -40,7 +40,6 @@ fn hex(value: &Value) -> bool {
     })
 }
 
-/// Runtime snapshots are bounded broker data, never replayed calls or another source of tool authority.
 /// 运行快照只承载有界程序资料，不能夹带待执行调用或变成另一套工具授权。
 pub(crate) fn valid_context_before(value: &Value) -> bool {
     if value.is_null() {
@@ -54,26 +53,46 @@ pub(crate) fn valid_context_before(value: &Value) -> bool {
         let Some(fields) = entry.as_object() else {
             return false;
         };
-        if fields.keys().any(|name| !["message", "source"].contains(&name.as_str())) {
+        if fields
+            .keys()
+            .any(|name| !["message", "source"].contains(&name.as_str()))
+        {
             return false;
         }
         let Some(message) = entry["message"].as_object() else {
             return false;
         };
-        if message.keys().any(|name| !["role", "content"].contains(&name.as_str()))
-            || !matches!(entry["message"]["role"].as_str(), Some("user" | "system" | "developer"))
+        if message
+            .keys()
+            .any(|name| !["role", "content"].contains(&name.as_str()))
+            || !matches!(
+                entry["message"]["role"].as_str(),
+                Some("user" | "system" | "developer")
+            )
         {
             return false;
         }
-        let Some(content) = entry["message"]["content"].as_str().filter(|text| !text.trim().is_empty()) else {
+        let Some(content) = entry["message"]["content"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+        else {
             return false;
         };
         let Some(source) = entry["source"].as_object() else {
             return false;
         };
-        if source.keys().any(|name| !["projectionOrigin", "runtimeContext", "snapshotHash", "authorityHash",
-            "publicText", "instructionAuthority", "runtimeKind"].contains(&name.as_str()))
-            || entry["source"]["projectionOrigin"] != "broker-control"
+        if source.keys().any(|name| {
+            ![
+                "projectionOrigin",
+                "runtimeContext",
+                "snapshotHash",
+                "authorityHash",
+                "publicText",
+                "instructionAuthority",
+                "runtimeKind",
+            ]
+            .contains(&name.as_str())
+        }) || entry["source"]["projectionOrigin"] != "broker-control"
             || entry["source"]["runtimeContext"] != true
             || !hex(&entry["source"]["snapshotHash"])
             || !hex(&entry["source"]["authorityHash"])
@@ -93,7 +112,6 @@ pub(crate) fn valid_context_before(value: &Value) -> bool {
 fn invalid() -> String {
     "INVALID_MODEL_TRANSCRIPT".into()
 }
-/// Live decoding and durable rounds share the same bounded call contract before dispatch.
 /// 实时解码与持久轮次在派发前共用同一个有界调用合同，不能执行后才发现无法保存。
 pub(crate) fn validate_calls(calls: &[Value]) -> Result<(), String> {
     if calls.len() > MAX_TURN_CALLS {
@@ -142,7 +160,8 @@ fn validate(args: &Value) -> Result<Value, String> {
             .filter(|number| *number > previous && *number <= MAX_TRANSCRIPT_ROUNDS as u64)
             .ok_or_else(invalid)?;
         let calls = round["calls"].as_array().ok_or_else(invalid)?;
-        if round["object"] != true || !text(&round["text"], 2 * 1024 * 1024)
+        if round["object"] != true
+            || !text(&round["text"], 2 * 1024 * 1024)
             || !valid_context_before(&round["contextBefore"])
         {
             return Err(invalid());
@@ -208,7 +227,6 @@ mod tests {
         );
         let mut value = value;
         let round = value["rounds"][0].clone();
-        // 129 full rounds exceed the 4096-call transcript total while staying under the 512-round limit.
         // 129 个满调用轮次超过 4096 个调用的总上限，但仍低于 512 轮上限。
         value["rounds"] = json!(
             (1..=129)
@@ -258,7 +276,10 @@ mod tests {
             accepted["message"]["role"] = json!(role);
             let mut round = transcript(0);
             round["rounds"][0]["contextBefore"] = json!([accepted]);
-            assert_eq!(calculate("models.transcript.validate", &round).unwrap(), true);
+            assert_eq!(
+                calculate("models.transcript.validate", &round).unwrap(),
+                true
+            );
         }
         let mut invalid_entries = Vec::new();
         for role in ["tool", "function", "assistant"] {
@@ -282,7 +303,10 @@ mod tests {
         for invalid in invalid_entries {
             let mut round = transcript(0);
             round["rounds"][0]["contextBefore"] = json!([invalid]);
-            assert_eq!(calculate("models.transcript.validate", &round).unwrap_err(), "INVALID_MODEL_TRANSCRIPT");
+            assert_eq!(
+                calculate("models.transcript.validate", &round).unwrap_err(),
+                "INVALID_MODEL_TRANSCRIPT"
+            );
         }
         assert!(!valid_context_before(&json!(vec![snapshot.clone(); 65])));
         let mut oversized = snapshot;
@@ -292,7 +316,6 @@ mod tests {
     }
 }
 
-/// Validate UTF-16 metadata and plan projections; keep private continuation in its archive adapter and preserve hashes.
 /// 校验 UTF-16 元信息并规划投影；私有续传留在归档适配层，保留原哈希表示。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {

@@ -8,7 +8,6 @@ pub mod reservation;
 
 use serde_json::Value;
 
-/// Demand estimates and fallback rules do not replace the live Rust resource authority.
 /// 需求估计与降级规则不替代实时 Rust 资源权威，不自行确认驻留回收或进程占用。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     if operation.starts_with("resources.external") {

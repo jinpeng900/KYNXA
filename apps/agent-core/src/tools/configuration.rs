@@ -95,7 +95,6 @@ fn mcp_url(arguments: &Value) -> Result<Value, String> {
 
 pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
     let server = &arguments["server"];
-    // JSON cannot represent NaN or infinities; preserve their rejection instead of using the null default.
     // JSON 无法表示 NaN 和无穷值；保留拒绝状态，不能将其作为 null 使用默认超时。
     let special = |key: &str| arguments["nonFiniteNumbers"][key].is_string();
     let field_truthy = |key: &str| {
@@ -112,7 +111,7 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
     let transport = optional(server, "transport", &default_transport)
         .as_str()
         .ok_or_else(invalid)?;
-    if !["stdio", "streamable-http","sse"].contains(&transport) {
+    if !["stdio", "streamable-http", "sse"].contains(&transport) {
         return Err(invalid());
     }
     let timeout =
@@ -126,7 +125,6 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
     if !timeout.is_finite() || timeout.fract() != 0.0 || !(1000.0..=120000.0).contains(&timeout) {
         return Err(invalid());
     }
-    // Execution and startup deadlines are separate; calls default to 10 minutes and allow up to six hours.
     // 执行期限与启动期限分开；单次调用默认 10 分钟，最长六小时。
     let execution_timeout = match server.get("timeoutMs").filter(|value| !value.is_null()) {
         None => None,
@@ -209,15 +207,26 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
             json!({"type":"bearer-env","tokenEnv":auth["tokenEnv"]})
         } else if auth["type"] == "oauth-authorization-code"
             && string_limit(&auth["clientId"], 256, true)
-            && auth["clientId"].as_str().is_some_and(|value| !js_trim(value).is_empty())
+            && auth["clientId"]
+                .as_str()
+                .is_some_and(|value| !js_trim(value).is_empty())
             && !special("auth.scope")
             && (auth["scope"].is_null() || string_limit(&auth["scope"], 2000, true))
         {
             let mut normalized = json!({"type":"oauth-authorization-code","clientId":js_trim(auth["clientId"].as_str().unwrap())});
-            if auth["issuer"].as_str().is_some_and(|value| !value.trim().is_empty()) {
-                normalized["issuer"] = json!(mcp_url(&json!({"value":auth["issuer"],"url":arguments["issuerUrl"],"issuer":true}))?);
-            } else if !auth["issuer"].is_null() && auth["issuer"] != "" { return Err(invalid()); }
-            if truthy(&auth["scope"]) { normalized["scope"] = auth["scope"].clone(); }
+            if auth["issuer"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                normalized["issuer"] = json!(mcp_url(
+                    &json!({"value":auth["issuer"],"url":arguments["issuerUrl"],"issuer":true})
+                )?);
+            } else if !auth["issuer"].is_null() && auth["issuer"] != "" {
+                return Err(invalid());
+            }
+            if truthy(&auth["scope"]) {
+                normalized["scope"] = auth["scope"].clone();
+            }
             normalized
         } else if auth["type"] == "oauth-client-credentials"
             && matches(ENV_NAME, auth["clientSecretEnv"].as_str().unwrap_or(""))
@@ -531,7 +540,6 @@ pub(super) fn calculate(operation: &str, arguments: &Value) -> Result<Value, Str
     }
 }
 
-/// Longest per-call MCP execution deadline, matching the six-hour owned background job limit.
 /// MCP 单次调用执行期限上限，与六小时的自有后台作业上限一致。
 const MAXIMUM_MCP_EXECUTION_MS: u64 = 21_600_000;
 const ENV_NAME: &str = r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$";

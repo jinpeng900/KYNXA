@@ -64,7 +64,6 @@ pub(crate) struct RankingContext {
     frequencies: HashMap<String, f64>,
 }
 
-/// Connection-local functions borrow only the current query's ranking inputs.
 /// 连接局部函数只借用当前查询的排序输入，函数与临时表只初始化一次。
 pub(crate) fn initialize_connection(
     connection: &Connection,
@@ -144,7 +143,6 @@ fn text_parameter(value: impl Into<String>) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
-/// A read transaction binds MATCH, authorization, corpus statistics and ranking to one SQLite snapshot.
 /// 读取事务将全文匹配、授权语料统计与排序绑定到同一个 SQLite 快照。
 pub fn apply(arguments: &Value) -> ContractResult {
     let root = Path::new(arguments["root"].as_str().unwrap_or(""));
@@ -159,7 +157,6 @@ pub fn apply(arguments: &Value) -> ContractResult {
     super::sqlite_store::finish(&connection, result)
 }
 
-/// Caller-owned snapshots combine lexical statistics and other channels without another connection checkout.
 /// 调用方持有的快照合并词法统计与其他通道，不再次借用连接或核验相同数据库身份。
 pub(crate) fn query(
     connection: &mut super::sqlite_connections::SqliteConnectionLease,

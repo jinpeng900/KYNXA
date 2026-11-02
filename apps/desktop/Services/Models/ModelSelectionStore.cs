@@ -10,7 +10,6 @@ public sealed record ModelChoice(string ProviderId, string ProviderName, string 
 }
 
 /// <summary>
-/// The composer's UI selection only; does not store connection credentials.
 /// 只保存输入区的 UI 选择，不保存模型连接凭据。
 /// </summary>
 public sealed class ModelSelectionStore(string dataDirectory)

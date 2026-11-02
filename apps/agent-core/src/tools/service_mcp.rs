@@ -10,10 +10,12 @@ use crate::models::protocol::{array, slice, string, truthy};
 const CACHE_ENTRIES: usize = 64;
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 
-/// These revisions share the implemented initialization and JSON-RPC lifecycle.
 /// 这些版本共用当前已实现的初始化和 JSON-RPC 生命周期；新主版本不能只改日期接入。
 pub(crate) fn supports_protocol(version: &str) -> bool {
-    matches!(version, "2025-11-25" | "2025-06-18" | "2025-03-26" | "2024-11-05")
+    matches!(
+        version,
+        "2025-11-25" | "2025-06-18" | "2025-03-26" | "2024-11-05"
+    )
 }
 
 fn invalid_catalog() -> ServiceError {
@@ -28,7 +30,6 @@ fn cleanup_failure() -> ServiceError {
     )
 }
 
-/// SDK callbacks report object ownership and negotiated facts; native policy selects refusals and recovery steps.
 /// SDK 回调报告对象所有权及协商事实；原生政策选择拒绝码及恢复步骤。
 fn runtime_guard(arguments: &Value) -> ServiceResult<Value> {
     let phase = string(&arguments["phase"]);
@@ -385,7 +386,6 @@ fn without_metadata(value: &Value) -> Value {
     }
 }
 
-// Reuse media labels when artifact hydration appends an image, without resending its base64.
 // 附件补读追加图片时复用媒体说明，不再把图片 base64 传回预览计算。
 pub(super) fn preview_sections(blocks: &[Value]) -> Vec<String> {
     let mut sections = Vec::new();
@@ -441,7 +441,6 @@ struct CatalogMetadata {
     bytes: usize,
 }
 
-/// MCP control owns validated catalog metadata and policy; transport/client lifetimes remain at the SDK boundary.
 /// MCP 控制拥有已验证目录元信息与策略；传输和客户端生命周期保留在 SDK 边界。
 #[derive(Default)]
 pub struct McpState {

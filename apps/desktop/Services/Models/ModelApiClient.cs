@@ -135,7 +135,6 @@ public sealed class ModelApiClient : IDisposable
             throw new ArgumentException("A saved chat request is required.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(3));
-        // Exit contacts the current gateway directly; it must not start a new service to close the desktop.
         // 退出直接联系当前网关，不能为了关闭桌面另行启动服务。
         using var response = await _httpClient.PostAsJsonAsync("/api/chat/pause",
             new { conversationId, requestId, taskId }, deadline.Token).ConfigureAwait(false);
@@ -196,7 +195,6 @@ public sealed class ModelApiClient : IDisposable
         int recoveryAttempt = 0;
         while (true)
         {
-            // Submit the prompt once; recovery observes the accepted request without replaying effects.
             // 消息只提交一次；恢复时观察原请求，不重发消息或重做工具操作。
             Func<HttpRequestMessage> nextRequest = isInitialRequest ? initialRequest : () => new HttpRequestMessage(HttpMethod.Get,
                 observeDurableTask && taskId is Guid durableTaskId
@@ -233,7 +231,6 @@ public sealed class ModelApiClient : IDisposable
 
             cancellationToken.ThrowIfCancellationRequested();
             if (!CanRecoverObservation(observationError)) throw observationError;
-            // Back off malformed snapshot retries while preserving the task and visible content.
             // 异常投影按退避间隔重读，保留任务和已显示内容，避免快速空转。
             int delayMs = recoveryAttempt++ switch { 0 => 100, 1 => 300, 2 => 1000, 3 => 2000, _ => 5000 };
             await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
@@ -315,7 +312,6 @@ public sealed class ModelApiClient : IDisposable
             if (recovered is not null) return recovered;
         }
 
-        // A closed request is immutable. Try its formal message, never resubmit its user prompt.
         // 已结束请求的结果不再生成；只尝试恢复原正式消息，不重发提示词或重做操作。
         try
         {
@@ -337,7 +333,6 @@ public sealed class ModelApiClient : IDisposable
             (error is HttpRequestException or OperationCanceledException or EndOfStreamException ||
                 error is GatewayApiException gateway && (int)gateway.StatusCode >= 500))
         {
-            // A transport failure may recover; invalid data in a settled reply cannot recover by rereading it.
             // 传输失败仍可重连；已结算回复中的错误数据不能靠反复读取自己恢复。
             return null;
         }
@@ -409,13 +404,11 @@ public sealed class ModelApiClient : IDisposable
         if (!waitingForUser && taskState is not ("completed" or "partial" or "failed" or "cancelled"))
             return new(conversationId, requestId, "running", null, DurableTaskState: taskState, DurableTaskVersion: taskVersion);
 
-        // After restart, restore terminal state only from the matching durable task and message.
         // 重启后仅用同一持久任务和正式消息补齐终态，不重做原请求。
         Guid replyId = requestId;
         if (detail.TryGetProperty("checkpoint", out var checkpoint) && checkpoint.ValueKind == JsonValueKind.Object
             && checkpoint.TryGetProperty("contextReference", out var context) && context.ValueKind == JsonValueKind.Object
             && context.TryGetProperty("assistantMessageId", out var assistantId) && assistantId.TryGetGuid(out var savedId)) replyId = savedId;
-        // Read the original reply by identity; its age and neighboring message sizes are irrelevant.
         // 按原回复身份读取；不受历史页数和相邻消息大小影响，也不重新提交用户请求。
         {
             string path = $"/api/conversations/{conversationId:D}/messages?messageId={replyId:D}";
@@ -451,7 +444,6 @@ public sealed class ModelApiClient : IDisposable
         }
         if (waitingForUser)
         {
-            // Pause can be accepted before the first reply is saved. Preserve received prose in the UI.
             // 暂停可能先于首条回复落盘；仅结束展示计时，界面保留已收到的正文，不伪造完成结果。
             var paused = new ChatStreamEvent("interrupted", conversationId, requestId, DateTimeOffset.UtcNow,
                 Content: "", Error: "", TaskId: taskId, RootRequestTaskId: taskId, ReplyMessageId: replyId,
@@ -459,7 +451,6 @@ public sealed class ModelApiClient : IDisposable
             return new(conversationId, requestId, "completed", JsonSerializer.SerializeToElement(paused, JsonOptions),
                 DurableTaskState: taskState, DurableTaskVersion: taskVersion);
         }
-        // A settled task without a formal reply is invalid display data, never active generation.
         // 已结算任务缺少正式回复属于展示数据错误，不能重新标成生成中并反复轮询。
         throw new GatewayApiException(UiText.Get("答复显示数据有误，已保留原文和任务记录。"),
             System.Net.HttpStatusCode.BadGateway, "CHAT_TERMINAL_PROTOCOL_INVALID");

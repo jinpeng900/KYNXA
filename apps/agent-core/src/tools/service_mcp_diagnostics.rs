@@ -9,7 +9,6 @@ struct DiagnosticRecord {
     revision: u64,
 }
 
-/// Diagnosis revisions prevent late SDK successes from erasing newer failures or reviving replaced connections.
 /// 诊断修订号防止晚到 SDK 成功清除新故障，或恢复已替换连接。
 #[derive(Default)]
 pub struct McpDiagnostics {
@@ -23,7 +22,7 @@ pub struct McpDiagnostics {
 
 impl McpDiagnostics {
     fn install(&mut self, server_id: &str, value: Value) -> u64 {
-        self.next_id = self.next_id.saturating_add(1);
+        self.next_id += 1;
         let id = self.next_id;
         self.records
             .insert(id, DiagnosticRecord { value, revision: 0 });
@@ -58,7 +57,7 @@ impl McpDiagnostics {
         match operation {
             "mcp.diagnosis.generation" => Ok(json!(self.connection_generation)),
             "mcp.diagnosis.resetGeneration" => {
-                self.connection_generation = self.connection_generation.saturating_add(1);
+                self.connection_generation += 1;
                 Ok(json!(self.connection_generation))
             }
             "mcp.diagnosis.serverGeneration" => Ok(json!(
@@ -118,7 +117,6 @@ impl McpDiagnostics {
                         .unwrap_or(Value::Null))
                 }
             }
-            // Queries return only the requested fact without cloning the full diagnostic records.
             // 查询仅返回所需事实，不克隆完整诊断记录，状态仍由原生账本拥有。
             "mcp.diagnosis.has" => Ok(json!(if arguments["kind"] == "state" {
                 self.states.iter().any(|(key, _)| key == server_id)
@@ -228,7 +226,7 @@ impl McpDiagnostics {
                     return Ok(Value::Null);
                 }
                 if let Some(record) = self.records.get_mut(&state_id) {
-                    record.revision = record.revision.saturating_add(1);
+                    record.revision += 1;
                     record.value["code"] = arguments["code"].clone();
                     if arguments["code"] == "MCP_AUTH_REQUIRED" {
                         record.value["state"] = json!("auth-required");

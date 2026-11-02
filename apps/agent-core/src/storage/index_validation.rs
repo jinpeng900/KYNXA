@@ -13,7 +13,6 @@ fn original_text(value: &Value) -> Result<Vec<u16>, ContractError> {
 }
 
 fn original_hash(units: &[u16]) -> String {
-    // Node UTF-8 encoding repairs isolated surrogates; retain that established hash identity.
     // Node 的 UTF-8 编码修复孤立代理项；哈希继续采用既有编码身份。
     format!(
         "{:x}",
@@ -28,7 +27,6 @@ fn split_pair(units: &[u16], offset: usize) -> bool {
         && (0xdc00..=0xdfff).contains(&units[offset])
 }
 
-/// One native call handles a bounded lexical batch, rather than one transport round trip per chunk.
 /// 有界词法批次仅调用一次原生接口，避免每块单独跨语言往返。
 pub fn lexical_batch(arguments: &Value) -> ContractResult {
     let texts = arguments["texts"]
@@ -46,7 +44,6 @@ pub fn lexical_batch(arguments: &Value) -> ContractResult {
     Ok(json!(output))
 }
 
-/// Validate all derived chunk metadata and calculate lexical/input hashes in one native pass.
 /// 单次原生处理校验整批分块元信息并计算词法与嵌入输入哈希。
 pub fn derive_chunks(arguments: &Value) -> ContractResult {
     let cancellation = arguments["cancellationId"]
@@ -243,7 +240,6 @@ fn invalid(message: &str) -> ContractError {
     ContractError::new(message, "INVALID_RETRIEVAL_INPUT", 400)
 }
 
-/// Admission owns ordered chunk coverage and vector-space consistency; receipts retain the existing SDK codecs.
 /// 准入拥有有序分块覆盖及向量空间一致性；回执保留既有 SDK 的字符串与 Float32 编码。
 pub fn validate(arguments: &Value) -> ContractResult {
     let source = raw_json::utf16_identity(arguments["sourceRaw"].as_str().unwrap_or(""))

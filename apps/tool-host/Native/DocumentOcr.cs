@@ -24,7 +24,6 @@ internal sealed class DocumentOcrException(string code, string message) : Except
 }
 
 /// <summary>
-/// Recognize authorized bytes offline, without reading paths or controlling windows.
 /// 离线识别已授权的文档或图像字节，不接收路径或操作窗口。
 /// </summary>
 internal static class DocumentOcr
@@ -90,7 +89,6 @@ internal static class DocumentOcr
             var size = page.Size;
             if (!double.IsFinite(size.Width) || !double.IsFinite(size.Height) || size.Width <= 0 || size.Height <= 0)
                 throw new DocumentOcrException("OCR_INVALID_PAGE", "Invalid PDF page dimensions. / PDF 页面尺寸无效。");
-            // Bound both dimensions before allocation; very long pages cannot force an unbounded bitmap.
             // 分配前限制两个方向的尺寸，极长页面不能强制创建无界位图。
             double scale = Math.Min(request.RenderWidth / size.Width,
                 OcrEngine.MaxImageDimension / Math.Max(size.Width, size.Height));
@@ -141,7 +139,6 @@ internal static class DocumentOcr
         uint width = decoder.PixelWidth, height = decoder.PixelHeight;
         if (width == 0 || height == 0 || width > 65536 || height > 65536 || (ulong)width * height > MaximumImagePixels)
             throw new DocumentOcrException("OCR_IMAGE_PIXEL_LIMIT", "Decoded image dimensions exceed the budget. / 图像解码尺寸超过额度。");
-        // Metadata is checked before pixel allocation; WIC scales within the OCR dimension limit.
         // 先核验尺寸再分配像素；WIC 在解码时缩放到 OCR 接受的尺寸，避免展开整张超大图。
         uint maximumDimension = Math.Min(4000, OcrEngine.MaxImageDimension);
         double scale = Math.Min(1, maximumDimension / (double)Math.Max(width, height));

@@ -96,7 +96,6 @@
     const text = entry.elapsedMode ? window.KynxaMessagePresentation.elapsedText(durationMs, uiStrings,
       { live: entry.elapsedMode === 'live', known: entry.elapsedKnown === true }) : '';
     setToolText(entry.elapsed, text);
-    // Reused snapshots must not mutate unchanged attributes or disturb the cached selection surface.
     // 复用快照时不重复写入未变属性，保留缓存聊天的选区与展示节点。
     if (entry.elapsed.hidden !== !text) entry.elapsed.hidden = !text;
     const mode = entry.elapsedMode || '';
@@ -121,7 +120,6 @@
     const clockId = hasTimingState && typeof message.generationClockId === 'string' ? message.generationClockId : null;
     let mode = null, durationMs = 0;
     if (message.role === 'assistant' && hasTimingState) {
-      // Timing belongs to the generation, independently of prose phases or transport completion.
       // 计时归属于生成任务，不受正文阶段或传输是否结束影响；新尝试必须使用新的时钟身份。
       const retainedElapsedMs = entry.generationClockId === clockId ? previousElapsedMs : null;
       if (message.generationTimingState === 'live' && (elapsedMs !== null || retainedElapsedMs !== null)) {
@@ -132,7 +130,6 @@
         durationMs = mode === 'final' && hasTotal ? message.durationMs : elapsedMs ?? retainedElapsedMs;
       }
     } else if (message.role === 'assistant') {
-      // Keep legacy preparation resets; final text arriving before totals must not erase an established clock.
       // 保留旧快照的准备阶段清零；正文先于总时长到达时，保留已有计时。
       const presentation = presentationFor(message);
       if (message.streaming && elapsedMs !== null) {
@@ -154,7 +151,6 @@
     refreshElapsedText(entry);
   }
   function statusText(message, presentation = presentationFor(message)) {
-    // Ordinary unfinished follow-ups are stated in the answer; genuine verification/unknown effects remain explicit.
     // 普通待办由正文说明，不叠加“部分完成”；核验失败和未知副作用仍明确显示。
     const taskStatus = {'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
     if (taskStatus) return taskStatus + (message.error ? ' · ' + message.error : '');
@@ -188,7 +184,6 @@
   }
   function updateMessageTime(entry, message = entry.timeMetadata || entry.message) {
     if (!message) return;
-    // Keep only footer metadata current while selected body content retains its previous snapshot.
     // 正文选区保留旧快照时，仅更新页脚元信息；切换语言仍使用最新结束状态。
     entry.timeMetadata = {
       role: message.role, streaming: message.streaming, status: message.status,
@@ -209,7 +204,6 @@
     const text = streaming ? phases[message.executionPhase]
       || (message.generationTimingState === 'paused' ? (english ? 'Waiting for task status…' : '等待任务状态') : uiStrings.generating)
       : label + separator + formatted;
-    // The persistent footer is outside copied content; unknown end times must never be inferred from duration.
     // 时间常显在操作行，不进入复制正文；未知结束时刻不能根据用时推算。
     if (entry.time.textContent !== text) entry.time.textContent = text;
     if (formatted !== uiStrings.timeNotRecorded) {
@@ -228,7 +222,6 @@
     if (!entry.mounted || !message) return;
     updateElapsedState(entry, message);
     updateMessageTime(entry, message);
-    // Final metadata must not infer an interrupted answer from body segments still awaiting layout.
     // 终态元信息不根据尚待排版的旧正文分段，误判回复中断。
     const mode = message.status === 'streaming' ? 'active' : message.status === 'completed' ? 'final' : 'partial';
     setStatusText(entry, statusText(message, Array.isArray(message.assistantSegments) ? presentationFor(message) : {mode}));
@@ -292,7 +285,6 @@
     pendingCopies.delete(command.requestId);
     if (!request || command.conversationId !== conversationId || request.conversationId !== conversationId
       || request.entry.copyRequestId !== command.requestId || !request.entry.mounted || !request.entry.article.isConnected) return;
-    // Show success only after the native host has written the clipboard, and ignore old operations.
     // 只有原生宿主写入剪贴板后才显示成功，忽略已经过期的操作回执。
     clearCopyFeedback();
     copyFeedbackEntry = request.entry;
@@ -321,7 +313,6 @@
     const expectedConversation = conversationId, expectedGeneration = conversationNavigationGeneration;
     const expectedNavigation = navigationGeneration;
     if (changingFont) { updatingAppearance = true; cancelAnimationFrame(scrollFrame); cancelAnimationFrame(appearanceFrame); }
-    // Palette/size preferences change styles, never selected text nodes or the bounded conversation cache.
     // 配色和字号仅修改样式，不替换已选文字节点或有界会话缓存。
     for (const [key, variable] of Object.entries(variables)) style.setProperty(variable, palette[key]);
     for (const [key, variable] of Object.entries(semanticVariables))
@@ -331,12 +322,10 @@
     style.colorScheme = palette.isDark === true ? 'dark' : 'light';
     if (changingFont) {
       style.setProperty('--chat-font-size', fontSize + 'px');
-      // Recalculate a folded preview using the new line box, then preserve its visible paragraph.
       // 先按新的行高重算完整十二行预览，再恢复原来可见段落，保留选区与折叠偏好。
       window.kynxaContentBlocks?.hydrate(messages);
       restoreScrollAnchor(anchors);
       appearanceFrame = requestAnimationFrame(() => {
-        // New wheel/key/jump navigation wins over the deferred font-size anchor correction.
         // 字号更新后若出现新的滚轮、键盘或跳转操作，不再覆盖用户刚选择的阅读位置。
         if (conversationId === expectedConversation && conversationNavigationGeneration === expectedGeneration
             && navigationGeneration === expectedNavigation) restoreScrollAnchor(anchors);
@@ -349,7 +338,6 @@
   }
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
-    // Startup has no content to preserve; let its first render follow the bottom.
     // 首次启动没有需要保留的内容，让第一次渲染跟随底部。
     localizingUi = entries.size > 0;
     if (localizingUi) cancelAnimationFrame(scrollFrame);
@@ -360,7 +348,6 @@
     document.title = uiStrings.conversation;
     messages.setAttribute('aria-label', uiStrings.transcript);
     updateJumpButton();
-    // Localize only application controls; message DOM and browser selections stay intact.
     // 只本地化应用控件；消息 DOM 与浏览器选择保持不变。
     for (const entry of entries.values()) localizeEntry(entry);
     for (const saved of conversations.values()) for (const entry of saved.entries.values()) localizeEntry(entry);
@@ -369,13 +356,11 @@
     window.kynxaTables?.setLanguage(uiStrings);
     window.kynxaTranscriptSearch?.setLanguage(uiStrings);
     if (!localizingUi) return;
-    // Label wrapping may shift layout; preserve scroll position and selection, skipping this auto-follow.
     // 文案换行可能改变布局；保留滚动位置和选区，仅跳过本次自动跟随。
     if (scrollX !== left || scrollY !== top) scrollTo({ left, top, behavior: 'instant' });
     languageFrame = requestAnimationFrame(() => {
       languageFrame = requestAnimationFrame(() => {
         localizingUi = false;
-        // A viewport callback may have yielded to the latest language update; resume its pending work.
         // 视口回调可能因最新一轮语言更新而暂停；解除保护后继续挂载待处理消息。
         if (viewportDirty) scheduleViewport();
         if (!activeSelection() && !pointerSelecting) {
@@ -401,7 +386,6 @@
     if (following || hasUnseenReplies || !entries.size) return;
     const nextOrder = Array.isArray(snapshot.messageOrder) ? snapshot.messageOrder : snapshot.messages.map(message => message.id);
     const tailIndex = nextOrder.indexOf(messageOrder?.at(-1));
-    // Only new tail replies and changed prose count: older-page hydration and elapsed-clock updates must not raise alerts.
     // 仅新增尾部回复或正文变化提示未读；补载旧页与计时刷新不能误报，也不抢占阅读锚点及选区。
     hasUnseenReplies = snapshot.messages.some(message => {
       if (message.role !== 'assistant') return false;
@@ -419,7 +403,6 @@
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
     try {
       const range = selection.getRangeAt(0), viewer = document.querySelector('.mermaid-viewer[open]');
-      // Fullscreen SVG text needs the same protection against redraw as transcript text.
       // 全屏图表选中的文字与聊天正文一样，需要避免重绘打断选区。
       return range.intersectsNode(messages) || !!viewer && range.intersectsNode(viewer);
     } catch { return false; }
@@ -432,7 +415,6 @@
     scrollFrame = requestAnimationFrame(() => {
       if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi || updatingAppearance) return;
       if (following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
-      // Offscreen layout may settle on the next frame; user upward input still revokes this generation immediately.
       // 屏幕外布局可能在下一帧稳定；用户真实上滚仍立即撤销本代跟随，不被布局回调覆盖。
       scrollFrame = requestAnimationFrame(() => {
         if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi) return;
@@ -462,7 +444,6 @@
       send({ type: 'history', direction: 'latest', conversationId });
       return;
     }
-    // Explicit navigation preserves the selection; selected text continues to freeze transcript updates.
     // 显式跳转保留选区；已选文字仍继续冻结聊天更新。
     following = !activeSelection();
     bottomFollowingPaused = false;
@@ -500,7 +481,6 @@
   }
   function ensureMathRenderer() {
     if (window.katex || mathRendererLoading) return;
-    // Text-only startup never loads KaTeX; all visible formula blocks share one local load.
     // 纯文字启动不加载 KaTeX，可见公式共用一次本地加载，不阻塞聊天 ready 或首屏原文。
     mathRendererLoading = new Promise(resolve => {
       const script = document.createElement('script');
@@ -558,7 +538,6 @@
   function patchBlocks(container, html, stableLength = 0, stableBlocks = 0) {
     if (container._sourceHtml === html) return;
     const previous = container._blockKeys || [];
-    // Stable prefix HTML is already real DOM; parse only the replacement tail during streaming.
     // 稳定前缀已有真实 DOM；流式阶段只解析替换尾部，不重复创建长回复的全部临时节点。
     const prefix = container._stableSource || '';
     const retained = prefix && html.startsWith(prefix) ? Math.min(container._stableKeyCount || 0, previous.length) : 0;
@@ -652,7 +631,6 @@
     for (const entry of required) if (entries.get(entry.article.dataset.messageId) === entry && !entry.mounted) {
       mountMessage(entry); contentChanged = true;
     }
-    // Selected nodes are never recycled; dragging may bring additional messages into the window.
     // 已选节点不回收；拖动选区滚动时允许把新消息加入窗口，清除选区后恢复回收。
     if (!activeSelection() && !pointerSelecting)
       for (const entry of [...mountedEntries]) if (!required.has(entry)) { unmountMessage(entry); contentChanged = true; }
@@ -792,7 +770,6 @@
       updateTools(row, activities);
       if (!row.tools.hidden && row.tools.parentNode !== row.root) row.root.append(row.tools);
     }
-    // Render the replacement body (including math) before removing earlier progress.
     // 先渲染替换后的正文与公式，再移除此前的中间进展。
     for (const [id, row] of entry.segmentRows) if (!ids.has(id)) { row.root.remove(); entry.segmentRows.delete(id); }
   }
@@ -850,7 +827,6 @@
       }
       const previous = groups.at(-1);
       const key = view.presentation.titleKey + ':' + view.presentation.website + ':' + tool.status;
-      // Approval requests retain an individual, visible identity. Execution records are never merged.
       // 审批请求各自保留可见身份；正式执行记录不会被合并。
       if (previous && previous.key === key && ['completed', 'running'].includes(tool.status)) previous.views.push(view);
       else groups.push({ id, key, views: [view] });
@@ -873,7 +849,6 @@
       const expected = previous ? previous.nextSibling : entry.tools.firstChild;
       if (expected !== row.root) entry.tools.insertBefore(row.root, expected);
       previous = row.root;
-      // Use the desktop display revision, falling back to a signature for older or standalone clients.
       // 优先使用桌面展示版本，旧版或独立客户端回退到签名；正式记录不变。
       const signature = JSON.stringify(group.views.map(view => view.signature));
       if (row.signature === signature) continue;
@@ -911,7 +886,6 @@
   function cacheCharactersWithin(value, remaining) {
     const pendingValues = [value];
     let characters = 0, visited = 0;
-    // Estimate cache size without copying large JSON; oversized or complex data stays rereadable.
     // 直接估算缓存大小，避免复制大型 JSON；过大或过于复杂的数据保留回读能力。
     while (pendingValues.length) {
       if (++visited > 8192 || characters > remaining) return Infinity;
@@ -932,7 +906,6 @@
     historyIntent = false; clearTimeout(historyRequestTimer); historyRequestTimer = 0;
     const outgoingUnseenReplies = hasUnseenReplies;
     historyHasOlder = historyHasNewer = historyHasNewReplies = false; messageOrder = null;
-    // Capture the outgoing viewport before selection cleanup or DOM replacement can change it.
     // 清理选区或替换 DOM 前记录当前视口，连同阅读锚点和底部跟随状态一起缓存。
     const view = { top: scrollY, left: scrollX, following: following && (bottomNavigationPending || atBottom()), anchors: scrollAnchors() };
     const search = window.kynxaTranscriptSearch?.capture();
@@ -943,7 +916,6 @@
     window.kynxaTables?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
     pending = null; clearSelection(); cancelAnimationFrame(scrollFrame);
-    // Cache the DOM tree so returning to a chat reuses formulas, highlighting and expanded reasoning.
     // 缓存 DOM 树，返回聊天时复用公式、高亮和思考展开状态。
     const restored = removeCached(id);
     if (restored?.view && !restored.view.following) {
@@ -973,7 +945,6 @@
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
     renderMath(messages);
-    // Rebuild the active row registry before restoring search or reading anchors from cached DOM.
     // 恢复搜索和阅读锚点前先重建当前行登记，缓存节点仍使用同一条消息身份。
     liveElapsedEntries.clear();
     for (const entry of entries.values()) {
@@ -1006,20 +977,17 @@
     if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
     else if (snapshot.type !== 'renderPatch') messageOrder = snapshot.messages.map(message => message.id);
     if (snapshot.progressiveSnapshot) {
-      // Recent-first snapshots merge into a restored DOM; earlier rows arrive as ordered background patches.
       // 最近消息首屏合入复用 DOM，较早消息由后台有序补入，不清空缓存正文或抢占阅读锚点。
       applyTranscriptPatch({ ...snapshot, progressiveSnapshot: false });
       return;
     }
     historyHasOlder = snapshot.historyHasOlder === true; historyHasNewer = snapshot.historyHasNewer === true;
     historyHasNewReplies = snapshot.historyHasNewReplies === true;
-    // Cached reading positions and real upward input survive delayed initial snapshots.
     // 缓存阅读位置与用户真实上滚均保留，不被延迟到达的首屏快照覆盖。
     if ((changedConversation || snapshot.openAtBottom && following && !activeSelection() && !pointerSelecting) && !restoringReadingNavigation()) {
       pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
       pending = snapshot;
-      // Timing and the footer stay current outside selected prose while body convergence is deferred.
       // 正文收束延迟时，仅更新选区外的计时和页脚，保留选区与正文节点。
       const timingIds = new Set(snapshot.messages.map(message => String(message.id)));
       for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
@@ -1052,10 +1020,8 @@
       if (searchingLoadedMessages && !entry.mounted) mountMessage(entry);
       previous = entry.article;
     }
-    // Older pages may prepend messages; the data registry must share the rendered order for later patches.
     // 加载旧页可能前插消息；数据登记与 DOM 顺序一致，后续增量不得把旧页移回末尾。
     entries = new Map(snapshot.messages.map(message => [String(message.id), entries.get(String(message.id))]));
-    // Account for block headers before restoring the reader's visible anchor.
     // 内容框工具栏先参与布局，再恢复阅读位置，避免追加内容时把正文挤离视口。
     window.kynxaContentBlocks?.disposeDetached();
     window.kynxaTables?.disposeDetached();
@@ -1081,7 +1047,6 @@
     if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
     const latest = pending?.conversationId === conversationId ? pending.messages
       : [...entries.values()].map(entry => entry.message);
-    // Merge into a deferred selected snapshot, so multiple stream patches cannot erase earlier changes.
     // 多次流式增量合入被冻结的选区快照，后续刷新不能抹掉前一次更新。
     const merged = new Map(latest.map(message => [String(message.id), message]));
     const replacements = new Map();
@@ -1110,7 +1075,6 @@
   }
   function scrollAnchors() {
     const anchors = [], fallbacks = [];
-    // Prefer a surviving paragraph in view; keep message-level fallbacks when transient steps disappear.
     // 优先使用视口内仍存在的段落作滚动锚点；中间阶段消失时仍保留消息级回退。
     for (const entry of mountedEntries) {
       const bounds = entry.article.getBoundingClientRect();
@@ -1142,7 +1106,6 @@
       restoredReadingNavigation.generation === conversationNavigationGeneration;
   }
   function scrollToReadingPosition(left, top) {
-    // Programmatic restoration must not let queued scroll notifications re-enable bottom following.
     // 程序恢复位置期间屏蔽排队的滚动通知，避免短暂高度夹紧重新开启底部跟随。
     anchoringScroll = true; cancelAnimationFrame(anchorFrame);
     scrollTo({ left, top, behavior: 'instant' });
@@ -1193,7 +1156,6 @@
     if (!selection || !selection.rangeCount || selection.isCollapsed || !activeSelection()) return null;
     const range = selection.getRangeAt(0);
     const fragment = range.cloneContents();
-    // Restore unloaded message bodies when copying a selection beyond the mounted viewport.
     // 复制跨越当前视口的选区时，补回已卸载消息的原始正文。
     for (const node of fragment.querySelectorAll('article[data-virtualized]')) {
       const entry = entries.get(node.dataset.messageId);
@@ -1201,7 +1163,6 @@
       const body = document.createElement('pre'); body.dataset.copyPlain = '';
       body.textContent = copiedMessage(entry.message); node.replaceChildren(body);
     }
-    // Project selected diagrams back to literal source, omitting duplicate SVG labels and controls.
     // 图表选区还原为原始源码，避免复制重复 SVG 标签和操作控件。
     for (const block of messages.querySelectorAll('.mermaid-block[data-diagram-id]')) {
       if (!range.intersectsNode(block)) continue;
@@ -1235,7 +1196,6 @@
       if (copy) copy.replaceWith(copiedTex(math));
       else if (math.contains(range.commonAncestorContainer)) fragment.replaceChildren(copiedTex(math));
     }
-    // A range inside SVG may clone its children without the SVG ancestor; definitions remain invisible.
     // SVG 内部选区可能只克隆子节点而丢失 SVG 祖先；不可见定义仍须从复制内容中排除。
     fragment.querySelectorAll('[data-copy-ignore],.katex-mathml,annotation,[hidden],style,defs,title,desc').forEach(node => node.remove());
     fragment.querySelectorAll('details:not([open])').forEach(node => node.remove());
@@ -1252,7 +1212,6 @@
     return fragment ? fragmentText(fragment) : '';
   }
   function fragmentText(fragment) {
-    // Inside literal text or code, preserve selected boundary newlines without adding separators.
     // 选区完全位于原文或代码内时，保留选中的首尾换行，不额外添加分隔。
     if (fragment.childNodes.length === 1 && fragment.firstChild.nodeType === Node.ELEMENT_NODE
       && fragment.firstChild.hasAttribute('data-copy-plain')) return fragment.firstChild.textContent;
@@ -1289,13 +1248,10 @@
   window.addEventListener('pagehide', () => { if (elapsedTimer !== null) clearInterval(elapsedTimer); elapsedTimer = null; });
   window.addEventListener('scroll', () => {
     const movedUp = scrollY < lastScrollTop, movedDown = scrollY > lastScrollTop;
-    // Update the direction baseline even for guarded restoration and navigation scrolls.
     // 锚点恢复或导航屏蔽的程序滚动也更新方向基准，避免沿用上一会话的位置。
     lastScrollTop = scrollY;
-    // Old DOM scroll events may arrive late; keep explicit navigation until the first bottom frame or real upward input.
     // 旧 DOM 滚动事件可能迟到；显式导航保持到首个底部帧，用户上滚则立即取消。
     if (!applying && !localizingUi && !updatingAppearance && !anchoringScroll && !bottomNavigationPending && !restoringReadingNavigation()) {
-      // Upward scrolling can start within the 36 px bottom tolerance; resume following only after a real downward scroll to bottom.
       // 上滚可能始于底部 36 px 容差内；仅在用户真实下滚到底后恢复跟随，避免视口更新拉回。
       if (movedUp) bottomFollowingPaused = true;
       const reachedBottom = document.documentElement.scrollHeight - innerHeight - scrollY <= 1;
@@ -1385,7 +1341,6 @@
   }
   function beforeContentLayoutChange(block) {
     if (activeSelection() || pointerSelecting || localizingUi) return false;
-    // Reading controls preserve the visible header or prose instead of jumping to the reply's end.
     // 调整阅读方式时保留可见工具栏或正文的位置，避免跳到回复末尾。
     stopFollowing(); cancelAnimationFrame(scrollFrame);
     const anchors = scrollAnchors(), bounds = block.getBoundingClientRect();
@@ -1412,7 +1367,6 @@
     searchConversations() { send({ type: 'searchConversations', conversationId: conversationId || '' }); },
     stateChanged(open) {
       searchingLoadedMessages = open;
-      // Search indexes the currently loaded history page, including rows outside the virtual viewport.
       // 搜索覆盖当前已加载历史页，包含虚拟视口外的消息；尚未回读的历史不在此次索引内。
       if (open) {
         const anchors = following ? [] : scrollAnchors();

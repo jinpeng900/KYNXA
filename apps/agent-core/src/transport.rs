@@ -9,7 +9,6 @@ pub struct FrameLimits {
     pub response_bytes: usize,
 }
 
-/// Both adapters and executors use the same caps; expanded frames never expand source permissions.
 /// 适配器和执行器共用额度表；扩大的传输帧不扩大来源权限或正文合同。
 pub fn frame_limits(operation: &str, kind: &str) -> FrameLimits {
     let input_bytes = match kind {

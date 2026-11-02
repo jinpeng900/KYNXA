@@ -116,7 +116,6 @@ try {
     }
     # Keep provenance beside the distributable files, and publish a list for normal MSBuild packaging.
     $outputManifest = Get-TranscriptionPath 'runtime/transcription/manifest.json'
-    # Hash the original manifest bytes without relying on nested modules' command lookup state.
     # 直接校验原始清单字节，避免嵌套模块导入影响命令发现；固定摘要校验保持不变。
     $manifestHasher = [Security.Cryptography.SHA256]::Create()
     $manifestStream = $null

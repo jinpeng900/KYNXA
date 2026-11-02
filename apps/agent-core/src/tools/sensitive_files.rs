@@ -1,4 +1,3 @@
-/// Classify sensitive names before opening a source; content-based classification would already expose credentials.
 /// 在打开来源前判断敏感名称；按内容分类会提前暴露凭据。
 pub(super) fn is_sensitive(path: &str) -> bool {
     let lower = path.to_lowercase();

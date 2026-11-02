@@ -11,7 +11,6 @@ use super::{
 const MAX_CHECKPOINT_EVIDENCE: usize = 60;
 const MIN_CHECKPOINT_EXCERPT_UNITS: usize = 96;
 
-/// Preserve the actual receipt body, rather than a JSON envelope's metadata and trailing fields.
 /// 保留真实回执正文，不让 JSON 包装的头尾元数据挤掉原文；这里只做摘录，不生成语义总结。
 pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
     fn body(content: &Value, depth: usize) -> Option<String> {
@@ -39,13 +38,11 @@ pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
         }
         for field in ["text", "content"] {
             if let Some(value) = content.get(field).filter(|value| value.is_string()) {
-                // A real JSON source file remains text; only the outer receipt string is decoded as an envelope.
                 // 真实 JSON 文件正文仍是原文；只有外层回执字符串作为包装解码，不二次吞掉 JSON 原文。
                 return value.as_str().map(str::to_owned);
             }
         }
         if let Some(blocks) = content.as_array().or_else(|| content["content"].as_array()) {
-            // Use only public MCP text; exclude reasoning, media and unknown blocks from summaries.
             // 摘要仅使用 MCP 公开文本，不纳入思考、媒体或未知块。
             let texts = blocks
                 .iter()
@@ -71,19 +68,31 @@ pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Keep bounded machine recovery state when verbose redirect diagnostics stay only in the archive.
 /// 冗长跳转诊断仅留在归档；压缩上下文仍保留有界的机器恢复状态。
 fn compact_failure_details(value: &Value) -> Value {
     let mut details = serde_json::Map::new();
-    for field in ["failureOrigin", "httpStatus", "upstreamStatus", "rpcCode", "providerCode", "retryable"] {
-        if let Some(value) = value.get(field).filter(|value| !value.is_null() && value.to_string().len() <= 128) {
+    for field in [
+        "failureOrigin",
+        "httpStatus",
+        "upstreamStatus",
+        "rpcCode",
+        "providerCode",
+        "retryable",
+    ] {
+        if let Some(value) = value
+            .get(field)
+            .filter(|value| !value.is_null() && value.to_string().len() <= 128)
+        {
             details.insert(field.into(), value.clone());
         }
     }
     if let Some(recovery) = value.get("recovery").filter(|value| value.is_object()) {
         let mut projected = serde_json::Map::new();
         for field in ["action", "tool", "retrySameUrl"] {
-            if let Some(value) = recovery.get(field).filter(|value| !value.is_null() && value.to_string().len() <= 256) {
+            if let Some(value) = recovery
+                .get(field)
+                .filter(|value| !value.is_null() && value.to_string().len() <= 256)
+            {
                 projected.insert(field.into(), value.clone());
             }
         }
@@ -94,7 +103,6 @@ fn compact_failure_details(value: &Value) -> Value {
     Value::Object(details)
 }
 
-/// Extract actual receipt locators; large bodies, media and reasoning never become source metadata.
 /// 提取真实回执定位字段；大正文、媒体和推理不能混入来源元数据，也不能依据摘要猜测版本。
 pub(crate) fn source_metadata(content: &Value) -> Value {
     let parsed;
@@ -230,7 +238,8 @@ mod checkpoint_evidence_tests {
         let first = original_evidence(&source, &HashSet::new()).unwrap();
         assert_eq!(first["kind"], "original-source");
         let mut next = source;
-        next["sourceMetadata"]["locator"]["extraction"]["pageWindow"] = json!({"startPage":2,"endPage":2});
+        next["sourceMetadata"]["locator"]["extraction"]["pageWindow"] =
+            json!({"startPage":2,"endPage":2});
         let second = original_evidence(&next, &HashSet::new()).unwrap();
         assert_ne!(evidence_identity(&first), evidence_identity(&second));
     }
@@ -313,9 +322,18 @@ mod checkpoint_evidence_tests {
             "originalExcerpt":"Saved findings for the already read current document."});
         let derived_document = original_evidence(&document_page, &HashSet::new()).unwrap();
         assert_eq!(derived_document["kind"], "document-work-read");
-        assert_eq!(derived_document["source"]["sourceIdentity"], "document-current");
-        assert_eq!(derived_document["source"]["sourceVersion"]["sha256"], "b".repeat(64));
-        assert_eq!(compact_evidence(&derived_document)["kind"], "document-work-read");
+        assert_eq!(
+            derived_document["source"]["sourceIdentity"],
+            "document-current"
+        );
+        assert_eq!(
+            derived_document["source"]["sourceVersion"]["sha256"],
+            "b".repeat(64)
+        );
+        assert_eq!(
+            compact_evidence(&derived_document)["kind"],
+            "document-work-read"
+        );
         let mut document_list = document_page;
         document_list["arguments"]["action"] = json!("list");
         assert!(original_evidence(&document_list, &HashSet::new()).is_none());
@@ -493,7 +511,10 @@ mod checkpoint_evidence_tests {
         assert_eq!(metadata["code"], "WEB_HTTP_FAILED");
         assert_eq!(metadata["retryAfterMs"], 1500);
         assert_eq!(metadata["details"]["httpStatus"], 503);
-        assert_eq!(metadata["details"]["providerCode"], "temporarily_unavailable");
+        assert_eq!(
+            metadata["details"]["providerCode"],
+            "temporarily_unavailable"
+        );
         assert_eq!(metadata["details"]["recovery"]["tool"], "web.search");
         assert_eq!(metadata["details"]["recovery"]["retrySameUrl"], true);
         assert!(metadata["details"].get("redirects").is_none());
@@ -513,11 +534,17 @@ mod checkpoint_evidence_tests {
                 "url":"https://example.org/challenge","evidenceUsable":false,"needsHumanVerification":true,
                 "requiresRendering":false,"pagination":{"restarted":true},
                 "recovery":{"action":"user-verification-or-another-enabled-source","retrySameUrl":false}}});
-        let mut evidence = vec![original_evidence(&error, &HashSet::new()).unwrap(),
-            original_evidence(&challenge, &HashSet::new()).unwrap()];
+        let mut evidence = vec![
+            original_evidence(&error, &HashSet::new()).unwrap(),
+            original_evidence(&challenge, &HashSet::new()).unwrap(),
+        ];
         assert_eq!(evidence[0]["kind"], "tool-error");
         assert_eq!(evidence[1]["kind"], "source-unavailable");
-        assert!(evidence.iter().all(|record| record.get("excerpt").is_none()));
+        assert!(
+            evidence
+                .iter()
+                .all(|record| record.get("excerpt").is_none())
+        );
         let unknown_effect = compact_evidence(&json!({"kind":"effect","status":"unknown",
             "tool":"process.run","resultRef":archive(),"source":{"evidenceUsable":false}}));
         assert_eq!(unknown_effect["kind"], "effect");
@@ -529,20 +556,32 @@ mod checkpoint_evidence_tests {
                 "checkpointCapabilities":{"loadableNames":[]},"omittedEvidence":0});
             let checkpoint = state.apply("models.lifecycle.toolContext.checkpointFinalize",
                 &json!({"plan":plan,"resultRef":archive(),"latestPublicText":"","budgetTokens":1024})).unwrap();
-            let note: Value = serde_json::from_str(string(&checkpoint["message"]["content"])).unwrap();
-            let failed = array(&note["evidence"]).iter().find(|record| record["kind"] == "tool-error").unwrap();
+            let note: Value =
+                serde_json::from_str(string(&checkpoint["message"]["content"])).unwrap();
+            let failed = array(&note["evidence"])
+                .iter()
+                .find(|record| record["kind"] == "tool-error")
+                .unwrap();
             assert_eq!(failed["status"], "error");
             assert_eq!(failed["executed"], false);
             assert_eq!(failed["code"], "WEB_HTTP_FAILED");
             assert_eq!(failed["retryAfterMs"], 1500);
             assert_eq!(failed["details"]["recovery"]["tool"], "web.search");
-            let blocked = array(&note["evidence"]).iter().find(|record| record["kind"] == "source-unavailable").unwrap();
+            let blocked = array(&note["evidence"])
+                .iter()
+                .find(|record| record["kind"] == "source-unavailable")
+                .unwrap();
             assert_eq!(blocked["evidenceUsable"], false);
             assert_eq!(blocked["needsHumanVerification"], true);
             assert_eq!(blocked["pagination"]["restarted"], true);
             assert_eq!(blocked["recovery"]["retrySameUrl"], false);
             assert!(!note.to_string().contains("CHALLENGE_BODY_IS_NOT_A_FACT"));
-            assert!(checkpoint["metrics"]["checkpointProjectedTokens"].as_u64().unwrap() <= 1024);
+            assert!(
+                checkpoint["metrics"]["checkpointProjectedTokens"]
+                    .as_u64()
+                    .unwrap()
+                    <= 1024
+            );
             evidence = array(&checkpoint["source"]["checkpointEvidence"]).to_vec();
         }
     }
@@ -905,8 +944,11 @@ fn capability_result(name: &str) -> bool {
 fn evidence_priority(evidence: &Value) -> u8 {
     if evidence["kind"] == "effect" && evidence["status"] != "completed" {
         0
-    } else if evidence["kind"] == "original-source" || evidence["kind"] == "working-summary-read"
-        || evidence["kind"] == "tool-error" || evidence["kind"] == "source-unavailable" {
+    } else if evidence["kind"] == "original-source"
+        || evidence["kind"] == "working-summary-read"
+        || evidence["kind"] == "tool-error"
+        || evidence["kind"] == "source-unavailable"
+    {
         1
     } else if evidence["kind"] == "document-work-read" {
         1
@@ -930,18 +972,28 @@ pub(crate) fn evidence_identity(evidence: &Value) -> String {
             digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
     };
-    // Identify acquired sources by content version and text range, not new wrapper IDs.
     // 按内容版本和正文范围识别已读来源，新包装 ID 不算新增证据。
     if evidence["kind"] == "original-source" {
         if let Some((start, end)) = actual_range {
             if evidence["tool"] == "attachment.read"
-                && source["sourceId"].as_str().is_some_and(|source| source.starts_with("attachment:"))
+                && source["sourceId"]
+                    .as_str()
+                    .is_some_and(|source| source.starts_with("attachment:"))
                 && valid_digest(&source["sourceVersion"])
             {
-                return json!(["attachment-window", source["sourceId"], source["sourceVersion"], start, end]).to_string();
+                return json!([
+                    "attachment-window",
+                    source["sourceId"],
+                    source["sourceVersion"],
+                    start,
+                    end
+                ])
+                .to_string();
             }
-            if matches!(string(&evidence["tool"]), "filesystem.read" | "document.read")
-                && !string(&source["path"]).is_empty()
+            if matches!(
+                string(&evidence["tool"]),
+                "filesystem.read" | "document.read"
+            ) && !string(&source["path"]).is_empty()
                 && valid_digest(&source["sha256"])
             {
                 return json!([
@@ -989,9 +1041,10 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
     let name = string(&source["name"]);
     let status = string(&source["status"]);
     if !reference(&source["resultRef"])
-        || (status != "error" && (capability_result(name)
-            || source["executed"] == false
-            || !matches!(status, "completed" | "unknown" | "cancelled")))
+        || (status != "error"
+            && (capability_result(name)
+                || source["executed"] == false
+                || !matches!(status, "completed" | "unknown" | "cancelled")))
     {
         return None;
     }
@@ -1001,15 +1054,17 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
         "resultRef":source["resultRef"], "arguments":arguments, "source":metadata,
         "excerpt":output_excerpt(string(&source["originalExcerpt"]),512), "excerptComplete":false, "instructionAuthority":false});
     if status == "error" || status == "completed" && evidence["source"]["evidenceUsable"] == false {
-        // A settled failure or verification page is control evidence, never factual source text.
         // 已结算失败或验证页面属于控制证据，不能将其正文当成事实来源。
-        evidence["kind"] = json!(if status == "error" { "tool-error" } else { "source-unavailable" });
+        evidence["kind"] = json!(if status == "error" {
+            "tool-error"
+        } else {
+            "source-unavailable"
+        });
         evidence["executed"] = source["executed"].clone();
         evidence.as_object_mut().unwrap().remove("excerpt");
         return Some(evidence);
     }
     if name == "task.document" {
-        // Saved findings are derived work; they cannot become another raw document to summarize.
         // 已存成果属于派生工作；回读不能增加原始文档或触发对成果再次摘要。
         if source["arguments"]["action"] != "read" || status != "completed" {
             return None;
@@ -1025,7 +1080,6 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
             if target.is_empty() || !reference(original_ref) || original_ref["id"] != target {
                 return None;
             }
-            // A summary page is derived context; retain its read range without treating it as a new source.
             // 摘要页是派生上下文；保留已读范围，不当作新原件或重复摘要。
             evidence["kind"] = json!("working-summary-read");
             evidence["resultRef"] = original_ref.clone();
@@ -1047,7 +1101,6 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
         }
         evidence["kind"] = json!("archive-read");
         let original_ref = &source["originalResultRef"];
-        // A wrapper's new archive is not the evidence source; retain the requested original identity and page.
         // 二次包装的归档不是原始证据来源；保留真实请求的原引用和页范围，不推荐再次包装的归档。
         evidence["resultRef"] = if reference(original_ref) && original_ref["id"] == target {
             original_ref.clone()
@@ -1099,7 +1152,6 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
     Some(evidence)
 }
 
-/// Project one compact receipt identity; keep the full hashed receipt in the sidecar and archive.
 /// 仅投影一份紧凑回执身份；完整带哈希回执保留在侧车和归档中。
 fn compact_evidence(record: &Value) -> Value {
     let source = &record["source"];
@@ -1144,9 +1196,15 @@ fn compact_evidence(record: &Value) -> Value {
             output[field] = value.clone();
         }
     }
-    if record["kind"] == "tool-error" || record["kind"] == "source-unavailable"
-        || (record["kind"] != "effect" && source["evidenceUsable"] == false) {
-        output["kind"] = json!(if record["kind"] == "tool-error" { "tool-error" } else { "source-unavailable" });
+    if record["kind"] == "tool-error"
+        || record["kind"] == "source-unavailable"
+        || (record["kind"] != "effect" && source["evidenceUsable"] == false)
+    {
+        output["kind"] = json!(if record["kind"] == "tool-error" {
+            "tool-error"
+        } else {
+            "source-unavailable"
+        });
         output["status"] = record["status"].clone();
         output["instructionAuthority"] = json!(false);
         if let Some(executed) = record.get("executed").filter(|value| value.is_boolean()) {
@@ -1176,14 +1234,12 @@ fn compact_evidence(record: &Value) -> Value {
     output
 }
 
-/// Full public working facts bind their cursor state to a real, verified archive; model input is only a projection.
 /// 完整公开工作事实与游标绑定真实核验归档；模型输入只是有界投影，不成为原始证据或权限。
 pub(crate) fn working_summary_payload(summary: &Value) -> Value {
     let payload_version = summary["archive"]["payloadVersion"].as_u64().unwrap_or(1);
     let mut payload = json!({"format":"kynxa-public-working-summary","version":payload_version,"instructionAuthority":false,"semanticCorrectnessCertified":false,
         "facts":summary["facts"],"sources":summary["sources"],"goalSignature":summary["goalSignature"],"preferredResultId":summary["preferredResultId"],
         "completedSources":summary["completedSources"],"partialSources":summary["partialSources"],"unprocessedSources":summary["unprocessedSources"]});
-    // Legacy payloads retain their exact hash; new archives exclude counters that add no work evidence.
     // 旧载荷保留原有核验哈希；新归档排除不增加工作证据的计数，避免仅统计变化造成重复回读。
     if payload_version == 1 {
         payload["metadataOnlySources"] = summary["metadataOnlySources"].clone();
@@ -1207,7 +1263,6 @@ fn working_archive_ready(summary: &Value) -> bool {
         && summary["archive"]["summaryHash"] == working_summary_hash(summary)
 }
 
-/// Trial projection reuses the final checkpoint rule and returns only fit diagnostics; it writes no state or history.
 /// 试投影复用最终检查点规则，只返回容量诊断；不写状态或历史，不删事实与未知副作用。
 pub(crate) fn semantic_checkpoint_fit(
     plan: &Value,
@@ -1262,9 +1317,9 @@ pub(crate) fn semantic_checkpoint_fit(
         });
     let projected_tokens =
         super::protocol::tool_message_tokens(std::slice::from_ref(&rendered["message"]), "");
-    let visible_fact_tokens = public["workingFacts"].as_array().map_or(0, |facts| {
-        estimate_tokens(&json!(facts).to_string())
-    });
+    let visible_fact_tokens = public["workingFacts"]
+        .as_array()
+        .map_or(0, |facts| estimate_tokens(&json!(facts).to_string()));
     let remaining_fact_budget_tokens =
         budget.saturating_sub(projected_tokens.saturating_sub(visible_fact_tokens));
     let reason = if !sidecar_preserved {
@@ -1338,7 +1393,6 @@ fn observation_text(source: &Value, replacement: &Value, reason: &Value) -> Stri
         "notice": "Earlier archived read observation; its receipt remains recorded. Use the later verified observation or read this saved result for the old version. Never repeat a completed effect to recover context."}).to_string()
 }
 
-/// Native state owns projection provenance, archive admission and all compaction decisions.
 /// 原生状态拥有投影来源、归档准入与全部压缩决策；JS 只保留 SDK 对象身份和真实 I/O Promise。
 #[derive(Default)]
 pub struct ToolContextState {
@@ -1363,7 +1417,6 @@ pub struct ToolContextState {
 }
 
 impl ToolContextState {
-    /// Export surviving provenance in current message order after native replacements.
     /// 原生替换完成后，按当前消息顺序导出仍存续的来源，不能沿用压缩前的数组偏移。
     pub fn history_sources(&self, items: &[Value]) -> Vec<Value> {
         items
@@ -1487,7 +1540,6 @@ impl ToolContextState {
                     let Some(source) = sources.get(index) else {
                         continue;
                     };
-                    // Provenance comes from the broker sidecar, never from user-authored content.
                     // 来源由程序侧车提供，不能把用户正文中伪造的检查点标记当成可删除授权。
                     if [
                         "broker-checkpoint",
@@ -1933,7 +1985,6 @@ impl ToolContextState {
                         evidence.push(source);
                     }
                 }
-                // Original receipts survive successive checkpoints; derived reads cannot replace their identity.
                 // 原始回执跨多次检查点保留；派生归档读取不能替代原件身份，控制目录也不伪装成取证。
                 evidence.sort_by(|left, right| {
                     evidence_priority(left)
@@ -2032,7 +2083,6 @@ impl ToolContextState {
                                         .is_some_and(|(processed, total)| processed >= total)
                             });
                         if summarized {
-                            // The verified sidecar owns versions and ranges; repeat only the useful fact locator here.
                             // 版本与范围仍由已核验侧车保存；模型已有事实时不重复塞入整份来源元数据。
                             projected = json!({"tool":record["tool"],"resultRef":{"id":record["resultRef"]["id"]},"summarized":true});
                             for field in ["path", "url", "sourceId"] {
@@ -2071,7 +2121,6 @@ impl ToolContextState {
                     content["workingCoverage"] = json!({"completedSources":semantic_summary["completedSources"],"partialSources":semantic_summary["partialSources"],"unprocessedSources":semantic_summary["unprocessedSources"],"sourceCountUnit":"archived-read-results-not-distinct-documents","metadataOnlySources":semantic_summary["metadataOnlySources"]});
                 }
                 let requested_tokens = estimate_tokens(&content.to_string()).saturating_add(8);
-                // Discard low-value coverage first, then fairly trim bodies without clearing all useful evidence.
                 // 先移除低价值覆盖指针，再均衡缩短正文，不能先把所有正文清零而保留重复定位元数据。
                 while estimate_tokens(&content.to_string()).saturating_add(8) > available {
                     if let Some(index) = content["evidence"].as_array().and_then(|records| {
@@ -2126,12 +2175,16 @@ impl ToolContextState {
                     } else if content.get("workingCoverage").is_some() {
                         content.as_object_mut().unwrap().remove("workingCoverage");
                     } else if content.get("workingFactsNotice").is_some() {
-                        content.as_object_mut().unwrap().remove("workingFactsNotice");
+                        content
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("workingFactsNotice");
                     } else if content["workingSummaryArchive"].get("navigation").is_some() {
-                        // Small windows keep the verified archive and read arguments, not repeated prose metadata.
                         // 小窗口保留核验归档及读取参数，先移除重复说明；不裁掉引用、非指令标记或未知操作。
                         let archive = content["workingSummaryArchive"].as_object_mut().unwrap();
-                        for field in ["kind", "offsetUnit", "navigation"] { archive.remove(field); }
+                        for field in ["kind", "offsetUnit", "navigation"] {
+                            archive.remove(field);
+                        }
                     } else if content["recentPublicText"] == "" {
                         content.as_object_mut().unwrap().remove("recentPublicText");
                     } else if let Some(index) = content["evidence"].as_array().and_then(|records| {
@@ -2139,7 +2192,6 @@ impl ToolContextState {
                             record["kind"] != "effect" || record["status"] == "completed"
                         })
                     }) {
-                        // Keep current unknown effects visible even when no further source excerpt fits.
                         // 再小的预算也不把当前未知副作用当作完成或删除；完整原文仍可从正式归档回查。
                         content["evidence"].as_array_mut().unwrap().remove(index);
                         content["omittedEvidence"] = json!(
@@ -2149,7 +2201,6 @@ impl ToolContextState {
                                 .saturating_add(1)
                         );
                     } else if !array(&content["workingFacts"]).is_empty() {
-                        // Only an exhausted physical budget can remove summary facts; formal sources and cursor state survive.
                         // 只有物理预算仍装不下时才裁剪语义事实；正式原件与已处理游标不会被删除或冒充完成。
                         content["workingFacts"].as_array_mut().unwrap().pop();
                         content["workingFactsOmitted"] = json!(

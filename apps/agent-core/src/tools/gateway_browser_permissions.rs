@@ -1,11 +1,9 @@
-//! Keep portable Chromium's sandbox enabled when its files inherit a developer or extraction-folder ACL.
 //! 便携 Chromium 在开发目录或解压目录中也保留沙箱；仅补齐其程序资源的只读执行权限。
 
 use super::gateway::{GatewayToolContext, failure};
 use crate::gateway_contract::GatewayError;
 use std::path::Path;
 
-/// This applies only to the exact bundled browser, never a user-selected executable or application data.
 /// 仅处理清单指定的随包浏览器，不改用户指定程序、数据目录或扩展凭据。
 pub(crate) async fn prepare(
     ctx: &GatewayToolContext,
@@ -22,8 +20,7 @@ pub(crate) async fn prepare(
         let Some((application, manifest)) = super::gateway::bundled_mcp_manifest(ctx) else {
             return Ok(());
         };
-        if super::gateway::bundled_mcp_path(&application, &manifest["browser"]["path"])
-            .as_deref()
+        if super::gateway::bundled_mcp_path(&application, &manifest["browser"]["path"]).as_deref()
             != Some(executable)
         {
             return Ok(());
@@ -41,7 +38,6 @@ pub(crate) async fn prepare(
             }
             let tool = PathBuf::from(String::from_utf16_lossy(&system[..length as usize]))
                 .join("icacls.exe");
-            // Fixed arguments grant RX to AppContainer groups; no shell, write permission, or sandbox switch.
             // 固定实参只向 AppContainer 组授予 RX，不经 shell、不授写权限，也不关闭沙箱。
             let status = tokio::process::Command::new(tool)
                 .arg(directory)
@@ -85,13 +81,20 @@ fn sandbox_can_read(directory: &Path) -> bool {
     let mut descriptor = std::ptr::null_mut();
     let mut acl = std::ptr::null_mut();
     if unsafe {
-        GetNamedSecurityInfoW(path.as_ptr(), 1, 4, std::ptr::null_mut(), std::ptr::null_mut(),
-            &mut acl, std::ptr::null_mut(), &mut descriptor)
+        GetNamedSecurityInfoW(
+            path.as_ptr(),
+            1,
+            4,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut acl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
     } != 0
     {
         return false;
     }
-    // Inheritable directory entries also cover Chromium's DLLs and resource subdirectories.
     // 目录中的可继承规则同时覆盖 Chromium 的 DLL 和资源子目录，已有正确安装权限时不启动修复进程。
     let result = if acl.is_null() {
         true
@@ -100,11 +103,17 @@ fn sandbox_can_read(directory: &Path) -> bool {
         let count = unsafe { (*acl).ace_count };
         for index in 0..count {
             let mut entry = std::ptr::null_mut();
-            if unsafe { GetAce(acl, index as u32, &mut entry) } == 0 { continue; }
+            if unsafe { GetAce(acl, index as u32, &mut entry) } == 0 {
+                continue;
+            }
             let bytes = entry.cast::<u8>();
             let header = unsafe { std::slice::from_raw_parts(bytes, 4) };
-            if header[0] != 0 || header[1] & 0x0b != 0x03
-                || u16::from_le_bytes([header[2], header[3]]) < 24 { continue; }
+            if header[0] != 0
+                || header[1] & 0x0b != 0x03
+                || u16::from_le_bytes([header[2], header[3]]) < 24
+            {
+                continue;
+            }
             let mask = unsafe { *bytes.add(4).cast::<u32>() };
             let sid = unsafe { std::slice::from_raw_parts(bytes.add(8), 16) };
             for (slot, package) in [1u8, 2].into_iter().enumerate() {
@@ -113,22 +122,39 @@ fn sandbox_can_read(directory: &Path) -> bool {
                 }
             }
         }
-        masks.into_iter().all(|mask| mask & 0x1200a9 == 0x1200a9 || mask & 0xa0000000 == 0xa0000000)
+        masks
+            .into_iter()
+            .all(|mask| mask & 0x1200a9 == 0x1200a9 || mask & 0xa0000000 == 0xa0000000)
     };
-    unsafe { LocalFree(descriptor); }
+    unsafe {
+        LocalFree(descriptor);
+    }
     result
 }
 
 #[cfg(windows)]
 #[repr(C)]
-struct Acl { revision: u8, reserved: u8, size: u16, ace_count: u16, reserved2: u16 }
+struct Acl {
+    revision: u8,
+    reserved: u8,
+    size: u16,
+    ace_count: u16,
+    reserved2: u16,
+}
 
 #[cfg(windows)]
 #[link(name = "advapi32")]
 unsafe extern "system" {
-    fn GetNamedSecurityInfoW(name: *const u16, kind: u32, information: u32,
-        owner: *mut *mut std::ffi::c_void, group: *mut *mut std::ffi::c_void,
-        dacl: *mut *mut Acl, sacl: *mut *mut Acl, descriptor: *mut *mut std::ffi::c_void) -> u32;
+    fn GetNamedSecurityInfoW(
+        name: *const u16,
+        kind: u32,
+        information: u32,
+        owner: *mut *mut std::ffi::c_void,
+        group: *mut *mut std::ffi::c_void,
+        dacl: *mut *mut Acl,
+        sacl: *mut *mut Acl,
+        descriptor: *mut *mut std::ffi::c_void,
+    ) -> u32;
     fn GetAce(acl: *const Acl, index: u32, entry: *mut *mut std::ffi::c_void) -> i32;
 }
 

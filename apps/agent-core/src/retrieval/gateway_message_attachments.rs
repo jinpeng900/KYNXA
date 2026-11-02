@@ -1,4 +1,3 @@
-//! Attachment extraction reuses document decoders and a conversation-owned cache, without indexing private uploads globally.
 //! 附件提取复用文档解析器和会话自有缓存；上传不会自动共享到全局索引或记忆。
 
 use crate::{
@@ -11,14 +10,22 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-/// An image without recognized text still has its immutable original available for pixel access.
 /// 图片未识别出文字不代表原件失效；像素仍可按正式附件身份读取。
 fn normalize_image_text_state(extracted: &mut Value, image: bool) -> bool {
-    if !image { return false; }
+    if !image {
+        return false;
+    }
     let empty_ocr = extracted["errorCode"] == "DOCUMENT_TEXT_UNAVAILABLE";
-    if (extracted.get("error").is_some() || extracted.get("errorCode").is_some()) && !empty_ocr { return false; }
-    let text_state = if empty_ocr || extracted["text"].as_str().unwrap_or("").trim().is_empty() { "empty" } else { "available" };
-    let changed = empty_ocr || extracted["textState"] != text_state || extracted["originalAvailable"] != true;
+    if (extracted.get("error").is_some() || extracted.get("errorCode").is_some()) && !empty_ocr {
+        return false;
+    }
+    let text_state = if empty_ocr || extracted["text"].as_str().unwrap_or("").trim().is_empty() {
+        "empty"
+    } else {
+        "available"
+    };
+    let changed =
+        empty_ocr || extracted["textState"] != text_state || extracted["originalAvailable"] != true;
     if empty_ocr {
         let object = extracted.as_object_mut().unwrap();
         object.remove("error");
@@ -50,7 +57,14 @@ pub(crate) fn extract(
     {
         if cached["sourceVersion"] == sha && cached["parserVersion"] == "message-attachment-v1" {
             if normalize_image_text_state(&mut cached, image) {
-                message_attachments::save_extraction(&config.data_root, conversation, message, attachment, sha, &cached)?;
+                message_attachments::save_extraction(
+                    &config.data_root,
+                    conversation,
+                    message,
+                    attachment,
+                    sha,
+                    &cached,
+                )?;
             }
             return Ok(cached);
         }
@@ -100,7 +114,6 @@ pub(crate) fn extract(
     Ok(extracted)
 }
 
-/// UTF-16 positions match the desktop and existing document.read paging contract.
 /// UTF-16 偏移与桌面及现有 document.read 分页合同一致，续读不会切断代理对。
 pub(crate) fn page(extracted: &Value, offset: usize, max_chars: usize) -> Value {
     let text = extracted["text"].as_str().unwrap_or("");
@@ -160,14 +173,19 @@ mod tests {
 
     #[test]
     fn image_text_classification_preserves_other_failures_and_document_contracts() {
-        for (image, code) in [(false, "DOCUMENT_TEXT_UNAVAILABLE"), (true, "OCR_UNAVAILABLE"), (true, "IMAGE_INVALID_CONTENT")] {
+        for (image, code) in [
+            (false, "DOCUMENT_TEXT_UNAVAILABLE"),
+            (true, "OCR_UNAVAILABLE"),
+            (true, "IMAGE_INVALID_CONTENT"),
+        ] {
             let original = json!({"sourceVersion":"saved-sha","text":"","complete":false,
                 "error":"Original extraction error","errorCode":code});
             let mut extracted = original.clone();
             assert!(!normalize_image_text_state(&mut extracted, image));
             assert_eq!(extracted, original);
         }
-        let mut available = json!({"sourceVersion":"saved-sha","text":"visible text","complete":true});
+        let mut available =
+            json!({"sourceVersion":"saved-sha","text":"visible text","complete":true});
         assert!(normalize_image_text_state(&mut available, true));
         assert_eq!(page(&available, 0, 24000)["textState"], "available");
         assert_eq!(available["text"], "visible text");

@@ -54,7 +54,6 @@ public sealed record LocalModelsSnapshot
 }
 
 /// <summary>
-/// The Rust owner installs and runs local models; this client only reads status and submits explicit actions.
 /// Rust 拥有本地模型安装与运行；客户端只读取状态、提交用户明确操作，不直接管理模型文件。
 /// </summary>
 public sealed class LocalModelsApiClient : IDisposable
@@ -94,7 +93,6 @@ public sealed class LocalModelsApiClient : IDisposable
     private async Task<LocalModelsSnapshot> PostAsync(string action, object body, CancellationToken token, bool allowLongOperation = false)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-        // Moving/importing weights may take longer than an ordinary control request; the window only cancels its wait.
         // 权重迁移及导入可长于普通控制请求；窗口取消只结束等待，不撤回后端已接受的文件事务。
         if (!allowLongOperation) deadline.CancelAfter(TimeSpan.FromSeconds(45));
         await ModelGatewayService.EnsureReadyAsync(deadline.Token).ConfigureAwait(false);

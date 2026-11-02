@@ -161,7 +161,6 @@ public sealed partial class LocalModelsPage
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto, ZoomMode = ZoomMode.Disabled
         };
-        // Keep models reachable in short windows while the options retain their own scroll area.
         // 矮窗口给模型列表保留空间，顶部选项可单独滚动。
         _root.SizeChanged += (_, args) =>
         {
@@ -228,7 +227,6 @@ public sealed partial class LocalModelsPage
     private void ArrangeLoadPolicy()
     {
         if (_policy.Parent is not Grid row) return;
-        // Keep the short segments together; descriptive text has its own wrapping row on narrow windows.
         // 窄窗时让短选项整体换到下一行，详细说明独立换行，不挤压硬件信息。
         bool compact = row.ActualWidth < (UiText.Language == "en" ? 540 : 400);
         Grid.SetColumn(_policy, compact ? 0 : 1);
@@ -270,7 +268,6 @@ public sealed partial class LocalModelsPage
     private static void ArrangeModelActions(Grid layout)
     {
         if (layout.FindName("LocalModelActions") is not StackPanel actions) return;
-        // Give the model details their full row before moving actions below them on narrow pages.
         // 窄页时把操作移到下一行，让模型名称和参数保留完整的可用宽度。
         bool compact = layout.ActualWidth < 560;
         if (layout.Children[0] is FrameworkElement details)
@@ -322,7 +319,6 @@ public sealed partial class LocalModelsPage
             "CheckBoxCheckBackgroundFillChecked",
             "CheckBoxCheckBackgroundFillCheckedPointerOver", "CheckBoxCheckBackgroundFillCheckedPressed", "CheckBoxCheckBorderBrushChecked" })
             resources[key] = focus;
-        // Keep dropdown selection under the shared accent and high-contrast palette.
         // 下拉选中沿用共享强调色及高对比度配色，避免页面局部中性色覆盖选中背景与标记。
         foreach (string key in new[] { "ListViewItemBackgroundSelected", "ListViewItemBackgroundSelectedPointerOver", "ListViewItemBackgroundSelectedPressed" })
             resources[key] = AppearanceService.GetBrush("KynxaControlHoverBrush");

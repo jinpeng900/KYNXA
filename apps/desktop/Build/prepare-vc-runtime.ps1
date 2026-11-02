@@ -11,7 +11,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
-# MSBuild can inherit PowerShell 7 module paths while launching Windows PS 5.1.
 # MSBuild 启动 Windows PS 5.1 时可能继承 PS 7 模块路径，显式加载当前宿主的签名校验模块。
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1')
 if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Join-Path $PSScriptRoot 'vc-runtime.json' }
@@ -52,14 +51,12 @@ function Find-VisualRuntimeRedist {
     }
     $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (-not [IO.File]::Exists($locator)) { throw 'The licensed MSVC Redist build source is unavailable. Supply -RedistDirectory from the official pinned toolset.' }
-    # Require the C++ toolchain; vswhere can also return SSMS.
     # 要求 C++ 工具链，避免 vswhere 误选 SSMS。
     $compilerInstall = & $locator -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $compilerInstall) { throw 'A stable Visual Studio build source is required for the pinned VC runtime.' }
     return Join-Path $compilerInstall ("VC/Redist/MSVC/$($runtimeManifest.toolsetDirectory)/$($runtimeSpec.redistDirectory)")
 }
 
-# Only the licensed official Redist directory is used; never copy System32 DLLs.
 # 只使用有许可的官方 Redist 目录，绝不从 System32 随意复制运行库；逐文件检查固定摘要及 Microsoft 签名。
 $runtimeLock = $null
 $runtimeDeadline = [DateTime]::UtcNow.AddMinutes(2)
@@ -110,7 +107,6 @@ try {
     }
     Copy-Item -LiteralPath $ManifestPath -Destination (Join-Path $licenseDirectory 'vc-runtime-manifest.json') -Force
     [IO.File]::WriteAllText((Join-Path $runtimeCache 'runtime-path.txt'), $runtimeBundle, [Text.UTF8Encoding]::new($false))
-    # Publish an explicit verified payload; unrelated cache files never become runtime DLLs.
     # 输出明确的已验证负载清单，不把无关缓存文件当作运行库或许可证随包发布。
     $runtimeFiles = @($runtimeSpec.files | ForEach-Object { Join-Path $runtimeBundle $_.name })
     [IO.File]::WriteAllLines((Join-Path $runtimeCache 'runtime-files.txt'), [string[]]$runtimeFiles, [Text.UTF8Encoding]::new($false))

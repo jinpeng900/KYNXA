@@ -20,7 +20,6 @@ pub struct FileVersion {
 
 pub fn path_text(path: &Path) -> String {
     let text = path.to_string_lossy();
-    // Windows canonicalization uses extended paths; the public contract keeps ordinary local drive paths.
     // Windows 真实路径解析使用扩展前缀；公开合同仍返回普通本机盘符路径。
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
@@ -97,7 +96,6 @@ pub fn inspect(
     let mut final_metadata = None;
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
-        // A bare Windows drive prefix is not an independently addressable root.
         // Windows 盘符前缀本身并非可独立访问的根目录。
         if matches!(component, Component::Prefix(_)) {
             continue;
@@ -131,7 +129,6 @@ pub fn open_read(path: &Path) -> ServiceResult<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // The Linux runtime is a development/test target; production runs on Windows.
         // Linux 为开发和测试运行时；正式产品运行于 Windows。
         options.custom_flags(0x20000);
     }
@@ -316,7 +313,6 @@ pub fn random_identity() -> ServiceResult<String> {
                 flags: u32,
             ) -> i32;
         }
-        // The OS cryptographic RNG receives a fixed-size valid stack buffer; no user secrets are read.
         // 系统加密随机数源接收固定大小且有效的栈缓冲区，不读取用户凭据。
         if unsafe {
             BCryptGenRandom(
@@ -436,7 +432,6 @@ pub(super) fn metadata_projection(path: &Path, metadata: Metadata) -> ServiceRes
     )
 }
 
-/// Tool paths share one canonical scope contract; synchronous calls below only calculate policy.
 /// 工具路径共用一个真实范围合同；下方同步操作仅计算策略，I/O 操作走异步服务。
 pub fn path_operation(operation: &str, arguments: &Value) -> ServiceResult<Value> {
     use super::intent::matches;

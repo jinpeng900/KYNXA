@@ -52,7 +52,6 @@ fn units(value: &Value) -> Result<Vec<u16>, ContractError> {
         .ok_or_else(|| invalid("记忆字符串编码无效。"))
 }
 
-/// Memory source authority, private provenance, lexical selection and projected freshness share one policy.
 /// 记忆来源权威、私人出处、词法选择与投影新鲜度共用同一策略，确认和权限不能由相似度替代。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     match operation {

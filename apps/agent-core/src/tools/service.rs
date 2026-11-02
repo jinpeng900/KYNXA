@@ -25,7 +25,6 @@ use super::service_skills::SkillInventory;
 use super::service_source_reading::SourceReadingState;
 use super::service_web::WebState;
 
-/// Each request-owned native helper releases business state when its runtime owner closes or is collected.
 /// 请求所属原生辅助对象在运行时所有者关闭或回收时释放业务状态。
 #[derive(Default)]
 pub struct ToolSession {

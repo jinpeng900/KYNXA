@@ -8,7 +8,6 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
-/// Derived syntax ownership is precise; textual names keep unresolved certainty and bounded coverage.
 /// 派生语法归属保持确定性；文本名称仍标为未解析关系，数量边界不冒充穷举结果。
 pub fn derive(args: &Value) -> Result<Value, String> {
     static IDENTIFIER: OnceLock<Regex> = OnceLock::new();

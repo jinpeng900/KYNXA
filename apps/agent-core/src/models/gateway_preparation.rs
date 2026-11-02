@@ -1,4 +1,3 @@
-//! Bounded startup preparation reuses provider transport and native resource admission without generation.
 //! 有界启动准备复用供应商通信及原生资源准入，不发送计费生成；仅按策略启动已选中的自管本地模型。
 
 use super::{
@@ -113,7 +112,6 @@ impl PreparationService {
         })
     }
 
-    /// Queue without waiting for load; keep the current choice on empty input and invalidate stale configuration results.
     /// 接受排队不代表已装载；空输入保留当前选择，配置或选择变化使旧结果失效。
     pub async fn schedule(
         self: &Arc<Self>,
@@ -187,7 +185,6 @@ impl PreparationService {
             self.changed.notify_waiters();
             return Ok(response);
         }
-        // Register before releasing the scheduling lock so shutdown cannot miss a queued worker.
         // 在释放调度锁前登记任务，避免关闭时漏掉尚未开始执行的准备任务。
         let activity = self.activity.begin();
         drop(state);
@@ -205,11 +202,24 @@ impl PreparationService {
         let state = self.state.lock().await;
         let mut value = snapshot(&state, false);
         for entry in value["models"].as_array_mut().into_iter().flatten() {
-            if entry["providerId"].as_str().is_some_and(|id|id.starts_with("kynxa-local-")) {
-                let running = super::gateway_local_engine::status(&self.config.data_home, entry["modelId"].as_str().unwrap_or(""));
-                if matches!(running["state"].as_str(),Some("ready"|"loading"|"preparing-runtime"|"waiting-resource"|"sleeping")) {
+            if entry["providerId"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("kynxa-local-"))
+            {
+                let running = super::gateway_local_engine::status(
+                    &self.config.data_home,
+                    entry["modelId"].as_str().unwrap_or(""),
+                );
+                if matches!(
+                    running["state"].as_str(),
+                    Some(
+                        "ready" | "loading" | "preparing-runtime" | "waiting-resource" | "sleeping"
+                    )
+                ) {
                     let observed = super::gateway_local_engine::preparation_status(&running);
-                    for (key, field) in observed.as_object().unwrap() { entry[key] = field.clone(); }
+                    for (key, field) in observed.as_object().unwrap() {
+                        entry[key] = field.clone();
+                    }
                 }
             }
         }
@@ -232,7 +242,6 @@ impl PreparationService {
         }).await.unwrap_or(false)
     }
 
-    /// Join only the selected local preload; completed or unknown results are checked by the real request.
     /// 仅复用当前本地预载等待，避免重复准入；结束或未知结果交正式请求核验。
     pub async fn wait_model(
         &self,
@@ -294,7 +303,6 @@ impl PreparationService {
         }
         self.changed.notify_waiters();
         drop(state);
-        // Cancellation requests are not settlement receipts; blocking retirement must also finish.
         // 取消请求不等于任务结算；后台准备与阻塞的模型回收全部退出后才允许迁移。
         self.activity.drain().await;
     }
@@ -397,7 +405,6 @@ impl PreparationService {
         } else {
             self.prepare_api(provider, entry["modelId"].as_str().unwrap_or(""), token)
         };
-        // This deadline bounds observation; managed weight loading retains its independent engine lifetime.
         // 此期限只约束准备观察；自管权重装载保留独立引擎生命周期，不把初始连通冒充装载完成。
         let result = tokio::time::timeout(Duration::from_secs(60), preparation).await;
         match result {
@@ -416,9 +423,16 @@ impl PreparationService {
                 entry["upstreamStatus"] = error.details["upstreamStatus"].clone();
             }
             Err(_) => {
-                let running = super::gateway_local_engine::status(&self.config.data_home, entry["modelId"].as_str().unwrap_or(""));
+                let running = super::gateway_local_engine::status(
+                    &self.config.data_home,
+                    entry["modelId"].as_str().unwrap_or(""),
+                );
                 if super::gateway_local_engine::is_managed(provider)
-                    && matches!(running["state"].as_str(),Some("loading"|"preparing-runtime"|"waiting-resource")) {
+                    && matches!(
+                        running["state"].as_str(),
+                        Some("loading" | "preparing-runtime" | "waiting-resource")
+                    )
+                {
                     entry["state"] = json!("loading");
                     entry["modelReady"] = json!(false);
                     entry["code"] = json!("MODEL_PREPARATION_PENDING");
@@ -479,15 +493,29 @@ impl PreparationService {
     {
         Box::pin(async move {
             if super::gateway_local_engine::is_managed(connection) {
-                let metadata = super::gateway_local_models::enabled_model(&self.config.data_home, model).await?;
+                let metadata =
+                    super::gateway_local_models::enabled_model(&self.config.data_home, model)
+                        .await?;
                 let policy = metadata["loadPolicy"].as_str().unwrap_or("auto");
                 if !selected || policy == "on-demand" {
-                    let running = super::gateway_local_engine::refresh_status(&self.config.data_home, connection, model).await?;
+                    let running = super::gateway_local_engine::refresh_status(
+                        &self.config.data_home,
+                        connection,
+                        model,
+                    )
+                    .await?;
                     let mut prepared = super::gateway_local_engine::preparation_status(&running);
                     prepared["loadPolicy"] = json!(policy);
                     return Ok(prepared);
                 }
-                super::gateway_local_engine::ensure_with_priority(&self.config.data_home, connection, model, token, false).await?;
+                super::gateway_local_engine::ensure_with_priority(
+                    &self.config.data_home,
+                    connection,
+                    model,
+                    token,
+                    false,
+                )
+                .await?;
                 let running = super::gateway_local_engine::status(&self.config.data_home, model);
                 let mut prepared = super::gateway_local_engine::preparation_status(&running);
                 prepared["loadPolicy"] = json!(policy);
@@ -528,7 +556,6 @@ impl PreparationService {
                         None,
                     ));
                 }
-                // Discovery proves availability; a healthy server alone does not prove this model's residency.
                 // 目录匹配证明模型可用；服务健康不能证明该模型已驻留，只有新鲜loaded观测允许就绪。
                 return Ok(local_result(
                     "unknown",
@@ -641,7 +668,6 @@ impl PreparationService {
                 model.into(),
                 context,
             )?;
-            // Empty preload has no business prompt; never pull, unload, or request permanent residency.
             // 空预载不含业务提示；不拉取、不卸载、不要求永久驻留，只加载已确认安装的当前选择。
             let result = json_request(
                 connection,
@@ -652,7 +678,6 @@ impl PreparationService {
             .await;
             let loaded = match result {
                 Ok(result) if result["done"] == true => {
-                    // A completed load receipt settles the increment even if the following telemetry fails.
                     // 装载完成回执已确定该增量操作结束，后续遥测失败不意味着装载仍在进行。
                     preload.complete().await;
                     gateway_config::observe_local_fresh(connection, model, Some(context), token)
@@ -720,7 +745,6 @@ async fn reconcile_preload(pending: &std::sync::Mutex<HashMap<String, String>>, 
     }
 }
 
-/// Own a dispatched external load until its receipt or fresh residency settles the reservation.
 /// 外部装载派发后，以完成回执或新鲜驻留观测核销预约；调用方取消不能证明外部服务停止。
 struct PendingPreload {
     lease: Option<crate::resources::gateway::ResourceLease>,
@@ -786,7 +810,6 @@ impl Drop for PendingPreload {
         let Some(mut lease) = self.lease.take() else {
             return;
         };
-        // Keep unknown external effects reserved, but start no old-root observer after quiescence.
         // 未知的外部装载仍保留资源预约；静止阶段不再启动旧根目录所属的核验任务。
         if self.activity.stopped.load(Ordering::Acquire) {
             return;
@@ -824,7 +847,6 @@ impl Drop for PendingPreload {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 };
-                // Verification is bounded; an unsettled lease expires into the existing quarantine ledger.
                 // 核验有界；仍未知的租约停止续租后进入既有隔离账本，后续新鲜驻留观测可受控核销。
                 tokio::select! {
                     _ = tokio::time::timeout(Duration::from_secs(60), verify) => {},
@@ -889,7 +911,6 @@ async fn explicit_cancelled(cancellation: &mut watch::Receiver<bool>) {
             return;
         }
         if cancellation.changed().await.is_err() {
-            // A completed 202 caller does not cancel its accepted background preparation.
             // 202调用者正常结束不取消已接受的后台准备；显式取消、服务关闭和截止仍负责回收。
             std::future::pending::<()>().await;
         }
@@ -1003,7 +1024,11 @@ mod tests {
     async fn api_preparation_checks_models_without_generation_and_reports_unsupported_discovery() {
         let service =
             PreparationService::new(config(std::path::Path::new("unused-preparation-fixture")));
-        for status in [StatusCode::OK, StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+        for status in [
+            StatusCode::OK,
+            StatusCode::NOT_FOUND,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ] {
             let (connection, generations, server) = fixture(false, status).await;
             let (_owner, token) = watch::channel(false);
             let result = service
@@ -1027,9 +1052,15 @@ mod tests {
             assert!(!result.to_string().contains("synthetic-preparation-secret"));
             if status != StatusCode::OK {
                 let mut oversized = connection.clone();
-                oversized["baseUrl"] = json!(format!("{}/oversized", connection["baseUrl"].as_str().unwrap()));
+                oversized["baseUrl"] = json!(format!(
+                    "{}/oversized",
+                    connection["baseUrl"].as_str().unwrap()
+                ));
                 let (_owner, token) = watch::channel(false);
-                let not_warmed = service.prepare_api(&oversized, "fixture-model", token).await.unwrap();
+                let not_warmed = service
+                    .prepare_api(&oversized, "fixture-model", token)
+                    .await
+                    .unwrap();
                 assert!(not_warmed["connectionReady"].is_null());
                 assert_eq!(not_warmed["code"], "MODEL_DISCOVERY_UNSUPPORTED");
             }
@@ -1271,7 +1302,6 @@ mod tests {
             released.recv().unwrap();
         });
         observed.await.unwrap();
-        // Dropping this handle cannot cancel an already-running blocking operation.
         // 已开始的阻塞操作不会因其异步等待句柄被丢弃而停止。
         drop(retirement);
         let shutdown = tokio::spawn({

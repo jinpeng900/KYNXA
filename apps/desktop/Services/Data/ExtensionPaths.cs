@@ -5,7 +5,6 @@ namespace KYNXA_Desktop.Services;
 public sealed record ExtensionPathResolution(string Root, bool UsesLegacyRoot);
 
 /// <summary>
-/// Extension locations are independent of WinRT and conversation storage initialization.
 /// 扩展位置不依赖 WinRT，也不依赖聊天存储初始化。
 /// </summary>
 public static class ExtensionPaths
@@ -34,7 +33,6 @@ public static class ExtensionPaths
         UsesLegacyRoot = resolved.UsesLegacyRoot && LegacyRoot is not null;
     }
 
-    // All inputs are explicit so tests never initialize StoragePaths or inspect a user's pointer.
     // 所有输入均明确传入，测试不会初始化 StoragePaths 或读取用户路径指针。
     public static ExtensionPathResolution Resolve(string legacyRoot, string? environmentRoot, string pointerPath, bool ignorePointer = false)
     {
@@ -123,8 +121,6 @@ public static class ExtensionPaths
         return true;
     }
 
-    // The gateway owns normal startup initialization. Native settings use this only
-    // for an inactive, verified migration target while holding the maintenance marker.
     // 正常启动初始化由网关负责；原生设置只在持有维护标记时初始化已验证、尚未启用的迁移目标。
     internal static void EnsureLayout(string root)
     {

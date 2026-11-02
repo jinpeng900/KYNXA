@@ -25,7 +25,6 @@ public interface ITasksApi
 }
 
 /// <summary>
-/// Reads durable task projections and submits explicit versioned controls; owns no task state.
 /// 读取持久任务投影并提交明确的带版本控制；不拥有正式任务状态。
 /// </summary>
 public sealed class TasksApiClient : ITasksApi, IDisposable
@@ -47,7 +46,6 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
         Guid? afterTaskId = null, CancellationToken cancellationToken = default) =>
         ReadListAsync(conversationId, projectId, afterTaskId, true, cancellationToken);
 
-    // Reopening one chat must not page through other chats in the same project.
     // 重开单个聊天仅查询该聊天；仍用预期项目复核归属，不分页读取同项目其他聊天。
     internal Task<TaskListResponse> ListConversationAsync(Guid conversationId, Guid? projectId = null,
         Guid? afterTaskId = null, CancellationToken cancellationToken = default) =>
@@ -175,7 +173,6 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
         Guid userMessageId, string message, string action, Guid? projectId,
         CancellationToken cancellationToken, Guid? replyMessageId, ChatAttachment[]? attachments)
     {
-        // Running-task steering keeps the live attempt; resuming a paused task may await lease release.
         // 运行中的引导保留当前尝试；恢复暂停任务时可能等待旧租约释放。
         using var deadline = CreateDeadline(cancellationToken, 60);
         cancellationToken = deadline.Token;
@@ -224,7 +221,6 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
             catch (Exception error) when (attempt == 0 && !cancellationToken.IsCancellationRequested
                 && (error is HttpRequestException || error is GatewayApiException gateway && (int)gateway.StatusCode >= 500))
             {
-                // Retry a transient read once. Versioned writes and steering are never replayed by this client.
                 // 临时读取故障仅重试一次；带版本控制和插话写入绝不由客户端自动重放。
                 await Task.Delay(TimeSpan.FromMilliseconds(300), cancellationToken);
             }

@@ -10,7 +10,6 @@ fn string(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
 
-/// Exact vector-space identities remain mandatory while a background migration is incomplete.
 /// 后台迁移尚未完成时仍须精确匹配向量空间身份，不能通过改标签假装兼容。
 #[derive(Default)]
 pub struct EmbeddingPolicyState {

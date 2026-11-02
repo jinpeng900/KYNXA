@@ -6,7 +6,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Keep executable payloads out of WinUI resource classification.
 # 可执行载荷不参与 WinUI 本地化资源分类。
 $layoutFile = [IO.Path]::GetFullPath($LayoutPath)
 $excludedFile = [IO.Path]::GetFullPath($ExcludedLayoutPath)
@@ -36,9 +35,7 @@ foreach ($line in $runtimePayloadPaths) {
     if ($knownExcludedPaths.Add($line.Replace('/', '\'))) { $excludedResourcePaths.Add($line) }
 }
 
-# The exclusion list keeps these files in the main payload when resources are split.
 # 排除列表确保资源拆包后，这些文件仍留在主载荷中。
-# Keep the original layout, Content items and bundle files unchanged.
 # 保留原布局、Content 项和实际捆绑文件。
 $utf8 = [Text.UTF8Encoding]::new($false)
 [IO.File]::WriteAllLines($excludedFile, $excludedResourcePaths, $utf8)

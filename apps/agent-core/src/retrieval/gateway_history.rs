@@ -1,4 +1,3 @@
-//! Explicit history evidence over authorized formal chat logs; work history is never injected automatically.
 //! 授权正式聊天日志上的显式历史取证；工作内其他聊天不自动注入上下文。
 
 use crate::{
@@ -26,7 +25,6 @@ struct OriginalContent<'a> {
 
 #[derive(Default, Serialize, Deserialize)]
 struct SearchCursor {
-    // Wire fields are serialized continuation state; rename only through a compatible cursor migration.
     // 字段会序列化为续查游标；改名必须经过兼容迁移，不能当作局部变量整理。
     identity: String,
     conversation: usize,
@@ -74,7 +72,6 @@ fn conversation_relationship(catalog: &Value, id: &Value) -> ContractResult {
 }
 
 fn check_context(catalog: &Value, context: &Value) -> ContractResult {
-    // Resolve formal ownership before scanning; the request's expected scope remains an immutable boundary.
     // 扫描前核验正式归属；请求携带的预期范围仍是不可静默扩大或切换的边界。
     storage::identity(&context["conversationId"])?;
     let relationship = conversation_relationship(catalog, &context["conversationId"])?;
@@ -208,7 +205,6 @@ fn scope_identity(
     )
 }
 
-/// Public message versions survive unrelated appends but reject changes to the referenced source or its owner.
 /// 公开消息版本允许无关消息追加，但拒绝被引用正文或归属变化；工具进展不能使旧用户原文自失效。
 fn message_version(
     location: &Value,
@@ -217,7 +213,6 @@ fn message_version(
     include_tools: bool,
     raw: &str,
 ) -> String {
-    // Display repair must not merge different original UTF-16 source identities.
     // 展示用标量修复不能合并不同原始 UTF-16 正文的版本身份。
     let original = serde_json::from_str::<OriginalContent<'_>>(raw)
         .map(|fields| storage::managed_files::digest(fields.content.get().as_bytes()))
@@ -292,7 +287,6 @@ fn checked_scope(
     expected: &str,
     versions: &mut [(Value, conversation_history::HistoryRead)],
 ) -> Result<(), ContractError> {
-    // Recheck ownership and observed log snapshots after I/O, without holding the catalog lock throughout scanning.
     // I/O 完成后再次核验归属与已观察日志快照；扫描期间不长时间持有目录锁。
     gateway::with_catalog(&config.data_root, |catalog, _| {
         let (locations, _) = scope_locations(catalog, context, scope)?;
@@ -374,7 +368,6 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
     let mut rows = Vec::new();
     let mut versions = Vec::new();
     let include_tools = input["includeTools"] == true;
-    // Cancellation and scan ceilings bound each call; the cursor retains progress for a later authorized continuation.
     // 每次调用受取消和扫描额度约束；游标保留进度，供后续授权续查使用。
     'scan: while cursor.conversation < locations.len() {
         storage::sqlite_store::cancelled()?;
@@ -382,15 +375,13 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
             break;
         }
         let location = &locations[cursor.conversation];
-        let page = conversation_history::read_page(
-            &json!({
-                "root": config.data_root,
-                "location": location,
-                "limit": 128,
-                "maxBytes": PAGE_BYTES,
-                "cursor": cursor.page
-            }),
-        );
+        let page = conversation_history::read_page(&json!({
+            "root": config.data_root,
+            "location": location,
+            "limit": 128,
+            "maxBytes": PAGE_BYTES,
+            "cursor": cursor.page
+        }));
         let (page, snapshot) = match page {
             Ok(page) => page,
             Err(error)
@@ -423,7 +414,6 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
         versions.push((location.clone(), snapshot));
         bytes += page["returnedBytes"].as_u64().unwrap_or(0) as usize;
         let raw_messages = page["rawMessages"].as_array().unwrap();
-        // Newest-first traversal is stable across bounded calls; archived/private/streaming records never become user evidence.
         // 有界调用按最近消息优先继续；归档、私有续接与未完成流不作为用户提问证据。
         for (position, raw) in raw_messages.iter().rev().enumerate().skip(cursor.skip) {
             let message = load_message(raw.as_str().unwrap())?;
@@ -474,7 +464,15 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
             cursor.conversation += 1;
         }
     }
-    checked_scope(config, context, scope, input, role, &identity, &mut versions)?;
+    checked_scope(
+        config,
+        context,
+        scope,
+        input,
+        role,
+        &identity,
+        &mut versions,
+    )?;
     let scan_complete = cursor.conversation == locations.len();
     let next_cursor = if scan_complete {
         Value::Null
@@ -519,7 +517,6 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
 }
 
 fn read(config: &GatewayConfig, input: &Value, context: &Value) -> ContractResult {
-    // Read one referenced message, then recheck ownership and the original snapshot before returning its text.
     // 只读取被引用消息；返回正文前再次核验归属和原始快照。
     let source = input
         .get("sourceConversationId")

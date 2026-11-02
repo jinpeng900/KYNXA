@@ -1,8 +1,7 @@
-//! Root model rounds retain their prepared guards through final delivery.
 //! 根任务模型轮次保留准备阶段守卫，直到最终交付结束。
 
-use super::*;
 use super::preparation::RootExecution;
+use super::*;
 
 mod preparation;
 mod response;
@@ -99,7 +98,13 @@ pub(super) async fn run(
     prepared: RootExecution,
 ) -> Result<Value, GatewayError> {
     let rounds = RoundState::new(&prepared);
-    let mut execution = Execution { runtime, run, input, prepared, rounds };
+    let mut execution = Execution {
+        runtime,
+        run,
+        input,
+        prepared,
+        rounds,
+    };
     execution.start().await?;
     for round in execution.prepared.first_round..=execution.rounds.last_round {
         match execution.advance(round).await? {
@@ -113,25 +118,42 @@ pub(super) async fn run(
 impl RoundState {
     fn new(prepared: &RootExecution) -> Self {
         let mut provider_input_limit = prepared.window["providerMaxInputTokens"]
-            .as_u64().or_else(|| prepared.connection["maxInputTokens"].as_u64());
+            .as_u64()
+            .or_else(|| prepared.connection["maxInputTokens"].as_u64());
         if let Some(limit) = prepared.observed_limits["providerMaxInputTokens"].as_u64() {
             provider_input_limit = Some(provider_input_limit.unwrap_or(limit).min(limit));
         }
         Self {
-            task_status: json!({"state":"unknown"}), stopped: None,
-            model_started: Instant::now(), final_received: false, final_evidence_validation: None,
-            freshness_recoveries: 0, output_continuations: 0,
-            review_pending: prepared.steering_applied == 0 && prepared.state.completion.review_checkpoint["pending"] == true,
-            review_evidence_required: prepared.state.completion.review_checkpoint["evidenceRequired"] == true,
-            review_attempts: prepared.state.completion.review_checkpoint["attempts"].as_u64().unwrap_or(0),
-            synthesized_version: None, grammar_recoveries: 0, context_recoveries: 0, image_fallback: false,
+            task_status: json!({"state":"unknown"}),
+            stopped: None,
+            model_started: Instant::now(),
+            final_received: false,
+            final_evidence_validation: None,
+            freshness_recoveries: 0,
+            output_continuations: 0,
+            review_pending: prepared.steering_applied == 0
+                && prepared.state.completion.review_checkpoint["pending"] == true,
+            review_evidence_required: prepared.state.completion.review_checkpoint["evidenceRequired"]
+                == true,
+            review_attempts: prepared.state.completion.review_checkpoint["attempts"]
+                .as_u64()
+                .unwrap_or(0),
+            synthesized_version: None,
+            grammar_recoveries: 0,
+            context_recoveries: 0,
+            image_fallback: false,
             provider_input_limit,
             projected_input_limit: prepared.observed_limits["estimatedInputBudgetTokens"].as_u64(),
-            rejected_request: None, retry_next_request: false,
-            empty_control_recoveries: 0, history_echo_recoveries: 0,
+            rejected_request: None,
+            retry_next_request: false,
+            empty_control_recoveries: 0,
+            history_echo_recoveries: 0,
             minimum_active_ms: prepared.state.assistant["UserTaskDirective"]["minimumActiveMs"]
-                .as_u64().unwrap_or_else(|| prepared.limits["minActiveMs"].as_u64().unwrap_or(0)),
-            segment_initial_calls: 0, segment_initial_generated: 0, segment_initial_active_ms: 0,
+                .as_u64()
+                .unwrap_or_else(|| prepared.limits["minActiveMs"].as_u64().unwrap_or(0)),
+            segment_initial_calls: 0,
+            segment_initial_generated: 0,
+            segment_initial_active_ms: 0,
             last_round: 0,
         }
     }
@@ -171,21 +193,55 @@ impl Execution {
         if observed.model.response.calls.is_empty() {
             return self.complete_response(round, observed).await;
         }
-        self.dispatch_tools(round, observed, broker_planned_call).await
+        self.dispatch_tools(round, observed, broker_planned_call)
+            .await
     }
 
     async fn finish(self) -> Result<Value, GatewayError> {
-        let Self { runtime, run, prepared, rounds, .. } = self;
-        let RootExecution { state, ctx, cancellation,
-            preparation_stages, _queue, _request_tools, .. } = prepared;
-        let RoundState { model_started, stopped, final_received,
-            final_evidence_validation, task_status, review_pending, review_evidence_required,
-            review_attempts, .. } = rounds;
+        let Self {
+            runtime,
+            run,
+            prepared,
+            rounds,
+            ..
+        } = self;
+        let RootExecution {
+            state,
+            ctx,
+            cancellation,
+            preparation_stages,
+            _queue,
+            _request_tools,
+            ..
+        } = prepared;
+        let RoundState {
+            model_started,
+            stopped,
+            final_received,
+            final_evidence_validation,
+            task_status,
+            review_pending,
+            review_evidence_required,
+            review_attempts,
+            ..
+        } = rounds;
         delivery::FinalDelivery {
-            runtime: &runtime, run: &run, state, ctx, cancellation,
-            model_started, preparation_stages, stopped,
-            final_received, final_evidence_validation, task_status, review_pending,
-            review_evidence_required, review_attempts,
-        }.finish().await
+            runtime: &runtime,
+            run: &run,
+            state,
+            ctx,
+            cancellation,
+            model_started,
+            preparation_stages,
+            stopped,
+            final_received,
+            final_evidence_validation,
+            task_status,
+            review_pending,
+            review_evidence_required,
+            review_attempts,
+        }
+        .finish()
+        .await
     }
 }

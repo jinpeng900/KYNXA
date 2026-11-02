@@ -326,7 +326,6 @@ pub fn partition(
     Ok(result)
 }
 
-/// Check keysets and generations per snapshot; release cursors before external work.
 /// 每次快照内核对键集和范围版本，外部计算前释放游标。
 pub fn vector_page(connection: &Connection, arguments: &Value) -> ContractResult {
     let Some((sql, parameters)) = vector_page_query(connection, arguments)? else {
@@ -365,7 +364,6 @@ pub(crate) fn vector_page_query(
                     .map_or(json!(9_007_199_254_740_991u64), |value| json!(value)),
             ),
         ]);
-        // Seek chunk IDs before joining vector spaces, so each page avoids sorting all remaining vectors.
         // 先按分块 ID 范围读取，再关联向量空间，避免每页重排所有剩余向量；向量字段仍取所选空间。
         let (source, vector_alias) = if table == "retrieval_vector_rows" {
             (
@@ -373,10 +371,7 @@ pub(crate) fn vector_page_query(
                 "v",
             )
         } else {
-            (
-                "chunks c JOIN sources s ON s.source_id=c.source_id",
-                "c",
-            )
+            ("chunks c JOIN sources s ON s.source_id=c.source_id", "c")
         };
         let columns = format!(
             "c.id,{}{vector_alias}.dimensions{}",
@@ -449,12 +444,10 @@ pub(crate) fn vector_page_query(
 
 #[cfg(test)]
 fn physical_identity_token(identity: (u64, u64)) -> String {
-    // Arbitrary filesystem u64 identities cannot safely round-trip through JavaScript numbers.
     // 文件系统 u64 身份不能经 JavaScript 数值安全往返，采用原样续传的十六进制不透明令牌。
     format!("{:016x}:{:016x}", identity.0, identity.1)
 }
 
-/// Preserve stored float bits in binary pages; use JSON only for offsets and IDs.
 /// 二进制分页保留原浮点位，JSON 仅传偏移及身份。
 #[cfg(test)]
 pub(crate) fn vector_page_binary(arguments: &Value) -> (Value, Vec<u8>) {
@@ -611,7 +604,6 @@ fn ensure_vector_extension(
             503,
         ));
     }
-    // The gateway supplies its bundled runtime/native path; preserve legacy packages without accepting arbitrary tool paths.
     // 网关提供随包 runtime/native 路径，兼容旧包布局但不接受任意工具路径；加载后立即撤销扩展加载能力。
     unsafe {
         let _guard = LoadExtensionGuard::new(connection).map_err(failure)?;
@@ -632,7 +624,6 @@ pub fn extension_info(connection: &Connection, arguments: &Value) -> ContractRes
     Ok(json!({"version":version,"owner":"rust-sqlite"}))
 }
 
-/// Authorize and rank vectors in one SQLite snapshot without exporting the full vector store.
 /// 授权与向量排序在同一 SQLite 快照完成，不搬运整个向量库。
 pub fn exact_search(connection: &Connection, arguments: &Value) -> ContractResult {
     exact_search_in_snapshot(connection, arguments, false)
@@ -851,10 +842,7 @@ mod tests {
         for (source, scope) in [("visible", "project:one"), ("hidden", "project:other")] {
             connection.execute("INSERT INTO sources(source_id,scope_key,source_type,title,locator,text,content_hash,source_revision,binding_revision,active_generation,updated_at) VALUES (?,?,'document','fixture','{}','','hash','1',1,1,'now')", [source, scope]).unwrap();
             connection
-                .execute(
-                    "INSERT INTO scope_snapshots VALUES (?,7)",
-                    [scope],
-                )
+                .execute("INSERT INTO scope_snapshots VALUES (?,7)", [scope])
                 .unwrap();
         }
         let old_vector: Vec<u8> = [0.0f32, 1.0, 0.0]
@@ -865,7 +853,11 @@ mod tests {
         for id in 1..=540i64 {
             let source = if id % 17 == 0 { "hidden" } else { "visible" };
             let domain = if id % 11 == 0 { "code" } else { "knowledge" };
-            let model = if id % 13 == 0 { "other-model" } else { "new-model" };
+            let model = if id % 13 == 0 {
+                "other-model"
+            } else {
+                "new-model"
+            };
             let chunk_id = format!("chunk-{id}");
             connection.execute("INSERT INTO chunks(id,chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,embedding_profile_id,dimensions,vector,chunker_version,tokenizer_version,embedding_model_version,embedding_space_id,structure_domain) VALUES (?,?,?,?,'','','hash',0,0,1,1,'old-profile',3,?,'v1','v1','old-model','old-space',?)", rusqlite::params![id, chunk_id, source, id, old_vector, domain]).unwrap();
             connection.execute("INSERT INTO chunk_vector_spaces VALUES (?,'old-profile',3,?,'old-model','old-space','now')", rusqlite::params![chunk_id, old_vector]).unwrap();
@@ -890,7 +882,9 @@ mod tests {
                 "domain":"knowledge","minimumId":11,"maximumId":530}
         });
         let (sql, parameters) = vector_page_query(&connection, &arguments).unwrap().unwrap();
-        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
         let plan = statement
             .query_map(params_from_iter(parameters), |row| row.get::<_, String>(3))
             .unwrap()
@@ -901,7 +895,10 @@ mod tests {
                 .all(|step| !(step.contains("TEMP B-TREE") && step.contains("ORDER BY"))),
             "{plan:?}"
         );
-        let reference_sql = format!("SELECT c.id,c.dimensions,c.vector FROM retrieval_vector_rows c JOIN sources s ON s.source_id=c.source_id WHERE {} AND c.id>? AND c.id>=? AND c.id<=? ORDER BY c.id LIMIT 256", identity_predicate());
+        let reference_sql = format!(
+            "SELECT c.id,c.dimensions,c.vector FROM retrieval_vector_rows c JOIN sources s ON s.source_id=c.source_id WHERE {} AND c.id>? AND c.id>=? AND c.id<=? ORDER BY c.id LIMIT 256",
+            identity_predicate()
+        );
         let mut actual_ids = Vec::new();
         loop {
             let (_, parameters) = vector_page_query(&connection, &arguments).unwrap().unwrap();
@@ -921,13 +918,22 @@ mod tests {
         arguments["metadataOnly"] = json!(true);
         arguments["includeChunkId"] = json!(true);
         let metadata = vector_page(&connection, &arguments).unwrap();
-        assert_eq!(metadata[0]["chunk_id"], format!("chunk-{}", expected_ids[0]));
+        assert_eq!(
+            metadata[0]["chunk_id"],
+            format!("chunk-{}", expected_ids[0])
+        );
         assert_eq!(metadata[0]["dimensions"], 2);
         assert!(metadata[0].get("vector").is_none());
         arguments["scopes"] = json!(["project:other"]);
-        assert_eq!(vector_page(&connection, &arguments).unwrap_err().code, "RETRIEVAL_SOURCE_NOT_FOUND");
+        assert_eq!(
+            vector_page(&connection, &arguments).unwrap_err().code,
+            "RETRIEVAL_SOURCE_NOT_FOUND"
+        );
         arguments["scopes"] = json!(["project:one"]);
         arguments["descriptor"]["generation"] = json!(6);
-        assert_eq!(vector_page(&connection, &arguments).unwrap_err().code, "RETRIEVAL_ANN_STALE_BUILD");
+        assert_eq!(
+            vector_page(&connection, &arguments).unwrap_err().code,
+            "RETRIEVAL_ANN_STALE_BUILD"
+        );
     }
 }

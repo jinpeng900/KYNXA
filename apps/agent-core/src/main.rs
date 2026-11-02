@@ -3,7 +3,6 @@ use std::io::{self, BufRead, Write};
 use kynxa_agent_core_native::{AgentEngine, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request};
 use serde_json::json;
 
-/// Bound frame reads, including inputs without a terminating newline.
 /// 限制帧读取大小，缺少结束换行的输入也不能无限占用内存。
 fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     let mut frame = Vec::new();

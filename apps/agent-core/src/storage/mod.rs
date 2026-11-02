@@ -32,7 +32,6 @@ mod native_services_tests;
 pub mod raw_json;
 pub mod retrieval;
 pub mod settings;
-pub mod task_repository;
 pub mod source_coverage;
 pub mod source_manifest;
 pub mod sqlite_bootstrap;
@@ -45,6 +44,7 @@ pub mod sqlite_schema;
 pub mod sqlite_search;
 pub mod sqlite_store;
 pub mod sqlite_vector_reads;
+pub mod task_repository;
 pub(crate) mod tool_memory;
 pub mod tool_results;
 pub mod workspace_mounts;
@@ -63,9 +63,15 @@ pub struct ContractError {
 pub(crate) type ContractResult = Result<Value, ContractError>;
 
 impl ContractError {
-    pub fn code(&self) -> &str { self.code }
-    pub fn message(&self) -> &str { &self.message }
-    pub fn status_code(&self) -> u16 { self.status_code }
+    pub fn code(&self) -> &str {
+        self.code
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    pub fn status_code(&self) -> u16 {
+        self.status_code
+    }
     pub(crate) fn new(message: impl Into<String>, code: &'static str, status_code: u16) -> Self {
         Self {
             code,
@@ -212,7 +218,6 @@ fn settings_optional_fields(
     }
 }
 
-/// Declare optional fields explicitly; user objects are not omission markers.
 /// 显式声明可选字段，不将用户对象当作缺省标记。
 fn undefined_policy(arguments: &Value) -> Value {
     let operation = arguments["operation"].as_str().unwrap_or("");
@@ -247,7 +252,6 @@ fn undefined_policy(arguments: &Value) -> Value {
                 &["patch", "coverage", "sources", "*"],
                 &["errorCode"],
             );
-            // The job adapter sends explicit clear facts; omission must not erase required identity or status.
             // 作业适配器另传实际清除事实；缺省不得清除身份与状态等必需字段。
             optional_fields(
                 &mut optional_paths,
@@ -433,7 +437,6 @@ fn undefined_policy(arguments: &Value) -> Value {
     json!({"optionalPaths": optional_paths, "defaults": defaults})
 }
 
-/// Domain contracts and declared I/O services share error envelopes, preserving exact adapter identities.
 /// 领域合同与已声明 I/O 服务共用错误封装；适配器保留原始字节、日期与既有哈希身份。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     let boundary_before = sqlite_connections::boundary_counts();

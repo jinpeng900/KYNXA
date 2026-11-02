@@ -1,4 +1,3 @@
-//! Task authorization matches trusted execution bindings; it never dispatches or replaces policy checks.
 //! 任务授权只匹配可信执行绑定，不派发工具，也不替代现有策略检查。
 
 use serde_json::{Value, json};
@@ -45,7 +44,6 @@ fn canonical(value: &Value) -> Value {
     }
 }
 
-/// Only native UTF-8 overwrite may vary the body; every write still checks expectedHash.
 /// 仅内置 UTF-8 覆盖可变更正文；每次写入仍须核验 expectedHash。
 pub(crate) fn fingerprint(
     name: &str,
@@ -78,7 +76,6 @@ pub(crate) fn fingerprint(
     )
 }
 
-/// Keep bounded authorization in GatewayRuntime; restart requires approval again.
 /// 授权仅有界保存在 GatewayRuntime 中，重启后须重新批准。
 #[derive(Default)]
 pub(crate) struct TaskApprovalGrants {
@@ -115,7 +112,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_file_grants_allow_body_updates_but_preserve_target_options_permission_and_configuration() {
+    fn native_file_grants_allow_body_updates_but_preserve_target_options_permission_and_configuration()
+     {
         let scope = json!({
             "permission": "ask",
             "configurationGeneration": 1,

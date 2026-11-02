@@ -22,8 +22,6 @@ public sealed partial class ConversationChromeView
 
     private void InitializeBrowserInput()
     {
-        // WinUI routes input through its ContentIsland even above a foreign child HWND.
-        // Relay only this viewport's real input, as the WinUI WebView2 control does for its browser surface.
         // WinUI 经 ContentIsland 接收输入，即使画面上方是外部子 HWND；只转交本视口的真实输入。
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         Children.Add(_textInput);
@@ -39,7 +37,6 @@ public sealed partial class ConversationChromeView
         };
         AddHandler(PreviewKeyDownEvent, new KeyEventHandler(BrowserKeyDown), true);
         AddHandler(KeyUpEvent, new KeyEventHandler(BrowserKeyUp), true);
-        // A native text box supplies committed IME text; CharacterReceived alone omits Chinese composition.
         // 原生文本框接收输入法提交文字；仅用 CharacterReceived 会漏掉中文组合输入。
         _textInput.TextCompositionStarted += (_, _) => _composingText = true;
         _textInput.TextCompositionEnded += (_, _) =>
@@ -64,7 +61,6 @@ public sealed partial class ConversationChromeView
         if (!ClientToScreen(_host, ref screen)) return false;
         target = _pointerTarget != 0 ? _pointerTarget : WindowFromPoint(screen);
         if (IsWindow(target) && IsChild(_host, target)) return true;
-        // Lifted XAML hit testing can report its island surface; the pointer still belongs to this visible viewport.
         // XAML 输入路由可能命中岛表面；此时仍只向当前可见视口的真实页面窗口转交。
         return TryRendererWindow(out target, out _);
     }
@@ -197,7 +193,6 @@ public sealed partial class ConversationChromeView
         uint parameter = Math.Max(1u, status.RepeatCount) | (status.ScanCode << 16)
             | (status.IsExtendedKey ? 1u << 24 : 0) | (released ? 0xC0000000 : status.WasKeyDown ? 1u << 30 : 0);
         bool system = args.Key == VirtualKey.Menu || status.IsMenuKeyDown;
-        // Synchronous delivery bypasses TranslateMessage; committed text is sent exactly once by the IME sink.
         // 同步派发不经过对方队列的 TranslateMessage，文字仅由输入法接收框提交一次，避免重字。
         SendMessageTimeout(_keyboardTarget, released ? system ? 0x0105u : 0x0101u : system ? 0x0104u : 0x0100u,
             (nint)(uint)args.Key, (nint)parameter, 0x0002, 50, out _);

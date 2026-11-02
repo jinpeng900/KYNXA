@@ -68,25 +68,58 @@ impl AdaptivePolicy {
         .any(|value| !value.is_finite() || value < 0.0 || value > 1.0e9)
             || feedback.queue_depth.is_some_and(|depth| depth > 1_000_000)
             || feedback.progress.is_some_and(|value| value > 1.0)
-            || feedback.phase.as_ref().is_some_and(|value| !["cold-load","queue","hot-inference","other"].contains(&value.as_str()))
-            || feedback.unit.as_ref().is_some_and(|value| !["tokens","documents","pairs","vectors","operations"].contains(&value.as_str()))
-            || feedback.backend.as_ref().is_some_and(|value| !["cpu","gpu","dml","cuda","host"].contains(&value.as_str()))
-            || feedback.input_tokens.is_some_and(|value| value == 0 || value > 65_536)
-            || feedback.sequence_tokens.is_some_and(|value| value == 0 || value > 512)
-            || feedback.batch_size.is_some_and(|value| value == 0 || value > 128)
-            || feedback.cpu_threads.is_some_and(|value| value == 0 || value > 32)
+            || feedback.phase.as_ref().is_some_and(|value| {
+                !["cold-load", "queue", "hot-inference", "other"].contains(&value.as_str())
+            })
+            || feedback.unit.as_ref().is_some_and(|value| {
+                !["tokens", "documents", "pairs", "vectors", "operations"].contains(&value.as_str())
+            })
+            || feedback.backend.as_ref().is_some_and(|value| {
+                !["cpu", "gpu", "dml", "cuda", "host"].contains(&value.as_str())
+            })
+            || feedback
+                .input_tokens
+                .is_some_and(|value| value == 0 || value > 65_536)
+            || feedback
+                .sequence_tokens
+                .is_some_and(|value| value == 0 || value > 512)
+            || feedback
+                .batch_size
+                .is_some_and(|value| value == 0 || value > 128)
+            || feedback
+                .cpu_threads
+                .is_some_and(|value| value == 0 || value > 32)
         {
             return false;
         }
         let phase = feedback.phase.as_deref().unwrap_or("legacy");
         let backend = feedback.backend.as_deref().unwrap_or("legacy");
-        let backend_group = if ["gpu","dml","cuda"].contains(&backend) {"gpu"} else {backend};
-        let sequence_bucket = feedback.sequence_tokens.map(|value| value.next_power_of_two().to_string()).unwrap_or("legacy".into());
-        let context = format!("{}|{}|{}|{}|{}", task_id, backend, phase, feedback.unit.as_deref().unwrap_or("legacy"), sequence_bucket);
-        // Compare per-token batch cost within the same sequence-length class.
+        let backend_group = if ["gpu", "dml", "cuda"].contains(&backend) {
+            "gpu"
+        } else {
+            backend
+        };
+        let sequence_bucket = feedback
+            .sequence_tokens
+            .map(|value| value.next_power_of_two().to_string())
+            .unwrap_or("legacy".into());
+        let context = format!(
+            "{}|{}|{}|{}|{}",
+            task_id,
+            backend,
+            phase,
+            feedback.unit.as_deref().unwrap_or("legacy"),
+            sequence_bucket
+        );
         // 在相同序列长度类别内比较每 token 的批次成本。
-        let comparable_latency_ms = feedback.latency_ms.map(|value| value / feedback.input_tokens.unwrap_or(1).max(1) as f64);
-        let control_context = if backend == "legacy" { "legacy".to_string() } else { format!("{}|{}",task_id,backend_group) };
+        let comparable_latency_ms = feedback
+            .latency_ms
+            .map(|value| value / feedback.input_tokens.unwrap_or(1).max(1) as f64);
+        let control_context = if backend == "legacy" {
+            "legacy".to_string()
+        } else {
+            format!("{}|{}", task_id, backend_group)
+        };
         if self.histories.len() >= 128 && !self.histories.contains_key(&context) {
             if let Some(oldest) = self
                 .histories
@@ -102,7 +135,12 @@ impl AdaptivePolicy {
             .entry(context.clone())
             .or_insert((None, None, now_ms, None));
         if self.fractions.len() >= 128 && !self.fractions.contains_key(&control_context) {
-            if let Some(oldest) = self.fractions.iter().min_by_key(|(_, value)|value.1).map(|(key,_)|key.clone()) {
+            if let Some(oldest) = self
+                .fractions
+                .iter()
+                .min_by_key(|(_, value)| value.1)
+                .map(|(key, _)| key.clone())
+            {
                 self.fractions.remove(&oldest);
             }
         }
@@ -116,36 +154,59 @@ impl AdaptivePolicy {
             .zip(history.0)
             .is_some_and(|(current, previous)| current > previous * 1.05)
             && feedback
-                .latency_ms.map(|value| value / feedback.input_tokens.unwrap_or(1).max(1) as f64)
+                .latency_ms
+                .map(|value| value / feedback.input_tokens.unwrap_or(1).max(1) as f64)
                 .zip(history.1)
                 .is_none_or(|(current, previous)| current <= previous * 1.1)
             && feedback.queue_depth.is_some_and(|depth| depth > 0);
-        // Shrink under pressure; grow only after measured benefit and the hold interval.
         // 有压力即收缩；扩容须有实测收益并满足保持时间，缺失指标不当作零。
         if is_pressure {
             control.0 = (control.0 / 2.0).min(0.5).max(0.125);
             control.1 = now_ms;
-            self.adjustment_reason = if feedback.allocation_failure == Some(true) {"allocation-pressure"} else {"foreground-latency"};
+            self.adjustment_reason = if feedback.allocation_failure == Some(true) {
+                "allocation-pressure"
+            } else {
+                "foreground-latency"
+            };
             self.last_adjustment_ms = now_ms;
-        } else if is_gain && ["legacy","hot-inference"].contains(&phase) && now_ms.saturating_sub(control.1) >= 5000 {
-            control.0 = (if control.0 < 1.0 { control.0 + 0.125 } else { control.0 * 2.0 }).min(4.0);
+        } else if is_gain
+            && ["legacy", "hot-inference"].contains(&phase)
+            && now_ms.saturating_sub(control.1) >= 5000
+        {
+            control.0 = (if control.0 < 1.0 {
+                control.0 + 0.125
+            } else {
+                control.0 * 2.0
+            })
+            .min(4.0);
             control.1 = now_ms;
             self.adjustment_reason = "measured-hot-throughput-gain";
             self.last_adjustment_ms = now_ms;
-        } else if phase == "hot-inference" && feedback.queue_depth.is_some_and(|depth| depth > 0)
-            && feedback.throughput_per_second.zip(history.0).is_some_and(|(current, previous)|current < previous * 0.9)
-            && now_ms.saturating_sub(control.1) >= 5000 {
+        } else if phase == "hot-inference"
+            && feedback.queue_depth.is_some_and(|depth| depth > 0)
+            && feedback
+                .throughput_per_second
+                .zip(history.0)
+                .is_some_and(|(current, previous)| current < previous * 0.9)
+            && now_ms.saturating_sub(control.1) >= 5000
+        {
             control.0 = (control.0 / 2.0).max(0.125);
             control.1 = now_ms;
             self.adjustment_reason = "measured-hot-throughput-regression";
             self.last_adjustment_ms = now_ms;
         } else {
-            self.adjustment_reason = if !["legacy","hot-inference"].contains(&phase) {"non-hot-sample-held"}
-                else if is_gain {"hold-interval"} else {"no-comparable-throughput-gain"};
+            self.adjustment_reason = if !["legacy", "hot-inference"].contains(&phase) {
+                "non-hot-sample-held"
+            } else if is_gain {
+                "hold-interval"
+            } else {
+                "no-comparable-throughput-gain"
+            };
         }
-        // Apply feedback only to its task/backend; keep legacy defaults and separate metric units.
         // 反馈仅影响对应任务与后端；保留旧默认，不混比冷热和不同单位的指标。
-        if backend == "legacy" { self.background_fraction = control.0; }
+        if backend == "legacy" {
+            self.background_fraction = control.0;
+        }
         self.task_backend_fraction = control.0;
         self.measurement_context = Some(context);
         if let Some(value) = feedback.throughput_per_second {
@@ -163,7 +224,11 @@ impl AdaptivePolicy {
             );
         }
         if let Some(value) = feedback.latency_ms {
-            history.3 = Some(history.3.map_or(value, |previous| previous * 0.75 + value * 0.25));
+            history.3 = Some(
+                history
+                    .3
+                    .map_or(value, |previous| previous * 0.75 + value * 0.25),
+            );
         }
         history.2 = now_ms;
         self.throughput_per_second = history.0;
@@ -176,8 +241,13 @@ impl AdaptivePolicy {
     }
 
     pub fn fraction(&self, task_id: &str, uses_gpu: bool) -> f64 {
-        self.fractions.get(&format!("{}|{}",task_id,if uses_gpu {"gpu"} else {"cpu"}))
-            .map_or(self.background_fraction,|value|value.0)
+        self.fractions
+            .get(&format!(
+                "{}|{}",
+                task_id,
+                if uses_gpu { "gpu" } else { "cpu" }
+            ))
+            .map_or(self.background_fraction, |value| value.0)
     }
 
     pub fn suggestions(
@@ -194,16 +264,27 @@ impl AdaptivePolicy {
         let usable_memory = granted_memory.min(hardware.memory.available_bytes / 3);
         let pressure = hardware.cpu.usage_percent.is_some_and(|usage| usage > 85.0);
         let factor = if pressure || hardware.memory.available_bytes < 1024 * 1024 * 1024 {
-            self.fraction(task_id,uses_gpu).min(0.5)
-        } else { self.fraction(task_id,uses_gpu) };
+            self.fraction(task_id, uses_gpu).min(0.5)
+        } else {
+            self.fraction(task_id, uses_gpu)
+        };
         let is_idle = hardware.cpu.usage_percent.is_some_and(|usage| usage < 35.0)
             && hardware.memory.available_bytes >= 2 * 1024 * 1024 * 1024;
-        // Search-planning leases do not authorize model inference.
         // 检索规划租约不授予模型推理权限。
         let has_gpu_headroom = gpu_headroom_bytes >= 512 * 1024 * 1024;
-        let rerank_candidates = if factor < 1.0 || pressure || memory_headroom_bytes < 512 * 1024 * 1024 || (cpu_headroom < 1 && !has_gpu_headroom) { 20 }
-            else if (cpu_headroom >= 3 || has_gpu_headroom) && memory_headroom_bytes >= 1024 * 1024 * 1024 { 60 }
-            else { 40 };
+        let rerank_candidates = if factor < 1.0
+            || pressure
+            || memory_headroom_bytes < 512 * 1024 * 1024
+            || (cpu_headroom < 1 && !has_gpu_headroom)
+        {
+            20
+        } else if (cpu_headroom >= 3 || has_gpu_headroom)
+            && memory_headroom_bytes >= 1024 * 1024 * 1024
+        {
+            60
+        } else {
+            40
+        };
         let candidates = ((if pressure {
             40.0
         } else {
@@ -295,32 +376,67 @@ mod tests {
     #[test]
     fn device_units_and_cold_load_are_not_compared_as_hot_throughput() {
         let mut policy = AdaptivePolicy::new();
-        let feedback = |phase:&str,unit:&str,backend:&str,throughput:f64|WorkFeedback {
-            phase:Some(phase.into()),unit:Some(unit.into()),backend:Some(backend.into()),
-            throughput_per_second:Some(throughput),latency_ms:Some(10.0),queue_depth:Some(5),..Default::default()
+        let feedback = |phase: &str, unit: &str, backend: &str, throughput: f64| WorkFeedback {
+            phase: Some(phase.into()),
+            unit: Some(unit.into()),
+            backend: Some(backend.into()),
+            throughput_per_second: Some(throughput),
+            latency_ms: Some(10.0),
+            queue_depth: Some(5),
+            ..Default::default()
         };
-        policy.report("embedding",WorkFeedback {allocation_failure:Some(true),backend:Some("dml".into()),..Default::default()},100);
-        assert_eq!(policy.fraction("embedding",true),0.5);
-        assert_eq!(policy.fraction("embedding",false),1.0);
-        policy.report("embedding",feedback("cold-load","documents","dml",10.0),1000);
-        policy.report("embedding",feedback("cold-load","documents","dml",100.0),10000);
-        assert_eq!(policy.fraction("embedding",true),0.5);
-        assert_eq!(policy.adjustment_reason,"non-hot-sample-held");
-        policy.report("embedding",feedback("hot-inference","tokens","dml",100000.0),11000);
-        assert_eq!(policy.fraction("embedding",true),0.5);
-        policy.report("embedding",feedback("hot-inference","tokens","dml",150000.0),12000);
-        assert_eq!(policy.fraction("embedding",true),0.625);
-        assert_eq!(policy.fraction("embedding",false),1.0);
-        assert_eq!(policy.adjustment_reason,"measured-hot-throughput-gain");
+        policy.report(
+            "embedding",
+            WorkFeedback {
+                allocation_failure: Some(true),
+                backend: Some("dml".into()),
+                ..Default::default()
+            },
+            100,
+        );
+        assert_eq!(policy.fraction("embedding", true), 0.5);
+        assert_eq!(policy.fraction("embedding", false), 1.0);
+        policy.report(
+            "embedding",
+            feedback("cold-load", "documents", "dml", 10.0),
+            1000,
+        );
+        policy.report(
+            "embedding",
+            feedback("cold-load", "documents", "dml", 100.0),
+            10000,
+        );
+        assert_eq!(policy.fraction("embedding", true), 0.5);
+        assert_eq!(policy.adjustment_reason, "non-hot-sample-held");
+        policy.report(
+            "embedding",
+            feedback("hot-inference", "tokens", "dml", 100000.0),
+            11000,
+        );
+        assert_eq!(policy.fraction("embedding", true), 0.5);
+        policy.report(
+            "embedding",
+            feedback("hot-inference", "tokens", "dml", 150000.0),
+            12000,
+        );
+        assert_eq!(policy.fraction("embedding", true), 0.625);
+        assert_eq!(policy.fraction("embedding", false), 1.0);
+        assert_eq!(policy.adjustment_reason, "measured-hot-throughput-gain");
     }
 
     #[test]
     fn hot_gain_can_exceed_startup_but_pressure_and_length_classes_bound_exploration() {
         let mut policy = AdaptivePolicy::new();
         let sample = |tokens: u32, latency: f64, sequence: u32| WorkFeedback {
-            phase: Some("hot-inference".into()), unit: Some("tokens".into()), backend: Some("cpu".into()),
-            input_tokens: Some(tokens), latency_ms: Some(latency), throughput_per_second: Some(tokens as f64 * 1000.0 / latency),
-            sequence_tokens: Some(sequence), queue_depth: Some(128), ..Default::default()
+            phase: Some("hot-inference".into()),
+            unit: Some("tokens".into()),
+            backend: Some("cpu".into()),
+            input_tokens: Some(tokens),
+            latency_ms: Some(latency),
+            throughput_per_second: Some(tokens as f64 * 1000.0 / latency),
+            sequence_tokens: Some(sequence),
+            queue_depth: Some(128),
+            ..Default::default()
         };
         assert!(policy.report("embedding", sample(64, 10.0, 64), 1000));
         policy.report("embedding", sample(128, 15.0, 64), 7000);
@@ -332,7 +448,15 @@ mod tests {
         assert_eq!(policy.fraction("embedding", false), 4.0);
         policy.report("embedding", sample(64, 2.0, 64), 25000);
         assert_eq!(policy.fraction("embedding", false), 4.0);
-        policy.report("embedding", WorkFeedback { backend: Some("cpu".into()), allocation_failure: Some(true), ..Default::default() }, 25001);
+        policy.report(
+            "embedding",
+            WorkFeedback {
+                backend: Some("cpu".into()),
+                allocation_failure: Some(true),
+                ..Default::default()
+            },
+            25001,
+        );
         assert_eq!(policy.fraction("embedding", false), 0.5);
         assert!(!policy.report("embedding", sample(512, 1.0, 513), 30000));
     }

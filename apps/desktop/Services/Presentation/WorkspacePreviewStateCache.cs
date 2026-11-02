@@ -1,7 +1,6 @@
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Retain preview drafts within a shared memory budget, including keys and string storage.
 /// 按共享内存预算保留预览状态，计入键和字符串占用。
 /// </summary>
 internal sealed class WorkspacePreviewStateCache(

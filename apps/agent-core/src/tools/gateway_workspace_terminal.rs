@@ -1,4 +1,3 @@
-//! Conversation-owned ConPTY sessions share raw input and tracked shell commands with the visible terminal.
 //! 聊天自有 ConPTY 会话与可见终端共享原始输入及有回执的命令，工作目录由正式归属解析。
 
 use super::gateway::{GatewayToolContext, ToolRuntime, check_cancelled, emit, failure};
@@ -20,8 +19,9 @@ const RETAINED_BYTES: usize = 4 * 1024 * 1024;
 const RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_COMMANDS: usize = 1024;
 
-/// ConPTY can interleave console title/cursor updates inside a single Console.Write marker.
 /// ConPTY 会在同次 Console.Write 标记内穿插标题或光标控制，仅在协议帧内去除这些 VT 控制。
+/// 模型据此可以自行恢复，不必猜测会话名称。
+const NO_WORKSPACE_TERMINAL: &str = "当前聊天还没有打开这个终端。先调用 terminal.workspace.list 或 terminal.workspace.open 获取 sessionId，或改用 terminal.host.run。";
 fn protocol_payload(frame: &str) -> String {
     let mut characters = frame.chars().peekable();
     let mut payload = String::new();
@@ -30,12 +30,21 @@ fn protocol_payload(frame: &str) -> String {
             match characters.next() {
                 Some(']') => {
                     while let Some(next) = characters.next() {
-                        if next == '\u{7}' { break; }
-                        if next == '\u{1b}' && characters.peek() == Some(&'\\') { characters.next(); break; }
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && characters.peek() == Some(&'\\') {
+                            characters.next();
+                            break;
+                        }
                     }
                 }
                 Some('[') => {
-                    for next in characters.by_ref() { if ('\u{40}'..='\u{7e}').contains(&next) { break; } }
+                    for next in characters.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -46,11 +55,9 @@ fn protocol_payload(frame: &str) -> String {
     payload
 }
 
-/// OSC 633 introducer shared by the owned READY/DONE frames.
 /// 自有 READY/DONE 帧共用的 OSC 633 起始序列。
 const PROTOCOL_OPENER: &str = "\u{1b}]633;";
 
-/// Byte offset of the BEL that ends a protocol frame, skipping escape sequences nested inside it.
 /// 返回结束协议帧的 BEL 位置，跳过帧内嵌套的 OSC/CSI 转义序列；尚未收齐时返回 None。
 fn protocol_frame_end(frame: &str) -> Option<usize> {
     let mut characters = frame.char_indices().peekable();
@@ -61,7 +68,9 @@ fn protocol_frame_end(frame: &str) -> Option<usize> {
                 Some((_, ']')) => loop {
                     match characters.next()? {
                         (_, '\u{7}') => break,
-                        (_, '\u{1b}') if characters.peek().is_some_and(|(_, next)| *next == '\\') => {
+                        (_, '\u{1b}')
+                            if characters.peek().is_some_and(|(_, next)| *next == '\\') =>
+                        {
                             characters.next();
                             break;
                         }
@@ -128,20 +137,27 @@ struct TerminalOutput {
 
 impl Default for TerminalOutput {
     fn default() -> Self {
-        Self { state: Mutex::new(OutputState::default()), changed: Default::default(),
-            marker_prefix: format!("\u{1b}]633;KYNXA_{};", uuid::Uuid::new_v4().simple()) }
+        Self {
+            state: Mutex::new(OutputState::default()),
+            changed: Default::default(),
+            marker_prefix: format!("\u{1b}]633;KYNXA_{};", uuid::Uuid::new_v4().simple()),
+        }
     }
 }
 
 impl OutputState {
     fn retain(&mut self, text: String) {
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         let cursor = self.next_cursor;
         self.next_cursor += text.len() as u64;
         self.retained_bytes += text.len();
         self.chunks.push_back((cursor, text));
         while self.retained_bytes > RETAINED_BYTES {
-            if let Some((_, removed)) = self.chunks.pop_front() { self.retained_bytes -= removed.len(); }
+            if let Some((_, removed)) = self.chunks.pop_front() {
+                self.retained_bytes -= removed.len();
+            }
         }
     }
 
@@ -157,7 +173,12 @@ impl OutputState {
 
     fn protocol_frame(&mut self, payload: &str) -> bool {
         let parts = payload.split(':').collect::<Vec<_>>();
-        let cwd = |value: &str| BASE64.decode(value).ok().and_then(|bytes| String::from_utf8(bytes).ok());
+        let cwd = |value: &str| {
+            BASE64
+                .decode(value)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        };
         match parts.as_slice() {
             ["READY", path] => {
                 let Some(path) = cwd(path) else { return false };
@@ -170,13 +191,27 @@ impl OutputState {
             }
             ["DONE", token, code, path] => {
                 let Some(path) = cwd(path) else { return false };
-                let Some(command) = self.commands.iter_mut().find(|command| command.token == *token && command.status == "running") else { return false };
+                let Some(command) = self
+                    .commands
+                    .iter_mut()
+                    .find(|command| command.token == *token && command.status == "running")
+                else {
+                    return false;
+                };
                 let parsed = code.parse::<i32>().ok();
-                if *code != "unknown" && parsed.is_none() { return false; }
+                if *code != "unknown" && parsed.is_none() {
+                    return false;
+                }
                 command.exit_code = parsed;
                 command.accepted = Some(true);
-                command.status = if parsed.is_some() { "completed" } else { "unknown" };
-                command.reason = parsed.is_none().then_some("script-left-without-normal-return");
+                command.status = if parsed.is_some() {
+                    "completed"
+                } else {
+                    "unknown"
+                };
+                command.reason = parsed
+                    .is_none()
+                    .then_some("script-left-without-normal-return");
                 command.cwd = Some(path.clone());
                 command.end_cursor = Some(self.next_cursor);
                 self.cwd = Some(path);
@@ -194,11 +229,9 @@ impl TerminalOutput {
             return;
         }
         if let Ok(mut state) = self.state.lock() {
-            // Protocol tags are generated inside encoded scripts, never guessed from PS>/>> or echoed input.
             // 协议标记在编码脚本运行时生成；不把 PS>/>> 文本或输入回显当作执行证明。
             let mut pending = std::mem::take(&mut state.pending_protocol);
             pending.push_str(&text);
-            // End at the first BEL outside nested title/cursor escapes, then verify the frame identity.
             // 取嵌套标题/光标转义之外的首个 BEL 作为帧尾，再核验标记身份，避免截断。
             let identity = &self.marker_prefix[PROTOCOL_OPENER.len()..];
             loop {
@@ -215,10 +248,14 @@ impl TerminalOutput {
                         pending.drain(..end + 1);
                     } else if pending.len() > RESPONSE_BYTES {
                         state.retain(std::mem::take(&mut pending));
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 } else {
-                    let keep = (1..PROTOCOL_OPENER.len()).rev().find(|length|
-                        pending.ends_with(&PROTOCOL_OPENER[..*length])).unwrap_or(0);
+                    let keep = (1..PROTOCOL_OPENER.len())
+                        .rev()
+                        .find(|length| pending.ends_with(&PROTOCOL_OPENER[..*length]))
+                        .unwrap_or(0);
                     state.retain(pending[..pending.len() - keep].to_owned());
                     pending = pending[pending.len() - keep..].to_owned();
                     break;
@@ -244,11 +281,11 @@ impl TerminalOutput {
     }
 
     fn read(&self, after: u64) -> Result<Value, GatewayError> {
-        self.read_range(after,None)
+        self.read_range(after, None)
     }
 
     fn read_command(&self, id: &str, after: u64) -> Result<Value, GatewayError> {
-        self.read_range(after,Some(id))
+        self.read_range(after, Some(id))
     }
 
     fn read_range(&self, after: u64, command_id: Option<&str>) -> Result<Value, GatewayError> {
@@ -256,12 +293,27 @@ impl TerminalOutput {
             .state
             .lock()
             .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500))?;
-        let selected = command_id.map(|id|state.commands.iter().find(|command|command.id==id)
-            .ok_or_else(||failure("TERMINAL_COMMAND_NOT_FOUND","当前终端不存在此命令；不会重新执行。",404))).transpose()?;
-        // A receipt and its byte window are observed under one lock; later commands cannot enter an old result.
+        let selected = command_id
+            .map(|id| {
+                state
+                    .commands
+                    .iter()
+                    .find(|command| command.id == id)
+                    .ok_or_else(|| {
+                        failure(
+                            "TERMINAL_COMMAND_NOT_FOUND",
+                            "当前终端不存在此命令；不会重新执行。",
+                            404,
+                        )
+                    })
+            })
+            .transpose()?;
         // 回执及其字节窗口在同一锁内观测；后续命令的输出不能混入旧命令结果。
-        let after = after.max(selected.map_or(0,|command|command.after));
-        let limit = selected.and_then(|command|command.end_cursor).unwrap_or(state.next_cursor).min(state.next_cursor);
+        let after = after.max(selected.map_or(0, |command| command.after));
+        let limit = selected
+            .and_then(|command| command.end_cursor)
+            .unwrap_or(state.next_cursor)
+            .min(state.next_cursor);
         let first = state
             .chunks
             .front()
@@ -269,7 +321,9 @@ impl TerminalOutput {
         let mut cursor = after.max(first).min(limit);
         let mut output = String::new();
         for (start, chunk) in &state.chunks {
-            if *start >= limit { break; }
+            if *start >= limit {
+                break;
+            }
             let end = *start + chunk.len() as u64;
             if end <= cursor {
                 continue;
@@ -278,13 +332,15 @@ impl TerminalOutput {
             while !chunk.is_char_boundary(offset) {
                 offset += 1;
             }
-            let mut count = (chunk.len() - offset).min(RESPONSE_BYTES - output.len()).min((limit-cursor) as usize);
+            let mut count = (chunk.len() - offset)
+                .min(RESPONSE_BYTES - output.len())
+                .min((limit - cursor) as usize);
             while !chunk.is_char_boundary(offset + count) {
                 count -= 1;
             }
             output.push_str(&chunk[offset..offset + count]);
             cursor = *start + (offset + count) as u64;
-            if output.len() >= RESPONSE_BYTES || cursor>=limit || offset + count < chunk.len() {
+            if output.len() >= RESPONSE_BYTES || cursor >= limit || offset + count < chunk.len() {
                 break;
             }
         }
@@ -298,53 +354,97 @@ impl TerminalOutput {
     }
 
     fn command(&self, id: &str) -> Result<Value, GatewayError> {
-        self.state.lock().map_err(|_|failure("TERMINAL_STATE_FAILED","终端命令状态不可用。",500))?
-            .commands.iter().find(|command|command.id==id).map(CommandReceipt::value)
-            .ok_or_else(||failure("TERMINAL_COMMAND_NOT_FOUND","当前终端不存在此命令；不会重新执行。",404))
+        self.state
+            .lock()
+            .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端命令状态不可用。", 500))?
+            .commands
+            .iter()
+            .find(|command| command.id == id)
+            .map(CommandReceipt::value)
+            .ok_or_else(|| {
+                failure(
+                    "TERMINAL_COMMAND_NOT_FOUND",
+                    "当前终端不存在此命令；不会重新执行。",
+                    404,
+                )
+            })
     }
 
     fn begin_command(&self, id: &str, command: &str) -> Result<Option<String>, GatewayError> {
         let fingerprint = format!("{:x}", Sha256::digest(command.as_bytes()));
-        let mut state = self.state.lock().map_err(|_|failure("TERMINAL_STATE_FAILED","终端命令状态不可用。",500))?;
-        if let Some(existing) = state.commands.iter().find(|existing|existing.id == id) {
-            return if existing.fingerprint == fingerprint { Ok(None) } else {
-                Err(failure("TERMINAL_COMMAND_ID_CONFLICT","同一 commandId 已用于不同命令；原命令不会重放。",409))
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端命令状态不可用。", 500))?;
+        if let Some(existing) = state.commands.iter().find(|existing| existing.id == id) {
+            return if existing.fingerprint == fingerprint {
+                Ok(None)
+            } else {
+                Err(failure(
+                    "TERMINAL_COMMAND_ID_CONFLICT",
+                    "同一 commandId 已用于不同命令；原命令不会重放。",
+                    409,
+                ))
             };
         }
-        if state.ended { return Err(failure("TERMINAL_CLOSED","终端已经退出。",410)); }
+        if state.ended {
+            return Err(failure("TERMINAL_CLOSED", "终端已经退出。", 410));
+        }
         if !state.prompt_ready || state.raw_input_pending || state.active_command.is_some() {
-            return Err(failure("TERMINAL_BUSY","终端正在运行、尚未就绪或有用户未提交输入。请读取原会话，或明确新建独立终端；不要清空或抢写。",409));
+            return Err(failure(
+                "TERMINAL_BUSY",
+                "终端正在运行、尚未就绪或有用户未提交输入。请读取原会话，或明确新建独立终端；不要清空或抢写。",
+                409,
+            ));
         }
         if state.commands.len() >= MAX_COMMANDS {
-            return Err(failure("TERMINAL_COMMAND_CAPACITY","此终端的去重回执已达上限。请新建终端，旧回执仍保留且不会重放。",409));
+            return Err(failure(
+                "TERMINAL_COMMAND_CAPACITY",
+                "此终端的去重回执已达上限。请新建终端，旧回执仍保留且不会重放。",
+                409,
+            ));
         }
         let token = uuid::Uuid::new_v4().simple().to_string();
         let after = state.next_cursor;
         let cwd = state.cwd.clone();
-        state.commands.push(CommandReceipt { id:id.to_owned(),fingerprint,token:token.clone(),status:"running",
-            exit_code:None,after,end_cursor:None,cwd,reason:None,accepted:None });
+        state.commands.push(CommandReceipt {
+            id: id.to_owned(),
+            fingerprint,
+            token: token.clone(),
+            status: "running",
+            exit_code: None,
+            after,
+            end_cursor: None,
+            cwd,
+            reason: None,
+            accepted: None,
+        });
         state.active_command = Some(id.to_owned());
         state.prompt_ready = false;
-        Ok(Some(command_input(command,&self.marker_prefix,&token)))
+        Ok(Some(command_input(command, &self.marker_prefix, &token)))
     }
 }
 
 fn encoded_script(script: &str) -> String {
-    let bytes = script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+    let bytes = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
     BASE64.encode(bytes)
 }
 
 fn shell_bootstrap(prefix: &str) -> String {
-    // OSC shell-integration metadata is not painted as text, so screen wrapping cannot corrupt its identity.
     // OSC shell 集成元数据不参与屏幕文字绘制，避免回绕、重绘破坏回执身份。
-    format!("function global:prompt {{ [Console]::Write('{prefix}READY:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)) + '\u{7}'); 'PS ' + (Get-Location).Path + '> ' }}")
+    format!(
+        "function global:prompt {{ [Console]::Write('{prefix}READY:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)) + '\u{7}'); 'PS ' + (Get-Location).Path + '> ' }}"
+    )
 }
 
 fn command_input(command: &str, prefix: &str, token: &str) -> String {
     let payload = BASE64.encode(command.as_bytes());
-    // One encoded wrapper is submitted with CR. A parser/runtime failure remains a real failed receipt.
     // 整段编码包装只用一次回车提交；语法或运行失败仍返回真实失败回执，不再陷入多行续行。
-    let wrapper = format!(r#"& {{
+    let wrapper = format!(
+        r#"& {{
     $kynxaCode = 'unknown'
     try {{
         $global:LASTEXITCODE = 0
@@ -358,8 +458,13 @@ fn command_input(command: &str, prefix: &str, token: &str) -> String {
     }} finally {{
         [Console]::Write('{prefix}DONE:{token}:' + $kynxaCode + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)) + '{terminator}')
     }}
-}}"#,terminator='\u{7}');
-    format!("& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'))))\r", encoded_script(&wrapper))
+}}"#,
+        terminator = '\u{7}'
+    );
+    format!(
+        "& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'))))\r",
+        encoded_script(&wrapper)
+    )
 }
 
 pub(crate) struct TerminalSession {
@@ -380,13 +485,36 @@ fn dimensions(arguments: &Value) -> (i16, i16) {
     )
 }
 
-pub(crate) async fn session_mount(context: &GatewayToolContext, id: &str) -> Result<Value, GatewayError> {
-    let session = context.runtime.terminals.lock().await.get(id).cloned()
-        .filter(|session|session.conversation_id == context.conversation_id && session.project_id == context.project_id)
-        .ok_or_else(||failure("TERMINAL_SESSION_NOT_FOUND","当前聊天的终端不存在。",404))?;
-    if session.mount.is_object() && context.config["workspaceMounts"].as_array().is_some_and(|mounts|
-        !mounts.iter().any(|mount|crate::storage::workspace_mounts::same_mount(&session.mount,mount))) {
-        return Err(failure("WORKSPACE_MOUNT_UNAVAILABLE","终端所在目录不在本次任务授权中。",409));
+pub(crate) async fn session_mount(
+    context: &GatewayToolContext,
+    id: &str,
+) -> Result<Value, GatewayError> {
+    let session = context
+        .runtime
+        .terminals
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .filter(|session| {
+            session.conversation_id == context.conversation_id
+                && session.project_id == context.project_id
+        })
+        .ok_or_else(|| failure("TERMINAL_SESSION_NOT_FOUND", NO_WORKSPACE_TERMINAL, 404))?;
+    if session.mount.is_object()
+        && context.config["workspaceMounts"]
+            .as_array()
+            .is_some_and(|mounts| {
+                !mounts.iter().any(|mount| {
+                    crate::storage::workspace_mounts::same_mount(&session.mount, mount)
+                })
+            })
+    {
+        return Err(failure(
+            "WORKSPACE_MOUNT_UNAVAILABLE",
+            "终端所在目录不在本次任务授权中。",
+            409,
+        ));
     }
     Ok(session.mount.clone())
 }
@@ -395,7 +523,7 @@ pub(crate) async fn open(
     arguments: &Value,
     context: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    let selected = super::gateway::select_workspace_context(context,arguments).await?;
+    let selected = super::gateway::select_workspace_context(context, arguments).await?;
     let context = &selected;
     #[cfg(windows)]
     {
@@ -446,7 +574,6 @@ pub(crate) async fn open(
     }
 }
 
-/// Model calls share the user's registered PTY; input acceptance never certifies a command's outcome.
 /// 模型复用用户已登记的伪终端；输入被接受不代表命令已经完成或成功。
 pub(crate) async fn execute(
     name: &str,
@@ -456,18 +583,38 @@ pub(crate) async fn execute(
     check_cancelled(context)?;
     match name {
         "terminal.workspace.list" => {
-            let sessions = context.runtime.terminals.lock().await.iter()
-                .filter(|(_, session)| session.conversation_id == context.conversation_id
-                    && session.project_id == context.project_id
-                    && arguments["mountId"].as_str().is_none_or(|id|session.mount["id"] == id)
-                    && (context.config["workspaceMounts"].as_array().is_some_and(|mounts|mounts.iter().any(|mount|crate::storage::workspace_mounts::same_mount(&session.mount,mount)))
-                        || session.mount.is_null() && session.workdir == context.workdir))
-                .map(|(id, session)| (id.clone(), session.clone())).collect::<Vec<_>>();
+            let sessions = context
+                .runtime
+                .terminals
+                .lock()
+                .await
+                .iter()
+                .filter(|(_, session)| {
+                    session.conversation_id == context.conversation_id
+                        && session.project_id == context.project_id
+                        && arguments["mountId"]
+                            .as_str()
+                            .is_none_or(|id| session.mount["id"] == id)
+                        && (context.config["workspaceMounts"]
+                            .as_array()
+                            .is_some_and(|mounts| {
+                                mounts.iter().any(|mount| {
+                                    crate::storage::workspace_mounts::same_mount(
+                                        &session.mount,
+                                        mount,
+                                    )
+                                })
+                            })
+                            || session.mount.is_null() && session.workdir == context.workdir)
+                })
+                .map(|(id, session)| (id.clone(), session.clone()))
+                .collect::<Vec<_>>();
             let mut available = Vec::new();
             for (id, session) in sessions {
                 if verify_scope(&session, &context.data_home).await.is_ok() {
-                    let state = session.output.state.lock()
-                        .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500))?;
+                    let state = session.output.state.lock().map_err(|_| {
+                        failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500)
+                    })?;
                     available.push(json!({"sessionId":id,"initialWorkingDirectory":session.workdir,
                         "mountId":session.mount["id"],"mountName":session.mount["name"],
                         "shell":"powershell","exited":state.ended,"exitCode":state.exit_code,
@@ -476,22 +623,43 @@ pub(crate) async fn execute(
                         "activeCommandId":state.active_command}));
                 }
             }
-            available.sort_by(|left, right| left["sessionId"].as_str().cmp(&right["sessionId"].as_str()));
+            available.sort_by(|left, right| {
+                left["sessionId"].as_str().cmp(&right["sessionId"].as_str())
+            });
             Ok(json!({"sessions":available,"presentation":"workspace"}))
         }
         "terminal.workspace.open" => {
-            let selected_context = super::gateway::select_workspace_context(context,arguments).await?;
+            let selected_context =
+                super::gateway::select_workspace_context(context, arguments).await?;
             let context = &selected_context;
-            verify_relationship(&context.conversation_id, context.project_id.as_deref(), &context.workdir, &context.data_home, &context.config["activeMount"]).await?;
+            verify_relationship(
+                &context.conversation_id,
+                context.project_id.as_deref(),
+                &context.workdir,
+                &context.data_home,
+                &context.config["activeMount"],
+            )
+            .await?;
             let selected = arguments["sessionId"].as_str().filter(|id| !id.is_empty());
-            let reuse = if arguments["newSession"] == true { None } else {
-                context.runtime.terminals.lock().await.iter()
-                    .filter(|(id, session)| selected.is_none_or(|selected| selected == id.as_str())
-                        && session.conversation_id == context.conversation_id
-                        && session.project_id == context.project_id && session.workdir == context.workdir
-                        && !session.closed.load(Ordering::Acquire)
-                        && session.output.state.lock().is_ok_and(|state| !state.ended))
-                    .map(|(id, session)| (id.clone(), session.clone())).next()
+            let reuse = if arguments["newSession"] == true {
+                None
+            } else {
+                context
+                    .runtime
+                    .terminals
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|(id, session)| {
+                        selected.is_none_or(|selected| selected == id.as_str())
+                            && session.conversation_id == context.conversation_id
+                            && session.project_id == context.project_id
+                            && session.workdir == context.workdir
+                            && !session.closed.load(Ordering::Acquire)
+                            && session.output.state.lock().is_ok_and(|state| !state.ended)
+                    })
+                    .map(|(id, session)| (id.clone(), session.clone()))
+                    .next()
             };
             let mut opened = if let Some((id, session)) = reuse {
                 verify_scope(&session, &context.data_home).await?;
@@ -499,7 +667,11 @@ pub(crate) async fn execute(
                 json!({"sessionId":id,"cols":cols,"rows":rows,"shell":"powershell","reused":true})
             } else {
                 if selected.is_some() {
-                    return Err(failure("TERMINAL_SESSION_NOT_FOUND", "当前聊天中未找到指定的可用终端。", 404));
+                    return Err(failure(
+                        "TERMINAL_SESSION_NOT_FOUND",
+                        NO_WORKSPACE_TERMINAL,
+                        404,
+                    ));
                 }
                 let mut opened = open(arguments, context).await?;
                 opened["reused"] = json!(false);
@@ -510,7 +682,10 @@ pub(crate) async fn execute(
             opened["mountId"] = context.config["activeMountId"].clone();
             opened["mountName"] = context.config["activeMount"]["name"].clone();
             opened["currentWorkingDirectory"] = json!("not-observed");
-            opened["title"] = arguments.get("title").cloned().unwrap_or_else(|| json!("终端"));
+            opened["title"] = arguments
+                .get("title")
+                .cloned()
+                .unwrap_or_else(|| json!("终端"));
             let mut event = opened.clone();
             event["type"] = json!("workspace_terminal_open");
             event["conversationId"] = json!(context.conversation_id);
@@ -520,14 +695,39 @@ pub(crate) async fn execute(
             emit(context, event).await;
             Ok(opened)
         }
-        "terminal.workspace.read" | "terminal.workspace.write" | "terminal.workspace.run" | "terminal.workspace.close" => {
+        "terminal.workspace.read"
+        | "terminal.workspace.write"
+        | "terminal.workspace.run"
+        | "terminal.workspace.close" => {
             if name != "terminal.workspace.close" {
-                let session = context.runtime.terminals.lock().await.get(arguments["sessionId"].as_str().unwrap_or("")).cloned()
-                    .filter(|session|session.conversation_id == context.conversation_id && session.project_id == context.project_id)
-                    .ok_or_else(||failure("TERMINAL_SESSION_NOT_FOUND","当前聊天的终端不存在。",404))?;
-                if session.mount.is_object() && context.config["workspaceMounts"].as_array().is_some_and(|mounts|
-                    !mounts.iter().any(|mount|crate::storage::workspace_mounts::same_mount(&session.mount,mount))) {
-                    return Err(failure("WORKSPACE_MOUNT_UNAVAILABLE","终端所在目录不在本次任务的授权挂载中。",409));
+                let session = context
+                    .runtime
+                    .terminals
+                    .lock()
+                    .await
+                    .get(arguments["sessionId"].as_str().unwrap_or(""))
+                    .cloned()
+                    .filter(|session| {
+                        session.conversation_id == context.conversation_id
+                            && session.project_id == context.project_id
+                    })
+                    .ok_or_else(|| {
+                        failure("TERMINAL_SESSION_NOT_FOUND", NO_WORKSPACE_TERMINAL, 404)
+                    })?;
+                if session.mount.is_object()
+                    && context.config["workspaceMounts"]
+                        .as_array()
+                        .is_some_and(|mounts| {
+                            !mounts.iter().any(|mount| {
+                                crate::storage::workspace_mounts::same_mount(&session.mount, mount)
+                            })
+                        })
+                {
+                    return Err(failure(
+                        "WORKSPACE_MOUNT_UNAVAILABLE",
+                        "终端所在目录不在本次任务的授权挂载中。",
+                        409,
+                    ));
                 }
             }
             let mut input = arguments.clone();
@@ -536,12 +736,22 @@ pub(crate) async fn execute(
             if name == "terminal.workspace.read" && input["waitMs"].is_null() {
                 input["waitMs"] = json!(1000);
             }
-            let mut result = action_with_cancellation(&input, &context.runtime, &context.data_home, Some(context.cancellation.clone())).await?;
+            let mut result = action_with_cancellation(
+                &input,
+                &context.runtime,
+                &context.data_home,
+                Some(context.cancellation.clone()),
+            )
+            .await?;
             result["sessionId"] = input["sessionId"].clone();
             result["presentation"] = json!("workspace");
             Ok(result)
         }
-        _ => Err(failure("TERMINAL_ACTION_INVALID", "未知的工作区终端操作。", 400)),
+        _ => Err(failure(
+            "TERMINAL_ACTION_INVALID",
+            "未知的工作区终端操作。",
+            400,
+        )),
     }
 }
 
@@ -550,7 +760,7 @@ pub(crate) async fn action(
     runtime: &Arc<ToolRuntime>,
     data_root: &Path,
 ) -> Result<Value, GatewayError> {
-    action_with_cancellation(arguments,runtime,data_root,None).await
+    action_with_cancellation(arguments, runtime, data_root, None).await
 }
 
 async fn action_with_cancellation(
@@ -576,7 +786,6 @@ async fn action_with_cancellation(
                 404,
             )
         })?;
-    // Closing releases only this conversation's owned process; it must remain possible after a move or deletion.
     // 关闭只释放此聊天自有进程，移动或删除聊天后仍应能清理；读取及输入则必须核对当前正式归属。
     if operation != "close" {
         if let Err(error) = verify_scope(&session, data_root).await {
@@ -590,76 +799,138 @@ async fn action_with_cancellation(
             let changed = session.output.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let current = match command_id { Some(id)=>session.output.read_command(id,after)?,None=>session.output.read(after)? };
+            let current = match command_id {
+                Some(id) => session.output.read_command(id, after)?,
+                None => session.output.read(after)?,
+            };
             let wait_ms = arguments["waitMs"].as_u64().unwrap_or(15000).min(15000);
-            if current["output"] != "" || current["exited"] == true || wait_ms == 0
-                || command_id.is_some() && current["command"]["status"] != "running" {
+            if current["output"] != ""
+                || current["exited"] == true
+                || wait_ms == 0
+                || command_id.is_some() && current["command"]["status"] != "running"
+            {
                 return Ok(current);
             }
             let _ = tokio::time::timeout(Duration::from_millis(wait_ms), changed).await;
             if let Err(error) = verify_scope(&session, data_root).await {
                 return Err(error);
             }
-            match command_id { Some(id)=>session.output.read_command(id,after),None=>session.output.read(after) }
+            match command_id {
+                Some(id) => session.output.read_command(id, after),
+                None => session.output.read(after),
+            }
         }
         "run" => {
-            let command = arguments["command"].as_str().filter(|command|!command.trim().is_empty()
-                && command.encode_utf16().count() <= 65_536 && !command.contains('\0'))
-                .ok_or_else(||failure("TERMINAL_COMMAND_INVALID","命令须为非空的完整 PowerShell 脚本，且不超过 65536 字符。",400))?.to_owned();
-            let command_id = arguments["commandId"].as_str().map(str::to_owned)
-                .unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-            if command_id.is_empty() || command_id.len()>120 || !command_id.bytes().all(|byte|
-                byte.is_ascii_alphanumeric() || b"-_./:".contains(&byte)) {
-                return Err(failure("TERMINAL_COMMAND_INVALID","commandId 须为至多 120 字符的 ASCII 标识。",400));
+            let command = arguments["command"]
+                .as_str()
+                .filter(|command| {
+                    !command.trim().is_empty()
+                        && command.encode_utf16().count() <= 65_536
+                        && !command.contains('\0')
+                })
+                .ok_or_else(|| {
+                    failure(
+                        "TERMINAL_COMMAND_INVALID",
+                        "命令须为非空的完整 PowerShell 脚本，且不超过 65536 字符。",
+                        400,
+                    )
+                })?
+                .to_owned();
+            let command_id = arguments["commandId"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            if command_id.is_empty()
+                || command_id.len() > 120
+                || !command_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:".contains(&byte))
+            {
+                return Err(failure(
+                    "TERMINAL_COMMAND_INVALID",
+                    "commandId 须为至多 120 字符的 ASCII 标识。",
+                    400,
+                ));
             }
             let wait_ms = arguments["waitMs"].as_u64().unwrap_or(1000).min(15000);
-            let ready_deadline = tokio::time::Instant::now()+Duration::from_secs(10);
-            // A newly opened shell may still be reaching its first owned prompt. Never probe a busy program by typing.
+            let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             // 新终端可等待第一次自有提示标记；绝不能通过试输命令探测正在运行的程序。
             loop {
                 let changed = session.output.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
                 let initializing = {
-                    let state = session.output.state.lock().map_err(|_|failure("TERMINAL_STATE_FAILED","终端状态不可用。",500))?;
-                    !state.prompt_ready && !state.raw_input_pending && !state.ended && state.active_command.is_none()
+                    let state =
+                        session.output.state.lock().map_err(|_| {
+                            failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500)
+                        })?;
+                    !state.prompt_ready
+                        && !state.raw_input_pending
+                        && !state.ended
+                        && state.active_command.is_none()
                 };
-                if !initializing || tokio::time::timeout_at(ready_deadline,changed).await.is_err() { break; }
+                if !initializing
+                    || tokio::time::timeout_at(ready_deadline, changed)
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
             }
-            if cancellation.as_ref().is_some_and(|receiver|*receiver.borrow()) {
-                return Err(failure("CANCELLED","命令尚未提交，用户已停止。",499));
+            if cancellation
+                .as_ref()
+                .is_some_and(|receiver| *receiver.borrow())
+            {
+                return Err(failure("CANCELLED", "命令尚未提交，用户已停止。", 499));
             }
-            verify_scope(&session,data_root).await?;
+            verify_scope(&session, data_root).await?;
             let current = session.clone();
             let submitted_id = command_id.clone();
-            let reused = tokio::task::spawn_blocking(move||current.run(&submitted_id,&command)).await
-                .map_err(|_|failure("TERMINAL_COMMAND_UNKNOWN","命令提交线程结束，请用原 commandId 读取，不能重放。",503))??;
-            let deadline = tokio::time::Instant::now()+Duration::from_millis(wait_ms);
+            let reused = tokio::task::spawn_blocking(move || current.run(&submitted_id, &command))
+                .await
+                .map_err(|_| {
+                    failure(
+                        "TERMINAL_COMMAND_UNKNOWN",
+                        "命令提交线程结束，请用原 commandId 读取，不能重放。",
+                        503,
+                    )
+                })??;
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
             let mut wait_cancelled = false;
             loop {
                 let changed = session.output.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if session.output.command(&command_id)?["status"] != "running" { break; }
+                if session.output.command(&command_id)?["status"] != "running" {
+                    break;
+                }
                 let cancelled = async {
-                    if let Some(receiver) = cancellation.as_mut() { super::gateway::wait_for_cancellation(receiver).await; }
-                    else { std::future::pending::<()>().await; }
+                    if let Some(receiver) = cancellation.as_mut() {
+                        super::gateway::wait_for_cancellation(receiver).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
                 };
                 tokio::select! {
                     _=cancelled=>{wait_cancelled=true;break;},
                     result=tokio::time::timeout_at(deadline,changed)=>if result.is_err(){break;}
                 }
             }
-            verify_scope(&session,data_root).await?;
-            let mut result = session.output.read_command(&command_id,0)?;
+            verify_scope(&session, data_root).await?;
+            let mut result = session.output.read_command(&command_id, 0)?;
             let receipt = result["command"].clone();
             result["shellExitCode"] = result["exitCode"].clone();
-            for (field,value) in receipt.as_object().unwrap() { result[field] = value.clone(); }
+            for (field, value) in receipt.as_object().unwrap() {
+                result[field] = value.clone();
+            }
             result["command"] = receipt;
             result["reused"] = json!(reused);
             result["waitCancelled"] = json!(wait_cancelled);
-            result["waitTimedOut"] = json!(!wait_cancelled && result["status"]=="running");
-            result["isError"] = json!(result["completed"] == true && result["exitCode"].as_i64().is_some_and(|code|code!=0));
+            result["waitTimedOut"] = json!(!wait_cancelled && result["status"] == "running");
+            result["isError"] = json!(
+                result["completed"] == true
+                    && result["exitCode"].as_i64().is_some_and(|code| code != 0)
+            );
             Ok(result)
         }
         "write" => {
@@ -674,8 +945,12 @@ async fn action_with_cancellation(
                 ));
             }
             let input = input.to_owned();
-            let after = session.output.state.lock()
-                .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500))?.next_cursor;
+            let after = session
+                .output
+                .state
+                .lock()
+                .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500))?
+                .next_cursor;
             tokio::task::spawn_blocking(move || session.write(&input))
                 .await
                 .map_err(|_| failure("TERMINAL_WRITE_FAILED", "终端输入线程结束。", 500))??;
@@ -706,10 +981,23 @@ async fn action_with_cancellation(
 }
 
 async fn verify_scope(session: &TerminalSession, data_root: &Path) -> Result<(), GatewayError> {
-    verify_relationship(&session.conversation_id, session.project_id.as_deref(), &session.workdir, data_root, &session.mount).await
+    verify_relationship(
+        &session.conversation_id,
+        session.project_id.as_deref(),
+        &session.workdir,
+        data_root,
+        &session.mount,
+    )
+    .await
 }
 
-async fn verify_relationship(conversation: &str, project_id: Option<&str>, workdir: &Path, data_root: &Path, mount: &Value) -> Result<(), GatewayError> {
+async fn verify_relationship(
+    conversation: &str,
+    project_id: Option<&str>,
+    workdir: &Path,
+    data_root: &Path,
+    mount: &Value,
+) -> Result<(), GatewayError> {
     let root = data_root.to_owned();
     let conversation_id = conversation.to_owned();
     let relationship = tokio::task::spawn_blocking(move || {
@@ -718,19 +1006,29 @@ async fn verify_relationship(conversation: &str, project_id: Option<&str>, workd
     .await
     .map_err(|_| failure("TERMINAL_SCOPE_FAILED", "终端工作范围读取线程结束。", 500))??;
     let expected_workdir = if mount.is_object() {
-        relationship["mounts"].as_array().into_iter().flatten()
-            .find(|current|crate::storage::workspace_mounts::same_mount(mount,current))
-            .and_then(|mount|mount["path"].as_str()).map(PathBuf::from)
-            .ok_or_else(||failure("TERMINAL_SCOPE_CHANGED", "终端所在挂载已移除或改变；原输出与会话仍保留。",409))?
-    } else { relationship["folderPath"]
-        .as_str()
-        .or_else(|| relationship["workspaceRoot"].as_str())
-        .filter(|folder| !folder.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_root.join("Sandboxes").join(conversation)) };
-    if relationship["projectId"].as_str() != project_id
-        || expected_workdir != workdir
-    {
+        relationship["mounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|current| crate::storage::workspace_mounts::same_mount(mount, current))
+            .and_then(|mount| mount["path"].as_str())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                failure(
+                    "TERMINAL_SCOPE_CHANGED",
+                    "终端所在挂载已移除或改变；原输出与会话仍保留。",
+                    409,
+                )
+            })?
+    } else {
+        relationship["folderPath"]
+            .as_str()
+            .or_else(|| relationship["workspaceRoot"].as_str())
+            .filter(|folder| !folder.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_root.join("Sandboxes").join(conversation))
+    };
+    if relationship["projectId"].as_str() != project_id || expected_workdir != workdir {
         return Err(failure(
             "TERMINAL_SCOPE_CHANGED",
             "聊天工作范围已变化，请重新打开终端。",
@@ -746,12 +1044,19 @@ impl TerminalSession {
             return Err(failure("TERMINAL_CLOSED", "终端已关闭。", 410));
         }
         #[cfg(windows)]
-        let mut native = self.native.lock().map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
+        let mut native = self
+            .native
+            .lock()
+            .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
         {
-            let mut state = self.output.state.lock().map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
+            let mut state = self
+                .output
+                .state
+                .lock()
+                .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
             state.prompt_ready = false;
             for character in input.chars() {
-                state.raw_input_pending = !matches!(character,'\r'|'\u{3}');
+                state.raw_input_pending = !matches!(character, '\r' | '\u{3}');
             }
         }
         #[cfg(windows)]
@@ -760,17 +1065,29 @@ impl TerminalSession {
     }
 
     fn run(&self, id: &str, command: &str) -> Result<bool, GatewayError> {
-        if self.closed.load(Ordering::Acquire) { return Err(failure("TERMINAL_CLOSED","终端已关闭。",410)); }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(failure("TERMINAL_CLOSED", "终端已关闭。", 410));
+        }
         #[cfg(windows)]
-        let mut native = self.native.lock().map_err(|_|failure("TERMINAL_STATE_FAILED","终端状态不可用。",500))?;
-        let Some(input) = self.output.begin_command(id,command)? else { return Ok(true); };
+        let mut native = self
+            .native
+            .lock()
+            .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
+        let Some(input) = self.output.begin_command(id, command)? else {
+            return Ok(true);
+        };
         #[cfg(windows)]
         if native.write(&input).is_err() {
-            self.output.state.lock().map_err(|_|failure("TERMINAL_STATE_FAILED","终端状态不可用。",500))?
+            self.output
+                .state
+                .lock()
+                .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?
                 .mark_unknown("input-write-failed-after-dispatch-start");
         } else {
             if let Ok(mut state) = self.output.state.lock() {
-                if let Some(receipt) = state.commands.iter_mut().find(|receipt|receipt.id==id) { receipt.accepted=Some(true); }
+                if let Some(receipt) = state.commands.iter_mut().find(|receipt| receipt.id == id) {
+                    receipt.accepted = Some(true);
+                }
             }
         }
         #[cfg(not(windows))]
@@ -803,32 +1120,44 @@ pub(crate) async fn shutdown(context: &GatewayToolContext) {
     let _ = shutdown_checked(context).await;
 }
 
-/// Migration waits for each owned terminal job before releasing its console and registry entry.
 /// 迁移等待每个自有终端进程树退出后，再释放控制台及登记，不把清空列表当作结算成功。
 pub(crate) async fn shutdown_checked(context: &GatewayToolContext) -> Result<(), GatewayError> {
-    let sessions = context.runtime.terminals.lock().await.iter()
-        .map(|(id, session)| (id.clone(), session.clone())).collect::<Vec<_>>();
+    let sessions = context
+        .runtime
+        .terminals
+        .lock()
+        .await
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect::<Vec<_>>();
     for (id, session) in sessions {
         #[cfg(windows)]
         {
             let current = session.clone();
             let job = tokio::task::spawn_blocking(move || {
-                let mut native = current.native.lock()
+                let mut native = current
+                    .native
+                    .lock()
                     .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
                 let job = native.take_owned_job();
                 Ok::<_, GatewayError>(job)
-            }).await.map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
+            })
+            .await
+            .map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
             if let Some(job) = job {
                 if let Err(error) = job.terminate_and_wait().await {
-                    // Keep the same job available for cleanup retries without replacing the original failure.
                     // 原进程树仍由本会话持有，供后续重试结算；返回最初的退出错误。
-                    let mut native = session.native.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut native = session
+                        .native
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     native.restore_owned_job(job);
                     return Err(error);
                 }
             }
         }
-        tokio::task::spawn_blocking(move || session.close()).await
+        tokio::task::spawn_blocking(move || session.close())
+            .await
             .map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
         context.runtime.terminals.lock().await.remove(&id);
     }
@@ -840,31 +1169,48 @@ mod command_contract_tests {
     use super::*;
 
     fn ready(output: &TerminalOutput) {
-        output.append(format!("{}READY:{}\u{7}",output.marker_prefix,BASE64.encode("D:\\fixture 中文")));
+        output.append(format!(
+            "{}READY:{}\u{7}",
+            output.marker_prefix,
+            BASE64.encode("D:\\fixture 中文")
+        ));
     }
 
     #[test]
     fn completion_marker_survives_title_and_cursor_sequences_inserted_by_conpty() {
         let output = TerminalOutput::default();
         ready(&output);
-        output.begin_command("titled", "Write-Output done").unwrap().unwrap();
+        output
+            .begin_command("titled", "Write-Output done")
+            .unwrap()
+            .unwrap();
         let token = output.state.lock().unwrap().commands[0].token.clone();
         let cwd = BASE64.encode("D:\\fixture 中文");
-        // ConPTY may nest title updates with BEL and cursor toggles inside the frame.
         // ConPTY 可能在帧内嵌入带 BEL 的标题更新和光标切换。
-        let frame = format!("{}DONE:{token}:\u{1b}]0;Windows PowerShell\u{7}\u{1b}[?25l0:{}\u{1b}[?25h{}\u{7}",
-            output.marker_prefix, &cwd[..4], &cwd[4..]);
-        for character in frame.chars() { output.append(character.to_string()); }
+        let frame = format!(
+            "{}DONE:{token}:\u{1b}]0;Windows PowerShell\u{7}\u{1b}[?25l0:{}\u{1b}[?25h{}\u{7}",
+            output.marker_prefix,
+            &cwd[..4],
+            &cwd[4..]
+        );
+        for character in frame.chars() {
+            output.append(character.to_string());
+        }
         let receipt = output.command("titled").unwrap();
         assert_eq!(receipt["completed"], true, "{receipt}");
         assert_eq!(receipt["exitCode"], 0);
         let page = output.read(0).unwrap();
-        assert!(!page["output"].as_str().unwrap().contains("DONE:"), "{page}");
-        // Foreign terminal frames remain ordinary output and cannot settle this command.
+        assert!(
+            !page["output"].as_str().unwrap().contains("DONE:"),
+            "{page}"
+        );
         // 其他终端的帧只算普通输出，不能结算当前命令。
         let foreign = TerminalOutput::default();
         ready(&foreign);
-        foreign.begin_command("foreign", "Write-Output done").unwrap().unwrap();
+        foreign
+            .begin_command("foreign", "Write-Output done")
+            .unwrap()
+            .unwrap();
         let token = foreign.state.lock().unwrap().commands[0].token.clone();
         foreign.append(format!("\u{1b}]633;KYNXA_other;DONE:{token}:0:{cwd}\u{7}"));
         assert_eq!(foreign.command("foreign").unwrap()["completed"], false);
@@ -873,64 +1219,130 @@ mod command_contract_tests {
     #[test]
     fn workspace_run_receipts_require_owned_markers_and_deduplicate_exact_commands() {
         let output = TerminalOutput::default();
-        let encoded_cwd=BASE64.encode("D:\\fixture 中文");
-        assert_eq!(protocol_payload(&format!("READY:{}\u{1b}]0;WindowsPowerShell\u{7}\u{1b}[?25h{}",&encoded_cwd[..8],&encoded_cwd[8..])),format!("READY:{encoded_cwd}"));
+        let encoded_cwd = BASE64.encode("D:\\fixture 中文");
+        assert_eq!(
+            protocol_payload(&format!(
+                "READY:{}\u{1b}]0;WindowsPowerShell\u{7}\u{1b}[?25h{}",
+                &encoded_cwd[..8],
+                &encoded_cwd[8..]
+            )),
+            format!("READY:{encoded_cwd}")
+        );
         ready(&output);
         let script = "Write-Output '中文与引号 \"hello\"'\nWrite-Output 'second line'";
-        let input = output.begin_command("stable-command",script).unwrap().unwrap();
+        let input = output
+            .begin_command("stable-command", script)
+            .unwrap()
+            .unwrap();
         assert!(input.ends_with('\r'));
         assert!(!input.contains('\n'));
         assert!(!input.contains(&output.marker_prefix));
-        assert!(output.begin_command("stable-command",script).unwrap().is_none());
-        assert_eq!(output.begin_command("stable-command","different command").unwrap_err().code,"TERMINAL_COMMAND_ID_CONFLICT");
-        assert_eq!(output.begin_command("other-command",script).unwrap_err().code,"TERMINAL_BUSY");
-        assert_eq!(output.command("stable-command").unwrap()["status"],"running");
+        assert!(
+            output
+                .begin_command("stable-command", script)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            output
+                .begin_command("stable-command", "different command")
+                .unwrap_err()
+                .code,
+            "TERMINAL_COMMAND_ID_CONFLICT"
+        );
+        assert_eq!(
+            output
+                .begin_command("other-command", script)
+                .unwrap_err()
+                .code,
+            "TERMINAL_BUSY"
+        );
+        assert_eq!(
+            output.command("stable-command").unwrap()["status"],
+            "running"
+        );
         let token = output.state.lock().unwrap().commands[0].token.clone();
         output.append("Actual 中文 output\r\n".into());
-        let frame = format!("{}DONE:{token}:7:{}\u{7}",output.marker_prefix,BASE64.encode("D:\\fixture 中文"));
-        for character in frame.chars() { output.append(character.to_string()); }
+        let frame = format!(
+            "{}DONE:{token}:7:{}\u{7}",
+            output.marker_prefix,
+            BASE64.encode("D:\\fixture 中文")
+        );
+        for character in frame.chars() {
+            output.append(character.to_string());
+        }
         ready(&output);
         let receipt = output.command("stable-command").unwrap();
-        assert_eq!(receipt["completed"],true);
-        assert_eq!(receipt["exitCode"],7);
-        assert_eq!(receipt["currentWorkingDirectory"],"D:\\fixture 中文");
-        assert_eq!(output.read(0).unwrap()["output"],"Actual 中文 output\r\n");
-        assert!(output.begin_command("stable-command",script).unwrap().is_none());
-        assert_eq!(output.state.lock().unwrap().commands.len(),1);
-        output.begin_command("second-command","Write-Output 'SECOND_COMMAND_ONLY'").unwrap();
+        assert_eq!(receipt["completed"], true);
+        assert_eq!(receipt["exitCode"], 7);
+        assert_eq!(receipt["currentWorkingDirectory"], "D:\\fixture 中文");
+        assert_eq!(output.read(0).unwrap()["output"], "Actual 中文 output\r\n");
+        assert!(
+            output
+                .begin_command("stable-command", script)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(output.state.lock().unwrap().commands.len(), 1);
+        output
+            .begin_command("second-command", "Write-Output 'SECOND_COMMAND_ONLY'")
+            .unwrap();
         output.append("SECOND_COMMAND_ONLY\r\n".into());
-        let first = output.read_command("stable-command",0).unwrap();
-        assert_eq!(first["output"],"Actual 中文 output\r\n");
-        assert_eq!(first["nextCursor"],receipt["completionCursor"]);
-        assert_eq!(first["hasMore"],false);
-        assert!(!first["output"].as_str().unwrap().contains("SECOND_COMMAND_ONLY"));
+        let first = output.read_command("stable-command", 0).unwrap();
+        assert_eq!(first["output"], "Actual 中文 output\r\n");
+        assert_eq!(first["nextCursor"], receipt["completionCursor"]);
+        assert_eq!(first["hasMore"], false);
+        assert!(
+            !first["output"]
+                .as_str()
+                .unwrap()
+                .contains("SECOND_COMMAND_ONLY")
+        );
     }
 
     #[test]
     fn workspace_run_preserves_partial_input_and_never_certifies_unmarked_or_closed_commands() {
         let output = TerminalOutput::default();
         ready(&output);
-        output.state.lock().unwrap().raw_input_pending=true;
+        output.state.lock().unwrap().raw_input_pending = true;
         ready(&output);
-        assert_eq!(output.begin_command("not-submitted","Write-Output 1").unwrap_err().code,"TERMINAL_BUSY");
+        assert_eq!(
+            output
+                .begin_command("not-submitted", "Write-Output 1")
+                .unwrap_err()
+                .code,
+            "TERMINAL_BUSY"
+        );
         assert!(output.state.lock().unwrap().commands.is_empty());
-        output.state.lock().unwrap().raw_input_pending=false;
+        output.state.lock().unwrap().raw_input_pending = false;
         ready(&output);
-        output.begin_command("unknown-command","Start-Sleep 10").unwrap();
+        output
+            .begin_command("unknown-command", "Start-Sleep 10")
+            .unwrap();
         output.append("PS> or >> output is not completion proof".into());
-        assert_eq!(output.command("unknown-command").unwrap()["status"],"running");
+        assert_eq!(
+            output.command("unknown-command").unwrap()["status"],
+            "running"
+        );
         ready(&output);
         let receipt = output.command("unknown-command").unwrap();
-        assert_eq!(receipt["status"],"unknown");
-        assert_eq!(receipt["completed"],false);
+        assert_eq!(receipt["status"], "unknown");
+        assert_eq!(receipt["completed"], false);
         assert!(receipt["exitCode"].is_null());
-        assert!(output.begin_command("unknown-command","Start-Sleep 10").unwrap().is_none());
-        output.begin_command("closed-command","Start-Sleep 10").unwrap();
+        assert!(
+            output
+                .begin_command("unknown-command", "Start-Sleep 10")
+                .unwrap()
+                .is_none()
+        );
+        output
+            .begin_command("closed-command", "Start-Sleep 10")
+            .unwrap();
         output.finish(Some(0));
         let receipt = output.command("closed-command").unwrap();
-        assert_eq!(receipt["status"],"unknown");
+        assert_eq!(receipt["status"], "unknown");
         assert!(receipt["exitCode"].is_null());
-        assert_eq!(output.read(0).unwrap()["exitCode"],0);
+        assert_eq!(output.read(0).unwrap()["exitCode"], 0);
     }
 }
 
@@ -940,58 +1352,114 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_run_executes_multiline_in_the_same_pty_with_real_receipts_and_no_replay() {
-        let (mut context,_owner)=super::super::gateway::test_context();
-        let root=context.workdir.parent().unwrap().to_owned();
-        crate::storage::gateway::ensure_conversation(&context.data_home,&context.conversation_id,"Structured PTY fixture").unwrap();
-        context.workdir=context.data_home.join("Sandboxes").join(&context.conversation_id);
-        let child=context.workdir.join("中文 folder");
+        let (mut context, _owner) = super::super::gateway::test_context();
+        let root = context.workdir.parent().unwrap().to_owned();
+        crate::storage::gateway::ensure_conversation(
+            &context.data_home,
+            &context.conversation_id,
+            "Structured PTY fixture",
+        )
+        .unwrap();
+        context.workdir = context
+            .data_home
+            .join("Sandboxes")
+            .join(&context.conversation_id);
+        let child = context.workdir.join("中文 folder");
         std::fs::create_dir_all(&child).unwrap();
-        context.permission_mode="full".into();
-        let opened=open(&json!({"cols":120,"rows":30}),&context).await.unwrap();
-        let id=opened["sessionId"].clone();
-        let script="Set-Location -LiteralPath '中文 folder'\nAdd-Content -LiteralPath 'once.txt' -Value '中文 ''single'' \"double\"' -Encoding UTF8\nWrite-Output 'ACTUAL_STRUCTURED_COMMAND'";
-        // The default one-second observation may legitimately return running during a cold PowerShell startup.
+        context.permission_mode = "full".into();
+        let opened = open(&json!({"cols":120,"rows":30}), &context)
+            .await
+            .unwrap();
+        let id = opened["sessionId"].clone();
+        let script = "Set-Location -LiteralPath '中文 folder'\nAdd-Content -LiteralPath 'once.txt' -Value '中文 ''single'' \"double\"' -Encoding UTF8\nWrite-Output 'ACTUAL_STRUCTURED_COMMAND'";
         // PowerShell 冷启动时默认一秒观察可合法返回 running；此处等待真实完成，不能把接收回执当完成。
-        let arguments=json!({"sessionId":id,"commandId":"once","command":script,"waitMs":15000,
+        let arguments = json!({"sessionId":id,"commandId":"once","command":script,"waitMs":15000,
             "reason":"Verify a whole multiline command in the visible terminal"});
-        context.permission_mode="ask".into();
-        let pending=super::super::gateway::execute("terminal.workspace.run",arguments.clone(),&context).await.unwrap();
-        assert_eq!(pending["requiresApproval"],true);
-        context.permission_mode="full".into();
-        let result=super::super::gateway::execute("terminal.workspace.run",arguments.clone(),&context).await;
-        let result=match result {
-            Ok(result)=>result,
-            Err(error)=>{
-                let session=context.runtime.terminals.lock().await.get(id.as_str().unwrap()).cloned().unwrap();
-                let page=session.output.read(0).unwrap();
-                let state=session.output.state.lock().unwrap();
-                panic!("Structured fixture failed: {error:?}; output={page}; pending={:?}; prefix={:?}",state.pending_protocol,session.output.marker_prefix);
+        context.permission_mode = "ask".into();
+        let pending =
+            super::super::gateway::execute("terminal.workspace.run", arguments.clone(), &context)
+                .await
+                .unwrap();
+        assert_eq!(pending["requiresApproval"], true);
+        context.permission_mode = "full".into();
+        let result =
+            super::super::gateway::execute("terminal.workspace.run", arguments.clone(), &context)
+                .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let session = context
+                    .runtime
+                    .terminals
+                    .lock()
+                    .await
+                    .get(id.as_str().unwrap())
+                    .cloned()
+                    .unwrap();
+                let page = session.output.read(0).unwrap();
+                let state = session.output.state.lock().unwrap();
+                panic!(
+                    "Structured fixture failed: {error:?}; output={page}; pending={:?}; prefix={:?}",
+                    state.pending_protocol, session.output.marker_prefix
+                );
             }
         };
-        assert_eq!(result["completed"],true,"{result}");
-        assert_eq!(result["exitCode"],0,"{result}");
-        assert!(result["output"].as_str().unwrap().contains("ACTUAL_STRUCTURED_COMMAND"));
-        assert!(result["currentWorkingDirectory"].as_str().unwrap().ends_with("中文 folder"));
-        let original=std::fs::read_to_string(child.join("once.txt")).unwrap();
-        let repeated=super::super::gateway::execute("terminal.workspace.run",arguments,&context).await.unwrap();
-        assert_eq!(repeated["reused"],true);
-        assert_eq!(std::fs::read_to_string(child.join("once.txt")).unwrap(),original);
-        let mut other=context.clone();
-        other.conversation_id=uuid::Uuid::new_v4().to_string();
-        assert_eq!(execute("terminal.workspace.read",&json!({"sessionId":id,"commandId":"once","waitMs":0}),&other).await.unwrap_err().code,"TERMINAL_SESSION_NOT_FOUND");
+        assert_eq!(result["completed"], true, "{result}");
+        assert_eq!(result["exitCode"], 0, "{result}");
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("ACTUAL_STRUCTURED_COMMAND")
+        );
+        assert!(
+            result["currentWorkingDirectory"]
+                .as_str()
+                .unwrap()
+                .ends_with("中文 folder")
+        );
+        let original = std::fs::read_to_string(child.join("once.txt")).unwrap();
+        let repeated =
+            super::super::gateway::execute("terminal.workspace.run", arguments, &context)
+                .await
+                .unwrap();
+        assert_eq!(repeated["reused"], true);
+        assert_eq!(
+            std::fs::read_to_string(child.join("once.txt")).unwrap(),
+            original
+        );
+        let mut other = context.clone();
+        other.conversation_id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            execute(
+                "terminal.workspace.read",
+                &json!({"sessionId":id,"commandId":"once","waitMs":0}),
+                &other
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "TERMINAL_SESSION_NOT_FOUND"
+        );
         let failed=execute("terminal.workspace.run",&json!({"sessionId":id,"command":"cmd.exe /d /c exit 7","commandId":"nonzero","waitMs":15000}),&context).await.unwrap();
-        assert_eq!(failed["completed"],true,"{failed}");
-        assert_eq!(failed["exitCode"],7);
+        assert_eq!(failed["completed"], true, "{failed}");
+        assert_eq!(failed["exitCode"], 7);
         let syntax=execute("terminal.workspace.run",&json!({"sessionId":id,"command":"Write-Output 'unclosed","commandId":"invalid-syntax","waitMs":15000}),&context).await.unwrap();
-        assert_eq!(syntax["completed"],true,"{syntax}");
-        assert_eq!(syntax["exitCode"],1);
+        assert_eq!(syntax["completed"], true, "{syntax}");
+        assert_eq!(syntax["exitCode"], 1);
         let waiting=execute("terminal.workspace.run",&json!({"sessionId":id,"command":"Start-Sleep -Seconds 10","commandId":"long-command","waitMs":1000}),&context).await.unwrap();
-        assert_eq!(waiting["status"],"running","{waiting}");
+        assert_eq!(waiting["status"], "running", "{waiting}");
         assert_eq!(execute("terminal.workspace.run",&json!({"sessionId":id,"command":"Write-Output 'must not execute'","commandId":"busy-other","waitMs":0}),&context).await.unwrap_err().code,"TERMINAL_BUSY");
         let observed=execute("terminal.workspace.read",&json!({"sessionId":id,"commandId":"long-command","after":waiting["nextCursor"],"waitMs":0}),&context).await.unwrap();
-        assert_eq!(observed["command"]["status"],"running");
-        let closed=execute("terminal.workspace.close",&json!({"sessionId":id}),&context).await.unwrap();
-        assert_eq!(closed["command"]["status"],"unknown");
+        assert_eq!(observed["command"]["status"], "running");
+        let closed = execute(
+            "terminal.workspace.close",
+            &json!({"sessionId":id}),
+            &context,
+        )
+        .await
+        .unwrap();
+        assert_eq!(closed["command"]["status"], "unknown");
         assert!(closed["command"]["exitCode"].is_null());
         assert!(root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(root).unwrap();
@@ -1006,47 +1474,91 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         let project_id = uuid::Uuid::new_v4().to_string();
         let first_id = uuid::Uuid::new_v4().to_string();
-        data::ensure_conversation(&context.data_home,&context.conversation_id,"Terminal mounts").unwrap();
+        data::ensure_conversation(
+            &context.data_home,
+            &context.conversation_id,
+            "Terminal mounts",
+        )
+        .unwrap();
         let old = data::load_catalog(&context.data_home).unwrap();
         data::handle("PUT","/api/conversations/catalog",&[],&json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Terminal mounts",
             "Mounts":[{"Id":first_id,"Name":"A","Path":context.workdir,"BindingRevision":1}],
             "DefaultMountId":first_id,"Chats":[{"Id":context.conversation_id,"Title":"Terminal","Messages":[
                 {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Terminal mounts fixture","Status":"completed"}]}]}]}),&context.data_home).unwrap().unwrap();
-        let relation = data::relationship(&context.data_home,&context.conversation_id).unwrap();
+        let relation = data::relationship(&context.data_home, &context.conversation_id).unwrap();
         context.project_id = Some(project_id);
         context.permission_mode = "full".into();
         context.config["workspaceMounts"] = relation["mounts"].clone();
         context.config["defaultMountId"] = relation["defaultMountId"].clone();
         context.config["bindingSnapshot"] = workspace_mounts::snapshot(&relation);
-        let user_opened = open(&json!({}),&context).await.unwrap();
+        let user_opened = open(&json!({}), &context).await.unwrap();
         let id = user_opened["sessionId"].clone();
-        assert_eq!(user_opened["mountId"],first_id);
-        let listed = execute("terminal.workspace.list",&json!({}),&context).await.unwrap();
-        assert_eq!(listed["sessions"][0]["mountId"],first_id);
-        // Verify a relative write rather than comparing short and long Windows path spellings.
+        assert_eq!(user_opened["mountId"], first_id);
+        let listed = execute("terminal.workspace.list", &json!({}), &context)
+            .await
+            .unwrap();
+        assert_eq!(listed["sessions"][0]["mountId"], first_id);
         // 通过相对写入验证真实目录，避免 Windows 长短路径的不同拼写导致误判。
         let script = "Set-Content -LiteralPath '.cwd-verification.txt' -Value 'owned-terminal-fixture'; Write-Output ('KYNXA_' + 'CWD_READY')\r";
         let result = super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":script,"reason":"Verify the existing terminal's actual working directory"}),&context).await.unwrap();
-        assert_eq!(result["inputAccepted"],true);
-        tokio::time::timeout(Duration::from_secs(10),async {
+        assert_eq!(result["inputAccepted"], true);
+        tokio::time::timeout(Duration::from_secs(10), async {
             let mut cursor = result["after"].as_u64().unwrap();
             let mut text = String::new();
             loop {
-                let page = execute("terminal.workspace.read",&json!({"sessionId":id,"after":cursor,"waitMs":1000}),&context).await.unwrap();
+                let page = execute(
+                    "terminal.workspace.read",
+                    &json!({"sessionId":id,"after":cursor,"waitMs":1000}),
+                    &context,
+                )
+                .await
+                .unwrap();
                 cursor = page["nextCursor"].as_u64().unwrap();
                 text.push_str(page["output"].as_str().unwrap());
-                if text.contains("KYNXA_CWD_READY") { break; }
+                if text.contains("KYNXA_CWD_READY") {
+                    break;
+                }
             }
-        }).await.unwrap();
-        assert_eq!(std::fs::read_to_string(context.workdir.join(".cwd-verification.txt")).unwrap().trim(), "owned-terminal-fixture");
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(context.workdir.join(".cwd-verification.txt"))
+                .unwrap()
+                .trim(),
+            "owned-terminal-fixture"
+        );
         assert!(!second.join(".cwd-verification.txt").exists());
         let mut catalog = data::load_catalog(&context.data_home).unwrap();
-        catalog["Projects"][0] = workspace_mounts::bind_default(&catalog["Projects"][0],second.to_str().unwrap()).unwrap();
-        data::handle("PUT","/api/conversations/catalog",&[],&catalog,&context.data_home).unwrap().unwrap();
+        catalog["Projects"][0] =
+            workspace_mounts::bind_default(&catalog["Projects"][0], second.to_str().unwrap())
+                .unwrap();
+        data::handle(
+            "PUT",
+            "/api/conversations/catalog",
+            &[],
+            &catalog,
+            &context.data_home,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":"echo should-not-run\r","reason":"An old terminal must not silently move to a replacement folder"}),&context).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
         assert!(!second.join(".cwd-verification.txt").exists());
-        assert!(context.runtime.terminals.lock().await.contains_key(id.as_str().unwrap()));
-        execute("terminal.workspace.close",&json!({"sessionId":id,"reason":"Release the same owned terminal"}),&context).await.unwrap();
+        assert!(
+            context
+                .runtime
+                .terminals
+                .lock()
+                .await
+                .contains_key(id.as_str().unwrap())
+        );
+        execute(
+            "terminal.workspace.close",
+            &json!({"sessionId":id,"reason":"Release the same owned terminal"}),
+            &context,
+        )
+        .await
+        .unwrap();
         assert!(root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1055,48 +1567,103 @@ mod tests {
     async fn model_tools_share_the_user_terminal_with_real_output_and_chat_isolation() {
         let (mut context, _owner) = super::super::gateway::test_context();
         let root = context.workdir.parent().unwrap().to_owned();
-        crate::storage::gateway::ensure_conversation(&context.data_home, &context.conversation_id, "Terminal fixture").unwrap();
-        context.workdir = context.data_home.join("Sandboxes").join(&context.conversation_id);
+        crate::storage::gateway::ensure_conversation(
+            &context.data_home,
+            &context.conversation_id,
+            "Terminal fixture",
+        )
+        .unwrap();
+        context.workdir = context
+            .data_home
+            .join("Sandboxes")
+            .join(&context.conversation_id);
         std::fs::create_dir_all(&context.workdir).unwrap();
-        let user_terminal = open(&json!({"cols":100,"rows":30}), &context).await.unwrap();
+        let user_terminal = open(&json!({"cols":100,"rows":30}), &context)
+            .await
+            .unwrap();
         let id = user_terminal["sessionId"].clone();
         let (events, mut received) = tokio::sync::mpsc::channel(8);
         context.events = Some(events);
         context.permission_mode = "full".into();
-        let reopened = super::super::gateway::execute("terminal.workspace.open", json!({"reason":"Use the existing right terminal"}), &context).await.unwrap();
+        let reopened = super::super::gateway::execute(
+            "terminal.workspace.open",
+            json!({"reason":"Use the existing right terminal"}),
+            &context,
+        )
+        .await
+        .unwrap();
         assert_eq!(reopened["sessionId"], id);
         assert_eq!(reopened["reused"], true);
-        assert_eq!(received.recv().await.unwrap()["type"], "workspace_terminal_open");
+        assert_eq!(
+            received.recv().await.unwrap()["type"],
+            "workspace_terminal_open"
+        );
         context.permission_mode = "ask".into();
-        let listed = super::super::gateway::execute("terminal.workspace.list", json!({}), &context).await.unwrap();
+        let listed = super::super::gateway::execute("terminal.workspace.list", json!({}), &context)
+            .await
+            .unwrap();
         assert_eq!(listed["sessions"][0]["sessionId"], id);
         let mut other_chat = context.clone();
         other_chat.conversation_id = uuid::Uuid::new_v4().to_string();
-        let denied = super::super::gateway::execute("terminal.workspace.read", json!({"sessionId":id,"waitMs":0}), &other_chat).await.unwrap_err();
+        let denied = super::super::gateway::execute(
+            "terminal.workspace.read",
+            json!({"sessionId":id,"waitMs":0}),
+            &other_chat,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(denied.code, "TERMINAL_SESSION_NOT_FOUND");
 
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let marker = format!("KYNXA_PTY_{suffix}");
         let command = format!("Write-Output ('KYNXA_' + 'PTY_{suffix}')\r");
-        let pending = super::super::gateway::execute("terminal.workspace.write", json!({"sessionId":id,"input":command,"reason":"Print a test marker"}), &context).await.unwrap();
+        let pending = super::super::gateway::execute(
+            "terminal.workspace.write",
+            json!({"sessionId":id,"input":command,"reason":"Print a test marker"}),
+            &context,
+        )
+        .await
+        .unwrap();
         assert_eq!(pending["requiresApproval"], true);
         context.permission_mode = "full".into();
-        let written = super::super::gateway::execute("terminal.workspace.write", json!({"sessionId":id,"input":command,"reason":"Print a test marker"}), &context).await.unwrap();
+        let written = super::super::gateway::execute(
+            "terminal.workspace.write",
+            json!({"sessionId":id,"input":command,"reason":"Print a test marker"}),
+            &context,
+        )
+        .await
+        .unwrap();
         assert_eq!(written["inputAccepted"], true);
         assert!(written["commandCompleted"].is_null());
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut after = written["after"].as_u64().unwrap();
             let mut output = String::new();
             loop {
-                let observed = super::super::gateway::execute("terminal.workspace.read", json!({"sessionId":id,"after":after,"waitMs":1000}), &context).await.unwrap();
+                let observed = super::super::gateway::execute(
+                    "terminal.workspace.read",
+                    json!({"sessionId":id,"after":after,"waitMs":1000}),
+                    &context,
+                )
+                .await
+                .unwrap();
                 output.push_str(observed["output"].as_str().unwrap());
                 after = observed["nextCursor"].as_u64().unwrap();
-                if output.contains(&marker) { break; }
+                if output.contains(&marker) {
+                    break;
+                }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let ui_output = action(&json!({"conversationId":context.conversation_id,"sessionId":id,"action":"read","after":0,"waitMs":0}), &context.runtime, &context.data_home).await.unwrap();
         assert!(ui_output["output"].as_str().unwrap().contains(&marker));
-        let closed = super::super::gateway::execute("terminal.workspace.close", json!({"sessionId":id,"reason":"Finish the test shell"}), &context).await.unwrap();
+        let closed = super::super::gateway::execute(
+            "terminal.workspace.close",
+            json!({"sessionId":id,"reason":"Finish the test shell"}),
+            &context,
+        )
+        .await
+        .unwrap();
         assert_eq!(closed["closed"], true);
         assert!(context.runtime.terminals.lock().await.is_empty());
         std::fs::remove_dir_all(root).unwrap();
@@ -1309,7 +1876,6 @@ mod windows {
                 _input: input_read,
                 _output: output_write,
             };
-            // Drain VT output on its own thread before closing the pseudoconsole; ConPTY close can otherwise block.
             // 在独立线程持续排空 VT 输出，避免关闭伪控制台时等待管道而阻塞 HTTP 或退出。
             let reader_output = output.clone();
             std::thread::Builder::new()
@@ -1373,12 +1939,12 @@ mod windows {
             let application = wide(executable.as_os_str());
             let bootstrap = encoded_script(&shell_bootstrap(&output.marker_prefix));
             let mut command = wide(std::ffi::OsStr::new(&format!(
-                "\"{}\" -NoLogo -NoProfile -NoExit -EncodedCommand {bootstrap}", executable.display()
+                "\"{}\" -NoLogo -NoProfile -NoExit -EncodedCommand {bootstrap}",
+                executable.display()
             )));
             let directory = wide(workdir.as_os_str());
             let mut startup: StartupInfoEx = unsafe { std::mem::zeroed() };
             startup.startup.cb = std::mem::size_of::<StartupInfoEx>() as u32;
-            // Explicit null standard handles prevent inheriting redirected gateway logs/input instead of ConPTY.
             // 显式空标准句柄阻止继承网关重定向的日志和输入；子进程应连接 ConPTY 控制台。
             startup.startup.flags = 0x00000100;
             startup.attributes = attributes;
@@ -1447,7 +2013,6 @@ mod windows {
                     if let Ok(mut state) = output.state.lock() {
                         state.exit_code = Some(code);
                     }
-                    // Closing ConPTY finishes its output stream; the reader marks EOF only after draining the tail.
                     // 退出时关闭 ConPTY，读取线程排空尾部后再标记 EOF，避免末行输出被提前截走。
                     if let Ok(mut console) = ended_console.lock() {
                         console.take();
@@ -1504,7 +2069,11 @@ mod windows {
                 console.take();
             }
             if unsafe { WaitForSingleObject(self.process.raw(), 2000) } != 0 {
-                return Err(failure("TERMINAL_CLEANUP_UNCONFIRMED", "终端进程退出尚未确认。", 503));
+                return Err(failure(
+                    "TERMINAL_CLEANUP_UNCONFIRMED",
+                    "终端进程退出尚未确认。",
+                    503,
+                ));
             }
             Ok(())
         }

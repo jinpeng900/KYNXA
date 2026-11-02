@@ -1,4 +1,3 @@
-//! Restore verified working sources before resuming the root loop.
 //! 核验工作来源后恢复根任务，保留逐文档失效和原有状态提交顺序。
 
 use super::*;
@@ -48,8 +47,10 @@ pub(super) async fn restore_root_work_context(
         return Ok(false);
     };
     if let Some(recovered_sequence) = state.assistant["RecoveredReceiptVersion"].as_u64() {
-        if journal.latest_checkpoint()?.is_none_or(|checkpoint| checkpoint.through_event_sequence < recovered_sequence) {
-            // Prefer the updated formal log when receipts postdate the private snapshot.
+        if journal
+            .latest_checkpoint()?
+            .is_none_or(|checkpoint| checkpoint.through_event_sequence < recovered_sequence)
+        {
             // 回执晚于私有快照时优先使用更新后的正式记录。
             state.assistant["WorkContextRestore"] = json!({"restored":false,"reason":"recovered-receipt-newer-than-checkpoint","fallback":"formal-original-readback"});
             return Ok(false);
@@ -68,7 +69,8 @@ pub(super) async fn restore_root_work_context(
     };
     let mut sources = identity_sources(&context, formal, original_goal)?;
     let mut verified =
-        restore_document_sources(runtime, run, ctx, journal, &context, state, &cancellation).await?;
+        restore_document_sources(runtime, run, ctx, journal, &context, state, &cancellation)
+            .await?;
     let references =
         collect_context_sources(runtime, run, &mut sources, cancellation.clone()).await?;
     let saved_progress = saved_validation_progress(&context, &state.assistant);
@@ -112,7 +114,10 @@ fn identity_sources(
     formal: &[Value],
     original_goal: &Value,
 ) -> Result<RestoredSources, GatewayError> {
-    let messages = context["messages"].as_array().ok_or_else(invalid_context)?.clone();
+    let messages = context["messages"]
+        .as_array()
+        .ok_or_else(invalid_context)?
+        .clone();
     let history_sources = context["historySources"]
         .as_array()
         .ok_or_else(invalid_context)?
@@ -127,11 +132,17 @@ fn identity_sources(
         .clone();
     if !crate::models::protocol::complete_pairs(&messages)
         || history_sources.len() > messages.len()
-        || !messages
-            .iter()
-            .any(|message| message["role"] == "user" && (message["content"] == *original_goal
-                || message["attachmentMessageId"].as_str().is_some_and(|id| formal.iter().any(|saved|
-                    saved["Id"] == id && saved["Role"] == "user" && saved["Content"] == *original_goal))))
+        || !messages.iter().any(|message| {
+            message["role"] == "user"
+                && (message["content"] == *original_goal
+                    || message["attachmentMessageId"].as_str().is_some_and(|id| {
+                        formal.iter().any(|saved| {
+                            saved["Id"] == id
+                                && saved["Role"] == "user"
+                                && saved["Content"] == *original_goal
+                        })
+                    }))
+        })
         || formal_sources.iter().any(|source| {
             !formal.iter().any(|message| {
                 message["Id"] == source["id"]
@@ -158,7 +169,6 @@ async fn restore_document_sources(
     state: &mut LoopState,
     cancellation: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<VerifiedSources, GatewayError> {
-    // Restore document work independently; invalidate only changed files.
     // 独立恢复逐文档成果，仅撤销已变化文件的成果。
     let mut checked_document_files = HashSet::new();
     let mut checked_document_knowledge = HashSet::new();
@@ -166,8 +176,11 @@ async fn restore_document_sources(
     state.work_progress =
         serde_json::from_value(context["workProgress"].clone()).unwrap_or_default();
     if context["documentReadbackTargets"].is_array() {
-        native(state.progress.apply("progress.restoreDocumentReadbackTargets",&json!({
-            "targets":context["documentReadbackTargets"],"sameTaskCheckpoint":true})))?;
+        native(state.progress.apply(
+            "progress.restoreDocumentReadbackTargets",
+            &json!({
+            "targets":context["documentReadbackTargets"],"sameTaskCheckpoint":true}),
+        ))?;
     }
     if context["documentDirectory"].is_object() {
         let mut restored_documents =
@@ -194,7 +207,6 @@ async fn restore_document_sources(
                 }
                 for observation in record["observations"].as_array().into_iter().flatten() {
                     let is_knowledge=observation["tool"]=="knowledge.read";
-                    // Verify live file bytes; verify knowledge against its original read and current scope.
                     // 文件核验当前字节，知识资料核验原始读取和当前范围。
                     if !is_knowledge && file_version.is_some() {continue;}
                     let expected=observation["resultRef"].clone();
@@ -235,7 +247,6 @@ async fn restore_document_sources(
                 changed_document_count += 1;
             }
         }
-        // Retain only verified document work when the conversation snapshot falls back.
         // 对话快照回退时，仅保留已核验的文档成果。
         state.documents = restored_documents;
     }
@@ -325,13 +336,23 @@ fn saved_validation_progress(context: &Value, assistant: &Value) -> Value {
     let mut saved_progress = context["runProgress"].clone();
     if !saved_progress.is_object() {
         let completion = &assistant["ToolRun"]["taskCompletion"];
-        if completion["receipts"].as_array().is_some_and(|receipts| !receipts.is_empty()) {
+        if completion["receipts"]
+            .as_array()
+            .is_some_and(|receipts| !receipts.is_empty())
+        {
             saved_progress = json!({"validationReceipts":completion["receipts"]});
             for field in ["mutationRevision", "checkedMutationRevision"] {
-                if let Some(value) = completion.get(field) { saved_progress[field] = value.clone(); }
+                if let Some(value) = completion.get(field) {
+                    saved_progress[field] = value.clone();
+                }
             }
-            for (field, source) in [("latestCodeVersion", "latestSnapshot"), ("validatedCodeVersion", "validatedSnapshot")] {
-                if let Some(value) = completion["codeVersionCoverage"].get(source) { saved_progress[field] = value.clone(); }
+            for (field, source) in [
+                ("latestCodeVersion", "latestSnapshot"),
+                ("validatedCodeVersion", "validatedSnapshot"),
+            ] {
+                if let Some(value) = completion["codeVersionCoverage"].get(source) {
+                    saved_progress[field] = value.clone();
+                }
             }
         }
     }
@@ -350,15 +371,32 @@ async fn verify_receipt_sources(
 ) -> Result<VerifiedReceipts, GatewayError> {
     let legacy_host_debt =
         crate::orchestration::progress::needs_host_effect_reclassification(saved_progress);
-    // Only old unclassified host debt or missing check identity needs supplemental archives.
     // 仅旧宿主待分类项或缺失的检查身份补读归档，新检查点不额外回读已压缩调用。
     let required_reference_count = references.len();
-    for activity in assistant["ToolActivities"].as_array().into_iter().flatten().filter(|activity|
-        matches!(activity["name"].as_str(), Some("terminal.run" | "terminal.host.run" | "terminal.host.start" | "skill.run"))
-            && (legacy_host_debt || saved_progress["validationReceipts"].as_array().into_iter().flatten()
-                .any(|receipt| receipt["checkId"].as_str().is_none() && receipt["toolCallId"] == activity["toolCallId"]))) {
+    for activity in assistant["ToolActivities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|activity| {
+            matches!(
+                activity["name"].as_str(),
+                Some("terminal.run" | "terminal.host.run" | "terminal.host.start" | "skill.run")
+            ) && (legacy_host_debt
+                || saved_progress["validationReceipts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|receipt| {
+                        receipt["checkId"].as_str().is_none()
+                            && receipt["toolCallId"] == activity["toolCallId"]
+                    }))
+        })
+    {
         let reference = &activity["resultRef"];
-        if reference["id"].is_string() && reference["sha256"].is_string() && reference["bytes"].is_u64() {
+        if reference["id"].is_string()
+            && reference["sha256"].is_string()
+            && reference["bytes"].is_u64()
+        {
             references.push(reference.clone());
         }
     }
@@ -375,12 +413,12 @@ async fn verify_receipt_sources(
         let root = runtime.config.data_root.clone();
         let chat = run.conversation_id.clone();
         let id = reference["id"].as_str().unwrap().to_owned();
-        // Verify private attachments internally; exclude their bodies from public results and archives.
         // 私有附件仅内部核验，正文不进入公开结果和归档。
         let classification_only = reference_index >= required_reference_count;
-        let loaded = tokio::task::spawn_blocking(move || data::load_private_tool_result(&root, &chat, &id))
-            .await.map_err(|_| invalid_context())?;
-        // Missing optional legacy evidence retains the old debt; it must not reject an otherwise valid checkpoint.
+        let loaded =
+            tokio::task::spawn_blocking(move || data::load_private_tool_result(&root, &chat, &id))
+                .await
+                .map_err(|_| invalid_context())?;
         // 可选旧证据不可读时保留原待核验项，不拒绝其余有效检查点。
         let archive = match loaded {
             Ok(archive) => archive,
@@ -392,14 +430,31 @@ async fn verify_receipt_sources(
             || archive["sha256"] != reference["sha256"]
             || archive["bytes"] != reference["bytes"]
         {
-            if classification_only { continue; }
+            if classification_only {
+                continue;
+            }
             return Err(invalid_context());
         }
         if archive["requestId"] == run.request_id
-            && let Some(activity) = assistant["ToolActivities"].as_array().into_iter().flatten()
-                .find(|activity| activity["toolCallId"] == archive["toolCallId"] && activity["name"] == archive["toolName"]
-                    && activity["resultRef"] == reference
-                    && matches!(activity["name"].as_str(), Some("terminal.run" | "terminal.host.run" | "terminal.host.start" | "skill.run"))) {
+            && let Some(activity) = assistant["ToolActivities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|activity| {
+                    activity["toolCallId"] == archive["toolCallId"]
+                        && activity["name"] == archive["toolName"]
+                        && activity["resultRef"] == reference
+                        && matches!(
+                            activity["name"].as_str(),
+                            Some(
+                                "terminal.run"
+                                    | "terminal.host.run"
+                                    | "terminal.host.start"
+                                    | "skill.run"
+                            )
+                        )
+                })
+        {
             legacy_calls.push(json!({"call":{"id":activity["toolCallId"],"name":activity["name"],"arguments":activity["arguments"]},
                 "result":{"status":activity["status"],"executed":activity["executed"] != false,
                     "isError":activity["status"] != "completed" || tools::explicit_tool_error(archive["toolName"].as_str().unwrap_or(""), &archive["canonical"]),
@@ -407,7 +462,6 @@ async fn verify_receipt_sources(
         }
         if archive["toolName"] == "knowledge.read" {
             if let Some(source_ref) = archive["canonical"]["sourceRef"].as_str() {
-                // Only verified original reads survive index replacement, not stale structure or unread chunks.
                 // 索引替换后仅复用已核验原始读取，不沿用旧结构或未读片段。
                 let config = runtime.config.clone();
                 let context =
@@ -510,10 +564,11 @@ async fn apply_restored_context(
         .iter()
         .map(|id| id.as_str().map(str::to_owned).ok_or_else(invalid_context))
         .collect::<Result<_, _>>()?;
-    let selected_names = context["selectedNames"].as_array().ok_or_else(invalid_context)?;
+    let selected_names = context["selectedNames"]
+        .as_array()
+        .ok_or_else(invalid_context)?;
     let catalog = tools::builtin_catalog();
     let mut restored_selected = Vec::new();
-    // Restore model-selected order, including recent loads, before schema admission.
     // 声明授额前恢复模型选择的顺序，包括最近加载项。
     for name in selected_names {
         if restored_selected
@@ -522,7 +577,12 @@ async fn apply_restored_context(
         {
             continue;
         }
-        if let Some(index) = state.tools.selected.iter().position(|tool| tool["name"] == *name) {
+        if let Some(index) = state
+            .tools
+            .selected
+            .iter()
+            .position(|tool| tool["name"] == *name)
+        {
             restored_selected.push(state.tools.selected.remove(index));
         } else if let Some(tool) = catalog
             .iter()
@@ -535,35 +595,63 @@ async fn apply_restored_context(
     state.tools.selected = restored_selected;
     state.context.history = messages;
     for message in &mut state.context.history {
-        if message["deferredAttachmentImages"] != true { continue; }
-        if *cancellation.borrow() { return Err(GatewayError::new("ABORT_ERR", "附件恢复已取消。", 499)); }
-        let message_id = message["attachmentMessageId"].as_str().ok_or_else(invalid_context)?.to_owned();
-        // Restore images only; retain extracted text and read coverage.
+        if message["deferredAttachmentImages"] != true {
+            continue;
+        }
+        if *cancellation.borrow() {
+            return Err(GatewayError::new("ABORT_ERR", "附件恢复已取消。", 499));
+        }
+        let message_id = message["attachmentMessageId"]
+            .as_str()
+            .ok_or_else(invalid_context)?
+            .to_owned();
         // 仅恢复图片，保留已提取文本和读取覆盖。
-        let prepared = crate::orchestration::gateway_attachments::prepare_context(runtime, &run.conversation_id, &message_id, 0, true,
-            run.native_cancellation.token.clone()).await?;
-        let mut parts = message["content"].as_array().cloned().unwrap_or_else(|| vec![json!({"type":"text","text":message["content"]})]);
+        let prepared = crate::orchestration::gateway_attachments::prepare_context(
+            runtime,
+            &run.conversation_id,
+            &message_id,
+            0,
+            true,
+            run.native_cancellation.token.clone(),
+        )
+        .await?;
+        let mut parts = message["content"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![json!({"type":"text","text":message["content"]})]);
         for image in prepared["images"].as_array().into_iter().flatten() {
             if let (Some(mime), Some(data)) = (image["mimeType"].as_str(), image["data"].as_str()) {
                 parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}}));
             }
         }
         message["content"] = json!(parts);
-        message.as_object_mut().unwrap().remove("deferredAttachmentImages");
+        message
+            .as_object_mut()
+            .unwrap()
+            .remove("deferredAttachmentImages");
     }
     state.context.history_sources = history_sources;
-    state.context.runtime_snapshot = context.get("runtimeSnapshot").filter(|value|
-        crate::models::transcript::valid_context_before(&json!([value]))).cloned();
-    state.transcript.pending_context_before = context["pendingContextBefore"].as_array()
-        .filter(|_| crate::models::transcript::valid_context_before(&context["pendingContextBefore"]))
-        .cloned().unwrap_or_default();
+    state.context.runtime_snapshot = context
+        .get("runtimeSnapshot")
+        .filter(|value| crate::models::transcript::valid_context_before(&json!([value])))
+        .cloned();
+    state.transcript.pending_context_before = context["pendingContextBefore"]
+        .as_array()
+        .filter(|_| {
+            crate::models::transcript::valid_context_before(&context["pendingContextBefore"])
+        })
+        .cloned()
+        .unwrap_or_default();
     state.context.result_sources = result_sources;
     state.cache.previous_summary = context["previousSummary"].clone();
     state.work_progress =
         serde_json::from_value(context["workProgress"].clone()).unwrap_or_default();
     state.context.formal_sources = formal_sources;
     state.applied_steering_ids = applied_steering_ids;
-    state.completion.retained_completion_observations = context["retainedCompletionObservations"].as_array().cloned().unwrap_or_default();
+    state.completion.retained_completion_observations = context["retainedCompletionObservations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     state.visual.visual_readback_delivered = context["visualReadbackDelivered"] == true;
     state.completion.acceptance_reviewed = context["acceptanceReviewed"] == true;
     state.delivery.pending_delivery = context["pendingDelivery"].as_str().unwrap_or("").to_owned();
@@ -574,22 +662,39 @@ async fn apply_restored_context(
     }
     state.completion.mutation_sequence = context["mutationSequence"].as_u64().unwrap_or(0);
     state.visual.pending_visual_readback = context["pendingVisualReadback"] == true;
-    state.visual.pending_visual_hashes = context["pendingVisualHashes"].as_array().into_iter().flatten()
-        .filter_map(Value::as_str).map(str::to_owned).collect();
+    state.visual.pending_visual_hashes = context["pendingVisualHashes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
     state.delivery.last_progress_ms = context["lastProgressMs"].as_u64().unwrap_or(0);
     if let Some(requirements) = context["acceptanceRequirements"].as_array() {
-        state.completion.acceptance_requirements = requirements.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+        state.completion.acceptance_requirements = requirements
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
     }
     if saved_progress.is_object() {
-        // Restore checks from owned checkpoints or formal broker receipts, never model prose.
         // 从自有检查点或正式执行回执恢复检查状态，不采信模型文字。
-        // Existing checkpoints can predate diagnostic wiring; recover the known lower bound once.
         // 旧检查点可能尚未接入诊断计数，只补齐已知停滞下界，不在每轮重复累加。
-        if let Some(diagnostics) = saved_progress.get_mut("diagnostics").filter(|value| value.is_object()) {
-            diagnostics["noProgressRounds"] = json!(diagnostics["noProgressRounds"].as_u64().unwrap_or(0)
-                .max(state.work_progress.stagnant_rounds()));
+        if let Some(diagnostics) = saved_progress
+            .get_mut("diagnostics")
+            .filter(|value| value.is_object())
+        {
+            diagnostics["noProgressRounds"] = json!(
+                diagnostics["noProgressRounds"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .max(state.work_progress.stagnant_rounds())
+            );
         }
-        native(state.progress.apply("progress.restoreValidation", &json!({"state":saved_progress,"legacyCalls":receipts.legacy_calls})))?;
+        native(state.progress.apply(
+            "progress.restoreValidation",
+            &json!({"state":saved_progress,"legacyCalls":receipts.legacy_calls}),
+        ))?;
     }
     state.context.work_context_reference = reference;
     state.context.work_context_ready = true;

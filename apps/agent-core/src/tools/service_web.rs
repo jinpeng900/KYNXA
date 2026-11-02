@@ -27,7 +27,6 @@ pub fn provider_kind(descriptor: &Value) -> Option<&'static str> {
     }
 }
 
-/// Recognize configured capabilities without connecting or enabling another service.
 /// 只识别已有配置能力，不为候选发现建立连接或启用其他服务。
 pub fn search_server(server: &Value) -> bool {
     matches(
@@ -271,7 +270,6 @@ impl WebState {
                     input["query"] = arguments["query"].clone();
                 }
                 if properties.get("objective").is_some() {
-                    // Some Exa schemas require an objective too; use the stated purpose without rewriting the search query.
                     // 部分 Exa 声明还要求 objective；沿用本次明确用途，不改写原始搜索词，也不给旧声明硬加字段。
                     input["objective"] = arguments["reason"]
                         .as_str()
@@ -280,7 +278,6 @@ impl WebState {
                         .unwrap_or_else(|| arguments["query"].clone());
                 }
                 if provider_kind(descriptor) == Some("parallel") {
-                    // Preserve the original query and stable conversation identity; never rotate identities to evade limits.
                     // 保留原查询与稳定聊天身份，不能通过轮换身份规避限流。
                     if properties.get("search_queries").is_some() {
                         input["search_queries"] = json!([arguments["query"]]);
@@ -418,18 +415,30 @@ mod tests {
         }],"providerId":"exa","query":"original entity and date","reason":"Verify the official release","limit":3});
         let mut web = WebState::default();
         let plan = web.apply("web.providerPlan", &arguments).unwrap();
-        assert_eq!(plan["arguments"], json!({
-            "query":"original entity and date","numResults":3,"objective":"Verify the official release"
-        }));
+        assert_eq!(
+            plan["arguments"],
+            json!({
+                "query":"original entity and date","numResults":3,"objective":"Verify the official release"
+            })
+        );
 
         arguments.as_object_mut().unwrap().remove("reason");
         let fallback = web.apply("web.providerPlan", &arguments).unwrap();
-        assert_eq!(fallback["arguments"]["objective"], "original entity and date");
+        assert_eq!(
+            fallback["arguments"]["objective"],
+            "original entity and date"
+        );
 
-        arguments["descriptors"][0]["originalInputSchema"]["properties"].as_object_mut().unwrap().remove("objective");
+        arguments["descriptors"][0]["originalInputSchema"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("objective");
         arguments["descriptors"][0]["originalInputSchema"]["required"] = json!(["query"]);
         let legacy = web.apply("web.providerPlan", &arguments).unwrap();
-        assert_eq!(legacy["arguments"], json!({"query":"original entity and date","numResults":3}));
+        assert_eq!(
+            legacy["arguments"],
+            json!({"query":"original entity and date","numResults":3})
+        );
         assert!(legacy["arguments"].get("type").is_none());
     }
 
@@ -442,7 +451,10 @@ mod tests {
                 "required":["objective","search_queries"],"additionalProperties":false
             }}],"providerId":"parallel","query":"Original query","reason":"Current research purpose","conversationId":"stable-chat"
         })).unwrap();
-        assert_eq!(parallel["arguments"], json!({"objective":"Current research purpose","search_queries":["Original query"]}));
+        assert_eq!(
+            parallel["arguments"],
+            json!({"objective":"Current research purpose","search_queries":["Original query"]})
+        );
 
         let brave = web.apply("web.providerPlan", &json!({
             "descriptors":[{"serverId":"brave","toolName":"brave_web_search","originalInputSchema":{
@@ -450,6 +462,9 @@ mod tests {
                 "required":["query"],"additionalProperties":false
             }}],"providerId":"brave","query":"Original query","reason":"Current research purpose","limit":3
         })).unwrap();
-        assert_eq!(brave["arguments"], json!({"query":"Original query","count":3}));
+        assert_eq!(
+            brave["arguments"],
+            json!({"query":"Original query","count":3})
+        );
     }
 }

@@ -9,10 +9,11 @@ use super::{
     protocol::{array, string, truthy},
 };
 
-/// Identify application-managed local providers without starting an engine.
 /// 仅判断自管本地连接，不触发引擎或进程操作。
 pub fn is_managed_local(connection: &Value) -> bool {
-    connection["providerId"].as_str().is_some_and(|id| id.starts_with("kynxa-local-"))
+    connection["providerId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("kynxa-local-"))
 }
 
 fn error(message: &str) -> Value {
@@ -52,7 +53,6 @@ fn public_provider(provider: &Value) -> Value {
         .cloned()
         .unwrap_or(json!("openai-completions"));
     result["contextWindowMode"] = json!("automatic");
-    // Public legacy defaults keep the desktop integer contract; runtime capacity remains automatic.
     // 公共旧字段默认值保持桌面整数合同；运行时额度仍由自动能力与观察决定，不改写原配置。
     result["contextWindowTokens"] = provider
         .get("contextWindowTokens")
@@ -78,7 +78,6 @@ pub(crate) fn valid_model(value: &Value) -> bool {
     })
 }
 
-/// Validate credentials, endpoints and retained defaults here; adapters only persist them.
 /// 此处校验凭据、端点和保留的默认值；适配器只负责持久化。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     let value = match operation {

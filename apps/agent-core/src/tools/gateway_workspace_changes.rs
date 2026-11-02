@@ -1,4 +1,3 @@
-//! A coarse workspace diff operation reads only the current authorized directory and never invokes external diff helpers.
 //! 工作区变更采用一次粗粒度读取，只覆盖当前授权目录，不执行外部 diff 辅助程序。
 
 use super::gateway::{GatewayToolContext, check_cancelled, failure};

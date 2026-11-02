@@ -52,7 +52,6 @@ public sealed class ThemeIcon : UserControl
         _canvas.Height = icon.Height;
         foreach (var definition in icon.Paths)
         {
-            // The mini-language comes only from the fixed catalog generated from repository-owned assets.
             // 几何简写只来自仓库内受信图标生成的固定目录，调用者只能选择键，不能传入几何或标记。
             var path = (PathShape)XamlReader.Load(
                 "<Path xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\" Data=\"" + definition.Data + "\" />");

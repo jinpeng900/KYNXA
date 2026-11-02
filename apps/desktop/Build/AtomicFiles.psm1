@@ -1,6 +1,5 @@
 ﻿Set-StrictMode -Version Latest
 
-# Publish a completed sibling file with one Windows rename; never delete the previous checkpoint first.
 # 已完成的同目录临时文件通过一次 Windows 改名发布，不先删除上一份检查点。
 if (-not ('KynxaAtomicFiles' -as [type])) {
     Add-Type -TypeDefinition @'

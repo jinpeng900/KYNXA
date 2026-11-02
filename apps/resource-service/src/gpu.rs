@@ -15,12 +15,19 @@ pub struct GpuProcessSample {
 
 impl GpuProcessSample {
     pub fn unknown(reason: &'static str) -> Self {
-        Self { processes: Vec::new(), is_complete: false, reason: Some(reason) }
+        Self {
+            processes: Vec::new(),
+            is_complete: false,
+            reason: Some(reason),
+        }
     }
 
     pub fn memory_for(&self, process_id: u32) -> Option<u64> {
-        self.processes.iter().find(|process| process.process_id == process_id)
-            .map(|process| process.memory_bytes).unwrap_or(if self.is_complete { Some(0) } else { None })
+        self.processes
+            .iter()
+            .find(|process| process.process_id == process_id)
+            .map(|process| process.memory_bytes)
+            .unwrap_or(if self.is_complete { Some(0) } else { None })
     }
 }
 
@@ -69,9 +76,9 @@ mod windows {
     type NvmlDeviceMemory = unsafe extern "C" fn(NvmlDevice, *mut NvmlMemory) -> u32;
     type NvmlDeviceUtilization = unsafe extern "C" fn(NvmlDevice, *mut NvmlUtilization) -> u32;
     type NvmlDeviceUuid = unsafe extern "C" fn(NvmlDevice, *mut c_char, u32) -> u32;
-    type NvmlDeviceProcesses = unsafe extern "C" fn(NvmlDevice, *mut u32, *mut NvmlProcessInfo) -> u32;
+    type NvmlDeviceProcesses =
+        unsafe extern "C" fn(NvmlDevice, *mut u32, *mut NvmlProcessInfo) -> u32;
 
-    // NVML v3 uses the v2 process layout; WDDM reports u64::MAX when attribution is unavailable.
     // NVML v3 使用 v2 进程布局；WDDM 无法归属时返回 u64::MAX，绝不能当作占用或零。
     #[repr(C)]
     #[derive(Clone, Default)]
@@ -117,7 +124,6 @@ mod windows {
 
     impl GpuSensor {
         pub fn open() -> Option<Self> {
-            // Load only the system driver's DLL; never search the working directory or invoke a shell.
             // 仅加载系统驱动 DLL，不搜索工作目录，也不启动 shell 或轮询 nvidia-smi。
             let name: Vec<u16> = "nvml.dll\0".encode_utf16().collect();
             let library = unsafe { LoadLibraryExW(name.as_ptr(), ptr::null_mut(), 0x0000_0800) };
@@ -133,8 +139,12 @@ mod windows {
                 let utilization =
                     GetProcAddress(library, c"nvmlDeviceGetUtilizationRates".as_ptr());
                 let uuid = GetProcAddress(library, c"nvmlDeviceGetUUID".as_ptr());
-                let compute_processes = GetProcAddress(library, c"nvmlDeviceGetComputeRunningProcesses_v3".as_ptr());
-                let graphics_processes = GetProcAddress(library, c"nvmlDeviceGetGraphicsRunningProcesses_v3".as_ptr());
+                let compute_processes =
+                    GetProcAddress(library, c"nvmlDeviceGetComputeRunningProcesses_v3".as_ptr());
+                let graphics_processes = GetProcAddress(
+                    library,
+                    c"nvmlDeviceGetGraphicsRunningProcesses_v3".as_ptr(),
+                );
                 if [init, shutdown, count, handle, memory]
                     .iter()
                     .any(|symbol| symbol.is_null())
@@ -174,10 +184,20 @@ mod windows {
                             utilization,
                         ))
                     },
-                    compute_processes: if compute_processes.is_null() { None } else {
-                        Some(std::mem::transmute::<*mut c_void, NvmlDeviceProcesses>(compute_processes)) },
-                    graphics_processes: if graphics_processes.is_null() { None } else {
-                        Some(std::mem::transmute::<*mut c_void, NvmlDeviceProcesses>(graphics_processes)) },
+                    compute_processes: if compute_processes.is_null() {
+                        None
+                    } else {
+                        Some(std::mem::transmute::<*mut c_void, NvmlDeviceProcesses>(
+                            compute_processes,
+                        ))
+                    },
+                    graphics_processes: if graphics_processes.is_null() {
+                        None
+                    } else {
+                        Some(std::mem::transmute::<*mut c_void, NvmlDeviceProcesses>(
+                            graphics_processes,
+                        ))
+                    },
                     adapter_identity: if uuid.is_null() {
                         None
                     } else {
@@ -208,7 +228,6 @@ mod windows {
                     None
                 }
             });
-            // Display docking can reorder DXGI ordinals; validate the LUID again before publishing a mapping.
             // 显示器连接可改变 DXGI 排序，每次发布设备映射前按 LUID 重新核对序号。
             let dml_device_id = self
                 .adapter_identity
@@ -236,45 +255,99 @@ mod windows {
         }
     }
 
-    fn query_processes(device: NvmlDevice, compute: Option<NvmlDeviceProcesses>, graphics: Option<NvmlDeviceProcesses>) -> GpuProcessSample {
+    fn query_processes(
+        device: NvmlDevice,
+        compute: Option<NvmlDeviceProcesses>,
+        graphics: Option<NvmlDeviceProcesses>,
+    ) -> GpuProcessSample {
         let mut processes: HashMap<u32, Option<u64>> = HashMap::new();
         let mut is_complete = true;
         for query in [compute, graphics] {
-            let Some(query) = query else { is_complete = false; continue; };
-            // Fixed bounds prevent driver churn from allocating unbounded IPC or process lists.
+            let Some(query) = query else {
+                is_complete = false;
+                continue;
+            };
             // 固定上限防止驱动进程变化导致无界分配或 IPC，列表收紧失败明确未知。
             let mut count = 128_u32;
             let mut records = vec![NvmlProcessInfo::default(); count as usize];
             let status = unsafe { query(device, &mut count, records.as_mut_ptr()) };
-            if status != 0 || count > records.len() as u32 { is_complete = false; continue; }
+            if status != 0 || count > records.len() as u32 {
+                is_complete = false;
+                continue;
+            }
             for record in records.into_iter().take(count as usize) {
-                if record.pid == 0 { continue; }
-                let bytes = if record.used_gpu_memory == u64::MAX { None } else { Some(record.used_gpu_memory) };
-                // Compute and graphics return total application memory, so duplicate PIDs are never summed.
+                if record.pid == 0 {
+                    continue;
+                }
+                let bytes = if record.used_gpu_memory == u64::MAX {
+                    None
+                } else {
+                    Some(record.used_gpu_memory)
+                };
                 // 计算与图形接口都返回应用总占用，同一 PID 的两份记录不能相加；任一未知保持未知。
-                processes.entry(record.pid).and_modify(|previous| *previous = match (*previous, bytes) {
-                    (Some(first), Some(second)) => Some(first.min(second)), _ => None,
-                }).or_insert(bytes);
+                processes
+                    .entry(record.pid)
+                    .and_modify(|previous| {
+                        *previous = match (*previous, bytes) {
+                            (Some(first), Some(second)) => Some(first.min(second)),
+                            _ => None,
+                        }
+                    })
+                    .or_insert(bytes);
             }
         }
         let has_unknown = processes.values().any(Option::is_none);
-        GpuProcessSample { processes: processes.into_iter().map(|(process_id, memory_bytes)|
-            GpuProcessMemory { process_id, memory_bytes }).collect(), is_complete,
-            reason: if has_unknown { Some("GPU_PROCESS_MEMORY_DRIVER_UNAVAILABLE") }
-                else if !is_complete { Some("GPU_PROCESS_MEMORY_QUERY_UNAVAILABLE") } else { None } }
+        GpuProcessSample {
+            processes: processes
+                .into_iter()
+                .map(|(process_id, memory_bytes)| GpuProcessMemory {
+                    process_id,
+                    memory_bytes,
+                })
+                .collect(),
+            is_complete,
+            reason: if has_unknown {
+                Some("GPU_PROCESS_MEMORY_DRIVER_UNAVAILABLE")
+            } else if !is_complete {
+                Some("GPU_PROCESS_MEMORY_QUERY_UNAVAILABLE")
+            } else {
+                None
+            },
+        }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
-        unsafe extern "C" fn reported(_device: NvmlDevice, count: *mut u32, records: *mut NvmlProcessInfo) -> u32 {
-            unsafe { *count = 2;
-                records.write(NvmlProcessInfo { pid: 8, used_gpu_memory: 100, ..Default::default() });
-                records.add(1).write(NvmlProcessInfo { pid: 12, used_gpu_memory: u64::MAX, ..Default::default() }); }
+        unsafe extern "C" fn reported(
+            _device: NvmlDevice,
+            count: *mut u32,
+            records: *mut NvmlProcessInfo,
+        ) -> u32 {
+            unsafe {
+                *count = 2;
+                records.write(NvmlProcessInfo {
+                    pid: 8,
+                    used_gpu_memory: 100,
+                    ..Default::default()
+                });
+                records.add(1).write(NvmlProcessInfo {
+                    pid: 12,
+                    used_gpu_memory: u64::MAX,
+                    ..Default::default()
+                });
+            }
             0
         }
-        unsafe extern "C" fn too_many(_device: NvmlDevice, count: *mut u32, _records: *mut NvmlProcessInfo) -> u32 {
-            unsafe { *count = 129; } 7
+        unsafe extern "C" fn too_many(
+            _device: NvmlDevice,
+            count: *mut u32,
+            _records: *mut NvmlProcessInfo,
+        ) -> u32 {
+            unsafe {
+                *count = 129;
+            }
+            7
         }
         #[test]
         fn driver_lists_deduplicate_contexts_and_keep_wddm_sentinel_unknown() {
@@ -333,7 +406,10 @@ mod tests {
         assert_eq!(sample.memory_for(1), None);
         sample.is_complete = true;
         assert_eq!(sample.memory_for(1), Some(0));
-        sample.processes.push(GpuProcessMemory { process_id: 1, memory_bytes: None });
+        sample.processes.push(GpuProcessMemory {
+            process_id: 1,
+            memory_bytes: None,
+        });
         assert_eq!(sample.memory_for(1), None);
         sample.processes[0].memory_bytes = Some(100);
         assert_eq!(sample.memory_for(1), Some(100));

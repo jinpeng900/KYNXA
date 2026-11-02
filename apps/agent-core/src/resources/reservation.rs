@@ -49,7 +49,6 @@ fn records(profile: &Value, backend: &str) -> Result<Vec<Value>, String> {
         .unwrap_or_default())
 }
 
-/// Samples are accepted only from this reservation's owned isolated process, never gateway RSS.
 /// 仅采纳当前预约拥有的隔离进程采样；网关 RSS 和其他进程不能冒充模型占用。
 fn remember_cost(
     profile: &Value,
@@ -104,7 +103,6 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     inference::calculate("resources.inferenceRequest", &args)
 }
 
-/// Rust owns approved lease facts and all model demand/feedback rules; adapters execute effects.
 /// Rust 拥有已批准租约事实及完整模型需求/反馈规则；适配器执行申请、续期和释放 I/O。
 #[derive(Default)]
 pub struct ReservationState {
@@ -566,7 +564,6 @@ impl ReservationState {
                 if accepted && ["gpu", "gpuUpgrade"].contains(&kind) {
                     self.gpu.push(lease.clone());
                 }
-                // Retain even an unusable grant until release is acknowledged; uncertainty never permits replacement.
                 // 不可用的批准额度也须保留到释放确认；未知清理状态不能允许替代驻留。
                 if !accepted {
                     self.gpu.push(lease.clone());

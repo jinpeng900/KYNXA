@@ -3,7 +3,6 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Observe a unique active root in this chat without resuming paused work.
 /// 仅观察本聊天唯一的活动根任务，不恢复暂停任务或代选其他聊天。
 /// </summary>
 internal static class RunningTaskObservation

@@ -20,7 +20,6 @@ using Span = Microsoft.UI.Xaml.Documents.Span;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// One selectable document, including across paragraphs and code fences.
 /// 统一的可选择文档，支持跨段落与代码块选择。
 /// </summary>
 public sealed partial class MarkdownReply : UserControl
@@ -190,7 +189,6 @@ public sealed partial class MarkdownReply : UserControl
                 target.Add(span);
                 break;
             case LinkInline link:
-                // Rendering makes no network requests; image references remain readable links.
                 // 渲染不发起网络请求；图片引用仍以可阅读的链接展示。
                 if (TryLink(link.Url, out var uri))
                 {

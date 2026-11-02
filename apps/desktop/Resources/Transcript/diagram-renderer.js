@@ -21,7 +21,6 @@
       deterministicIds: false, theme: 'base',
       fontFamily: UI_FONT_FAMILY,
       flowchart: { htmlLabels: false, useMaxWidth: false, wrappingWidth: 220 },
-      // Sequence labels have separate family defaults; set them before layout so measured and displayed glyphs match.
       // 时序图标签有独立默认字体，布局前同步设置，确保文字测量与实际显示一致。
       sequence: { useMaxWidth: false, wrap: true, wrapPadding: 12, actorMargin: 45, width: 170,
         actorFontFamily: UI_FONT_FAMILY, noteFontFamily: UI_FONT_FAMILY, messageFontFamily: UI_FONT_FAMILY },
@@ -52,7 +51,6 @@
         doneTaskBkgColor: soft, doneTaskBorderColor: border, critBkgColor: soft, critBorderColor: accent,
         sectionBkgColor: soft, altSectionBkgColor: main, sectionBkgColor2: soft, gridColor: border,
         errorBkgColor: soft, errorTextColor: text,
-        // High contrast diagrams use only the actual system foreground/background pair.
         // 高对比图表仅使用真实系统前景和背景组合，避免自动衍生的色阶削弱对比度。
         ...(palette?.isHighContrast === true ? Object.fromEntries(Array.from({ length: 12 }, (_, index) => [
           ['cScale' + index, main], ['cScaleLabel' + index, text], ['cScaleInv' + index, text]
@@ -77,7 +75,6 @@
       parent.postMessage({ type: 'kynxa-mermaid-result', token: command.token, error: true }, '*');
     } finally {
       rendering = false;
-      // Remove Mermaid's temporary output after each request, including failed parses.
       // 每次请求后清除 Mermaid 临时节点，包括解析失败时生成的内容。
       document.body.replaceChildren();
     }

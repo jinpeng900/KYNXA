@@ -13,7 +13,6 @@ public sealed record ChromeWorkspaceState(string? Url, string? Title, bool CanGo
     long? WindowId = null, ChromeWorkspaceWindowBounds? WindowBounds = null, ChromeWorkspaceViewport? Viewport = null);
 
 /// <summary>
-/// Rust owns Chrome lifecycle; the client sends navigation and the viewport relays input.
 /// Rust 管理 Chrome 生命周期；客户端提交导航，视口转交输入，不另记进程。
 /// </summary>
 public sealed class ChromeWorkspaceApiClient : IDisposable

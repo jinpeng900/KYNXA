@@ -12,12 +12,10 @@ public sealed record ConversationHistoryPage(Guid ConversationId, List<ChatMessa
     string? NewerCursor = null, bool HasNewer = false, int StartIndex = 0, int EndIndex = 0);
 
 /// <summary>
-/// The gateway owns conversation persistence. The desktop keeps only its current UI projection.
 /// 网关拥有正式聊天持久化；桌面只保留当前展示投影。
 /// </summary>
 public sealed class ProjectStore(string dataDirectory) : IDisposable
 {
-    // Bound cold catalog/history recovery time while respecting caller cancellation.
     // 冷启动恢复及正式历史校验有等待上限，仍支持调用方取消。
     private readonly HttpClient _httpClient = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromMinutes(2));
     private readonly SemaphoreSlim _requestGate = new(1, 1);
@@ -34,7 +32,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         LoadCatalogAsync(includeMessages: true, cancellationToken);
 
     /// <summary>
-    /// Read metadata and paged history from the gateway; load older bodies on demand.
     /// 元信息和历史页均来自网关，按需读旧正文，不另存聊天状态。
     /// </summary>
     public Task<ConversationCatalog> LoadMetadataAsync(CancellationToken cancellationToken = default) =>
@@ -42,7 +39,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
 
     private async Task<ConversationCatalog> LoadCatalogAsync(bool includeMessages, CancellationToken cancellationToken)
     {
-        // Headers-only transport avoids duplicating the JSON body; its deadline also covers streamed decoding.
         // 仅先接收响应头，避免完整 JSON 缓冲副本；总期限同时覆盖后续流式解码。
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_httpClient.Timeout);
@@ -81,7 +77,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         return page;
     }
 
-    // Restore persisted message IDs when reusing a page evicted from the display window.
     // 复用历史页时恢复已保存的消息 ID，避免将淘汰的旧消息当成新提交。
     internal void AcceptHistoryPage(ConversationHistoryPage page)
     {
@@ -91,7 +86,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     /// <summary>
-    /// Acknowledge the user's stable ID only after the gateway confirms its durable submission.
     /// 网关确认持久化后才确认用户消息 ID，后续保存不再上传；仅 started 事件不足为据。
     /// </summary>
     internal void AcceptSubmittedMessage(Guid conversationId, Guid userMessageId)
@@ -100,7 +94,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     /// <summary>
-    /// Projection eviction cannot drop user submissions that have not reached durable storage.
     /// 展示缓存淘汰不能丢弃尚未进入正式存储的用户消息。
     /// </summary>
     public bool CanReleaseHistory(ProjectChatState chat)
@@ -131,7 +124,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
             _knownUserMessages.RemoveWhere(entry => entry.Chat == conversationId && !retainedIds.Contains(entry.Message));
     }
 
-    // Capture snapshots before the first await: UI collections can change during a request.
     // 首个 await 前捕获快照；请求执行时 UI 集合可能继续变化。
     private List<ProjectState> SnapshotProjects(IReadOnlyList<ProjectState> projects) => projects.Select(project =>
         {
@@ -160,7 +152,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     /// <summary>
-    /// Save both sidebar scopes in one revision; unchanged exit snapshots need no network write.
     /// 两类侧栏范围在同一版本内保存；退出快照未变化时无需网络写入。
     /// </summary>
     public Task SaveCatalogAsync(IReadOnlyList<ProjectState> projects, IEnumerable<ProjectChatState> chats,
@@ -183,7 +174,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
             {
                 Id = chat.Id, Title = chat.Title, Draft = chat.Draft, IsSample = chat.IsSample,
                 IsPinned = chat.IsPinned, IsArchived = chat.IsArchived, KeepWorkspace = chat.KeepWorkspace,
-                // Runtime owns assistant content. Metadata updates send only new submitted user messages.
                 // 助手内容由运行时负责；元数据更新只发送新提交的用户消息。
                 Messages = chat.Messages.Where(message => message.Role == "user" && !_knownUserMessages.Contains((chat.Id, message.Id))).ToList()
             };
@@ -232,7 +222,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
                 catalog = await ReadAsync(retry, cancellationToken);
             }
             else catalog = await ReadAsync(response, cancellationToken);
-            // Apply mount receipts only to unchanged submissions, preserving later local edits.
             // 目录回执只更新提交后未改的绑定，保留后续更换或取消关联的修改。
             var savedBindings = catalog.Projects.ToDictionary(project => project.Id);
             foreach (var project in projectReferences ?? _loadedProjects)
@@ -241,7 +230,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
                 { project.FolderPath = saved.FolderPath; project.Mounts = saved.Mounts.ToList(); project.DefaultMountId = saved.DefaultMountId; }
             if (projectReferences is not null) _loadedProjects = projectReferences;
             AcceptCatalog(catalog);
-            // Successful metadata receipts acknowledge submitted user IDs without resending history.
             // 元信息保存成功时一并确认用户消息 ID，无需重传历史正文。
             lock (_knownUserMessagesLock)
                 foreach (var submittedChat in new[] { projects, chats }.Where(value => value is not null)
@@ -254,7 +242,6 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     /// <summary>
-    /// Rebase only concurrent work-folder changes; all other metadata or competing folder edits retain conflict semantics.
     /// 仅合并并发工作目录变更，其他元信息变更和同一目录的竞争编辑仍保留版本冲突。
     /// </summary>
     private JsonElement? MergeWorkFolders(ConversationCatalog latest, JsonElement? projects)

@@ -1,4 +1,3 @@
-//! Offline structured document decoders share bounded packages and stable source identities.
 //! 离线结构化文档解码共用有界容器与稳定来源身份，不执行宏、脚本或外部资源。
 
 use crate::storage::{ContractError, gateway};
@@ -25,7 +24,6 @@ pub(crate) fn cancelled(cancel: &Arc<AtomicBool>) -> Result<(), ContractError> {
     }
 }
 
-/// Text offsets use UTF-16, matching source references rather than UTF-8 byte positions.
 /// 正文位置使用 UTF-16，与来源引用一致，不将 UTF-8 字节数当成字符偏移。
 pub(crate) struct DocumentText {
     pub(crate) text: String,
@@ -88,7 +86,6 @@ impl DocumentText {
     }
 }
 
-/// All ZIP members are checked before a parser allocates from their declared sizes.
 /// 在解析器按声明大小分配内存前核验所有 ZIP 成员；不解压到磁盘或跟随容器路径。
 pub(crate) struct DocumentPackage<'a> {
     archive: zip::ZipArchive<Cursor<&'a [u8]>>,
@@ -198,7 +195,6 @@ pub(crate) fn attribute(
     Ok(None)
 }
 
-/// Namespace-independent XML extraction still rejects DTDs and keeps tables and paragraph breaks.
 /// XML 不依赖前缀命名，但拒绝 DTD；保留表格列、段落和实体文字，不解析外部实体。
 fn xml_text(
     bytes: &[u8],
@@ -315,7 +311,6 @@ fn xml_text(
     Ok(())
 }
 
-/// Store cached numeric/date/currency values even when an exporter omits rendered paragraph text.
 /// 即使导出器未写显示段落，也保留缓存数值、日期和货币单位；公式作为原文而非计算指令。
 fn open_document_cell_fields(
     event: &quick_xml::events::BytesStart<'_>,
@@ -402,7 +397,6 @@ fn relationships(
     Ok(result)
 }
 
-/// Relative package relationships may move within the package but never escape its root.
 /// 相对关系可在容器内部移动，不能逃出根目录、引用盘符或变成远程 URL。
 fn package_target(base: &str, target: &str) -> Result<String, ContractError> {
     if target.contains('\\')
@@ -560,7 +554,6 @@ pub(crate) fn open_document(
     )
 }
 
-/// EPUB chapter order is taken from the spine, never guessed from ZIP member ordering.
 /// EPUB 正文按 spine 阅读顺序组织，不用 ZIP 文件名顺序猜测章节。
 fn epub(
     bytes: &[u8],
@@ -657,7 +650,6 @@ fn epub(
     )
 }
 
-/// Static HTML never runs scripts, loads images or follows network references.
 /// 静态 HTML 只读正文，不运行脚本、加载图片或跟随网络引用。
 pub(crate) fn html_text(
     bytes: &[u8],
@@ -723,7 +715,6 @@ fn html_text_with_content_type(
     Ok(())
 }
 
-/// Stream reviewed RTF tokens without allocating an unchecked document or losing the declared code page.
 /// 逐个处理已审阅词法器的 RTF token，避免 unchecked 文档分配，并保留声明的文字编码。
 fn rtf(
     bytes: &[u8],
@@ -905,7 +896,6 @@ fn flush_unicode(unicode: &mut Vec<u16>, output: &mut DocumentText) -> Result<()
     Ok(())
 }
 
-/// Parsers return complete text or a typed error; a limited prefix is never silently indexed.
 /// 解析返回完成正文或类型化错误，不把额度截断的前缀静默发布到索引。
 pub(crate) fn decode(
     format: &str,

@@ -36,7 +36,6 @@
       ? businessParameters.arguments : businessParameters;
   }
 
-  // Traverse only public result containers, never arbitrary metadata, scripts, or policy fields.
   // 只遍历公开结果容器，不检查任意元数据、脚本或权限策略字段。
   function resultParts(result) {
     const texts = [], urls = [], resultQueue = [{ value: result, depth: 0 }];
@@ -80,7 +79,6 @@
       }
       const navigationMatch = /^Successfully navigated to\s+(https?:\/\/\S+)/imu.exec(text);
       if (navigationMatch) return navigationMatch[1];
-      // evaluate_script JSON can explicitly return its own current location.
       // evaluate_script 的 JSON 结果可以明确返回当前页面位置。
       const jsonBlockMatch = /```json\s*([\s\S]*?)```/iu.exec(text);
       if (jsonBlockMatch) try {

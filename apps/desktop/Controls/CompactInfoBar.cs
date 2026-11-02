@@ -10,7 +10,6 @@ using Microsoft.UI.Xaml.Media;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Bound floating notice text while keeping its complete message available to the native tooltip and automation.
 /// 限制悬浮提示的正文高度，原生提示和辅助功能继续保留完整消息。
 /// </summary>
 public sealed class CompactInfoBar : InfoBar
@@ -117,7 +116,6 @@ public sealed class CompactInfoBar : InfoBar
             _dismissTimer.IsRepeating = false;
             _dismissTimer.Tick += DismissTimerTick;
         }
-        // Charge only visible idle time; interaction pauses the remaining delay instead of restarting it.
         // 只累计可见空闲时间；交互时暂停剩余倒计时，而不是重新计满五秒。
         _dismissTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, _remaining.TotalMilliseconds));
         _dismissElapsed.Restart();
@@ -127,7 +125,6 @@ public sealed class CompactInfoBar : InfoBar
     private void DismissTimerTick(DispatcherQueueTimer sender, object args)
     {
         if (!ReferenceEquals(sender, _dismissTimer)) return;
-        // Recheck elapsed time so a queued tick from an earlier notice cannot dismiss its replacement.
         // 再核对实际经过时间，避免上一条提示排队中的回调关闭替换后的新提示。
         UpdateAutoDismiss();
     }

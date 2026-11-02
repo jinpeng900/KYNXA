@@ -31,7 +31,6 @@ pub fn protocol(connection: &Value) -> &str {
         .unwrap_or("openai-completions")
 }
 
-/// Bind identity answers to the resolved request route without exposing credentials or certifying upstream weights.
 /// 身份回答绑定本次已解析的请求路由，不暴露凭据，也不把连接配置当成真实上游权重的认证。
 pub(crate) fn runtime_identity_prompt(connection: &Value, model: &str) -> String {
     let endpoint_host = url::Url::parse(connection["baseUrl"].as_str().unwrap_or(""))
@@ -53,31 +52,42 @@ pub(crate) fn runtime_identity_prompt(connection: &Value, model: &str) -> String
     )
 }
 
-/// Owned model capabilities are projected from verified runtime observations; other connections retain their contract.
 /// 自管模型能力由已核验的运行时观测投影；API及外部本地连接仍沿用原合同。
 pub fn supports_tools(connection: &Value) -> bool {
-    !connection["providerId"].as_str().is_some_and(|id| id.starts_with("kynxa-local-"))
-        || connection["capabilities"].as_array().is_some_and(|items| items.iter().any(|item| item == "tools"))
+    !connection["providerId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("kynxa-local-"))
+        || connection["capabilities"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == "tools"))
 }
 
 fn merge_text_turns(messages: Vec<Value>) -> Vec<Value> {
     let mut turns: Vec<Value> = Vec::new();
     for mut message in messages {
-        if let Some(previous) = turns.last_mut().filter(|previous| previous["role"] == message["role"] && message["role"] != "system") {
+        if let Some(previous) = turns
+            .last_mut()
+            .filter(|previous| previous["role"] == message["role"] && message["role"] != "system")
+        {
             let joined = match (previous["content"].as_str(), message["content"].as_str()) {
                 (Some(left), Some(right)) => json!(format!("{left}\n\n{right}")),
                 _ => {
-                    let blocks = |value: &Value| value.as_array().cloned()
-                        .unwrap_or_else(|| vec![json!({"type":"text","text":value.as_str().unwrap_or("")})]);
+                    let blocks = |value: &Value| {
+                        value.as_array().cloned().unwrap_or_else(|| {
+                            vec![json!({"type":"text","text":value.as_str().unwrap_or("")})]
+                        })
+                    };
                     let mut content = blocks(&previous["content"]);
-                    content.extend(blocks(&message["content"])); json!(content)
+                    content.extend(blocks(&message["content"]));
+                    json!(content)
                 }
             };
             previous["content"] = joined;
         } else {
-            // Tool execution is disabled for this model; an obsolete empty call field must not activate a parser.
             // 此模型不支持工具执行，历史空调用字段也不能意外激活服务端工具解析器。
-            if let Some(fields) = message.as_object_mut() { fields.remove("tool_calls"); }
+            if let Some(fields) = message.as_object_mut() {
+                fields.remove("tool_calls");
+            }
             turns.push(message);
         }
     }
@@ -93,7 +103,6 @@ pub fn request_path(connection: &Value) -> &'static str {
     }
 }
 
-/// Purpose-specific controls come from one pure capability rule; credentials and inferred quotas are excluded.
 /// 目的控制复用同一纯能力规则；不携带凭据、不推断代理额度，可用于辅助摘要缓存身份与审计。
 pub fn summary_controls(connection: &Value, model: &str) -> Result<Value, ModelError> {
     let endpoint = url::Url::parse(connection["baseUrl"].as_str().unwrap_or(""))
@@ -112,7 +121,6 @@ pub fn summary_controls(connection: &Value, model: &str) -> Result<Value, ModelE
     .map_err(ModelError::native)
 }
 
-/// Build an auxiliary summary request without changing the normal request builder or saved user settings.
 /// 辅助摘要复用正式协议构建器，只附加本次目的控制；普通请求和用户保存的思考配置保持不变。
 pub fn build_summary_request(
     connection: &Value,
@@ -122,10 +130,17 @@ pub fn build_summary_request(
     max_output_tokens: Option<u64>,
     stream: bool,
 ) -> Result<(Value, Value), ModelError> {
-    build_summary_request_with_tools(connection, model, messages, system, max_output_tokens, &[], stream)
+    build_summary_request_with_tools(
+        connection,
+        model,
+        messages,
+        system,
+        max_output_tokens,
+        &[],
+        stream,
+    )
 }
 
-/// Reuse an authorized request prefix for compaction while allowing text output only.
 /// 压缩复用当前授权的请求前缀，但摘要只能输出正文，不触发工具执行。
 pub fn build_summary_request_with_tools(
     connection: &Value,
@@ -145,10 +160,15 @@ pub fn build_summary_request_with_tools(
         tools,
         stream,
     )?;
-    if body["tools"].as_array().is_some_and(|tools| !tools.is_empty()) {
+    if body["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty())
+    {
         match protocol(connection) {
             "anthropic-messages" => body["tool_choice"] = json!({"type":"none"}),
-            "ollama" => { body.as_object_mut().unwrap().remove("tools"); },
+            "ollama" => {
+                body.as_object_mut().unwrap().remove("tools");
+            }
             _ => body["tool_choice"] = json!("none"),
         }
     }
@@ -159,17 +179,31 @@ pub fn build_summary_request_with_tools(
     Ok((body, controls["audit"].clone()))
 }
 
-/// Append only a native summary tail to an already projected prefix; never translate its tool updates twice.
 /// 只给已投影的协议前缀追加原生摘要尾部；已有工具增量块不再翻译第二遍。
-pub(crate) fn build_summary_from_wire_prefix(connection: &Value, model: &str, prefix: &Value,
-    tail: &[Value], max_output_tokens: Option<u64>) -> Result<(Value, Value), ModelError> {
-    let (mut body, controls) = build_summary_request_with_tools(connection, model, tail, "",
-        max_output_tokens, protocol::array(&prefix["tools"]), false)?;
+pub(crate) fn build_summary_from_wire_prefix(
+    connection: &Value,
+    model: &str,
+    prefix: &Value,
+    tail: &[Value],
+    max_output_tokens: Option<u64>,
+) -> Result<(Value, Value), ModelError> {
+    let (mut body, controls) = build_summary_request_with_tools(
+        connection,
+        model,
+        tail,
+        "",
+        max_output_tokens,
+        protocol::array(&prefix["tools"]),
+        false,
+    )?;
     let mut messages = protocol::array(&prefix["messages"]).to_vec();
     messages.extend_from_slice(protocol::array(&body["messages"]));
     body["messages"] = json!(messages);
-    if let Some(system) = prefix.get("system") { body["system"] = system.clone(); }
-    else if let Some(object) = body.as_object_mut() { object.remove("system"); }
+    if let Some(system) = prefix.get("system") {
+        body["system"] = system.clone();
+    } else if let Some(object) = body.as_object_mut() {
+        object.remove("system");
+    }
     Ok((body, controls))
 }
 
@@ -199,7 +233,6 @@ fn content_block(protocol: &str, role: &str, value: &Value) -> Value {
     value.clone()
 }
 
-/// Adapt sampler declarations only; authoritative execution schemas remain in the tool catalog.
 /// 仅适配模型采样声明；执行端仍按工具目录中的完整原始 schema 校验，不改变权限或参数上限。
 pub fn project_tool_declarations(
     connection: &Value,
@@ -213,12 +246,13 @@ pub fn project_tool_declarations(
             502,
         ));
     }
-    if !supports_tools(connection) { return Ok(Vec::new()); }
+    if !supports_tools(connection) {
+        return Ok(Vec::new());
+    }
     let local = url::Url::parse(connection["baseUrl"].as_str().unwrap_or(""))
         .ok()
         .and_then(|url| url.host_str().map(super::connections::local_host))
         .unwrap_or(false);
-    // Remote declarations stay exact unless an observed grammar rejection explicitly asks for adaptation.
     // 普通远端声明保持原样；只有已观测到语法拒绝的恢复步骤才明确请求结构适配。
     if tools.is_empty() || (!local && mode == "bounded") {
         return Ok(tools.to_vec());
@@ -262,7 +296,6 @@ pub fn project_tool_declarations(
     Ok(declarations)
 }
 
-/// Provider bodies preserve continuation blocks, signatures and encrypted reasoning verbatim.
 /// 供应商正文原样保留续传块、签名与加密思考内容；只转换明确的通用图片输入。
 pub fn build_request(
     connection: &Value,
@@ -286,7 +319,6 @@ pub fn build_request(
     .map_err(ModelError::native)?;
     let mut messages = messages.to_vec();
     for message in &mut messages {
-        // Attachment restoration metadata is private broker state, not a provider message parameter.
         // 附件恢复元信息属于私有代理状态，不作为供应商消息参数发送。
         if let Some(fields) = message.as_object_mut() {
             fields.remove("attachmentMessageId");
@@ -303,7 +335,6 @@ pub fn build_request(
         }
     }
     if name == "anthropic-messages" {
-        // Messages endpoints reject empty turns; dropping them the same way every round keeps the prefix stable.
         // Messages 接口拒绝空内容消息；每轮按同一规则去掉空消息，前缀保持一致，正式历史不变。
         messages.retain(|message| match &message["content"] {
             Value::String(text) => !text.is_empty(),
@@ -312,7 +343,6 @@ pub fn build_request(
         });
     }
     if !supports_tools(connection) {
-        // Broker notices and a new user message can share a turn; strict Gemma templates require alternating roles.
         // 调度提示与用户补充可能相邻；仅在不支持工具的自管模型投影中合并同角色，正式消息仍原样保存。
         messages = merge_text_turns(messages);
     }
@@ -331,8 +361,9 @@ pub fn build_request(
     if !tools.is_empty() {
         body["tools"] = json!(tools);
         body["tool_choice"] = plan["toolChoice"].clone();
-    } else if supports_tools(connection) && matches!(name, "openai-completions" | "openai-responses") {
-        // Make text-only turns explicit even when retained history contains tool calls.
+    } else if supports_tools(connection)
+        && matches!(name, "openai-completions" | "openai-responses")
+    {
         // 即使保留历史工具调用，也明确本轮只生成正文。
         body["tool_choice"] = json!("none");
     }
@@ -352,12 +383,17 @@ pub fn build_request(
         if let Some(limit) = body.as_object_mut().unwrap().remove("max_tokens") {
             options["num_predict"] = limit;
         }
-        // Generation must retain the same configured window used during local preparation.
         // 正式生成沿用本地预热所用的窗口，不能重新落回 Ollama 默认值。
-        if let Some(window) = connection["contextWindowTokens"].as_u64().filter(|window| *window > 0) {
+        if let Some(window) = connection["contextWindowTokens"]
+            .as_u64()
+            .filter(|window| *window > 0)
+        {
             options["num_ctx"] = json!(window);
         }
-        if options.as_object().is_some_and(|options| !options.is_empty()) {
+        if options
+            .as_object()
+            .is_some_and(|options| !options.is_empty())
+        {
             body["options"] = options;
         }
         for message in body["messages"].as_array_mut().unwrap() {
@@ -388,34 +424,60 @@ pub fn build_request(
     Ok(body)
 }
 
-/// Cache projection uses an authorized stable scope and an exact prefix, without storing a second request history.
 /// 缓存投影使用已核验稳定范围及逐字前缀，不另存第二份请求历史。
-pub fn apply_prompt_cache(connection: &Value, model: &str, body: &mut Value,
-    scope: &str, stable_system: &str) -> Value {
-    super::cache_policy::apply(connection, model, protocol(connection), body, scope, stable_system)
+pub fn apply_prompt_cache(
+    connection: &Value,
+    model: &str,
+    body: &mut Value,
+    scope: &str,
+    stable_system: &str,
+) -> Value {
+    super::cache_policy::apply(
+        connection,
+        model,
+        protocol(connection),
+        body,
+        scope,
+        stable_system,
+    )
 }
 
-/// Auxiliary summaries retain their native system fields and reuse the same scoped provider policy.
 /// 辅助摘要保留协议原生系统字段，并复用相同的范围隔离及供应商缓存策略。
-pub fn apply_summary_prompt_cache(connection: &Value, model: &str, body: &mut Value, scope: &str) -> Value {
+pub fn apply_summary_prompt_cache(
+    connection: &Value,
+    model: &str,
+    body: &mut Value,
+    scope: &str,
+) -> Value {
     fn system_text(value: &Value) -> Option<String> {
-        if let Some(text) = value.as_str() { return Some(text.to_owned()); }
-        value.as_array()?.iter().try_fold(String::new(), |mut text, block| {
-            if !matches!(block["type"].as_str(), Some("text" | "input_text")) { return None; }
-            text.push_str(block["text"].as_str()?);
-            Some(text)
-        })
+        if let Some(text) = value.as_str() {
+            return Some(text.to_owned());
+        }
+        value
+            .as_array()?
+            .iter()
+            .try_fold(String::new(), |mut text, block| {
+                if !matches!(block["type"].as_str(), Some("text" | "input_text")) {
+                    return None;
+                }
+                text.push_str(block["text"].as_str()?);
+                Some(text)
+            })
     }
     let stable_system = system_text(&body["instructions"])
         .or_else(|| system_text(&body["system"]))
-        .or_else(|| body["messages"].as_array().into_iter().flatten()
-            .filter(|message| message["role"] == "system")
-            .find_map(|message| system_text(&message["content"])))
+        .or_else(|| {
+            body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|message| message["role"] == "system")
+                .find_map(|message| system_text(&message["content"]))
+        })
         .unwrap_or_default();
     apply_prompt_cache(connection, model, body, scope, &stable_system)
 }
 
-/// Fit output to the owned runtime's exact input count; only genuinely oversized input needs compaction.
 /// 按自管运行时的实测输入调整输出预留；只有输入确实放不下时才请求压缩。
 pub(crate) fn validate_measured_request(
     connection: &Value,
@@ -424,13 +486,23 @@ pub(crate) fn validate_measured_request(
     context_window_tokens: u64,
 ) -> Result<(), ModelError> {
     let output_field = ["max_tokens", "max_completion_tokens", "max_output_tokens"]
-        .into_iter().find(|field| body[*field].as_u64().is_some());
-    let mut output_tokens = output_field.and_then(|field| body[field].as_u64()).unwrap_or(0);
+        .into_iter()
+        .find(|field| body[*field].as_u64().is_some());
+    let mut output_tokens = output_field
+        .and_then(|field| body[field].as_u64())
+        .unwrap_or(0);
     let provider_input_limit = connection["maxInputTokens"].as_u64().unwrap_or(u64::MAX);
-    let available_output = context_window_tokens.saturating_sub(input_tokens).saturating_sub(64)
+    let available_output = context_window_tokens
+        .saturating_sub(input_tokens)
+        .saturating_sub(64)
         .min(connection["maxOutputTokens"].as_u64().unwrap_or(u64::MAX));
-    let minimum_output = if context_window_tokens < 2048 { 32 } else { 256 };
-    if input_tokens <= provider_input_limit && output_tokens > available_output
+    let minimum_output = if context_window_tokens < 2048 {
+        32
+    } else {
+        256
+    };
+    if input_tokens <= provider_input_limit
+        && output_tokens > available_output
         && available_output >= minimum_output
     {
         if let Some(field) = output_field {
@@ -446,9 +518,10 @@ pub(crate) fn validate_measured_request(
         return Ok(());
     }
     let estimated_input = protocol::tool_message_tokens(protocol::array(&body["messages"]), "")
-        .saturating_add(body.get("tools").map_or(0, |tools| {
-            protocol::estimate_tokens(&tools.to_string())
-        }));
+        .saturating_add(
+            body.get("tools")
+                .map_or(0, |tools| protocol::estimate_tokens(&tools.to_string())),
+        );
     let mut error = ModelError::new(
         "MODEL_CONTEXT_LIMIT_REJECTED",
         "正在按模型实际容量整理上下文。",
@@ -619,13 +692,14 @@ pub fn append_results(
             && pair["result"]["isError"] != true
             && canonical["isError"] != true
         {
-            // Native browser receipts wrap their image blocks in value; keep the pixels out of tool text.
             // 原生浏览器回执用 value 包装图块；像素走多模态输入，不塞进工具文字。
             let image_content = canonical.get("content").or_else(|| {
                 (canonical["sessionId"].is_string() && canonical["tabId"].is_string())
-                    .then(|| canonical["value"].get("content")).flatten()
+                    .then(|| canonical["value"].get("content"))
+                    .flatten()
             });
-            for block in image_content.unwrap_or(&Value::Null)
+            for block in image_content
+                .unwrap_or(&Value::Null)
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -692,7 +766,6 @@ fn task_completion(message: &Value) -> Value {
     history::task_completion(&message["ToolRun"]["taskCompletion"])
 }
 
-/// Project saved paired model/tool history using the existing Rust history state, never authorize replay.
 /// 使用现有 Rust 历史状态投影已保存的模型/工具配对；历史记录绝不授权重新执行。
 pub fn history_messages(name: &str, formal_history: &[Value]) -> Result<Vec<Value>, ModelError> {
     history_messages_with_tools(name, formal_history, &[])
@@ -859,7 +932,6 @@ fn restore_continuation(
     true
 }
 
-/// Restore a signature only from its verified formal receipt and exact request prefix.
 /// 签名仅在正式回执、原始请求前缀和拥有者均一致时恢复；失配保留公开历史，绝不授权工具重放。
 pub async fn history_projection_verified(
     connection: &Value,
@@ -874,7 +946,8 @@ pub async fn history_projection_verified(
     let name = protocol(connection);
     let origin = json!({"providerId":connection["providerId"],"model":model,"protocol":name,
         "connectionFingerprint":fingerprint(&json!([connection["providerId"],model,name,connection["baseUrl"],connection["apiKey"].as_str().unwrap_or("")]))});
-    let mut projection = history_projection_for_origin(name, formal_history, available_tools, Some(&origin))?;
+    let mut projection =
+        history_projection_for_origin(name, formal_history, available_tools, Some(&origin))?;
     for assistant in formal_history
         .iter()
         .filter(|message| message["Role"] == "assistant")
@@ -960,7 +1033,6 @@ pub fn history_projection(
     history_projection_for_origin(name, formal_history, available_tools, None)
 }
 
-/// Runtime broker messages replay only through the verified route, never through generic public history.
 /// 运行时代理消息仅在已核验路由内回放，不经通用公开历史取得系统权威。
 fn history_projection_for_origin(
     name: &str,
@@ -968,9 +1040,13 @@ fn history_projection_for_origin(
     available_tools: &[String],
     runtime_origin: Option<&Value>,
 ) -> Result<HistoryProjection, ModelError> {
-    history_cache::project(name, formal_history, available_tools, runtime_origin, || {
-        build_history_projection(name, formal_history, available_tools, runtime_origin)
-    })
+    history_cache::project(
+        name,
+        formal_history,
+        available_tools,
+        runtime_origin,
+        || build_history_projection(name, formal_history, available_tools, runtime_origin),
+    )
 }
 
 fn build_history_projection(
@@ -1048,8 +1124,11 @@ fn build_history_projection(
             planned["publicContent"].clone()
         };
         let mut rounds = history_rounds(assistant)?;
-        let runtime_allowed = runtime_origin.is_some_and(|origin| assistant["ModelTranscript"]["origin"] == *origin);
-        for round in &mut rounds { round["runtimeReplayAllowed"] = json!(runtime_allowed); }
+        let runtime_allowed =
+            runtime_origin.is_some_and(|origin| assistant["ModelTranscript"]["origin"] == *origin);
+        for round in &mut rounds {
+            round["runtimeReplayAllowed"] = json!(runtime_allowed);
+        }
         summary_sources.push(summary_source(user, assistant, &rounds)?);
         let record = json!({"turn":{"user":{"Id":user["Id"],"Content":user["Content"],"contentJson":user["Content"].to_string()},
             "assistant":{"Id":assistant["Id"],"Content":content,"contentJson":content.to_string(),"Status":assistant["Status"]},"taskCompletion":task_completion(assistant)},"rounds":rounds});
@@ -1195,7 +1274,6 @@ fn history_rounds(assistant: &Value) -> Result<Vec<Value>, ModelError> {
     Ok(records)
 }
 
-/// Public chronology reuses recorded observations, excluding private reasoning and continuation attachments.
 /// 公开时间线复用已记录的观察，不暴露私有思考或续传附件。
 pub fn public_history_text(message: &Value) -> Result<String, ModelError> {
     let rounds = history_rounds(message)?;
@@ -1238,7 +1316,6 @@ fn history_result(activity: &Value) -> Result<String, ModelError> {
     .map_err(ModelError::native)
 }
 
-/// Execute the existing evidence codec plans, retaining public JSON order and UTF-16 slice offsets.
 /// 执行现有证据编解码计划，保留公开 JSON 字段顺序与 UTF-16 截取偏移。
 pub fn retrieval_model_view(value: &Value) -> Result<Value, ModelError> {
     let policy = crate::storage::evidence::apply("storage.evidence.codecPolicy", &json!({}))
@@ -1414,57 +1491,131 @@ mod tests {
         let messages = [json!({"role":"user","content":"hello"})];
         let mut connection = json!({"protocol":"ollama","baseUrl":"http://127.0.0.1:11434",
             "contextWindowTokens":8192});
-        let body = build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
+        let body =
+            build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
         assert_eq!(body["options"], json!({"num_ctx":8192,"num_predict":1024}));
-        connection.as_object_mut().unwrap().remove("contextWindowTokens");
-        let automatic = build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
+        connection
+            .as_object_mut()
+            .unwrap()
+            .remove("contextWindowTokens");
+        let automatic =
+            build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
         assert!(automatic["options"].get("num_ctx").is_none());
         connection["protocol"] = json!("openai-completions");
         connection["contextWindowTokens"] = json!(8192);
-        let cloud = build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
+        let cloud =
+            build_request(&connection, "fixture", &messages, "", Some(1024), &[], true).unwrap();
         assert!(cloud.get("options").is_none());
     }
 
     #[test]
     fn messages_requests_drop_empty_turns_while_other_protocols_keep_them() {
-        let history = [json!({"role":"user","content":"start"}), json!({"role":"assistant","content":"done"}),
-            json!({"role":"user","content":[]}), json!({"role":"user","content":""}), json!({"role":"user","content":"review"})];
+        let history = [
+            json!({"role":"user","content":"start"}),
+            json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":[]}),
+            json!({"role":"user","content":""}),
+            json!({"role":"user","content":"review"}),
+        ];
         let messages = json!({"protocol":"anthropic-messages","baseUrl":"https://api.deepseek.com/anthropic","providerId":"fixture"});
-        let body = build_request(&messages, "deepseek-flash", &history, "", Some(64), &[], true).unwrap();
+        let body = build_request(
+            &messages,
+            "deepseek-flash",
+            &history,
+            "",
+            Some(64),
+            &[],
+            true,
+        )
+        .unwrap();
         assert_eq!(body["messages"].as_array().unwrap().len(), 3);
-        assert!(body["messages"].as_array().unwrap().iter().all(|message| message["content"] != json!([]) && message["content"] != ""));
+        assert!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message["content"] != json!([]) && message["content"] != "")
+        );
         let compatible = json!({"protocol":"openai-completions","baseUrl":"https://api.deepseek.com","providerId":"fixture"});
-        let body = build_request(&compatible, "deepseek-flash", &history, "", Some(64), &[], true).unwrap();
+        let body = build_request(
+            &compatible,
+            "deepseek-flash",
+            &history,
+            "",
+            Some(64),
+            &[],
+            true,
+        )
+        .unwrap();
         assert_eq!(body["messages"].as_array().unwrap().len(), history.len());
     }
 
     #[test]
-    fn auxiliary_summary_cache_uses_native_system_fields_without_changing_roles_or_responses_instructions() {
-        for (kind, model, base) in [("openai-responses","gpt-6.1-sol","https://api.openai.com/v1"),
-            ("openai-completions","gpt-4.1","https://api.openai.com/v1"),
-            ("anthropic-messages","claude-sonnet-4-5","https://api.anthropic.com/v1")] {
-            let connection=json!({"protocol":kind,"baseUrl":base,"providerId":"fixture"});
-            let (mut body,_)=build_summary_request(&connection,model,
+    fn auxiliary_summary_cache_uses_native_system_fields_without_changing_roles_or_responses_instructions()
+     {
+        for (kind, model, base) in [
+            (
+                "openai-responses",
+                "gpt-6.1-sol",
+                "https://api.openai.com/v1",
+            ),
+            ("openai-completions", "gpt-4.1", "https://api.openai.com/v1"),
+            (
+                "anthropic-messages",
+                "claude-sonnet-4-5",
+                "https://api.anthropic.com/v1",
+            ),
+        ] {
+            let connection = json!({"protocol":kind,"baseUrl":base,"providerId":"fixture"});
+            let (mut body, _) = build_summary_request(
+                &connection,
+                model,
                 &[json!({"role":"user","content":"untrusted history to summarize"})],
-                "stable summary guidance",Some(1024),false).unwrap();
-            let original=body.clone();
-            let field=if kind=="openai-responses" { "input" } else { "messages" };
-            let roles=body[field].as_array().unwrap().iter().map(|item|item["role"].clone()).collect::<Vec<_>>();
-            let policy=apply_summary_prompt_cache(&connection,model,&mut body,"summary-scope");
-            assert_ne!(policy["mode"],"unavailable");
-            assert_eq!(body[field].as_array().unwrap().iter().map(|item|item["role"].clone()).collect::<Vec<_>>(),roles);
-            if kind=="openai-responses" {
-                assert_eq!(body["instructions"],original["instructions"]);
-                assert_eq!(body["input"],original["input"]);
-                assert_eq!(body["prompt_cache_options"]["mode"],"implicit");
-            } else if kind=="openai-completions" { assert_eq!(body["messages"],original["messages"]); }
-            else { assert_eq!(body["system"][0]["text"],original["system"]); }
+                "stable summary guidance",
+                Some(1024),
+                false,
+            )
+            .unwrap();
+            let original = body.clone();
+            let field = if kind == "openai-responses" {
+                "input"
+            } else {
+                "messages"
+            };
+            let roles = body[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["role"].clone())
+                .collect::<Vec<_>>();
+            let policy = apply_summary_prompt_cache(&connection, model, &mut body, "summary-scope");
+            assert_ne!(policy["mode"], "unavailable");
+            assert_eq!(
+                body[field]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["role"].clone())
+                    .collect::<Vec<_>>(),
+                roles
+            );
+            if kind == "openai-responses" {
+                assert_eq!(body["instructions"], original["instructions"]);
+                assert_eq!(body["input"], original["input"]);
+                assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
+            } else if kind == "openai-completions" {
+                assert_eq!(body["messages"], original["messages"]);
+            } else {
+                assert_eq!(body["system"][0]["text"], original["system"]);
+            }
         }
-        let connection=json!({"protocol":"openai-responses","baseUrl":"https://proxy.invalid/v1"});
-        let mut body=json!({"instructions":"guidance","input":[{"role":"user","content":"history"}]});
-        let original=body.clone();
-        apply_summary_prompt_cache(&connection,"gpt-6.1-sol",&mut body,"scope");
-        assert_eq!(body,original);
+        let connection =
+            json!({"protocol":"openai-responses","baseUrl":"https://proxy.invalid/v1"});
+        let mut body =
+            json!({"instructions":"guidance","input":[{"role":"user","content":"history"}]});
+        let original = body.clone();
+        apply_summary_prompt_cache(&connection, "gpt-6.1-sol", &mut body, "scope");
+        assert_eq!(body, original);
     }
 
     #[test]
@@ -1477,11 +1628,18 @@ mod tests {
         let error = validate_measured_request(&connection, &mut body, 12163, 8192).unwrap_err();
         assert_eq!(error.code, "MODEL_CONTEXT_LIMIT_REJECTED");
         assert_eq!(error.details["requestDispatched"], false);
-        assert_eq!(error.details["contextRejection"]["contextWindowTokens"], 8192);
+        assert_eq!(
+            error.details["contextRejection"]["contextWindowTokens"],
+            8192
+        );
         assert_eq!(error.details["contextRejection"]["requestTokens"], 12163);
         assert_eq!(error.details["contextRejection"]["inputLimitTokens"], 6080);
-        assert!(error.details["contextRejection"]["estimatedInputTokens"].as_u64().unwrap()
-            > protocol::tool_message_tokens(protocol::array(&body["messages"]), ""));
+        assert!(
+            error.details["contextRejection"]["estimatedInputTokens"]
+                .as_u64()
+                .unwrap()
+                > protocol::tool_message_tokens(protocol::array(&body["messages"]), "")
+        );
         assert!(!error.details.to_string().contains("fixture-secret"));
         let constrained = json!({"maxInputTokens":3000});
         assert!(validate_measured_request(&constrained, &mut body, 3000, 8192).is_ok());
@@ -1502,7 +1660,10 @@ mod tests {
         let mut body = json!({"messages":[],"max_tokens":2048});
         assert!(validate_measured_request(&json!({}), &mut body, 7900, 8192).is_err());
         assert_eq!(body["max_tokens"], 2048);
-        assert!(validate_measured_request(&json!({"maxInputTokens":6000}), &mut body, 6081, 8192).is_err());
+        assert!(
+            validate_measured_request(&json!({"maxInputTokens":6000}), &mut body, 6081, 8192)
+                .is_err()
+        );
         assert_eq!(body["max_tokens"], 2048);
     }
 
@@ -1731,21 +1892,55 @@ mod tests {
     fn managed_text_only_models_keep_text_turns_without_enabling_tool_parser() {
         let text = json!({"providerId":"kynxa-local-text","baseUrl":"http://127.0.0.1:18080/v1",
             "protocol":"openai-completions","capabilities":["text"]});
-        let turns = [json!({"role":"user","content":"你好"}),
+        let turns = [
+            json!({"role":"user","content":"你好"}),
             json!({"role":"user","content":"Broker: use the current request."}),
-            json!({"role":"assistant","content":"你好。"}),json!({"role":"user","content":"继续聊天"})];
-        let tools = [json!({"type":"function","function":{"name":"fixture_echo","parameters":{"type":"object","properties":{}}}})];
-        let body = build_request(&text, "fixture", &turns, "Reply briefly.", Some(128), &tools, true).unwrap();
-        assert!(body.get("tools").is_none()); assert!(body.get("tool_choice").is_none());
+            json!({"role":"assistant","content":"你好。"}),
+            json!({"role":"user","content":"继续聊天"}),
+        ];
+        let tools = [
+            json!({"type":"function","function":{"name":"fixture_echo","parameters":{"type":"object","properties":{}}}}),
+        ];
+        let body = build_request(
+            &text,
+            "fixture",
+            &turns,
+            "Reply briefly.",
+            Some(128),
+            &tools,
+            true,
+        )
+        .unwrap();
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 4); assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["content"], "你好\n\nBroker: use the current request.");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[1]["content"],
+            "你好\n\nBroker: use the current request."
+        );
         assert_eq!(turns[0]["content"], "你好");
-        let mut capable = text; capable["capabilities"] = json!(["text","tools"]);
-        let body = build_request(&capable, "fixture", &turns[..1], "", Some(128), &tools, true).unwrap();
-        assert!(body["tools"].is_array()); assert_eq!(body["tool_choice"], "auto");
-        assert!(supports_tools(&json!({"providerId":"api","capabilities":["text"]})));
-        assert!(!supports_tools(&json!({"providerId":"kynxa-local-unobserved"})));
+        let mut capable = text;
+        capable["capabilities"] = json!(["text", "tools"]);
+        let body = build_request(
+            &capable,
+            "fixture",
+            &turns[..1],
+            "",
+            Some(128),
+            &tools,
+            true,
+        )
+        .unwrap();
+        assert!(body["tools"].is_array());
+        assert_eq!(body["tool_choice"], "auto");
+        assert!(supports_tools(
+            &json!({"providerId":"api","capabilities":["text"]})
+        ));
+        assert!(!supports_tools(
+            &json!({"providerId":"kynxa-local-unobserved"})
+        ));
     }
     #[test]
     fn local_request_projects_large_repetitions_without_changing_execution_schema() {
@@ -1881,14 +2076,33 @@ mod tests {
         let turn = decode_response("openai-completions", raw, &[], Value::Null).unwrap();
         assert!(turn.output_truncated);
         for (name, finish, raw) in [
-            ("openai-completions", "length", json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{"name":"filesystem_read","arguments":"{}"}}]},"finish_reason":"length"}]})),
-            ("anthropic-messages", "max_tokens", json!({"content":[{"type":"tool_use","id":"call-1","name":"filesystem_read","input":{}}],"stop_reason":"max_tokens"})),
-            ("openai-responses", "max_output_tokens", json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","call_id":"call-1","name":"filesystem_read","arguments":"{}"}]})),
-            ("ollama", "length", json!({"message":{"tool_calls":[{"function":{"name":"filesystem_read","arguments":{}}}]},"done_reason":"length"})),
+            (
+                "openai-completions",
+                "length",
+                json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{"name":"filesystem_read","arguments":"{}"}}]},"finish_reason":"length"}]}),
+            ),
+            (
+                "anthropic-messages",
+                "max_tokens",
+                json!({"content":[{"type":"tool_use","id":"call-1","name":"filesystem_read","input":{}}],"stop_reason":"max_tokens"}),
+            ),
+            (
+                "openai-responses",
+                "max_output_tokens",
+                json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","call_id":"call-1","name":"filesystem_read","arguments":"{}"}]}),
+            ),
+            (
+                "ollama",
+                "length",
+                json!({"message":{"tool_calls":[{"function":{"name":"filesystem_read","arguments":{}}}]},"done_reason":"length"}),
+            ),
         ] {
             let failure = decode_response(name, raw, &catalog(), Value::Null).unwrap_err();
             assert_eq!(failure.code, "MODEL_TOOL_OUTPUT_TRUNCATED", "{name}");
-            assert_eq!(failure.details["decoderCode"], "MODEL_TOOL_OUTPUT_TRUNCATED", "{name}");
+            assert_eq!(
+                failure.details["decoderCode"], "MODEL_TOOL_OUTPUT_TRUNCATED",
+                "{name}"
+            );
             assert_eq!(failure.details["finishReason"], finish, "{name}");
             assert_eq!(failure.details["outputTruncated"], true, "{name}");
             assert_eq!(failure.details["hasToolCalls"], true, "{name}");
@@ -1906,10 +2120,20 @@ mod tests {
         assert_eq!(turn.continuation, raw["output"].as_array().unwrap().clone());
         let mut completed = raw.clone();
         completed["status"] = json!("completed");
-        assert_eq!(decode_response("openai-responses", completed, &[], Value::Null).unwrap_err().code, "MODEL_RESPONSE_EMPTY");
+        assert_eq!(
+            decode_response("openai-responses", completed, &[], Value::Null)
+                .unwrap_err()
+                .code,
+            "MODEL_RESPONSE_EMPTY"
+        );
         let mut empty = raw;
         empty["output"][0]["encrypted_content"] = json!("");
-        assert_eq!(decode_response("openai-responses", empty, &[], Value::Null).unwrap_err().code, "MODEL_RESPONSE_EMPTY");
+        assert_eq!(
+            decode_response("openai-responses", empty, &[], Value::Null)
+                .unwrap_err()
+                .code,
+            "MODEL_RESPONSE_EMPTY"
+        );
     }
     #[test]
     fn invalid_calls_and_mapped_names_fail_before_a_turn_can_be_dispatched() {
@@ -2073,14 +2297,21 @@ mod tests {
         for (name, raw) in fixtures {
             let turn = decode_response(name, raw, &catalog(), Value::Null).unwrap();
             let image = json!({"content":[{"type":"text","text":"temporary image"},{"type":"image","mimeType":"image/png","data":"aGVsbG8="}],"_meta":{"private":"secret"}});
-            for canonical in [image.clone(), json!({"sessionId":"browser-session","tabId":"page","value":image})] {
+            for canonical in [
+                image.clone(),
+                json!({"sessionId":"browser-session","tabId":"page","value":image}),
+            ] {
                 let continued = append_results(name, &[], &turn,
                     &[json!({"call":turn.calls[0],"result":{"status":"completed","content":canonical}})]).unwrap();
                 assert!(protocol::complete_pairs(&continued));
-                assert_eq!(&continued[..turn.continuation.len()], turn.continuation.as_slice());
+                assert_eq!(
+                    &continued[..turn.continuation.len()],
+                    turn.continuation.as_slice()
+                );
                 let image = &continued.last().unwrap()["content"][1]["image_url"]["url"];
                 assert_eq!(image, "data:image/png;base64,aGVsbG8=");
-                let tool_text = json!(&continued[turn.continuation.len()..continued.len() - 1]).to_string();
+                let tool_text =
+                    json!(&continued[turn.continuation.len()..continued.len() - 1]).to_string();
                 assert!(!tool_text.contains("aGVsbG8="));
                 assert!(!tool_text.contains("secret"));
             }

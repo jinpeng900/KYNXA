@@ -120,7 +120,6 @@ fn file_inspect(root: &Path, path: &Path, maximum: u64) -> Result<bool, Contract
     Ok(exists)
 }
 
-/// The imported registry owns eligibility, deduplication, scope budgets, revocation and snapshot publication.
 /// 导入登记拥有可用性、去重、范围预算、撤销及快照发布，派生索引不能恢复已撤销资料。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let document = &arguments["document"];

@@ -1,4 +1,3 @@
-//! Native, offline inference preserves the pinned tokenizer, projection and vector-space contract.
 //! 原生离线推理保留固定分词器、投影和向量空间合同，不启动 Node 或下载模型。
 
 use std::{
@@ -144,7 +143,6 @@ struct LoadedModel {
     batch_state: super::worker::WorkerState,
 }
 
-/// The additional CPU audit graph uses the existing resource estimate, and must have its own granted RAM.
 /// 额外 CPU 审计图复用现有资源估计，必须持有单独批准的 RAM 授额。
 pub fn qualification_request(cpu_threads: usize) -> Result<Value, ModelError> {
     let assets = EMBEDDING_ASSETS;
@@ -164,7 +162,6 @@ fn check_cancelled(cancel: &AtomicBool) -> Result<(), ModelError> {
     }
 }
 
-/// Initialize once from the installed DLL; an incompatible or absent runtime never silently falls back.
 /// 从随包 DLL 初始化一次；运行库不兼容或缺失时不能静默回退到另一运行路径。
 pub fn initialize_runtime(dll_path: &Path) -> Result<(), ModelError> {
     let _gate = INITIALIZE_GATE
@@ -265,7 +262,6 @@ fn loaded(
     if let Some(model) = cache.get(&key) {
         return Ok(model.clone());
     }
-    // At most one session per model/device is retained; a thread-budget change retires the old cache entry.
     // 每种模型/设备最多保留一个会话；线程授额变更时淘汰旧缓存，活动请求仍持有自身句柄。
     let prefix = format!("{}:{}:{}:", root.display(), false, options.device);
     if cache
@@ -278,11 +274,7 @@ fn loaded(
     if cache.len() >= 4 {
         return Err(error("INFERENCE_SESSION_BUDGET_FULL"));
     }
-    verify_assets(
-        &root,
-        EMBEDDING_ASSETS,
-        cancel,
-    )?;
+    verify_assets(&root, EMBEDDING_ASSETS, cancel)?;
     let tokenizer = load_tokenizer(&root, cancel)?;
     let mut session = if options.device == "dml" {
         let requested = qualification_request(options.cpu_threads)?;
@@ -369,7 +361,10 @@ fn qualified_session(
     let directory = AuditDirectory(directory);
     let inputs = vec![
         tokenizer.encode("query: 如何安全读取临时文件？", true),
-        tokenizer.encode("passage: This is a fixed multilingual model qualification probe.", true),
+        tokenizer.encode(
+            "passage: This is a fixed multilingual model qualification probe.",
+            true,
+        ),
     ];
     let encodings = inputs
         .into_iter()
@@ -390,8 +385,7 @@ fn qualified_session(
     let probe = |model: &LoadedModel| -> Result<Vec<f32>, ModelError> {
         let mut values = Vec::new();
         for encoding in &encodings {
-            values
-                .extend(execute(model, std::slice::from_ref(encoding), cancel)?.remove(0));
+            values.extend(execute(model, std::slice::from_ref(encoding), cancel)?.remove(0));
         }
         Ok(values)
     };
@@ -407,7 +401,8 @@ fn qualified_session(
     let compatibility = super::inference::calculate(
         "models.inference.qualifiedOutputs",
         &json!({"reference":reference,"actual":actual,"dimensions":384}),
-    ).map_err(ModelError::native)?;
+    )
+    .map_err(ModelError::native)?;
     if compatibility.is_null() || compatibility == false {
         return Err(error("INFERENCE_GPU_OUTPUT_INCOMPATIBLE"));
     }
@@ -470,10 +465,7 @@ fn qualified_session(
     Ok(model)
 }
 
-fn load_tokenizer(
-    root: &Path,
-    cancel: &AtomicBool,
-) -> Result<Arc<Tokenizer>, ModelError> {
+fn load_tokenizer(root: &Path, cancel: &AtomicBool) -> Result<Arc<Tokenizer>, ModelError> {
     check_cancelled(cancel)?;
     let root = root
         .canonicalize()
@@ -488,11 +480,7 @@ fn load_tokenizer(
     if cache.len() >= 2 {
         return Err(error("INFERENCE_TOKENIZER_BUDGET_FULL"));
     }
-    verify_assets(
-        &root,
-        &(EMBEDDING_ASSETS)[..4],
-        cancel,
-    )?;
+    verify_assets(&root, &(EMBEDDING_ASSETS)[..4], cancel)?;
     let mut tokenizer = Tokenizer::from_file(root.join("tokenizer.json"))
         .map_err(|_| error("EMBEDDING_TOKENIZER_INVALID"))?;
     tokenizer.with_padding(None);
@@ -504,7 +492,6 @@ fn load_tokenizer(
     Ok(tokenizer)
 }
 
-/// Report success only after the last native session owner is gone; resident leases can then be released.
 /// 最后一个原生会话拥有者退役后才报告成功，此时才能归还驻留内存租约。
 pub fn retire_idle(root: &Path, device: &str) -> Result<bool, ModelError> {
     let root = root
@@ -640,7 +627,6 @@ fn tensors(
     Ok((inputs, mask, width))
 }
 
-/// Stop the native graph on cancellation and join the watcher before dropping RunOptions.
 /// 取消时停止原生图；释放 RunOptions 前等待观察线程退出。
 fn execute(
     model: &LoadedModel,
@@ -720,7 +706,6 @@ fn normalize(vector: &mut [f32]) -> Result<(), ModelError> {
     if vector.iter().any(|value| !value.is_finite()) {
         return Err(error("EMBEDDING_INVALID_OUTPUT"));
     }
-    // Match the former Float32 tensor: round the pooled values and the norm before division.
     // 对齐原 Float32 张量：池化值与范数先取 Float32，再执行归一化除法。
     let mut squared = 0f32;
     for value in vector.iter() {
@@ -898,7 +883,6 @@ pub fn embed_blocking(
     embed_with_options(root, texts, kind, &InferenceOptions::default(), cancel)
 }
 
-/// Use the caller's admitted hardware budget without a second scheduler.
 /// 使用调用方已准入的硬件额度，不另建调度器。
 pub fn embed_with_options(
     root: &Path,
@@ -933,8 +917,7 @@ pub fn embed_with_options(
         encodings.push(encoding);
     }
     let applied = audit_batch_budget(&mut model, options, &cancel)?;
-    let (vectors, batch_measurements) =
-        execute_batches(&model, &encodings, &applied, &cancel)?;
+    let (vectors, batch_measurements) = execute_batches(&model, &encodings, &applied, &cancel)?;
     Ok(EmbeddingBatch {
         vectors,
         profile_id: metadata["profileId"].as_str().unwrap().into(),
@@ -947,7 +930,6 @@ pub fn embed_with_options(
     })
 }
 
-/// Use the existing native fitting state with the real pinned tokenizer; offsets remain UTF-16 offsets.
 /// 现有原生分块状态使用真实固定分词器计量；偏移继续采用 UTF-16 单位。
 pub fn fit_documents(
     root: &Path,
@@ -1021,7 +1003,6 @@ mod tests {
         assert!(normalize(&mut [0.0]).is_err());
     }
 
-    /// This explicitly selected test uses six fixed offline inputs, never the user's data or a model download.
     /// 显式执行此测试仅使用六条固定离线输入，不读取用户数据或下载模型。
     #[test]
     #[ignore = "requires the pinned offline ORT DLL and model assets"]

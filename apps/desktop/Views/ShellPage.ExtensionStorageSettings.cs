@@ -44,7 +44,6 @@ public sealed partial class ShellPage
             UiLocalization.Bind(status, InfoBar.MessageProperty, text);
             status.Severity = severity;
             status.IsOpen = true;
-            // Reusing an open notice gives the new message its full idle interval.
             // 复用尚未关闭的提示时，新消息拥有完整的空闲显示时间。
             status.RestartAutoDismiss();
         }

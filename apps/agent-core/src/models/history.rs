@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-/// Project the saved task result without judging it again or exposing private diagnostics.
 /// 仅投影已保存的任务结果，不重新裁决，也不暴露私有诊断正文。
 pub fn task_completion(value: &Value) -> Value {
     if !matches!(
@@ -620,7 +619,6 @@ fn project_round(args: &Value) -> Value {
     json!(entries)
 }
 
-/// Retain only paired completed turns or witnessed interrupted execution, never guessed effects.
 /// 仅保留已配对的完整轮次或有执行记录的中断轮次，不能根据缺失回执猜测执行结果。
 fn history_turn_plan(args: &Value) -> Value {
     let before = string(&args["beforeUserId"]).to_lowercase();

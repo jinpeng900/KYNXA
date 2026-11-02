@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 
 use super::chunking;
 
-/// Map selected current evidence only, not a complete language-service graph.
 /// 仅映射当前选中代码证据，不作为完整语言服务图。
 pub fn navigation(items: &[Value], maximum_tokens: u64) -> Value {
     let mut entries = Vec::new();
@@ -13,15 +12,31 @@ pub fn navigation(items: &[Value], maximum_tokens: u64) -> Value {
     let mut omitted = 0usize;
     for item in items {
         let structure = &item["structure"];
-        let Some(symbol) = structure["qualifiedName"].as_str().or_else(|| structure["symbolName"].as_str())
-            .filter(|symbol| !symbol.is_empty()) else { continue; };
-        if structure["domain"] != "code" || structure["parseStatus"] == "unavailable" { continue; }
+        let Some(symbol) = structure["qualifiedName"]
+            .as_str()
+            .or_else(|| structure["symbolName"].as_str())
+            .filter(|symbol| !symbol.is_empty())
+        else {
+            continue;
+        };
+        if structure["domain"] != "code" || structure["parseStatus"] == "unavailable" {
+            continue;
+        }
         let path = item["locator"]["relativePath"].as_str().unwrap_or("");
-        let key = (item["locator"].to_string(), symbol.to_owned(), structure["unitStartOffset"].to_string());
-        if !seen.insert(key) { continue; }
+        let key = (
+            item["locator"].to_string(),
+            symbol.to_owned(),
+            structure["unitStartOffset"].to_string(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
         let mut entry = json!({"sourceRef":item["sourceRef"],"path":path,"mountId":item["locator"]["mountId"],
             "symbol":symbol,"kind":structure["kind"],"startLine":item["startLine"],"endLine":item["endLine"]});
-        if let Some(signature) = structure["signature"].as_str().filter(|signature| !signature.is_empty()) {
+        if let Some(signature) = structure["signature"]
+            .as_str()
+            .filter(|signature| !signature.is_empty())
+        {
             entry["signature"] = json!(signature.chars().take(321).collect::<String>());
         }
         entries.push(entry);
@@ -33,7 +48,6 @@ pub fn navigation(items: &[Value], maximum_tokens: u64) -> Value {
     json!({"entries":entries,"omitted":omitted,"coverage":"selected-current-evidence", "resolvedCallGraph":false})
 }
 
-/// Assign AST spans to the deepest declaration without claiming resolved references.
 /// AST 区间归最内层声明，语法归属不代表引用已解析。
 pub fn select(args: &Value) -> Result<Value, String> {
     let text = args["text"]
@@ -174,6 +188,11 @@ mod tests {
         let tiny = navigation(&[first], 0);
         assert!(tiny["entries"].as_array().unwrap().is_empty());
         assert_eq!(tiny["omitted"], 1);
-        assert!(navigation(&[json!({"structure":{"domain":"knowledge"}})], 1024)["entries"].as_array().unwrap().is_empty());
+        assert!(
+            navigation(&[json!({"structure":{"domain":"knowledge"}})], 1024)["entries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

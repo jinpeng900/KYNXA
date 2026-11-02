@@ -8,7 +8,6 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Keep a reply at the bottom until the reader deliberately scrolls away.
 /// 回复保持跟随底部，直到用户主动向上阅读。
 /// </summary>
 internal sealed class ConversationAutoFollow
@@ -82,7 +81,6 @@ internal sealed class ConversationAutoFollow
         double offset = _scroll.VerticalOffset;
         if (!_applying && !TextSelectionAutoScroll.HasActiveSelection)
         {
-            // Layout shrink can clamp the offset without any action from the reader.
             // 布局缩小会自行限制滚动偏移，不能据此推断用户已主动滚动。
             double expectedOffset = Math.Min(_lastOffset, _scroll.ScrollableHeight);
             if (offset < expectedOffset - 1 && _scroll.ScrollableHeight - offset > 4) _following = false;

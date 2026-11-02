@@ -132,7 +132,6 @@ fn build_index(
         }
         hash.update(&line);
         let raw = std::str::from_utf8(&line).map_err(|encoding| {
-            // Only an unfinished UTF-8 scalar at the unclosed final record is a crash tail.
             // 仅未闭合末条记录中被截断的 UTF-8 字符属于崩溃残尾；完整非法字节仍拒绝读取。
             if !line.ends_with(b"\n") && encoding.error_len().is_none() {
                 conversation_logs::error(
@@ -209,7 +208,6 @@ fn build_index(
     })
 }
 
-/// A completed read keeps source identity and requested records, reopening only for final verification.
 /// 完成的读取仅保留来源身份与指定记录，最终复核时短时重开文件，不阻止目录所有者移动会话。
 pub(crate) struct HistoryRead {
     pub messages: Vec<String>,
@@ -220,7 +218,6 @@ pub(crate) struct HistoryRead {
     path: std::path::PathBuf,
 }
 impl HistoryRead {
-    /// Append a checked message and advance the existing offsets/hash without rereading the whole log.
     /// 追加已核验消息并更新现有偏移与哈希，不为每次工具回执重新读取整个历史日志。
     pub(crate) fn append_message(&mut self, raw_message: &str, unchanged: bool) -> ContractResult {
         let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
@@ -369,9 +366,7 @@ pub(crate) fn read_latest(
     read_snapshot(root, location, message_ids, user_only, true, None)
 }
 
-/// Reuse normalized message bodies inside the versioned offset cache, without changing raw journals.
 /// 在已有版本化偏移缓存内复用规范化消息，不改写正式原文日志。
-/// Projectors share one storage representation; transport filtering and live scope checks stay with callers.
 /// 投影器共用同一存储消息表示；公开字段过滤与即时范围核验仍由调用方负责。
 pub(crate) fn read_projected(
     root: &Path,
@@ -381,7 +376,6 @@ pub(crate) fn read_projected(
     read_snapshot(root, location, None, false, true, Some(project))
 }
 
-/// Use the log-version index for catalog message IDs without decoding all bodies.
 /// 目录消息身份复用日志版本索引，不解码全部正文。
 pub(crate) fn read_metadata(root: &Path, location: &Value) -> Result<HistoryRead, ContractError> {
     read_snapshot(root, location, None, false, false, None)
@@ -397,7 +391,6 @@ fn read_snapshot(
 ) -> Result<HistoryRead, ContractError> {
     conversation_logs::check_cancelled()?;
     let path = conversation_logs::directory(root, location)?.join("events.jsonl");
-    // Hold the writer lock only while opening; recheck versions after appends or moves.
     // 仅打开时持写锁，追加或移动后须重核版本。
     let reader = {
         let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
@@ -497,14 +490,22 @@ fn read_snapshot(
 fn projection_bytes(value: &Value) -> usize {
     let heap = match value {
         Value::String(text) => text.capacity(),
-        Value::Array(items) => items.capacity().saturating_mul(std::mem::size_of::<Value>())
-            .saturating_add(items.iter().map(|item| projection_bytes(item)
-                .saturating_sub(std::mem::size_of::<Value>())).sum::<usize>()),
-        // Conservatively charge ordered-map entries and buckets, not only serialized text length.
+        Value::Array(items) => items
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Value>())
+            .saturating_add(
+                items
+                    .iter()
+                    .map(|item| projection_bytes(item).saturating_sub(std::mem::size_of::<Value>()))
+                    .sum::<usize>(),
+            ),
         // 保守计入有序映射条目和桶的管理开销，不只计算序列化后的文本长度。
-        Value::Object(fields) => fields.len().saturating_mul(192)
-            .saturating_add(fields.iter().map(|(key, value)| key.capacity()
-                .saturating_add(projection_bytes(value))).sum::<usize>()),
+        Value::Object(fields) => fields.len().saturating_mul(192).saturating_add(
+            fields
+                .iter()
+                .map(|(key, value)| key.capacity().saturating_add(projection_bytes(value)))
+                .sum::<usize>(),
+        ),
         _ => 0,
     };
     std::mem::size_of::<Value>().saturating_add(heap)
@@ -515,7 +516,6 @@ fn indexed(
     owner: &str,
 ) -> Result<Arc<HistoryIndex>, ContractError> {
     let version_token = reader.version_token()?;
-    // Reuse offsets after Windows identity/change-stamp checks; unknown stamps require full hashing.
     // Windows 身份及变更时间核验后复用偏移，变更时间未知时仍核对完整哈希。
     let byte_snapshot = if version_token.is_none() {
         Some(source_hash(reader)?)
@@ -599,7 +599,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 retained_entries += 1;
             }
         }
-        // Choose oldest-first eviction from size facts without copying original bodies.
         // 根据容量事实从旧到新淘汰，不复制原始正文。
         for (index, entry) in entries.iter().enumerate() {
             if retained_bytes <= max_bytes as u64 && retained_entries <= max_entries {
@@ -622,7 +621,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     read_page(arguments).map(|(page, _)| page)
 }
 
-/// Keep each page's source proof outside the evictable cache until its caller finishes scope checks.
 /// 分页来源凭证独立于可淘汰缓存保留，直至调用方完成归属核验。
 pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), ContractError> {
     conversation_logs::check_cancelled()?;
@@ -662,15 +660,19 @@ pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), Contr
         if cursor.is_some() {
             return Err(changed());
         }
-        return Ok(
-            (json!({"rawMessages":[],"totalMessages":0,"hasMore":false,"nextCursor":null,
+        return Ok((
+            json!({"rawMessages":[],"totalMessages":0,"hasMore":false,"nextCursor":null,
             "hasNewer":false,"newerCursor":null,"startIndex":0,"endIndex":0,
             "snapshot":null,"returnedBytes":0,"byteBudgetExceeded":false,"hasStreamingMessages":false}),
             HistoryRead {
-                messages: Vec::new(), projected_messages: Vec::new(), source: None, index: None,
-                root: root.to_path_buf(), path,
-            }),
-        );
+                messages: Vec::new(),
+                projected_messages: Vec::new(),
+                source: None,
+                index: None,
+                root: root.to_path_buf(),
+                path,
+            },
+        ));
     };
     let index = indexed(&mut reader, &owner)?;
     let snapshot = &index.snapshot;
@@ -693,7 +695,6 @@ pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), Contr
     let mut end = boundary;
     let mut bytes = 0;
     let mut messages = Vec::new();
-    // Use the same owner/version checks for both paging directions.
     // 双向分页共用归属及版本核验，限制正文驻留不影响导航。
     let positions: Box<dyn Iterator<Item = usize>> = if newer {
         Box::new(boundary..boundary.saturating_add(limit).min(index.records.len()))
@@ -703,7 +704,6 @@ pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), Contr
     for position in positions {
         conversation_logs::check_cancelled()?;
         let range = &index.records[position];
-        // Return an oversized first message intact within the record cap; never silently truncate.
         // 首条消息可超页预算但不可超记录硬限，不静默截断。
         if !messages.is_empty() && bytes + range.length > maximum_bytes {
             break;
@@ -771,10 +771,17 @@ pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), Contr
         "startIndex":start,"endIndex":end,
         "snapshot":snapshot,"returnedBytes":bytes,"byteBudgetExceeded":bytes>maximum_bytes,
         "hasStreamingMessages":index.has_streaming});
-    Ok((page, HistoryRead {
-        messages: Vec::new(), projected_messages: Vec::new(), source: Some(reader.into_version()),
-        index: Some(index), root: root.to_path_buf(), path,
-    }))
+    Ok((
+        page,
+        HistoryRead {
+            messages: Vec::new(),
+            projected_messages: Vec::new(),
+            source: Some(reader.into_version()),
+            index: Some(index),
+            root: root.to_path_buf(),
+            path,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -795,78 +802,134 @@ mod tests {
 
     #[test]
     fn history_pages_verify_evicted_and_over_budget_sources_without_caching_them() {
-        let root = std::env::temp_dir().join(format!("kynxa-history-page-budget-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-history-page-budget-{}",
+            uuid::Uuid::new_v4()
+        ));
         let location = json!({"Id":"page-budget","ProjectId":null});
-        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        let path = conversation_logs::directory(&root, &location)
+            .unwrap()
+            .join("events.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let original = ["first", "second"].iter().map(|id| format!(
             "{{\"version\":1,\"type\":\"message.upsert\",\"message\":{{\"Id\":\"{id}\",\"Role\":\"user\",\"Content\":\"{id}\",\"Status\":\"completed\"}}}}\n"
         )).collect::<String>();
         fs::write(&path, &original).unwrap();
         let owner = managed_files::digest(path.to_string_lossy().as_bytes());
-        let (page, mut snapshot) = read_page(&json!({"root":root,"location":location,"limit":1})).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(page["rawMessages"][0].as_str().unwrap()).unwrap()["Id"], "second");
+        let (page, mut snapshot) =
+            read_page(&json!({"root":root,"location":location,"limit":1})).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(page["rawMessages"][0].as_str().unwrap()).unwrap()["Id"],
+            "second"
+        );
         let mut oversized = snapshot.index.as_deref().unwrap().clone();
         oversized.bytes = MAX_CACHE_BYTES + 1;
         let oversized = Arc::new(oversized);
-        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        HISTORY_CACHE
+            .lock()
+            .unwrap()
+            .retain(|(key, _)| key != &owner);
         cache_index(&owner, &oversized).unwrap();
-        assert!(!HISTORY_CACHE.lock().unwrap().iter().any(|(key, _)| key == &owner),
-            "An over-budget index must remain outside the shared cache.");
+        assert!(
+            !HISTORY_CACHE
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(key, _)| key == &owner),
+            "An over-budget index must remain outside the shared cache."
+        );
         snapshot.index = Some(oversized);
         snapshot.verify().unwrap();
         let (previous, mut previous_snapshot) = read_page(&json!({
             "root":root,"location":location,"limit":1,"cursor":page["nextCursor"]
-        })).unwrap();
-        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        }))
+        .unwrap();
+        HISTORY_CACHE
+            .lock()
+            .unwrap()
+            .retain(|(key, _)| key != &owner);
         previous_snapshot.verify().unwrap();
         assert_eq!(previous["snapshot"], page["snapshot"]);
-        assert_eq!(serde_json::from_str::<Value>(previous["rawMessages"][0].as_str().unwrap()).unwrap()["Id"], "first");
+        assert_eq!(
+            serde_json::from_str::<Value>(previous["rawMessages"][0].as_str().unwrap()).unwrap()["Id"],
+            "first"
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn history_pages_without_cache_still_reject_changed_replaced_and_new_sources() {
-        let root = std::env::temp_dir().join(format!("kynxa-history-page-proof-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kynxa-history-page-proof-{}", uuid::Uuid::new_v4()));
         let location = json!({"Id":"page-proof","ProjectId":null});
-        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        let path = conversation_logs::directory(&root, &location)
+            .unwrap()
+            .join("events.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let arguments = json!({"root":root,"location":location});
         let (_, mut absent) = read_page(&arguments).unwrap();
         let original = "{\"version\":1,\"type\":\"message.upsert\",\"message\":{\"Id\":\"source\",\"Role\":\"user\",\"Content\":\"before\",\"Status\":\"completed\"}}\n";
         fs::write(&path, original).unwrap();
-        assert_eq!(absent.verify().unwrap_err().code(), "CONVERSATION_HISTORY_CHANGED");
+        assert_eq!(
+            absent.verify().unwrap_err().code(),
+            "CONVERSATION_HISTORY_CHANGED"
+        );
         let owner = managed_files::digest(path.to_string_lossy().as_bytes());
         let (_, mut replaced) = read_page(&arguments).unwrap();
-        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        HISTORY_CACHE
+            .lock()
+            .unwrap()
+            .retain(|(key, _)| key != &owner);
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         fs::rename(&path, path.with_extension("previous")).unwrap();
         fs::write(&path, original).unwrap();
-        OpenOptions::new().write(true).open(&path).unwrap()
-            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
         assert_eq!(replaced.verify().unwrap_err().code(), "MEMORY_CONFLICT");
         let (_, mut changed_snapshot) = read_page(&arguments).unwrap();
-        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
-        // Exercise the byte-verified fallback even on Windows volumes with observable change stamps.
+        HISTORY_CACHE
+            .lock()
+            .unwrap()
+            .retain(|(key, _)| key != &owner);
         // 即使 Windows 卷提供变更时间，也覆盖缺少该标识时的完整字节核验。
         Arc::make_mut(changed_snapshot.index.as_mut().unwrap()).version_token = None;
         fs::write(&path, original.replace("before", "after!")).unwrap();
-        OpenOptions::new().write(true).open(&path).unwrap()
-            .set_times(FileTimes::new().set_modified(modified)).unwrap();
-        assert_eq!(changed_snapshot.verify().unwrap_err().code(), "CONVERSATION_HISTORY_CHANGED");
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            changed_snapshot.verify().unwrap_err().code(),
+            "CONVERSATION_HISTORY_CHANGED"
+        );
         let (_, mut removed) = read_page(&arguments).unwrap();
-        HISTORY_CACHE.lock().unwrap().retain(|(key, _)| key != &owner);
+        HISTORY_CACHE
+            .lock()
+            .unwrap()
+            .retain(|(key, _)| key != &owner);
         fs::remove_file(&path).unwrap();
-        assert_eq!(removed.verify().unwrap_err().code(), "CONVERSATION_HISTORY_CHANGED");
+        assert_eq!(
+            removed.verify().unwrap_err().code(),
+            "CONVERSATION_HISTORY_CHANGED"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn projected_bodies_reuse_unchanged_records_and_refresh_only_the_appended_message() {
-        let root = std::env::temp_dir().join(format!("kynxa-history-projected-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kynxa-history-projected-{}", uuid::Uuid::new_v4()));
         let location = json!({"Id":"projected-chat","ProjectId":null});
-        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        let path = conversation_logs::directory(&root, &location)
+            .unwrap()
+            .join("events.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let original = ["first", "second"].iter().map(|id| format!(
             "{{\"version\":1,\"type\":\"message.upsert\",\"message\":{{\"Id\":\"{id}\",\"Role\":\"user\",\"Content\":\"{id}\",\"Status\":\"completed\"}}}}\n"
@@ -877,53 +940,107 @@ mod tests {
         assert_eq!(PROJECTED_RECORDS.with(|count| count.get()), 2);
         let mut second = read_projected(&root, &location, project_test_message).unwrap();
         assert_eq!(second.projected_messages, first.projected_messages);
-        assert_eq!(PROJECTED_RECORDS.with(|count| count.get()), 2,
-            "An unchanged read must not decode or normalize the same message bodies again.");
-        let before = Arc::clone(first.index.as_ref().unwrap().records[0].projection.as_ref().unwrap());
-        second.append_message(&json!({"Id":"second","Role":"user","Content":"updated","Status":"completed"}).to_string(), false).unwrap();
+        assert_eq!(
+            PROJECTED_RECORDS.with(|count| count.get()),
+            2,
+            "An unchanged read must not decode or normalize the same message bodies again."
+        );
+        let before = Arc::clone(
+            first.index.as_ref().unwrap().records[0]
+                .projection
+                .as_ref()
+                .unwrap(),
+        );
+        second
+            .append_message(
+                &json!({"Id":"second","Role":"user","Content":"updated","Status":"completed"})
+                    .to_string(),
+                false,
+            )
+            .unwrap();
         let third = read_projected(&root, &location, project_test_message).unwrap();
         assert_eq!(PROJECTED_RECORDS.with(|count| count.get()), 3);
         assert_eq!(third.projected_messages[0]["Content"], "first");
         assert_eq!(third.projected_messages[1]["Content"], "updated");
-        assert!(Arc::ptr_eq(&before, third.index.as_ref().unwrap().records[0].projection.as_ref().unwrap()));
-        assert!(third.index.as_ref().unwrap().bytes >= third.index.as_ref().unwrap().projection_bytes);
+        assert!(Arc::ptr_eq(
+            &before,
+            third.index.as_ref().unwrap().records[0]
+                .projection
+                .as_ref()
+                .unwrap()
+        ));
+        assert!(
+            third.index.as_ref().unwrap().bytes >= third.index.as_ref().unwrap().projection_bytes
+        );
         assert!(third.index.as_ref().unwrap().projection_bytes <= MAX_PROJECTION_BYTES);
         assert!(fs::read(&path).unwrap().starts_with(original.as_bytes()));
         let raw = read_latest(&root, &location, None, false).unwrap();
         assert_eq!(raw.messages.len(), 2);
-        assert_eq!(serde_json::from_str::<Value>(&raw.messages[1]).unwrap()["Content"], "updated");
-        assert!(first.index.as_ref().unwrap().records[0].projection.is_some());
-        assert!(third.index.as_ref().unwrap().records[1].projection.is_some());
+        assert_eq!(
+            serde_json::from_str::<Value>(&raw.messages[1]).unwrap()["Content"],
+            "updated"
+        );
+        assert!(
+            first.index.as_ref().unwrap().records[0]
+                .projection
+                .is_some()
+        );
+        assert!(
+            third.index.as_ref().unwrap().records[1]
+                .projection
+                .is_some()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn projected_bodies_recheck_external_edit_identity_and_missing_sources() {
-        let root = std::env::temp_dir().join(format!("kynxa-history-projected-version-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-history-projected-version-{}",
+            uuid::Uuid::new_v4()
+        ));
         let location = json!({"Id":"version-chat","ProjectId":null});
-        let path = conversation_logs::directory(&root, &location).unwrap().join("events.jsonl");
+        let path = conversation_logs::directory(&root, &location)
+            .unwrap()
+            .join("events.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let original = "{\"version\":1,\"type\":\"message.upsert\",\"message\":{\"Id\":\"user-message\",\"Role\":\"user\",\"Content\":\"before\",\"Status\":\"completed\"}}\n";
         fs::write(&path, original).unwrap();
         let mut first = read_projected(&root, &location, project_test_message).unwrap();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         fs::write(&path, original.replace("before", "after!")).unwrap();
-        OpenOptions::new().write(true).open(&path).unwrap()
-            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
         assert!(first.verify().is_err());
         let mut second = read_projected(&root, &location, project_test_message).unwrap();
         assert_eq!(second.projected_messages[0]["Content"], "after!");
         fs::rename(&path, path.with_extension("previous")).unwrap();
         fs::write(&path, original).unwrap();
-        OpenOptions::new().write(true).open(&path).unwrap()
-            .set_times(FileTimes::new().set_modified(modified)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
         assert!(second.verify().is_err());
         let mut third = read_projected(&root, &location, project_test_message).unwrap();
         assert_eq!(third.projected_messages[0]["Content"], "before");
-        assert!(!Arc::ptr_eq(second.index.as_ref().unwrap(), third.index.as_ref().unwrap()));
+        assert!(!Arc::ptr_eq(
+            second.index.as_ref().unwrap(),
+            third.index.as_ref().unwrap()
+        ));
         fs::remove_file(&path).unwrap();
         assert!(third.verify().is_err());
-        assert!(read_projected(&root, &location, project_test_message).unwrap().projected_messages.is_empty());
+        assert!(
+            read_projected(&root, &location, project_test_message)
+                .unwrap()
+                .projected_messages
+                .is_empty()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1001,7 +1118,6 @@ mod tests {
         let destination = root.join("moved-source");
         let source = folder.clone();
         let moved = destination.clone();
-        // Both returned snapshots remain alive while the real Windows directory rename executes.
         // 两个已返回快照保持存活时执行真实 Windows 目录移动，验证文件句柄已及时释放。
         std::thread::spawn(move || fs::rename(source, moved))
             .join()

@@ -5,7 +5,6 @@ using System.Text.Json;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Starts the bundled gateway on demand without stopping shared services.
 /// 按需启动随包网关，不停止其他调用方共用的服务。
 /// </summary>
 public static class ModelGatewayService
@@ -44,7 +43,6 @@ public static class ModelGatewayService
             _shutdownRequested = true;
             ownedGateway = _ownedGateway;
         }
-        // Stop startup and warmup before notifying the gateway, so they cannot start a replacement during exit.
         // 先停止启动及预热，再通知网关退出，避免收尾期间又拉起新网关。
         ShutdownCancellation.Cancel();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -55,7 +53,6 @@ public static class ModelGatewayService
             {
                 if (!ownedGateway.HasExited)
                 {
-                    // The owned pipe accepts shutdown before HTTP is listening; process exit also closes it as EOF.
                     // 自有管道在 HTTP 监听前即可接收退出；前台结束也会关闭写端并发送 EOF。
                     await ownedGateway.StandardInput.WriteLineAsync("shutdown").WaitAsync(deadline.Token).ConfigureAwait(false);
                     await ownedGateway.StandardInput.FlushAsync(deadline.Token).ConfigureAwait(false);
@@ -83,7 +80,6 @@ public static class ModelGatewayService
     }
 
     /// <summary>
-    /// Validate and prepare a migration copy before its pointer becomes active.
     /// 启用迁移后的路径指针之前，验证并准备迁移副本。
     /// </summary>
     public static async Task InitializeStorageAsync(string target, CancellationToken cancellationToken = default)
@@ -114,7 +110,6 @@ public static class ModelGatewayService
             }
             catch (OperationCanceledException)
             {
-                // This short-lived helper belongs to this migration. Never stop the shared gateway.
                 // 此短期辅助进程只属于本次迁移；不得停止共享网关。
                 try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
                 catch (InvalidOperationException) { }
@@ -147,7 +142,6 @@ public static class ModelGatewayService
         {
             if (_shutdownRequested) throw new OperationCanceledException(ShutdownCancellation.Token);
             ShutdownCancellation.Token.ThrowIfCancellationRequested();
-            // Concurrent catalog, preparation and chat requests share one readiness check.
             // 目录、准备和聊天并发共用一次检查；后续请求仍核对协议及存储范围。
             if (_readinessTask is null || _readinessTask.IsCompleted || _readinessAddress != address)
             {
@@ -156,7 +150,6 @@ public static class ModelGatewayService
             }
             readiness = _readinessTask;
         }
-        // Cancelling one caller must not cancel startup required by the other callers.
         // 单个调用方取消等待，不取消其他调用方仍需要的共享启动。
         return readiness.WaitAsync(cancellationToken);
     }
@@ -261,7 +254,6 @@ public static class ModelGatewayService
                 if (ready && body!.RootElement.TryGetProperty("shuttingDown", out var shuttingDown)
                     && shuttingDown.ValueKind == JsonValueKind.True)
                 {
-                    // A matching gateway retires its own tasks before replacement; normal healthy probes never wait.
                     // 同范围网关先完成自身退出再替换；正常就绪探测不增加等待。
                     await Task.Delay(100, cancellationToken);
                     continue;
@@ -288,11 +280,9 @@ public static class ModelGatewayService
         catch (ArgumentException) { return false; }
     }
 
-    // Resolve bundled native dependencies without modifying the user's global PATH.
     // 只给本次子进程加入随包原生依赖目录，不修改用户全局 PATH。
     private static void ConfigureNativeRuntime(ProcessStartInfo start)
     {
-        // Pass writable defaults and pointer locations without freezing future migration reloads.
         // 传递可写默认位置和指针；不把当前选择锁成显式环境覆盖，迁移后仍可重新解析。
         start.Environment["KYNXA_STORAGE_POINTER"] = ApplicationPaths.StoragePointerPath;
         start.Environment["KYNXA_STORAGE_MIGRATION_LOCK"] = ApplicationPaths.MigrationLockPath;

@@ -16,7 +16,6 @@ public sealed record ChatRequest(Guid ConversationId, string Message, string? Mo
     Guid[]? AttachmentIds = null);
 
 /// <summary>
-/// Stable attachment references live with the user message; original bytes belong to the gateway.
 /// 用户消息保存稳定附件引用；原始文件由网关管理，缩略图草稿不写入正式日志。
 /// </summary>
 public sealed record ChatAttachment(Guid Id, string Name, string ContentType, long SizeBytes,

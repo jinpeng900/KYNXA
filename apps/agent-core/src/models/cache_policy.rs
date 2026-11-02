@@ -1,4 +1,3 @@
-//! Provider cache controls are pure request projections; they never own model execution or a cache ledger.
 //! 供应商缓存控制仅投影请求，不接管模型执行，也不创建缓存账本。
 
 use serde_json::{Value, json};
@@ -91,7 +90,6 @@ fn provider(connection: &Value, model: &str, protocol: &str) -> (ProviderCache, 
 }
 
 fn scope_key(connection: &Value, model: &str, protocol: &str, scope: &str) -> String {
-    // Keep accounting scopes stable without sending disk paths, user identifiers, queries or credentials.
     // 保持计量范围稳定，不能把盘符路径、用户标识、查询或凭据直接发送给供应商。
     let domain = json!([
         "kynxa.prompt-cache.v1",
@@ -138,7 +136,6 @@ fn cache_mark(block: &mut Value, available: &mut usize) -> bool {
 }
 
 fn anthropic(body: &mut Value, stable_system: &str) -> (usize, usize) {
-    // Preserve existing TTL order; a 5m marker before a 1h marker is invalid.
     // 保留现有 TTL 顺序；5m 标记放在 1h 前会使请求无效。
     if marker_count(body) > 0 {
         return (0, 0);
@@ -172,7 +169,6 @@ fn anthropic(body: &mut Value, stable_system: &str) -> (usize, usize) {
             prefix_bytes = stable_text.len();
         }
     }
-    // Reuse completed turns; time, memory and permission changes still invalidate the prefix.
     // 复用已完成轮次；时间、记忆和权限变化仍使前缀失效。
     if slots > 0 {
         if let Some(messages) = body["messages"].as_array_mut() {
@@ -213,7 +209,6 @@ fn anthropic(body: &mut Value, stable_system: &str) -> (usize, usize) {
     (written, prefix_bytes)
 }
 
-/// Apply confirmed provider controls without changing instruction authority, history roles or continuation lifetimes.
 /// 仅应用已确认的供应商控制；不能改变指令优先级、历史角色或续传生命周期。
 pub(crate) fn apply(
     connection: &Value,
@@ -236,7 +231,6 @@ pub(crate) fn apply(
                 mode = "implicit";
                 reason = "official-automatic-cache";
                 if policy == ProviderCache::OpenAiModern {
-                    // Responses instructions replace prior guidance; caching must never turn them into retained input items.
                     // Responses instructions 替换旧指导；缓存不能把它转成会被继承和累积的输入项。
                     if body.get("prompt_cache_options").is_none() {
                         body["prompt_cache_options"] = json!({"mode":"implicit","ttl":"30m"});
@@ -245,8 +239,11 @@ pub(crate) fn apply(
                         mode = "unchanged";
                         reason = "existing-request-cache-policy-preserved";
                     }
-                    prefix_bytes = body["instructions"].as_str()
-                        .filter(|instructions| !stable_system.is_empty() && instructions.starts_with(stable_system))
+                    prefix_bytes = body["instructions"]
+                        .as_str()
+                        .filter(|instructions| {
+                            !stable_system.is_empty() && instructions.starts_with(stable_system)
+                        })
                         .map_or(0, |_| stable_system.len());
                 }
             }
@@ -284,7 +281,6 @@ pub(crate) fn apply(
         "stablePrefixBytes":prefix_bytes,"policyHash":&hash[..20]})
 }
 
-/// Request streaming usage only from verified protocols to avoid rejected fields.
 /// 仅向已核验协议请求流式计量，避免兼容服务拒绝额外字段。
 pub(crate) fn include_stream_usage(
     connection: &Value,
@@ -296,13 +292,13 @@ pub(crate) fn include_stream_usage(
         return;
     }
     let (policy, provider_name) = provider(connection, model, protocol);
-    // The pinned local llama.cpp stream reports its measured KV reuse only when usage is requested.
     // 固定本地 llama.cpp 仅在请求 usage 时回传实测 KV 复用量；这不改变缓存或推理策略。
     let managed_local = super::connections::is_managed_local(connection);
     if !matches!(
         policy,
         ProviderCache::OpenAiLegacy | ProviderCache::OpenAiModern
-    ) && provider_name != "deepseek" && !managed_local
+    ) && provider_name != "deepseek"
+        && !managed_local
     {
         return;
     }
@@ -314,7 +310,6 @@ pub(crate) fn include_stream_usage(
     }
 }
 
-/// Sort object keys; preserve history, tool pairs, array order and string contents.
 /// 固定对象键顺序；保留历史、工具配对、数组顺序和字符串原文。
 pub(crate) fn canonicalize_request(value: &mut Value) {
     match value {
@@ -350,15 +345,20 @@ mod tests {
         body.as_object_mut().unwrap().remove("stream_options");
         assert_eq!(body, original);
 
-        let mut external = local.clone(); external["providerId"] = json!("configured-local-api");
+        let mut external = local.clone();
+        external["providerId"] = json!("configured-local-api");
         include_stream_usage(&external, "test", "openai-completions", &mut body);
         assert_eq!(body, original);
         body["stream"] = json!(false);
         include_stream_usage(&local, "test", "openai-completions", &mut body);
         assert!(body.get("stream_options").is_none());
-        body["stream"] = json!(true); body["stream_options"] = json!({"include_usage":false,"other":true});
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({"include_usage":false,"other":true});
         include_stream_usage(&local, "test", "openai-completions", &mut body);
-        assert_eq!(body["stream_options"], json!({"include_usage":false,"other":true}));
+        assert_eq!(
+            body["stream_options"],
+            json!({"include_usage":false,"other":true})
+        );
     }
 
     #[test]
@@ -543,8 +543,14 @@ mod tests {
                 {"type":"function_call_output","call_id":"c1","output":"observed"},
                 {"role":"assistant","content":[{"type":"output_text","text":"saved output"}]}]});
         let original = body.clone();
-        apply(&connection("api.openai.com", "openai-responses"), "gpt-6.1-sol", "openai-responses",
-            &mut body, "scope", "stable");
+        apply(
+            &connection("api.openai.com", "openai-responses"),
+            "gpt-6.1-sol",
+            "openai-responses",
+            &mut body,
+            "scope",
+            "stable",
+        );
         assert_eq!(body["instructions"], original["instructions"]);
         assert_eq!(body["input"], original["input"]);
         assert_eq!(body["store"], false);

@@ -3,7 +3,6 @@ use sha2::{Digest, Sha256};
 
 const MAX_OBSERVATIONS: usize = 256;
 
-/// The broker and the guard share the same canonical source identity calculations.
 /// 代理与重复读取保护共用同一来源身份计算，避免接口投影与控制账本各自维护规则。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     match operation {
@@ -23,7 +22,6 @@ pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     }
 }
 
-/// Successful and failed observations have separate request-local progress histories.
 /// 成功观察与失败读取使用独立的请求级历史；不共享跨请求缓存，也不授予执行权限。
 #[derive(Default)]
 pub struct ObservationGuard {
@@ -61,7 +59,6 @@ impl ObservationGuard {
                 || is_truthy(&result["code"])
                 || (is_truthy(&result["status"]) && result["status"] != "completed")
             {
-                // Discovery and failed reads do not erase prior source observations.
                 // 发现工具和失败读取不会抹掉已读来源；真实写入重置无进展轮次，仍保留版本指纹。
                 changed_state |= !pair["observation"].as_bool().unwrap_or(false)
                     && !is_truthy(&result["isError"])
@@ -71,7 +68,6 @@ impl ObservationGuard {
             }
             observed = true;
             discovery_only &= matches!(call["name"].as_str(), Some("tool.search" | "tool.load"));
-            // Broker-created source identity takes precedence over call explanations and changing archive IDs.
             // 优先使用代理生成的来源身份；调用理由和每次变化的归档 ID 不构成新信息。
             let source = source_observation(call, result);
             let key = result
@@ -208,7 +204,6 @@ fn is_truthy(value: &Value) -> bool {
 }
 
 fn progress_result(repeated: bool, rounds: u64) -> Value {
-    // Successful observations warn after two unchanged rounds; failed reads count the first failure.
     // 成功读取在两轮无新增信息后告警；失败读取从第一次失败开始计数。
     json!({"repeated": repeated, "warning": rounds == 2, "finalize": rounds >= 3})
 }
@@ -277,7 +272,6 @@ fn call_key(call: &Value) -> Option<String> {
             | "conversation.history.read"
             | "memory.read"
     ) {
-        // Intent descriptions never alter a known read's target; result fingerprints still detect version changes.
         // 说明参数不改变已知读取目标；实际结果指纹仍识别文件或来源版本变化。
         if let Some(fields) = input.as_object_mut() {
             fields.remove("reason");
@@ -331,7 +325,6 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
     let observation = match name {
         "tool.search" | "tool.load" => {
             let tools = value["tools"].as_array()?;
-            // Capability identity ignores query scores and call IDs, but includes schemas and authority versions.
             // 能力身份不含查询分数及调用 ID，保留声明和权限版本变化。
             let mut definitions = tools.iter().map(|tool| json!({
                 "name":tool["name"],"description":tool["description"],
@@ -341,15 +334,35 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 "identity":tool["identity"],"configurationGeneration":tool["configurationGeneration"]
             })).collect::<Vec<_>>();
             definitions.sort_by_cached_key(Value::to_string);
-            json!([definitions, value["configurationGeneration"],value["mcpConfigurationGeneration"],
-                value["permissionMode"],value["permissions"]])
+            json!([
+                definitions,
+                value["configurationGeneration"],
+                value["mcpConfigurationGeneration"],
+                value["permissionMode"],
+                value["permissions"]
+            ])
         }
-        "attachment.read" if value["sourceId"].is_string() && value["sourceVersion"].is_string() => {
-            json!([value["sourceId"], value["sourceVersion"], value["offset"], value["nextOffset"],
-                value["textState"], value["text"]])
+        "attachment.read"
+            if value["sourceId"].is_string() && value["sourceVersion"].is_string() =>
+        {
+            json!([
+                value["sourceId"],
+                value["sourceVersion"],
+                value["offset"],
+                value["nextOffset"],
+                value["textState"],
+                value["text"]
+            ])
         }
         "image.read" if value["sourceId"].is_string() && value["imageSha256"].is_string() => {
-            json!([value["sourceId"], value["sourceVersion"], value["imageSha256"], value["crop"], value["width"], value["height"]])
+            json!([
+                value["sourceId"],
+                value["sourceVersion"],
+                value["imageSha256"],
+                value["crop"],
+                value["width"],
+                value["height"]
+            ])
         }
         "knowledge.read"
             if value["text"].is_string()
@@ -384,7 +397,10 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 value["offset"],
                 value["nextOffset"],
                 value["locator"]["extraction"]["pageWindow"],
-                value.get("text").filter(|value| value.is_string()).unwrap_or(&value["content"])
+                value
+                    .get("text")
+                    .filter(|value| value.is_string())
+                    .unwrap_or(&value["content"])
             ])
         }
         "tool.result.read"
@@ -392,7 +408,6 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 && is_truthy(&value["resultRef"]["sha256"])
                 && value["text"].is_string() =>
         {
-            // Page identity belongs to the original immutable archive, never the new read receipt.
             // 页身份使用原始不可变归档与实际范围，新回执 ID 或调用说明不能伪装成新证据。
             json!([
                 value["resultRef"]["id"],
@@ -472,13 +487,39 @@ mod tests {
     #[test]
     fn discovery_identity_uses_schema_and_authority_instead_of_call_or_query() {
         let mut guard = ObservationGuard::default();
-        let capability = |id: &str, version: u64| json!({"call":{"id":id,"name":"tool.search",
+        let capability = |id: &str, version: u64| {
+            json!({"call":{"id":id,"name":"tool.search",
             "arguments":{"query":id}},"observation":true,"result":{"status":"completed",
             "content":{"configurationGeneration":version,"tools":[{"name":"filesystem.read",
-                "score":id,"inputSchema":{"type":"object"}}]}}});
-        assert_eq!(guard.apply("observations.success",&json!({"results":[capability("one",1)]})).unwrap()["repeated"],false);
-        assert_eq!(guard.apply("observations.success",&json!({"results":[capability("two",1)]})).unwrap()["repeated"],true);
-        assert_eq!(guard.apply("observations.success",&json!({"results":[capability("three",2)]})).unwrap()["repeated"],false);
+                "score":id,"inputSchema":{"type":"object"}}]}}})
+        };
+        assert_eq!(
+            guard
+                .apply(
+                    "observations.success",
+                    &json!({"results":[capability("one",1)]})
+                )
+                .unwrap()["repeated"],
+            false
+        );
+        assert_eq!(
+            guard
+                .apply(
+                    "observations.success",
+                    &json!({"results":[capability("two",1)]})
+                )
+                .unwrap()["repeated"],
+            true
+        );
+        assert_eq!(
+            guard
+                .apply(
+                    "observations.success",
+                    &json!({"results":[capability("three",2)]})
+                )
+                .unwrap()["repeated"],
+            false
+        );
     }
 
     #[test]

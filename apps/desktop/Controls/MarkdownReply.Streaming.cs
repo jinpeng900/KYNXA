@@ -31,8 +31,6 @@ public sealed partial class MarkdownReply
 
     private void Render()
     {
-        // Updating a RichTextBlock invalidates its native TextPointers. This also applies
-        // to final reconciliation and to selections spanning an earlier message.
         // RichTextBlock 更新会使原生 TextPointer 失效；最终内容校正和跨旧消息选择也适用。
         if (_selectionScroll.HasSelection)
         {
@@ -52,8 +50,6 @@ public sealed partial class MarkdownReply
         _renderedStreaming = IsStreaming;
         if (completed)
         {
-            // Final text can equal the last delta. Still reconcile decoration geometry
-            // after the final native layout without replacing selectable paragraphs.
             // 最终文本可能与最后一个增量相同；最终布局后仍校正装饰几何，同时保留可选择段落。
             _backgroundsDirty = true;
             _formulaBaselines.Clear();
@@ -67,8 +63,6 @@ public sealed partial class MarkdownReply
             while (keep < keys.Length && keep < _renderedBlocks.Count && _renderedBlocks[keep].Key == keys[keep]) keep++;
         if (keep == keys.Length && keep == _renderedBlocks.Count) { QueueFormulaRendering(); return; }
 
-        // A growing list/fence/table can change its final block. Retain every preceding
-        // paragraph and its formula images rather than rebuilding the whole message.
         // 增量可能改变列表、代码块或表格的末块；保留此前段落与公式图片，避免重建整条消息。
         RemoveTail(keep);
         _renderedPlainText = IsPlainText;
@@ -120,8 +114,6 @@ public sealed partial class MarkdownReply
 
     private void AddSemanticKey(StringBuilder key, MdBlock block)
     {
-        // A later reference definition can change an earlier link without changing its
-        // source slice. Include resolved link targets and incomplete-math state.
         // 后续引用定义可能改变早期链接而不改变源文切片；缓存签名包含解析后的链接与未完成公式状态。
         if (block is MathBlock math)
             key.Append("|math:").Append(IsStreaming && math.ClosingFencedCharCount == 0);

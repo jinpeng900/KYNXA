@@ -6,14 +6,12 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Reads gateway SSE frames independently of network packet and UTF-8 character boundaries.
 /// 读取网关 SSE 帧，不依赖网络包边界或 UTF-8 字符的分包位置。
 /// </summary>
 public static class ChatStreamReader
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaximumEventCharacters = 8 * 1024 * 1024;
-    // Preserve full write-approval parameters within the SSE frame limit.
     // 保留完整写入审批参数，SSE 帧仍有大小上限。
     private const int MaximumToolArgumentCharacters = 1024 * 1024;
 
@@ -52,7 +50,6 @@ public static class ChatStreamReader
                         throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
                     if (!ChatDurationRules.IsValid(streamEvent.DurationMs))
                         throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"));
-                    // Ignore invalid display timing without ending the stream or changing settled time.
                     // 忽略缺失或越界的展示计时，保持有效回复和正式结算用时。
                     if (streamEvent.GenerationElapsedMs is not long elapsed || !ChatDurationRules.IsValid(elapsed)
                         || streamEvent.GenerationActive is null)
@@ -77,7 +74,6 @@ public static class ChatStreamReader
                                 || streamEvent.UserMessageId is not Guid userMessageId || userMessageId == Guid.Empty
                                 || streamEvent.SupersededReplyMessageId == Guid.Empty)
                                 throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
-                            // A steering boundary starts a new visible reply while preserving the task and tool receipts.
                             // 引导边界开启新的可见回复，任务身份及工具回执继续沿用，不重开整个请求。
                             assistantSegments.Clear();
                             lastTimelineOrder = -1;
@@ -110,7 +106,6 @@ public static class ChatStreamReader
                         case "tool_result":
                         case "approval_required":
                             ValidateToolEvent(streamEvent);
-                            // Context maintenance is display-only, including after interruption; tools wait for round output.
                             // 上下文维护只作展示，可接续中断步骤；工具仍须等本轮输出结束。
                             bool isContextActivity = streamEvent.Tool!.Name == "context.compact";
                             if (isContextActivity && (streamEvent.Type == "approval_required" ||
@@ -137,7 +132,6 @@ public static class ChatStreamReader
                             if (streamEvent.Type == "tool_result") { activeToolCalls.Remove(toolCallId); terminalOutputSequences.Remove(toolCallId); }
                             break;
                         case "approval_closed":
-                            // Closing an approval changes neither the active tool nor the reply's terminal state.
                             // 审批关闭不结束工具或回复；后续真实工具回执仍必须正常接收。
                             if (streamEvent.ApprovalId is not Guid closedId || closedId == Guid.Empty ||
                                 string.IsNullOrWhiteSpace(streamEvent.ToolCallId) || streamEvent.ToolCallId.Length > 200 ||
@@ -152,7 +146,6 @@ public static class ChatStreamReader
                             terminalOutputSequences[streamEvent.Terminal.ToolCallId] = streamEvent.Terminal.Sequence;
                             break;
                         case "workspace_terminal_open":
-                            // The gateway already owns this PTY; the event attaches its renderer, never creates a second session.
                             // 网关已拥有此伪终端；事件只挂接渲染视图，不能再建立第二个会话。
                             if (string.IsNullOrWhiteSpace(streamEvent.SessionId) || streamEvent.SessionId.Length > 200 ||
                                 streamEvent.SessionId.Any(char.IsControl) || streamEvent.Cols is not (>= 2 and <= 500) ||
@@ -160,7 +153,6 @@ public static class ChatStreamReader
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             break;
                         case "mcp_status":
-                            // Discovery diagnostics preserve reply/tool state; identity checks still apply.
                             // 发现诊断不结束回复或改变工具状态，会话身份仍统一校验。
                             if (string.IsNullOrWhiteSpace(streamEvent.ServerId) || streamEvent.ServerId.Length > 80 ||
                                 streamEvent.Ready is null || string.IsNullOrWhiteSpace(streamEvent.Code) || streamEvent.Code.Length > 200 ||
@@ -175,7 +167,6 @@ public static class ChatStreamReader
                         case "task_tool_result":
                         case "task_finished":
                         case "task_approval_closed":
-                            // Child diagnostics are not main-agent tools or terminal reply events.
                             // 子任务诊断不加入主代理工具账本，也不结束主回复；正式回执通过任务 API 读取。
                             if (streamEvent.TaskId is not Guid task || task == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty
                                 || (rootTaskId is Guid root && streamEvent.RootRequestTaskId is Guid actual && root != actual))
@@ -218,7 +209,6 @@ public static class ChatStreamReader
                 if (line is null) throw new EndOfStreamException(UiText.Get("模型连接已断开，已保留收到的内容。"));
                 continue;
             }
-            // Ignore comments/heartbeats and optional SSE event/id/retry fields.
             // 忽略注释、心跳与可选的 SSE event、id、retry 字段。
             int separator = line.IndexOf(':');
             string field = separator < 0 ? line : line[..separator];
@@ -261,7 +251,6 @@ public static class ChatStreamReader
         if (previous.Phase == "final_answer" && segment.Phase != "final_answer") return false;
         if (previous.Status == "streaming") return true;
 
-        // Round closure is idempotent; classification may refine phase/continuation, not closed body or summary.
         // 同轮结束可幂等重放；后续可确定阶段或续写标记，但不改已关闭的正文和摘要。
         return previous.Status == segment.Status && previous.Content == segment.Content &&
             previous.Reasoning == segment.Reasoning && previous.ReasoningDurationMs <= segment.ReasoningDurationMs &&
@@ -280,7 +269,6 @@ public static class ChatStreamReader
         if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment =>
             !knownSegments.TryGetValue(segment.Id, out var prior) || !IsValidSegmentUpdate(prior, segment))))
             throw InvalidSegment();
-        // Preserve interrupted steps as commentary even if recovery produces a final answer.
         // 恢复后即使得到完整答案，也保留先前中断的过程记录。
         if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment =>
             segment.Status != "completed" && !(segment.Phase == "commentary" && segment.Status == "interrupted")) ||

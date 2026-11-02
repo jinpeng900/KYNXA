@@ -18,7 +18,8 @@
     ".csproj",
     ".xaml",
     ".html",
-    ".css"
+    ".css",
+    ".py"
   ],
   "excludedDirectoryNames": [
     "node_modules",
@@ -270,7 +271,23 @@
         "orchestration/gateway_task_worker/preparation.rs",
         "orchestration/gateway_task_worker/model_round.rs",
         "orchestration/gateway_task_worker/tool_round/dispatch.rs",
-        "orchestration/gateway_task_worker/tool_round/receipts.rs"
+        "orchestration/gateway_task_worker/tool_round/receipts.rs",
+        "training/dataset_tables.rs",
+        "training/datasets.rs",
+        "training/export.rs",
+        "training/imports.rs",
+        "training/jobs.rs",
+        "training/mod.rs",
+        "training/prediction.rs",
+        "training/resources.rs",
+        "training/runtime.rs",
+        "training/store.rs",
+        "training/dataset_preview.rs",
+        "training/environment.rs",
+        "training/environment_download.rs",
+        "training/environment_process.rs",
+        "training/records.rs",
+        "training/trial.rs"
       ],
       "dependencyVersions": {
         "serde": "=1.0.228",
@@ -1105,6 +1122,139 @@
             "retrieval"
           ],
           "purpose": "Delegated durable receipt and evidence projection / 子任务正式回执及证据投影"
+        },
+        {
+          "path": "training/dataset_tables.rs",
+          "allowedDomains": [
+            "retrieval"
+          ],
+          "purpose": "Training table decoding reuses existing Office guards / 训练表格复用Office边界"
+        },
+        {
+          "path": "training/datasets.rs",
+          "allowedDomains": [
+            "tools",
+            "storage",
+            "retrieval"
+          ],
+          "purpose": "Authorized sources to frozen training samples / 授权来源生成冻结样本"
+        },
+        {
+          "path": "training/export.rs",
+          "allowedDomains": [
+            "tools",
+            "storage"
+          ],
+          "purpose": "Registered training artifacts export without overwrite / 已登记训练产物流式导出"
+        },
+        {
+          "path": "training/imports.rs",
+          "allowedDomains": [
+            "tools",
+            "storage"
+          ],
+          "purpose": "Native picker source and model grants / 原生选择器资料与模型授权"
+        },
+        {
+          "path": "training/jobs.rs",
+          "allowedDomains": [
+            "tools",
+            "storage",
+            "resources"
+          ],
+          "purpose": "Durable training lifecycle and process admission / 持久训练生命周期与资源准入"
+        },
+        {
+          "path": "training/mod.rs",
+          "allowedDomains": [
+            "tools",
+            "storage",
+            "resources"
+          ],
+          "purpose": "Training API and tool boundary / 训练API与工具边界"
+        },
+        {
+          "path": "training/prediction.rs",
+          "allowedDomains": [
+            "tools"
+          ],
+          "purpose": "Completed training model prediction / 已完成模型预测"
+        },
+        {
+          "path": "training/resources.rs",
+          "allowedDomains": [
+            "tools"
+          ],
+          "purpose": "Training-specific allocation estimate / 训练资源估计"
+        },
+        {
+          "path": "training/runtime.rs",
+          "allowedDomains": [
+            "tools",
+            "storage",
+            "models"
+          ],
+          "purpose": "Versioned training workers and model capabilities / 版本化训练执行器及模型能力"
+        },
+        {
+          "path": "training/store.rs",
+          "allowedDomains": [
+            "storage",
+            "tools"
+          ],
+          "purpose": "Scoped atomic training records / 按归属保存原子训练记录"
+        },
+        {
+          "path": "training/dataset_preview.rs",
+          "allowedDomains": [
+            "storage",
+            "tools"
+          ],
+          "purpose": "Scoped dataset pages and image thumbnails / 作用域数据分页与缩略图"
+        },
+        {
+          "path": "training/environment.rs",
+          "allowedDomains": [
+            "storage",
+            "tools",
+            "resources",
+            "models"
+          ],
+          "purpose": "Training-only environment setup / 训练台独立环境准备"
+        },
+        {
+          "path": "training/environment_download.rs",
+          "allowedDomains": [
+            "storage",
+            "tools",
+            "models"
+          ],
+          "purpose": "Verified training bootstrap downloads / 训练环境校验下载"
+        },
+        {
+          "path": "training/environment_process.rs",
+          "allowedDomains": [
+            "tools",
+            "resources"
+          ],
+          "purpose": "Owned training setup subprocess / 训练安装子进程生命周期"
+        },
+        {
+          "path": "training/records.rs",
+          "allowedDomains": [
+            "storage",
+            "tools"
+          ],
+          "purpose": "Experiment metadata and explicit checkpoint cleanup / 实验备注与显式旧断点清理"
+        },
+        {
+          "path": "training/trial.rs",
+          "allowedDomains": [
+            "storage",
+            "tools",
+            "resources"
+          ],
+          "purpose": "Isolated trained model trials / 训练台独立试用"
         }
       ]
     }
@@ -1312,6 +1462,14 @@
     {
       "prefix": "apps/official-tools/",
       "component": "tools"
+    },
+    {
+      "prefix": "apps/agent-core/src/training/",
+      "component": "integration"
+    },
+    {
+      "prefix": "apps/agent-core/training-runtime/",
+      "component": "integration"
     }
   ],
   "localTests": {

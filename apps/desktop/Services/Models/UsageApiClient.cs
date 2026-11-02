@@ -5,7 +5,6 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Reads a scoped usage projection without opening logs or creating a second statistics store.
 /// 仅读取范围化用量投影，不打开日志，也不建立第二份统计存储。
 /// </summary>
 public sealed class UsageApiClient : IDisposable

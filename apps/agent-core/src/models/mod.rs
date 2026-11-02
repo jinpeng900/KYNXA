@@ -1,11 +1,10 @@
-//! Provider calculations own interpretation; transport and journal I/O remain in adapters.
 //! 供应商计算负责解析与决策；网络传输及正式日志 I/O 仍留在适配器。
 
 pub mod batches;
-pub mod capabilities;
-pub(crate) mod cache_policy;
 pub mod cache_diagnostics;
+pub(crate) mod cache_policy;
 pub mod cache_replay;
+pub mod capabilities;
 pub mod connections;
 pub mod context;
 pub mod context_control;
@@ -13,8 +12,8 @@ pub mod discovery;
 pub mod document_fit;
 pub mod gateway;
 pub mod gateway_config;
-mod gateway_download_network;
 pub mod gateway_context;
+mod gateway_download_network;
 pub mod gateway_inference;
 pub mod gateway_local_engine;
 pub mod gateway_local_models;

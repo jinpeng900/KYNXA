@@ -23,7 +23,6 @@ public sealed partial class ShellPage
         container.ClearValue(AutomationProperties.HelpTextProperty);
         container.ClearValue(AutomationProperties.NameProperty);
         if (args.InRecycleQueue) return;
-        // Virtualized containers have no item DataContext; bind their actual item explicitly and clear on reuse.
         // 虚拟化容器没有条目的 DataContext，显式绑定实际条目，并在回收时清除旧状态。
         BindingOperations.SetBinding(container, UiLocalization.AutomationHelpProperty, new Binding
         {
@@ -53,7 +52,6 @@ public sealed partial class ShellPage
         try { child = FocusManager.GetFocusedElement(root) as DependencyObject; }
         catch (ArgumentException)
         {
-            // PointerExited/LostFocus can arrive while XAML detaches this root.
             // XAML 移除当前根节点时，PointerExited 或 LostFocus 仍可能到达。
             return false;
         }

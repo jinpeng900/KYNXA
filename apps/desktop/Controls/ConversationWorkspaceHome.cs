@@ -9,7 +9,6 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Workspace entry points share the right pane; website entry never opens a modal dialog.
 /// 工作区入口共用右栏，网址直接输入，不再弹出阻断式输入窗口。
 /// </summary>
 public sealed class ConversationWorkspaceHome : Grid
@@ -77,7 +76,6 @@ public sealed class ConversationWorkspaceHome : Grid
         _homeScroll.SizeChanged += (_, args) =>
         {
             if (args.NewSize.Width <= 0 || args.NewSize.Height <= 0) return;
-            // Center within the viewport; a shorter window still scrolls the whole entry group.
             // 按可见区域居中；矮窗口仍能滚到整组入口的底部。
             homeLayout.MinHeight = args.NewSize.Height;
             content.Width = Math.Min(460, Math.Max(0, args.NewSize.Width - 36));
@@ -398,7 +396,6 @@ public sealed class ConversationWorkspaceHome : Grid
         if (DirectoryLoader is not { } loader) return;
         long generation = _browserGeneration;
         CancellationToken token = _browserReads.Token;
-        // Mark admission immediately so collapsing/reopening a pending branch cannot dispatch it twice.
         // 立即占位，避免目录尚在排队或读取时快速收起、再展开导致重复派发。
         children.Children.Add(new TextBlock { Text = UiText.Get("正在读取文件列表…"), FontSize = 12,
             Foreground = Brush("KynxaSecondaryTextBrush") });

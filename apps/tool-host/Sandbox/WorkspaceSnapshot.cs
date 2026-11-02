@@ -63,7 +63,6 @@ internal sealed class WorkspaceSnapshot
             if (file.Length > MaximumFileBytes) { Skipped++; continue; }
             if (++Files > MaximumFiles || Bytes + file.Length > MaximumBytes)
                 throw new SandboxException("SANDBOX_SNAPSHOT_LIMIT", "Workspace exceeds the bounded sandbox snapshot limit.");
-            // Disallow concurrent writers during the copy; recheck reparse attributes after opening.
             // 复制时禁止并发写入，打开后再次检查重解析属性。
             using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             NativeMethods.Check(NativeMethods.GetFileInformationByHandle(input.SafeFileHandle, out var information), "GetFileInformationByHandle snapshot");
@@ -90,8 +89,6 @@ internal sealed class WorkspaceSnapshot
         foreach (string root in _excludedRoots)
         {
             if (!IsWithin(root, path)) continue;
-            // Only the service's canonical managed work folder may bypass its Data ancestor.
-            // Explicit exclusions inside the work folder still apply, as do all sensitive-name filters.
             // 仅规范托管工作目录可跨越 Data 祖先；内部显式排除和敏感文件名过滤仍有效。
             if (_allowDataAncestor && IsWithin(root, _sourceRoot) && !PathEquals(root, _sourceRoot) && IsWithin(_sourceRoot, path)) continue;
             return true;
@@ -110,11 +107,9 @@ internal sealed class WorkspaceSnapshot
         bool conversationBelowModels = parts.Length == 2 && Path.GetFileName(Path.TrimEndingDirectorySeparator(root))
             .Equals("Models", StringComparison.OrdinalIgnoreCase) && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) &&
             Guid.TryParse(parts[1], out _);
-        // Accept custom model-home names only at the configured root, not other excluded folders.
         // 自定义模型目录名仅放行已配置根目录，不扩大到其他被排除目录。
         bool conversationBelowConfiguredHome = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
             parts.Length == 2 && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);
-        // The native broker passes the exact configured Data root for its current chat sandbox.
         // 原生程序为当前聊天沙箱传入准确的已配置 Data 根；不能放行其他 Data 子目录或扩展根。
         bool conversationBelowNativeData = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
             parts.Length == 2 && parts[0].Equals("Sandboxes", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);

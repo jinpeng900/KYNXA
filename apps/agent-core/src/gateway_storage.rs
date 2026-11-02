@@ -1,4 +1,3 @@
-//! Storage maintenance closes admission, drains writers and replaces runtimes.
 //! 存储维护先关闭准入、等待写入结束，再替换运行时。
 
 use crate::{
@@ -109,10 +108,14 @@ impl StorageLifecycle {
         self: &Arc<Self>,
         control: bool,
     ) -> Result<(Arc<GatewayRuntime>, RequestAdmission), GatewayError> {
-        if self.is_shutting_down() { return Err(shutdown_error()); }
+        if self.is_shutting_down() {
+            return Err(shutdown_error());
+        }
         self.refresh().await;
         let state = self.state.lock().await;
-        if self.is_shutting_down() { return Err(shutdown_error()); }
+        if self.is_shutting_down() {
+            return Err(shutdown_error());
+        }
         if state.phase != Phase::Running
             && !(control && matches!(state.phase, Phase::Waiting | Phase::CleanupFailed))
         {
@@ -129,14 +132,18 @@ impl StorageLifecycle {
         ))
     }
     async fn refresh(self: &Arc<Self>) {
-        if self.is_shutting_down() { return; }
+        if self.is_shutting_down() {
+            return;
+        }
         let Some(path) = &self.migration_lock else {
             return;
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
         let mut attempted_cleanup = false;
         loop {
-            if self.is_shutting_down() { return; }
+            if self.is_shutting_down() {
+                return;
+            }
             let active = match migration_active(path) {
                 Ok(active) => active,
                 Err(error) => {
@@ -149,13 +156,14 @@ impl StorageLifecycle {
                 }
             };
             let mut state = self.state.lock().await;
-            if self.is_shutting_down() { return; }
+            if self.is_shutting_down() {
+                return;
+            }
             match (active, state.phase) {
                 (true, Phase::Running) => state.phase = Phase::Waiting,
                 (false, Phase::Waiting) => state.phase = Phase::Running,
                 _ => {}
             }
-            // Retry unfinished cleanup before rebuilding runtimes, even if its marker was removed.
             // 重建运行时前重试未完成清理，维护标记已删除也一样。
             if !attempted_cleanup
                 && (active && state.phase == Phase::Waiting || state.phase == Phase::CleanupFailed)
@@ -166,7 +174,6 @@ impl StorageLifecycle {
                 state.phase = Phase::Draining;
                 let lifecycle = self.clone();
                 let runtime = state.runtime.clone();
-                // Run cleanup independently so health-request disconnects cannot cancel it.
                 // 清理由独立任务执行，健康检查断开不会中途取消。
                 tokio::spawn(async move {
                     let result = runtime.quiesce_storage().await;
@@ -203,7 +210,9 @@ impl StorageLifecycle {
         let old_config = self.current().await.config.clone();
         let cancellation = self.shutdown_signal();
         let prepared = tokio::task::spawn_blocking(move || {
-            if *cancellation.borrow() { return Err(shutdown_error()); }
+            if *cancellation.borrow() {
+                return Err(shutdown_error());
+            }
             let config = resolver()?;
             let owner = if config.data_root == old_config.data_root {
                 None
@@ -213,7 +222,9 @@ impl StorageLifecycle {
             crate::gateway::initialize_storage(config.data_root.to_str().ok_or_else(|| {
                 GatewayError::new("INVALID_STORAGE_CONFIGURATION", "存储目录编码无效。", 409)
             })?)?;
-            if *cancellation.borrow() { return Err(shutdown_error()); }
+            if *cancellation.borrow() {
+                return Err(shutdown_error());
+            }
             crate::retrieval::gateway::start_background(&config)?;
             Ok::<_, GatewayError>((config, owner))
         })
@@ -225,7 +236,10 @@ impl StorageLifecycle {
         if self.is_shutting_down() {
             drop(state);
             if let Ok((config, _owner)) = prepared {
-                let _ = tokio::task::spawn_blocking(move || crate::retrieval::gateway::drain_background(&config)).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::retrieval::gateway::drain_background(&config)
+                })
+                .await;
             }
             self.state.lock().await.phase = Phase::Ready;
             return;
@@ -265,11 +279,12 @@ impl StorageLifecycle {
     pub(crate) async fn wait_for_shutdown(&self) {
         let mut requested = self.shutdown_signal();
         while !*requested.borrow_and_update() {
-            if requested.changed().await.is_err() { break; }
+            if requested.changed().await.is_err() {
+                break;
+            }
         }
     }
 
-    /// Bind desktop exit to this installation's current paths before closing admission.
     /// 桌面退出先核对当前安装路径，再关闭准入；不接管其他数据目录的网关。
     pub(crate) async fn request_shutdown(&self, identity: &Value) -> Result<(), GatewayError> {
         let state = self.state.lock().await;
@@ -277,17 +292,36 @@ impl StorageLifecycle {
             ("modelDataHome", &state.runtime.config.data_home),
             ("extensionRoot", &state.runtime.config.extension_root),
         ] {
-            let supplied = identity[field].as_str().filter(|path| std::path::Path::new(path).is_absolute())
-                .ok_or_else(|| GatewayError::new("INVALID_SHUTDOWN_IDENTITY", "退出请求缺少有效的软件目录。", 400))?;
+            let supplied = identity[field]
+                .as_str()
+                .filter(|path| std::path::Path::new(path).is_absolute())
+                .ok_or_else(|| {
+                    GatewayError::new(
+                        "INVALID_SHUTDOWN_IDENTITY",
+                        "退出请求缺少有效的软件目录。",
+                        400,
+                    )
+                })?;
             let normalize = |path: &str| -> Result<String, GatewayError> {
-                let resolved = crate::storage::administration::configured_path(&json!(path), &state.runtime.config.application_root)?;
+                let resolved = crate::storage::administration::configured_path(
+                    &json!(path),
+                    &state.runtime.config.application_root,
+                )?;
                 let path = resolved.to_string_lossy();
                 Ok(if cfg!(windows) {
-                    crate::storage::retrieval::normalize_path(&path).trim_end_matches('/').to_owned()
-                } else { path.trim_end_matches('/').to_owned() })
+                    crate::storage::retrieval::normalize_path(&path)
+                        .trim_end_matches('/')
+                        .to_owned()
+                } else {
+                    path.trim_end_matches('/').to_owned()
+                })
             };
             if normalize(supplied)? != normalize(&expected.to_string_lossy())? {
-                return Err(GatewayError::new("SHUTDOWN_IDENTITY_MISMATCH", "退出请求不属于当前软件。", 409));
+                return Err(GatewayError::new(
+                    "SHUTDOWN_IDENTITY_MISMATCH",
+                    "退出请求不属于当前软件。",
+                    409,
+                ));
             }
         }
         state.runtime.close_admission();
@@ -303,17 +337,22 @@ impl StorageLifecycle {
 
     pub async fn shutdown(&self) {
         self.begin_shutdown().await;
+        let home = self.current().await.config.data_root.clone();
+        crate::training::shutdown(&home).await;
         loop {
             let phase = self.state.lock().await.phase;
-            if !matches!(phase, Phase::Draining | Phase::Reloading) { break; }
+            if !matches!(phase, Phase::Draining | Phase::Reloading) {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let runtime = self.current().await;
-        // Accepted HTTP writes settle independently; SSE observation ends on the shutdown signal.
         // 已准入写入自行结算；SSE 观察随退出信号结束，不能相互等待。
         loop {
             runtime.interrupt_for_shutdown().await;
-            if self.active_http.load(Ordering::Acquire) == 0 { break; }
+            if self.active_http.load(Ordering::Acquire) == 0 {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         runtime.shutdown().await;
@@ -321,7 +360,11 @@ impl StorageLifecycle {
 }
 
 fn shutdown_error() -> GatewayError {
-    GatewayError::new("GATEWAY_SHUTTING_DOWN", "软件正在退出，已有任务与回执正在保存。", 503)
+    GatewayError::new(
+        "GATEWAY_SHUTTING_DOWN",
+        "软件正在退出，已有任务与回执正在保存。",
+        503,
+    )
 }
 
 #[cfg(test)]
@@ -332,24 +375,52 @@ mod shutdown_tests {
     async fn shutdown_identity_closes_admission_without_waiting_for_existing_request() {
         let root = std::env::temp_dir().join(format!("kynxa-exit-{}", uuid::Uuid::new_v4()));
         let config = GatewayConfig {
-            data_root: root.join("Data"), data_home: root.join("Data/Models"),
-            extension_root: root.join("Extensions"), application_root: root.join("App"), port: 0,
-            toolhost_exe: root.join("unused-toolhost.exe"), vector_extension: root.join("unused-vec.dll"),
+            data_root: root.join("Data"),
+            data_home: root.join("Data/Models"),
+            extension_root: root.join("Extensions"),
+            application_root: root.join("App"),
+            port: 0,
+            toolhost_exe: root.join("unused-toolhost.exe"),
+            vector_extension: root.join("unused-vec.dll"),
             inference_library: root.join("unused-ort.dll"),
         };
         let lifecycle = StorageLifecycle::fixed(GatewayRuntime::new(config.clone()));
         let (_, admitted) = lifecycle.admit(false).await.unwrap();
-        let mut identity = json!({"modelDataHome":config.data_home,"extensionRoot":root.join("Other")});
-        assert_eq!(lifecycle.request_shutdown(&identity).await.unwrap_err().code, "SHUTDOWN_IDENTITY_MISMATCH");
+        let mut identity =
+            json!({"modelDataHome":config.data_home,"extensionRoot":root.join("Other")});
+        assert_eq!(
+            lifecycle
+                .request_shutdown(&identity)
+                .await
+                .unwrap_err()
+                .code,
+            "SHUTDOWN_IDENTITY_MISMATCH"
+        );
         assert!(!lifecycle.is_shutting_down());
         identity["extensionRoot"] = json!(config.extension_root.join("."));
-        #[cfg(windows)] {
-            identity["modelDataHome"] = json!(format!("{}\\", config.data_home.to_string_lossy().to_uppercase()));
+        #[cfg(windows)]
+        {
+            identity["modelDataHome"] = json!(format!(
+                "{}\\",
+                config.data_home.to_string_lossy().to_uppercase()
+            ));
         }
-        tokio::time::timeout(Duration::from_secs(1), lifecycle.request_shutdown(&identity)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            lifecycle.request_shutdown(&identity),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(lifecycle.active_http.load(Ordering::Acquire), 1);
-        assert_eq!(lifecycle.admit(false).await.err().unwrap().code, "GATEWAY_SHUTTING_DOWN");
-        assert_eq!(lifecycle.admit(true).await.err().unwrap().code, "GATEWAY_SHUTTING_DOWN");
+        assert_eq!(
+            lifecycle.admit(false).await.err().unwrap().code,
+            "GATEWAY_SHUTTING_DOWN"
+        );
+        assert_eq!(
+            lifecycle.admit(true).await.err().unwrap().code,
+            "GATEWAY_SHUTTING_DOWN"
+        );
         lifecycle.request_shutdown(&identity).await.unwrap();
         lifecycle.wait_for_shutdown().await;
         drop(admitted);
@@ -357,7 +428,6 @@ mod shutdown_tests {
     }
 }
 
-/// Require the desktop's deny-write handle; stale marker files cannot pause the gateway.
 /// 以桌面的拒写句柄为准，旧标记文件不能暂停网关。
 fn migration_active(path: &std::path::Path) -> Result<bool, GatewayError> {
     match std::fs::symlink_metadata(path) {

@@ -19,7 +19,6 @@ public sealed partial class ShellPage
     private bool RefreshSettingsToolsContext()
     {
         if (_toolManagementWindow is not { } current || _settingsToolsConversationId == CurrentSettingsToolsConversationId()) return true;
-        // Reuse cached views only within the same conversation; dirty forms retain their original scope.
         // 仅在同一会话中复用缓存页面；含未保存编辑时保留原范围。
         if (current.HasPendingChanges) return false;
         current.DisposeEmbedded();

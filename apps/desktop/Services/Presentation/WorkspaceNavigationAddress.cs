@@ -3,7 +3,6 @@ using System.Net;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Both workspace address bars navigate URLs and send ordinary text to the same search provider.
 /// 工作区两处地址输入共用解释规则：网址直接打开，普通文字交给同一搜索来源。
 /// </summary>
 public static class WorkspaceNavigationAddress

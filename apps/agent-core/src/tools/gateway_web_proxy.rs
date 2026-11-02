@@ -1,7 +1,5 @@
-//! Preserve the user's HTTP proxy while pinning public web destinations.
 //! 保留用户配置的 HTTP 代理，并把公共网页目的地绑定到已核验地址。
 //!
-//! This transport owns address verification and the per-request relay; gateway_web owns extraction and pagination.
 //! 本传输模块拥有地址核验与单次请求的转接生命周期；gateway_web 拥有正文提取和分页。
 
 use super::gateway::failure;
@@ -16,7 +14,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use url::Url;
 
-/// Dropping the transport aborts its private relay, including on caller cancellation or timeout.
 /// 传输对象释放时中止自有转接任务，覆盖调用取消和超时路径。
 pub(crate) struct PublicClient {
     pub client: reqwest::Client,
@@ -27,7 +24,6 @@ pub(crate) struct PublicClient {
 
 impl Drop for PublicClient {
     fn drop(&mut self) {
-        // A cancelled fetch must not leave an internal proxy or tunnel running.
         // 取消抓取后不得留下内部转接监听或网络隧道。
         if let Some(relay) = self.relay.take() {
             relay.abort();
@@ -41,7 +37,6 @@ fn is_fake_address(address: IpAddr) -> bool {
             address.octets()[0] == 198 && [18, 19].contains(&address.octets()[1])
         }
         IpAddr::V6(address) => {
-            // Recognize the specific Clash mapping prefix, never arbitrary ULA/private IPv6.
             // 只识别 Clash 的明确映射前缀，不能把任意 ULA/私有 IPv6 都当作代理地址。
             address.segments()[..3] == [0xfdfe, 0xdcba, 0x9876]
         }
@@ -149,7 +144,6 @@ fn system_proxy() -> Result<Option<(String, String)>, GatewayError> {
         while length < 32768 && unsafe { *pointer.add(length) } != 0 {
             length += 1;
         }
-        // WinHTTP returns GlobalAlloc-owned text; copy it before releasing that allocation exactly once.
         // WinHTTP 返回 GlobalAlloc 所有的文本；先复制内容，再仅释放该分配一次。
         let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, length) });
         unsafe {
@@ -188,7 +182,6 @@ fn system_proxy() -> Result<Option<(String, String)>, GatewayError> {
 }
 
 pub(crate) fn proxy_for(url: &Url) -> Result<Option<Url>, GatewayError> {
-    // Explicit bypass and environment proxy rules take precedence over the current user's Windows proxy.
     // 明确绕过规则和环境代理配置优先于当前用户的 Windows 代理配置。
     let bypass = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
@@ -239,7 +232,6 @@ async fn public_dns(
             return Ok(addresses.clone());
         }
     }
-    // Resolve through the existing proxy, never leak a direct DNS/HTTP query around it.
     // 核验解析仍经过现有代理，不能绕过代理直连 DNS/HTTP；只发送当前公共网页域名。
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -296,7 +288,6 @@ async fn public_dns(
         .min()
         .unwrap_or(0)
         .min(120);
-    // Repeated pagination reuses only verified addresses within DNS TTL; cache never grants private access.
     // 连续分页只在 DNS TTL 内复用已核验地址；有界缓存不授予私网访问能力。
     if ttl_seconds > 0 {
         if let Ok(mut cache) = cache.lock() {
@@ -358,7 +349,6 @@ fn public_dns_addresses(value: &Value) -> Result<Vec<SocketAddr>, GatewayError> 
 
 async fn read_http_header(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
     let mut bytes = Vec::new();
-    // Header-only reads avoid losing bytes belonging to the following TLS tunnel.
     // 只读取协议头，避免吞掉随后 TLS 隧道的首批字节。
     while bytes.len() < 16384 {
         let byte = stream.read_u8().await?;
@@ -408,7 +398,6 @@ async fn relay_public_request(
         proxy.port_or_known_default().unwrap_or(80),
     ))
     .await?;
-    // The configured upstream connects the verified public IP; it cannot re-resolve the target privately.
     // 上游代理只连接已核验公共 IP，不能在第二次解析时把网页域名重绑到内网。
     let target = destinations[0].to_string();
     let mut connect = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");

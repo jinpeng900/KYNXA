@@ -9,7 +9,6 @@ using Windows.Storage.Pickers;
 namespace KYNXA_Desktop.Views;
 
 /// <summary>
-/// Edits retrieval settings through versioned gateway requests; never writes source files or chat state.
 /// 通过带版本的网关请求编辑检索设置；不写入原始资料或聊天状态。
 /// </summary>
 public sealed partial class RetrievalSettingsWindow : Window
@@ -65,7 +64,6 @@ public sealed partial class RetrievalSettingsWindow : Window
                 || Value(_webDepth, web.Depth) != web.Depth || Value(_webLanguage, web.Language) != web.Language;
         }
     }
-    // Reads may be cancelled on close; active operations still guard storage migration.
     // 关闭可取消读取；进行中的操作仍保护存储迁移，不能冒充未保存编辑。
     public bool HasPendingChanges => _busy || HasUnsavedChanges;
     public bool BlocksSettingsClose => _busy && _blocksSettingsClose;
@@ -95,12 +93,10 @@ public sealed partial class RetrievalSettingsWindow : Window
     public Guid? ProjectId => _projectId;
     public bool IsEmbedded => _settingsOwner is not null;
 
-    // Auto-save normally leaves no draft; reveal pending options if a close decision keeps them.
     // 自动保存通常不留下草稿；关闭确认选择继续编辑时，定位尚未保存的检索选项。
     public void RevealUnsavedChanges() => _localMode.Focus(FocusState.Programmatic);
 
     /// <summary>
-    /// Reuses retrieval controls and polling in the settings content area, owned by the visible window.
     /// 在设置内容区复用检索控件和轮询，选择器与确认框由可见设置窗口持有。
     /// </summary>
     public FrameworkElement AttachToSettings(Window owner)
@@ -163,7 +159,6 @@ public sealed partial class RetrievalSettingsWindow : Window
         if (_closed) return;
         Title = UiText.Get("KYNXA · 检索与网页搜索");
         RefreshPickerSelections();
-        // Keep newer job observations when language changes refresh an older status snapshot.
         // 切换语言时保留较新的任务观察，不回退到旧状态快照。
         var currentJob = _job;
         if (_status is { } status) RenderStatus(status);
@@ -175,13 +170,11 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private void RefreshPickerSelections()
     {
-        // WinUI caches a string selection box independently of ComboBoxItem.Content.
         // WinUI 的收起显示缓存独立于 ComboBoxItem.Content；重新选择同一项刷新显示，但不能触发保存。
         bool wasRendering = _rendering;
         _rendering = true;
         try
         {
-            // Refresh the full provider label before updating WinUI's closed selection cache.
             // 先刷新包含状态的完整服务文案，再更新 WinUI 收起状态的选中文本缓存。
             foreach (var item in _webProvider.Items.OfType<ComboBoxItem>())
                 if (item.DataContext is RetrievalProvider provider) item.Content = SearchProviderLabel(provider);
@@ -231,7 +224,6 @@ public sealed partial class RetrievalSettingsWindow : Window
                 foreach (var provider in providers.Providers.Where(provider => provider.Id != "auto"))
                     _webProvider.Items.Add(CreateWebProviderItem(provider));
             }
-            // Keep unavailable selected providers visible; do not silently replace the user's selection.
             // 保留当前不可用服务的选中项；不静默替换用户选择。
             if (!_webProvider.Items.OfType<ComboBoxItem>().Any(item => Equals(item.Tag, web.ProviderId)))
                 _webProvider.Items.Add(new ComboBoxItem { Tag = web.ProviderId, Content = web.ProviderId });
@@ -251,7 +243,6 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private static string SearchProviderLabel(RetrievalProvider provider)
     {
-        // Localize default display names and status only; configured names and stable IDs stay intact.
         // 仅翻译默认显示名称与状态；用户配置的名称和稳定 ID 保留原值。
         string? labelKey = UiText.DefaultToolNameKey(provider.Id, provider.Name);
         string name = labelKey is null ? provider.Name : UiText.Get(labelKey);
@@ -279,7 +270,6 @@ public sealed partial class RetrievalSettingsWindow : Window
         if (_busy || _global is null || _closed) return;
         var previousLocal = _project?.Effective.Local ?? _global.Local;
         var previousWeb = _project?.Effective.Web ?? _global.Web;
-        // Retain legacy read compatibility, but never reactivate the removed neural reranker on save.
         // 保留旧配置读取兼容；保存时不再重新启用已移除的神经重排模型。
         var local = previousLocal with { Enabled = Value(_localMode, "true") == "true", Semantic = Value(_semanticMode, previousLocal.Semantic),
             RerankProfileId = null, RerankDevicePolicy = null, RerankCandidates = null };
@@ -306,7 +296,6 @@ public sealed partial class RetrievalSettingsWindow : Window
             }
             catch (GatewayApiException error) when (error.StatusCode == HttpStatusCode.Conflict)
             {
-                // Refresh on conflict, never replay a stale form over concurrent changes.
                 // 冲突时刷新；不把旧表单自动重放到并发更新上。
                 await LoadAsync();
                 ShowError("检索设置已在其他位置更新。已刷新，请重新选择。");
@@ -350,7 +339,6 @@ public sealed partial class RetrievalSettingsWindow : Window
     private void RenderSources(RetrievalSource[] sources)
     {
         _sourcesPanel.Children.Clear();
-        // The retrieval API includes inherited global sources; manage each source only in its owning scope.
         // 检索接口包含继承的全局资料；管理操作只展示当前所属范围的资料。
         foreach (var source in sources.Where(source => _projectId is { } projectId ?
             source.Scope == "project" && source.ProjectId == projectId : source.Scope == "user"))
@@ -460,7 +448,6 @@ public sealed partial class RetrievalSettingsWindow : Window
         {
             var status = await _api.GetStatusAsync(observation.Token);
             if (_closed || _busy || !ReferenceEquals(_observation, observation)) return;
-            // Observe only model residency; do not reload form values or replace a newer job receipt.
             // 只观察模型驻留，不重载表单，也不以旧快照覆盖较新的索引任务回执。
             _status = _status is { } previous ? previous with { Embedding = status.Embedding } : status;
             _statusObservationFailed = false;
@@ -469,7 +456,6 @@ public sealed partial class RetrievalSettingsWindow : Window
         catch (OperationCanceledException) when (_closed || !ReferenceEquals(_observation, observation)) { }
         catch (Exception)
         {
-            // A transient observation failure is not evidence that the model failed to load.
             // 短暂状态读取失败不能被当成模型加载失败；保留最后回执，并在下次计时重试。
             if (!_closed && ReferenceEquals(_observation, observation))
             {
@@ -487,12 +473,10 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_closed) return;
         _job = job;
-        // Poll paused checkpoints without resuming or recreating gateway-owned tasks.
         // 暂停检查点归网关；界面仅轮询观察，不自行恢复或重复创建任务。
         bool active = IsActiveJob(job.Status);
         _cancelJob.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         _rebuild.IsEnabled = !active;
-        // Normal work needs no indexing action; only an interrupted or incomplete job exposes recovery.
         // 正常工作无需索引操作；只有中断或未完整完成的任务才显示恢复入口。
         _rebuild.Visibility = job.Error != "INDEX_SUPERSEDED" && (job.Status is "cancelled" or "failed" or "partial")
             ? Visibility.Visible : Visibility.Collapsed;
@@ -514,7 +498,6 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private static string PartialJobSummary(RetrievalIndexJob job)
     {
-        // Processed sources do not prove complete lexical or semantic coverage; display the actual receipt separately.
         // 已处理来源不代表关键词或语义覆盖完整；有覆盖回执时分别显示真实数量。
         if (job.Coverage is not { } coverage)
             return string.Format(UiText.Get("索引部分完成 · 已处理 {0}/{1} 个来源"), job.CompletedSources, job.TotalSources);
@@ -545,7 +528,6 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_busy || _closed || StoragePaths.IsMigrating) return;
         _busy = true;
-        // Loading and refreshes are cancellable reads; mutations and their native confirmations must finish before close.
         // 加载与刷新可随关闭取消；写入操作及其原生确认则应先完成再关闭。
         _blocksSettingsClose = blocksClose;
         _notice.IsOpen = false;
@@ -569,7 +551,6 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private void ShowError(string message)
     {
-        // Keep the source key for an already visible local notice; unknown gateway details stay unchanged.
         // 保留已显示本地提示的原始键，支持即时换语言；未识别的网关详情仍按原文显示。
         _noticeMessageKey = message;
         _notice.Message = UiText.Get(message);

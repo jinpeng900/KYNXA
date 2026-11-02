@@ -1,4 +1,3 @@
-//! MS-PPT text follows the latest persist directory and the live presentation slide list.
 //! 旧 PPT 正文遵循最新持久对象目录与活动幻灯片清单，不读取已删除版本中的任意字符串。
 
 use super::{CompoundDocument, decode_utf16, range, u16_at, u32_at};
@@ -101,7 +100,6 @@ impl ParseBudget<'_> {
     }
 }
 
-/// Newer user edits win; a valid old mapping does not make a deleted slide live.
 /// 新编辑的映射优先；旧目录仍含某对象，并不意味着已删除幻灯片仍属于当前文稿。
 fn persist_directory(
     stream: &[u8],
@@ -209,7 +207,6 @@ fn text_characters(record: Record<'_>) -> Result<String, ContractError> {
     }
     let text = match record.kind {
         TEXT_CHARS => decode_utf16(record.payload)?,
-        // TextBytesAtom stores the low byte of Unicode, not an ANSI code page.
         // TextBytesAtom 存储 Unicode 低字节；不按 ANSI 代码页改变源文字。
         TEXT_BYTES => record
             .payload
@@ -363,7 +360,6 @@ fn is_deleted_shape(payload: &[u8], budget: &mut ParseBudget<'_>) -> Result<bool
     Err(failure("DOCUMENT_PARSE_FAILED"))
 }
 
-/// Deleted shapes can retain outline references; the fallback must not restore deleted text.
 /// 删除形状可能仍保留大纲引用；备用大纲路径不得重新引入这些删除正文。
 fn suppress_deleted_outlines(
     payload: &[u8],
@@ -389,7 +385,6 @@ fn suppress_deleted_outlines(
     Ok(())
 }
 
-/// Only drawing/group/shape records lead to textboxes; unknown blobs and OLE are not recursed.
 /// 仅沿绘图、组和形状进入文本框；未知载荷、图片、宏与嵌入 OLE 不递归解释为正文。
 fn drawing_text(
     record: Record<'_>,
@@ -790,7 +785,6 @@ mod tests {
         append(stream, &record(USER_EDIT, 0, 0, &edit))
     }
 
-    /// Appended saves deliberately retain old and deleted text in the same real CFB file.
     /// 增量保存夹具故意在同一真实 CFB 内保留旧正文与删除正文，以验证只读取活动版本。
     fn edited_stream() -> (Vec<u8>, Vec<u8>) {
         let mut stream = Vec::new();

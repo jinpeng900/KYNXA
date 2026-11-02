@@ -4,7 +4,6 @@ using KYNXA_Desktop.Models.UI;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Produces a readable Markdown snapshot using the same visible content as the main transcript.
 /// 使用与主聊天相同的可见正文生成可读 Markdown 快照。
 /// </summary>
 internal static class ConversationExport
@@ -26,7 +25,6 @@ internal static class ConversationExport
         foreach (var block in blocks)
         {
             markdown.Append("## ").AppendLine(HeadingText(block.Role == "user" ? userLabel : assistantLabel)).AppendLine();
-            // Keep raw Markdown, TeX and code indentation. Hidden reasoning/tool receipts stay in the gateway archive.
             // 保留原 Markdown、TeX 与代码缩进；隐藏的思考和工具回执仍保留在网关归档中。
             markdown.Append(block.Content).AppendLine().AppendLine();
         }

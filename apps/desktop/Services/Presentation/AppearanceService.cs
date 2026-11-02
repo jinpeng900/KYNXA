@@ -11,7 +11,6 @@ using Windows.UI.ViewManagement;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Applies local UI palettes without replacing controls, conversations or brush references.
 /// 应用本机界面配色，不替换控件、会话或画刷引用。
 /// </summary>
 public static class AppearanceService
@@ -53,7 +52,6 @@ public static class AppearanceService
     private const uint EraseBackgroundMessage = 0x0014;
     private const uint NonClientDestroyMessage = 0x0082;
     private static readonly nuint AppearanceSubclassId = 0x4B594E58;
-    // Keep the delegate alive while any native HWND can invoke it.
     // 只要原生 HWND 仍可能回调，就必须保持委托存活。
     private static readonly WindowSubclassProc AppearanceSubclassCallback = OnWindowMessage;
 
@@ -103,7 +101,6 @@ public static class AppearanceService
 
     private static void EnsureSystemSettings()
     {
-        // Both WinRT change events are unsupported in desktop apps; observe the owned HWNDs instead.
         // 这两个 WinRT 变更事件均不支持桌面应用；改为监听应用自己的 HWND 消息。
         SystemSettings ??= new UISettings();
         Accessibility ??= new AccessibilitySettings();
@@ -113,13 +110,11 @@ public static class AppearanceService
     {
         if (SystemAppearanceRefreshQueued || UiDispatcher is not { } dispatcher) return;
         SystemAppearanceRefreshQueued = true;
-        // Resolve after the native theme callback to avoid stale state and escaping exceptions.
         // 原生主题回调结束后再解析，避免读旧状态或让托管异常越界。
         if (!dispatcher.TryEnqueue(() =>
         {
             SystemAppearanceRefreshQueued = false;
             if (Mode != "system" && Accessibility?.HighContrast != true && !Current.IsHighContrast) return;
-            // A queued system notification always resolves the latest saved user preference.
             // 排队中的系统通知始终解析用户当前偏好，不能恢复已经过期的主题选择。
             var preset = Palettes.First(palette => palette.Id == Current.Id);
             ApplyEffectivePalette(preset);
@@ -139,7 +134,6 @@ public static class AppearanceService
 
     private static bool TryEraseWindowBackground(nint window, nint deviceContext)
     {
-        // Keep the palette through native erasure, including before XAML paint and after Closed.
         // 原生擦除可能早于 XAML 绘制或晚于 Closed；始终沿用当前配色。
         if (deviceContext == 0) return false;
         try
@@ -154,7 +148,6 @@ public static class AppearanceService
         }
         catch
         {
-            // Fall through to the original native procedure if drawing fails; no managed exception crosses this callback.
             // 绘制失败时交回原生默认处理，不让托管异常跨越原生回调边界。
             return false;
         }
@@ -210,7 +203,6 @@ public static class AppearanceService
         SetBrush("KynxaWorkPanelDividerBrush", palette.Border);
         SetBrush("KynxaPermissionFullBrush", palette.Warning);
         SetBrush("KynxaOnlineBrush", palette.Success);
-        // WinUI controls use these resources for focus, selection and primary actions.
         // WinUI 控件通过这些资源统一焦点、选中状态和主要操作。
         foreach (string key in AccentBrushKeys) SetBrush(key, palette.Accent);
         SetBrush("AccentTextFillColorPrimaryBrush", palette.AccentText);
@@ -218,7 +210,6 @@ public static class AppearanceService
         SetBrush("SystemControlFocusVisualPrimaryBrush", palette.AccentText);
         SetBrush("AccentFillColorSecondaryBrush", palette.AccentHover);
         SetBrush("AccentFillColorTertiaryBrush", palette.AccentPressed);
-        // Standard native selection uses white text; high contrast keeps the OS highlight pair.
         // 普通原生选区使用白字；高对比度保留系统选区前景与背景的配对。
         SetBrush("TextControlSelectionHighlightColor", palette.Accent);
         SetBrush("TextOnAccentFillColorPrimaryBrush", palette.OnAccent);
@@ -228,7 +219,6 @@ public static class AppearanceService
 
     private static void ApplyPopupPalette(AppearancePalette palette)
     {
-        // Every selection state shares the application tint; high contrast keeps the OS highlight pair.
         // 所有选中状态共用应用强调色浅底；高对比度继续使用系统高亮前景与背景配对。
         string selectedBackground = palette.IsHighContrast ? palette.Accent : palette.Soft;
         string selectedForeground = palette.IsHighContrast ? palette.OnAccent : palette.Text;
@@ -260,7 +250,6 @@ public static class AppearanceService
     {
         customAccent = NormalizeAccent(customAccent);
         string accent = customAccent ?? preset.Accent;
-        // Button fill and linked text serve different contrast pairs, especially in dark mode.
         // 按钮填充与链接文字对应不同的对比度组合，深色模式尤其不能共用同一个色调。
         accent = EnsureContrast(accent, "#FFFFFF", lighten: false);
         if (!dark)
@@ -276,14 +265,12 @@ public static class AppearanceService
                 Selection = customAccent is null ? preset.Selection : Blend(preset.Main, accent, 0.22),
                 Muted = EnsureContrast("#6B7280", soft, lighten: false),
                 ReplySurface = preset.Sidebar,
-                // Neutral interaction fills stay equally visible across every light palette and popup surface.
                 // 中性交互底色在各套浅色配色和弹出层上保持一致的可见程度。
                 ControlHover = "#E9EBEF",
                 ControlPressed = "#DEE1E7"
             };
         }
 
-        // Neutral near-black surfaces keep depth without tinting the whole interface blue-gray.
         // 中性近黑表面以明度区分层次，避免整个界面泛蓝灰。
         const string main = "#0C0C0C";
         const string sidebar = "#141414";
@@ -318,7 +305,6 @@ public static class AppearanceService
         string highlight = Hex(UIElementType.Highlight);
         string highlightText = Hex(UIElementType.HighlightText);
         string link = Hex(UIElementType.Hotlight);
-        // Follow system high contrast without saving its temporary colors as custom preferences.
         // 高对比度沿用系统方案，临时颜色不写回自定义配色。
         return preset with
         {
@@ -392,7 +378,6 @@ public static class AppearanceService
             brush = FindApplicationBrush(resources, key);
             if (brush is null)
             {
-                // SDK resources belong to its theme dictionaries; register our own override only once.
                 // SDK 资源属于其主题字典；首次创建应用自己的覆盖画刷，之后不再重复插入。
                 brush = new SolidColorBrush(ParseColor(hex));
                 try { resources[key] = brush; }
@@ -403,7 +388,6 @@ public static class AppearanceService
             }
             OwnedBrushes.Add(key, brush);
         }
-        // Update owned brushes in place to preserve StaticResource references.
         // 原位更新应用画刷，保留 StaticResource 引用，避免重复挂载 XAML 对象。
         try { brush.Color = ParseColor(hex); }
         catch (COMException error)
@@ -414,7 +398,6 @@ public static class AppearanceService
 
     private static SolidColorBrush? FindApplicationBrush(ResourceDictionary resources, string key)
     {
-        // Enumerate local entries; TryGetValue may return SDK brushes that cannot be reparented.
         // 枚举只检查本地条目；TryGetValue 可能返回不能重新挂载的 SDK 画刷。
         foreach (var resource in resources)
             if (Equals(resource.Key, key) && resource.Value is SolidColorBrush applicationBrush) return applicationBrush;
@@ -478,7 +461,6 @@ public static class AppearanceService
             Changed -= Update;
             window.Activated -= Activated;
             TrackedWindows.Remove(window);
-            // Closed precedes XAML/native teardown; the static callback removes itself at WM_NCDESTROY.
             // Closed 早于 XAML 和原生窗口拆除；静态回调在 WM_NCDESTROY 时自行解除，覆盖关闭空档。
         };
         Update(null, EventArgs.Empty);

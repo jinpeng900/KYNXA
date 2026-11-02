@@ -21,7 +21,6 @@ public interface IRetrievalApi
 }
 
 /// <summary>
-/// Sends retrieval commands to the single gateway owner without creating chats or writing local indexes.
 /// 将检索命令发送给唯一网关所有者，不创建聊天，也不在桌面写入索引。
 /// </summary>
 public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
@@ -35,7 +34,6 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
     public RetrievalApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(60)),
         ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true)
     {
-        // URL parsing has its own bounded transport; ordinary status reads keep their existing deadline.
         // 链接解析使用独立有界传输；普通状态读取继续使用原有截止时间。
         _urlImportHttpClient = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromMinutes(5));
     }

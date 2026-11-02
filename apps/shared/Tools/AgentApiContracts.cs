@@ -5,7 +5,6 @@ namespace KYNXA.Contracts;
 /// <summary>One public model round. Tool receipts belong to its round; private provider reasoning is never included.</summary>
 /// <remarks>
 /// 表示一轮公开模型响应；工具回执归属对应轮次，不包含供应商的私有推理。
-/// IsAnswerContinuation marks a completed output-limit continuation; it never promotes tool commentary.
 /// IsAnswerContinuation 标记因输出上限续写的已完成正文，不把工具进展升级为最终答案。
 /// </remarks>
 public sealed record AssistantSegment(string Id, int Round, int Order, string Phase, string Status,

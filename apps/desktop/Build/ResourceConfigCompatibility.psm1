@@ -1,11 +1,9 @@
 ﻿Set-StrictMode -Version Latest
 
-# Import Get-FileHash's module explicitly; nested MSBuild calls may lose its lookup path.
 # 显式导入 Get-FileHash 所在模块，避免 MSBuild 嵌套调用时找不到模块。
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AtomicFiles.psm1') -Force
 
-# Only configuration text accepts checkout formatting differences; binary payload checks remain byte-exact.
 # 仅配置文本兼容检出时的换行与 BOM 差异，二进制资源仍按原始字节校验。
 function Get-KynxaConfigHashVariants {
     param([string]$Path, [byte[]]$Bytes)
@@ -68,7 +66,6 @@ function ConvertFrom-KynxaResourceJson([string]$Text) {
     return $reader.DeserializeObject($Text)
 }
 
-# Completion records accelerate local preparation; first installation still verifies pinned content hashes.
 # 完成记录只加速本地重复准备；首次安装仍核验固定内容摘要，记录不能代替下载完整性校验。
 if (-not ('KynxaResourceMetadata' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -265,7 +262,6 @@ function Save-KynxaPreparedComponent {
             if (-not $identities.ContainsKey($file.path) -or $identities[$file.path] -ne $file.sha256) { $sameFiles = $false; break }
             [void]$identities.Remove($file.path)
         }
-        # Setup and MSBuild reuse this record when inputs, inventories and file metadata match.
         # 输入、清单和文件元数据一致时，Setup 与 MSBuild 复用同一完成记录。
         if ($sameFiles -and (Test-KynxaPreparedComponent -Root $Root -Component $Component -InputHash $InputHash -State $existing)) { return }
     }

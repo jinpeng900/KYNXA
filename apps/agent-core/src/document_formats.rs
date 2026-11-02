@@ -1,4 +1,3 @@
-//! Use one format identity for scanning, parsing and storage.
 //! 扫描、解析和存储使用同一格式标识。
 
 use std::path::Path;
@@ -20,7 +19,6 @@ pub struct DocumentFormat {
     pub version: &'static str,
 }
 
-/// Resolve parser IDs, including compound archive suffixes.
 /// 解析规范格式标识，支持复合压缩后缀。
 pub fn detect(path: &Path) -> Option<DocumentFormat> {
     let filename = path.file_name()?.to_str()?.to_ascii_lowercase();

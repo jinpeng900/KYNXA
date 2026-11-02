@@ -30,7 +30,6 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
-/// Track evidence identities, versions and bounded facts; retain originals in native storage.
 /// 账本跟踪证据身份、版本和有界事实，原文及完整回执由原生存储保留。
 #[derive(Default)]
 pub struct EvidenceLedger {
@@ -385,27 +384,30 @@ impl EvidenceLedger {
                     "blocked":!cached && (self.searches>=self.maximum_searches() || searches>=self.maximum_per_gap())})
             }
             "retrieval.refinement-restore" => {
-                let key=text(args,"gapKey");
-                let count=args["attempt"].as_u64().unwrap_or(0).min(3);
-                let previous=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
-                self.gaps.set(key.to_owned(),json!(previous.max(count)));
+                let key = text(args, "gapKey");
+                let count = args["attempt"].as_u64().unwrap_or(0).min(3);
+                let previous = self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                self.gaps.set(key.to_owned(), json!(previous.max(count)));
                 Value::Null
             }
             "retrieval.refinement-reserve" => {
-                let key=text(args,"gapKey");
-                let count=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
-                let blocked=count>=3;
-                let attempt=if blocked {count} else {count+1};
-                if !blocked {self.gaps.set(key.to_owned(),json!(attempt));}
+                let key = text(args, "gapKey");
+                let count = self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let blocked = count >= 3;
+                let attempt = if blocked { count } else { count + 1 };
+                if !blocked {
+                    self.gaps.set(key.to_owned(), json!(attempt));
+                }
                 json!({"gapKey":key,"attempt":attempt,"executed":!blocked,
                     "remainingSupplementalSearches":3u64.saturating_sub(attempt),"maximumSupplementalSearches":2,
                     "state":if blocked {"unresolved"}else{"searching"},
                     "next":if blocked {"state-missing-evidence-or-use-another-evidence-type"}else{"rewrite-keywords-or-narrow-directory-if-needed"}})
             }
             "retrieval.refinement-release" => {
-                let key=text(args,"gapKey");
-                let count=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
-                self.gaps.set(key.to_owned(),json!(count.saturating_sub(1)));
+                let key = text(args, "gapKey");
+                let count = self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                self.gaps
+                    .set(key.to_owned(), json!(count.saturating_sub(1)));
                 Value::Null
             }
             "retrieval.evidence-invalidate" => {

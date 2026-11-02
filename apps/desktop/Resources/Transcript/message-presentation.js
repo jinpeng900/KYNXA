@@ -24,7 +24,6 @@
     const outcome = source.taskCompletionState || source.taskCompletion?.completionState;
     const taskIncomplete = ['partial','verification-failed','execution-unknown'].includes(outcome);
     if (status === 'completed') {
-      // A task outcome never replaces the settled answer with its execution trace.
       // 任务验收状态不把已经完成的回答替换为执行过程。
       const finalIndex = segments.findLastIndex(segment => segment.phase === 'final_answer'
         && segment.status === 'completed' && hasText(segment.content));
@@ -32,7 +31,6 @@
         let first = finalIndex;
         while (first > 0 && segments[first - 1].isAnswerContinuation === true
           && segments[first - 1].phase === 'commentary' && segments[first - 1].status === 'completed') first--;
-        // Only broker-marked output continuations belong to the settled answer; older unmarked stages remain history.
         // 只有程序明确标记的输出续写属于最终正文；旧记录中未标记的执行进展仍只是历史。
         const answerSegments = segments.slice(first, finalIndex + 1);
         return { mode: 'final', segments: answerSegments, tools: [],
@@ -45,7 +43,6 @@
     if (!segments.length) return { mode, segments: [], tools: visibleTools, content };
     const lastSegment = segments.at(-1), lastStreamingSegment = mode === 'active' && lastSegment?.status === 'streaming' ? lastSegment : null;
     const toolRounds = new Set(visibleTools.map(tool => tool.round));
-    // Keep every spoken stage until the request has a completed final answer.
     // 请求的最终回答完成之前，保留所有已输出的中间正文。
     const visibleSegments = segments.filter(segment => hasText(segment.content)
       || toolRounds.has(segment.round) || segment === lastStreamingSegment);
@@ -66,7 +63,6 @@
   function mergeMessagePatch(previous, patch) {
     if (!patch?.reuseBody) return patch;
     if (!previous || String(previous.id) !== String(patch.id)) return null;
-    // A tool/status update must not copy or erase the unchanged long reply.
     // 工具或状态更新不重传、不清空未变化的长回复；正文仍由原消息持有。
     return { ...patch, content: previous.content, html: previous.html,
       reasoningHtml: previous.reasoningHtml, assistantSegments: previous.assistantSegments };

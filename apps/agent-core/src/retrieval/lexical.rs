@@ -96,7 +96,6 @@ fn append(
     result.push(term);
 }
 
-/// Han is separated before Latin token matching; document counts retain repeated occurrences.
 /// 中文先与相邻英文分隔；文档词频保留重复出现，查询词按同一规则去重。
 pub fn collect_terms(text: &str, limit: usize, deduplicate: bool) -> Vec<String> {
     let separated = han_pattern().replace_all(text, " $0 ");

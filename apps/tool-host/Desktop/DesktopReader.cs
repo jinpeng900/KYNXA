@@ -98,8 +98,6 @@ internal static class DesktopReader
                 selected |= elementId == request.ElementId;
                 if (selected) foundElement = true;
                 bool password = current.IsPassword;
-                // IsPassword is checked before Name, Value or TextPattern: even an unsafe
-                // provider's password Name must never enter the returned metadata.
                 // 在读取 Name、Value 或 TextPattern 前先检查 IsPassword，避免不安全提供方将密码控件名称带入返回元数据。
                 string name = selected && !password ? current.Name ?? "" : "", value = "";
                 if (selected && !password && element.TryGetCurrentPattern(TextPattern.Pattern, out object rawText))

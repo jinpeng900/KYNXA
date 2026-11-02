@@ -1,4 +1,3 @@
-//! Child compaction retains originals, source versions and the model request prefix.
 //! 子任务压缩保留原文、来源版本及模型请求前缀。
 
 use super::*;
@@ -8,10 +7,12 @@ fn split_summary_segment(segment: &str) -> Option<(String, String)> {
         return None;
     }
     let boundary = segment.char_indices().nth(midpoint)?.0;
-    Some((segment[..boundary].to_owned(), segment[boundary..].to_owned()))
+    Some((
+        segment[..boundary].to_owned(),
+        segment[boundary..].to_owned(),
+    ))
 }
 
-/// Keep compaction originals in child artifacts; use normal model admission and metering.
 /// 压缩原文保存在子任务产物，模型调用正常准入并计量。
 pub(super) async fn compact_child(
     runtime: &Arc<GatewayRuntime>,
@@ -28,20 +29,28 @@ pub(super) async fn compact_child(
     allocation: &Value,
     structural_tools: bool,
 ) -> Result<()> {
-    let original = checkpoint(run,journal, state, "compacting").await?;
+    let original = checkpoint(run, journal, state, "compacting").await?;
     let protocol_name = protocol::protocol(connection);
     let schemas = gateway_model_request::model_tool_declarations(protocol_name, catalog);
     let schemas = if structural_tools {
         protocol::project_tool_declarations(connection, &schemas, "structural")?
-    } else { schemas };
+    } else {
+        schemas
+    };
     let wire_prefix = crate::models::gateway_context::summary_prefix(
-        connection, model, &state.history, system, &schemas, &state.tool_series)?;
-    let (summary_executor, _) = gateway_model_request::summary_executor(runtime, run, ctx, connection, model, window);
+        connection,
+        model,
+        &state.history,
+        system,
+        &schemas,
+        &state.tool_series,
+    )?;
+    let (summary_executor, _) =
+        gateway_model_request::summary_executor(runtime, run, ctx, connection, model, window);
     let projected = crate::models::gateway_context::compact_request_with_executor(connection, model, &state.history, system, &json!({"inputBudgetTokens":input_budget,"contextWindowTokens":window,"providerMaxInputTokens":allocation["providerMaxInputTokens"],"providerMaxOutputTokens":allocation["providerMaxOutputTokens"],"declarations":schemas,"wireRequestPrefix":wire_prefix,"summarySources":[],"historySources":state.history_sources,"resultSources":state.result_sources,"dataRoot":runtime.config.data_root,"conversationId":run.conversation_id,"requestId":run.request_id}), run.cancellation.subscribe(), None, Some(summary_executor)).await?;
     if projected.audit["currentStepCheckpoint"] == true
         || projected.audit["reducedTokens"].as_u64().unwrap_or(0) > 0
     {
-        // Count successful native compactions even without fallback.
         // 原生压缩成功也计次数，不以回退是否执行为准。
         state.compactions += 1;
         journal.repository().record_usage(
@@ -64,7 +73,6 @@ pub(super) async fn compact_child(
             "Child history cannot be encoded. / 子历史无法编码。",
         )
     })?;
-    // Cover all history chunks; keep originals readable from checkpoints.
     // 分块覆盖全部历史，原文可从检查点回读，不只保留尾部。
     let available = input_budget.saturating_sub(512).max(512);
     let mut chunks = Vec::new();
@@ -112,7 +120,9 @@ pub(super) async fn compact_child(
                 true,
             )?;
             model_controls = controls;
-            let ModelRequestOutcome { result: response, .. } = gateway_model_request::request_model(
+            let ModelRequestOutcome {
+                result: response, ..
+            } = gateway_model_request::request_model(
                 runtime,
                 run,
                 ctx,
@@ -133,7 +143,6 @@ pub(super) async fn compact_child(
                     if error.code != "ABORT_ERR"
                         && error.details["contextRejection"].is_object() =>
                 {
-                    // Retry only the rejected summary; preserve both chunks and original receipts without rerunning tools.
                     // 仅重试被拒摘要，保留分块两半和原回执，不重跑工具。
                     let rejection = &error.details["contextRejection"];
                     if context_repairs < 2 {
@@ -146,7 +155,8 @@ pub(super) async fn compact_child(
                             continue;
                         }
                         if chunks.len() < 64 {
-                            if let Some((first, remaining)) = split_summary_segment(&chunks[index]) {
+                            if let Some((first, remaining)) = split_summary_segment(&chunks[index])
+                            {
                                 chunks[index] = first;
                                 chunks.insert(index + 1, remaining);
                                 context_repairs += 1;
@@ -154,7 +164,6 @@ pub(super) async fn compact_child(
                             }
                         }
                     }
-                    // If summarization fails, provide original-read navigation without invented facts or task interruption.
                     // 摘要不可用时提供原文回读导航，不编造事实或中断任务。
                     summaries.push(format!(
                         "Segment {} remains unsummarized. Read the preserved original context with task.read, reference={}; page through the missing material before relying on it. Recorded effects must not be replayed.",
@@ -205,7 +214,7 @@ pub(super) async fn compact_child(
             ..Default::default()
         },
     )?;
-    checkpoint(run,journal, state, "compacted").await?;
+    checkpoint(run, journal, state, "compacted").await?;
     Ok(())
 }
 

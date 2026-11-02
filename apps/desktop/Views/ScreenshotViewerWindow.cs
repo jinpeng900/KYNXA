@@ -12,7 +12,6 @@ using Windows.System;
 namespace KYNXA_Desktop.Views;
 
 /// <summary>
-/// Full-screen presentation of one formal screenshot archive. It owns no conversation or tool execution state.
 /// 全屏展示一张正式归档截图；不拥有聊天状态或工具执行状态。
 /// </summary>
 public sealed class ScreenshotViewerWindow : Window, IDisposable
@@ -93,7 +92,6 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
     private async Task LoadAsync()
     {
         if (_closed || _disposed || _busy || _lifetime.IsCancellationRequested) return;
-        // A retry reads the same validated archive identity. It never invokes a new screenshot operation.
         // 重试只读取同一个已验证的归档身份，绝不重新执行截图操作。
         _busy = true; _retry.IsEnabled = false;
         _noticeKey = "正在读取工具结果…"; RefreshLanguage(); _notice.Visibility = Visibility.Visible;
@@ -143,7 +141,6 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
     {
         if (_decoded is null) return;
         double dpi = _root.XamlRoot?.RasterizationScale ?? 1;
-        // Actual-size mode resets the base scale so each image pixel occupies one physical display pixel.
         // 实际尺寸模式重置基础缩放，使图片的每个像素对应一个物理显示像素。
         _image.Width = _decoded.OriginalPixelWidth / dpi * _imageBaseScale;
         _image.Height = _decoded.OriginalPixelHeight / dpi * _imageBaseScale;
@@ -155,7 +152,6 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         double dpi = _root.XamlRoot?.RasterizationScale ?? 1;
         double fit = Math.Min(_scroll.ViewportWidth * dpi / _decoded.OriginalPixelWidth,
             _scroll.ViewportHeight * dpi / _decoded.OriginalPixelHeight);
-        // WinUI refuses zoom factors below 0.1. Scale layout for very long pages without resampling the original bitmap.
         // WinUI 不接受低于 0.1 的缩放；超长页面通过调整布局适配，原始位图不重采样。
         _imageBaseScale = Math.Min(1, fit / _scroll.MinZoomFactor);
         _scroll.MaxZoomFactor = (float)(16 / _imageBaseScale); UpdateImageSize();

@@ -145,7 +145,6 @@ public sealed partial class ShellPage
             "tasks" => WorkTaskToggle,
             _ => ChatHistoryToggle
         };
-        // A search editor owns the title column; only the leading arrow remains a collapse target.
         // 搜索框独占标题列，展开／收起按钮仅保留前侧箭头的命中区。
         Grid.SetColumnSpan(toggle, open ? 1 : 2);
         controls.Box.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
@@ -174,7 +173,6 @@ public sealed partial class ShellPage
         if (SidebarSearchScope(sender) is not { } scope) return;
         var state = SidebarSearchStateFor(scope);
         state.Composing = false;
-        // The Enter that accepts an IME candidate must not also activate a conversation.
         // 确认输入法候选字的 Enter 不能同时打开会话。
         state.SuppressEnter = true;
         RefreshSidebarSearches(scope);
@@ -230,7 +228,6 @@ public sealed partial class ShellPage
             FrameworkElement results = scope == "recent" ? WorkRecentHistory : scope == "projects" ? ProjectTree
                 : scope == "tasks" ? WorkTaskHistory : ChatHistoryList;
             if (!ContainsKeyboardFocus(controls.Box) && !ContainsKeyboardFocus(results) && !ContainsKeyboardFocus(controls.Button)) continue;
-            // Let the input method consume candidate Escape before changing the surrounding sidebar.
             // 输入法候选状态先接收 Escape，不改变外围侧栏。
             if (state.Composing) return false;
             CloseSidebarSearch(scope);
@@ -272,7 +269,6 @@ public sealed partial class ShellPage
         state.AppliedQuery = query;
         if (scope == "projects" && queryChanged)
         {
-            // Refresh full tree rows before changing its projection; filtering never changes formal ownership.
             // 修改树投影前先刷新完整树行；过滤不改变正式归属关系。
             RenderProjects();
             return;
@@ -309,7 +305,6 @@ public sealed partial class ShellPage
                 try { ProjectTreeReconciler.ReconcileRows(target, desired); }
                 finally
                 {
-                    // Native tree unbinding may write IsExpanded; preserve the original UI state during filtering.
                     // 原生树解绑可能回写 IsExpanded；过滤期间保留原有界面展开状态。
                     foreach (var expansion in expansions) expansion.Row.IsExpanded = expansion.IsExpanded;
                     _renderingProjects = wasRendering;

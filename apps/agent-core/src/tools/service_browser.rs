@@ -24,7 +24,6 @@ fn identifier(value: &Value) -> Option<String> {
     if value.is_null() {
         None
     } else if let Some(number) = value.as_f64().filter(|_| value.is_number()) {
-        // JavaScript String(5.0) is "5"; injected page IDs must retain the observed tab identity.
         // JavaScript 的 String(5.0) 为 "5"；注入的页面 ID 必须保留已观察标签页身份。
         Some(if number.fract() == 0.0 && number.abs() < 1e21 {
             format!("{number:.0}")
@@ -108,7 +107,6 @@ struct Preparation {
     script_check: bool,
 }
 
-/// Native browser state binds only observed tabs, snapshots and request-independent session identities.
 /// 原生浏览器状态只绑定已观察标签页、快照及独立于请求的会话身份。
 #[derive(Default)]
 pub struct BrowserState {

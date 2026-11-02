@@ -15,7 +15,6 @@ foreach ($source in [IO.File]::ReadAllLines([IO.Path]::GetFullPath($FileList), [
     $targetPath = [IO.Path]::Combine($layoutRoot, $sourcePath.Substring($sourceRoot.Length))
     if ($targetPath.Length -gt $maximumPath.Length) { $maximumPath = $targetPath }
 }
-# VS deployment still uses legacy copy APIs on some hosts; diagnose before DEP1000 loses context.
 # 部分 VS 部署主机仍使用传统复制 API；在 DEP1000 丢失上下文前给出明确诊断。
 if ($maximumPath.Length -ge 260) {
     throw "Native deployment target is $($maximumPath.Length) characters (limit 259): $maximumPath. Use a shorter checkout path or set MSBuild LayoutDir to a short absolute directory, then rebuild. No directory was moved or deleted."

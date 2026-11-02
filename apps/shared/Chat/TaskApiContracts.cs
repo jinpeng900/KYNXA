@@ -3,7 +3,6 @@ using System.Text.Json;
 namespace KYNXA.Contracts;
 
 /// <summary>
-/// Durable work identity and read-only projections; attempts are separate from the task ID.
 /// 持久工作身份及只读投影；执行尝试不替换任务 ID。
 /// </summary>
 public sealed record TaskScope(Guid ConversationId, Guid? ProjectId);
@@ -11,14 +10,12 @@ public sealed record TaskUsage(ulong ModelRequests, ulong FailedRequests, ulong 
     ulong InputTokens, ulong OutputTokens, ulong UnknownTokenRequests, ulong ModelDurationMs = 0, ulong ToolDurationMs = 0,
     ulong? ActiveDurationMs = null);
 public sealed record TaskBudget(ulong MaxModelRequests, ulong? MaxKnownTokens, ulong? MaxExecutionMs = null);
-// Child request deduplication keys are namespaced strings; only task identity is always a UUID.
 // 子任务请求查重键使用命名空间字符串；任务身份始终为 UUID。
 public sealed record TaskRecord(Guid TaskId, string RequestId, string Goal, string[] Acceptance, TaskScope Scope,
     Guid? ParentTaskId, Guid[] DependencyIds, TaskBudget Budget, TaskUsage Usage, string State,
     ulong Version, ulong ExecutionVersion, Guid? CurrentAttemptId, ulong EventSequence, string? StopReason,
     long CreatedAtMs, long UpdatedAtMs, bool? DisplayInTaskList = null, string? Title = null);
 public sealed record TaskListResponse(TaskRecord[] Tasks, bool HasMore, Guid? NextTaskId);
-// A bounded same-chat lookup distinguishes no checkpoint, one checkpoint and ambiguous work.
 // 同聊天有界查询区分无断点、唯一断点和多项待继续任务，不改变工作任务列表范围。
 public sealed record TaskPausedResponse(TaskRecord[] Tasks);
 public sealed record TaskArtifact(string ArtifactId, string Kind, JsonElement Reference,

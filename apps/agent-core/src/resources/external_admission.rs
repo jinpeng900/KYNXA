@@ -25,7 +25,6 @@ struct Borrower {
     released: bool,
 }
 
-/// Keep one shared prediction ledger; callers retain live runtime objects only.
 /// 共用一份预测账本，调用方仅持有活动运行时对象。
 #[derive(Default)]
 pub struct ExternalAdmissionState {
@@ -317,7 +316,6 @@ impl ExternalAdmissionState {
                     self.entries.insert(key.into(), entry);
                     return Ok(Value::Null);
                 }
-                // A retired borrower cannot dispatch again; settled callbacks remain harmless.
                 // 退役借用者不能再次派发；晚到的结束回调保持幂等。
                 self.borrowers.retain(|_, borrower| borrower.key != key);
                 entry.state = json!({"state":"prediction-fence-released","reason":args["reason"],"externalResidentOwnership":false});

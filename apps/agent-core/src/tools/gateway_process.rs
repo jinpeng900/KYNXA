@@ -1,4 +1,3 @@
-//! Owned ToolHost IPC and background terminal handles, without an intermediate runtime.
 //! 直接管理 ToolHost 通信与后台终端句柄，不启动中间 Node 运行时。
 
 use super::gateway::{GatewayToolContext, check_cancelled, emit, failure, native};
@@ -12,14 +11,11 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufRead
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, watch};
 
-/// Longest time a background host start waits for a free job slot before reporting capacity.
 /// 后台宿主命令等待空闲作业槽的最长时间，超过后如实报告容量不足。
 
-/// Windows closes the entire owned process tree if the gateway crashes or releases this handle.
 /// 网关崩溃或释放句柄时，Windows 自动关闭此自有进程树，避免只清理父进程。
 pub(crate) struct OwnedProcessJob(usize);
 
-/// A checked, point-in-time sample of this job's process tree, not a reservation or peak.
 /// 已核验的自有作业进程树时点采样，不代表资源预约或占用峰值。
 pub(crate) struct OwnedProcessMemory {
     pub private_bytes: u64,
@@ -103,7 +99,6 @@ unsafe extern "system" {
     ) -> i32;
 }
 impl OwnedProcessJob {
-    /// Sample verified job handles; private commit and working set are separate values, not peaks.
     /// 采样本作业已核验句柄；私有提交和工作集分别返回，不代表峰值。
     pub(crate) fn memory_usage(&self) -> Result<OwnedProcessMemory, GatewayError> {
         #[cfg(windows)]
@@ -191,7 +186,6 @@ impl OwnedProcessJob {
             ))
         }
     }
-    /// A launcher may hand off and exit; check the whole job, not just its first PID.
     /// 启动器可能交接后退出；检查整个作业，不只看首个 PID。
     pub(crate) fn has_running_processes(&self) -> Result<bool, GatewayError> {
         #[cfg(windows)]
@@ -254,7 +248,6 @@ impl OwnedProcessJob {
         Self::attach_with_policy(child, false)
     }
 
-    /// Only the approved GUI launch helper may create an explicitly independent application.
     /// 仅已批准的图形应用启动助手允许显式创建独立应用；终端与 MCP 进程树仍不能脱离。
     fn attach_for_launch(child: &Child) -> Result<Self, GatewayError> {
         Self::attach_with_policy(child, true)
@@ -267,7 +260,6 @@ impl OwnedProcessJob {
         Self::attach_pid_with_policy(pid, allow_breakaway)
     }
 
-    /// ConPTY launches suspended Win32 processes rather than Tokio Child handles.
     /// ConPTY 以挂起状态创建 Win32 进程，复用同一作业生命周期，不另建进程树账本。
     pub(crate) fn attach_pid(pid: u32) -> Result<Self, GatewayError> {
         Self::attach_pid_with_policy(pid, false)
@@ -339,7 +331,6 @@ impl Drop for OwnedProcessJob {
     }
 }
 
-/// Keep a background terminal's cancellation, receipt and completion tied to its conversation.
 /// 将后台终端的取消、回执和完成通知绑定到所属聊天，避免跨聊天复用任务。
 #[derive(Clone)]
 pub(crate) struct HostJob {
@@ -354,7 +345,6 @@ pub(crate) fn hide(command: &mut Command) {
     command.creation_flags(0x08000000);
 }
 
-/// Check limits before allocating, even when the peer sends no newline.
 /// 分配前检查上限，对端不发换行也不能无限读取。
 pub(crate) async fn bounded_line<T: AsyncRead + Unpin>(
     reader: &mut BufReader<T>,
@@ -397,7 +387,6 @@ pub(crate) async fn bounded_line<T: AsyncRead + Unpin>(
     }
 }
 
-/// Only the child created by this invocation may be terminated, never a process name.
 /// 仅终止本次创建且仍持有句柄的子进程树，绝不按通用进程名杀进程。
 pub(crate) async fn terminate(child: &mut tokio::process::Child) {
     #[cfg(windows)]
@@ -420,7 +409,6 @@ pub(crate) async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
-/// Release the reservation only after confirming process-tree exit; unknown cleanup retains the lease debt.
 /// 确认自有进程树退出后才归还预约；清理未知时保留租约债务，不重派操作。
 async fn finish_helper_resources(
     owned: &OwnedProcessJob,
@@ -443,7 +431,6 @@ async fn finish_helper_resources(
     Ok(())
 }
 
-/// Dispatch one owned helper, retain streamed facts, then release its job and resource lease.
 /// 派发一个自有助手、保留流式事实，最后释放作业及资源租约；缺失最终回执保留未知状态。
 async fn invoke(
     mut request: Value,
@@ -495,9 +482,14 @@ async fn invoke(
     };
     if request["operation"] == "run" {
         if let Some(lease) = &lease {
-            request["resourceLimits"] = native(ctx, "runner.sandboxAllocatedResources", json!({
-                "requested":request["resourceLimits"],"allocation":lease.allocation
-            })).await?;
+            request["resourceLimits"] = native(
+                ctx,
+                "runner.sandboxAllocatedResources",
+                json!({
+                    "requested":request["resourceLimits"],"allocation":lease.allocation
+                }),
+            )
+            .await?;
         }
     }
     let granted = lease.is_some();
@@ -521,7 +513,6 @@ async fn invoke(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| failure("TOOLHOST_START_FAILED", "原生工具助手启动失败。", 503))?;
-    // Once a helper exists, every early return keeps admission until native cleanup is explicitly confirmed.
     // 助手已创建后，所有提前退出先保留预约，只有原生清理明确完成才释放。
     if let Some(lease) = lease.as_mut() {
         lease.retain_unknown_on_drop();
@@ -535,7 +526,6 @@ async fn invoke(
         Ok(job) => job,
         Err(error) => {
             terminate(&mut child).await;
-            // No request bytes were submitted, so this failed registration could not dispatch the command.
             // 登记失败时尚未提交任何请求字节，不会派发命令；助手已退出后归还准入。
             if let Some(mut lease) = lease.take() {
                 if lease.release_confirmed().await.is_err() {
@@ -607,7 +597,9 @@ async fn invoke(
                         "host.started",
                         json!({"jobId":id,"processId":value["processId"]}),
                     )
-                    .await.is_err() {
+                    .await
+                    .is_err()
+                    {
                         break;
                     }
                 }
@@ -623,7 +615,9 @@ async fn invoke(
                         "host.append",
                         json!({"jobId":id,"units":units,"replace":value["replace"]}),
                     )
-                    .await.is_err() {
+                    .await
+                    .is_err()
+                    {
                         break;
                     }
                 }
@@ -656,7 +650,6 @@ async fn invoke(
     if receipt.is_none() {
         let _ = stdin.write_all(b"cancel\n").await;
         let _ = stdin.flush().await;
-        // Allow the helper to close its Win32 job and report partial effects before hard cleanup.
         // 先让助手关闭 Win32 作业并报告部分效果，再执行受控硬清理；取消不会伪装成未执行。
         if let Ok(Ok(Some(line))) = tokio::time::timeout(
             Duration::from_secs(3),
@@ -678,7 +671,6 @@ async fn invoke(
         terminate(&mut child).await;
     }
     diagnostic.abort();
-    // Verify the whole job exited before releasing admission; approved independent apps remain exempt.
     // 核验整个作业退出后才释放准入；已批准的独立应用仍按例外处理。
     if let Err(error) = finish_helper_resources(&_owned, &mut lease, independent_launch).await {
         let value = receipt.get_or_insert_with(|| json!({"protocolVersion":1}));
@@ -714,7 +706,6 @@ async fn invoke(
     }))
 }
 
-/// Validate host policy and working-directory identity before requesting a native terminal receipt.
 /// 请求原生终端回执前核对宿主策略与工作目录身份，不把终端执行迁到沙箱或替换错误类别。
 async fn host_run(
     mut input: Value,
@@ -758,7 +749,6 @@ async fn host_run(
             400,
         ));
     }
-    // Resolve the approved directory before dispatch to keep Windows short-name receipts consistent.
     // 派发前解析已批准目录，避免 Windows 长短路径导致回执身份不一致。
     let resolved_cwd = super::service_filesystem::canonical(requested_cwd, false)
         .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
@@ -804,7 +794,6 @@ async fn host_run(
     host_receipt(&input, &plan["holdMs"], value, ctx).await
 }
 
-/// Retain terminal output and identity while applying only the runner's verified state overrides.
 /// 保留终端输出与身份，仅合并执行器已核验的状态修正；后台完成记录使用同一完整回执。
 async fn host_receipt(
     parameters: &Value,
@@ -849,20 +838,28 @@ async fn observe_host_start(
             if let Some(job) = ctx.runtime.jobs.lock().await.get(id) {
                 let _ = job.cancel.send(true);
             }
-            return Ok(unknown_job(id, "后台任务启动等待已取消；已请求终止自有进程。"));
+            return Ok(unknown_job(
+                id,
+                "后台任务启动等待已取消；已请求终止自有进程。",
+            ));
         }
         let state = native(
             ctx,
             "host.view",
             json!({"context":{"conversationId":ctx.conversation_id},"jobId":id}),
-        ).await?;
+        )
+        .await?;
         if state["status"] != "starting" {
             return Ok(if state["status"] == "unknown" {
-                unknown_job(id, "后台任务派发结果未知；请读取该自有任务状态，不能直接重放。")
-            } else { state });
+                unknown_job(
+                    id,
+                    "后台任务派发结果未知；请读取该自有任务状态，不能直接重放。",
+                )
+            } else {
+                state
+            });
         }
         if tokio::time::Instant::now() >= deadline {
-            // Keep the queued job handle; ending observation neither cancels admission nor proves dispatch.
             // 保留排队任务句柄；观察结束不取消准入，也不代表已派发。
             return Ok(state);
         }
@@ -870,7 +867,6 @@ async fn observe_host_start(
     }
 }
 
-/// Route terminal and desktop tools without duplicating the native runner's policy or job state.
 /// 接线终端与桌面工具，复用原生执行器的策略和任务状态，不另建执行账本。
 pub(crate) async fn execute(
     name: &str,
@@ -881,7 +877,6 @@ pub(crate) async fn execute(
         return host_run(input, ctx, None).await;
     }
     if name == "terminal.host.start" {
-        // A full pool waits for capacity under the original cancellation identity, without a queue-age failure.
         // 作业池满时沿原取消身份等待容量，不因排队时间长而终止任务；未派发前不产生副作用。
         let mut cancellation = ctx.cancellation.clone();
         let plan = loop {
@@ -896,9 +891,7 @@ pub(crate) async fn execute(
             )
             .await;
             match attempt {
-                Err(error)
-                    if error.code == "HOST_TERMINAL_CAPACITY" =>
-                {
+                Err(error) if error.code == "HOST_TERMINAL_CAPACITY" => {
                     tokio::select! {
                         _ = super::gateway::wait_for_cancellation(&mut cancellation) => {
                             return Err(GatewayError::new("TOOL_CANCELLED", "排队中的后台终端任务已取消，未启动。", 499));
@@ -1040,7 +1033,6 @@ pub(crate) async fn execute(
         })).await?;
         input["operation"] = json!("run");
         input["workspaceRoot"] = json!(ctx.workdir);
-        // Node selection is application-owned, never accepted from the tool arguments or system PATH.
         // Node 路径由应用拥有，不采信工具参数或系统 PATH。
         input["nodeExecutable"] = if use_node {
             json!(private_node)
@@ -1048,7 +1040,6 @@ pub(crate) async fn execute(
             Value::Null
         };
         input["excludedRoots"] = json!([ctx.data_home, ctx.extension_root]);
-        // Trust only the exact link-free workspace for this conversation, never its surrounding formal data.
         // 仅信任当前聊天的精确无链接工作范围，不能放行其周围正式应用数据。
         let own_sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
         let managed = uuid::Uuid::parse_str(&ctx.conversation_id).is_ok()
@@ -1071,18 +1062,21 @@ pub(crate) async fn execute(
         if result["completed"] == false && result["outcome"] == "unknown" {
             return Ok(result);
         }
-        // Verify the helper's isolation and descendant cleanup before accepting a receipt.
         // 收据必须证明隔离与子进程清理；不能把成功读取 JSON 当成沙箱执行已核验。
-        native(ctx, "runner.sandboxReceipt", json!({
-            "result":result,"resourceLimits":result["resourceAdmission"]["limits"]
-        })).await?;
+        native(
+            ctx,
+            "runner.sandboxReceipt",
+            json!({
+                "result":result,"resourceLimits":result["resourceAdmission"]["limits"]
+            }),
+        )
+        .await?;
         let completion = native(
             ctx,
             "broker.completion.sandboxReceipt",
             json!({"name":"terminal.run","value":result}),
         )
         .await?;
-        // Isolation proves where execution ran, not whether the command or skill succeeded.
         // 隔离证明仅说明执行位置；命令或技能是否成功还必须保留真实退出、超时和取消状态。
         for (field, field_value) in completion.as_object().unwrap() {
             result[field] = field_value.clone();
@@ -1201,7 +1195,6 @@ pub(crate) async fn execute(
     Err(failure("TOOL_NOT_FOUND", "终端或桌面操作不存在。", 404))
 }
 
-/// Apply the receipt plan without substituting its control fields for ToolHost's actual result.
 /// 校验计划仅控制投影，不能取代 ToolHost 的实际回执，否则窗口和进程身份会丢失。
 async fn desktop_receipt(
     action: &str,
@@ -1223,7 +1216,6 @@ async fn desktop_receipt(
             ]
             .contains(&code)
         {
-            // A failed observation after launch cannot certify that no application was started.
             // 启动后的观察失败不能证明未启动；保留未知状态，阻止盲目重复启动。
             return Ok(json!({
                 "action": action,
@@ -1299,7 +1291,6 @@ fn unknown_job(id: &str, message: &str) -> Value {
     })
 }
 
-/// Cancel owned background work before cleaning verified sandbox stages; launched GUI apps stay independent.
 /// 先取消自有后台任务，再清理已核验的沙箱阶段；已启动的独立 GUI 应用保持其自身生命周期。
 pub async fn shutdown(ctx: &GatewayToolContext) {
     let _ = shutdown_checked(ctx).await;
@@ -1382,18 +1373,29 @@ mod tests {
     async fn observing_queued_host_start_keeps_the_same_job_without_cancelling_admission() {
         let (ctx, _sender) = super::super::gateway::test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
-        let plan = native(&ctx, "host.start", json!({
-            "context":{"conversationId":ctx.conversation_id},
-            "request":{"shell":"cmd","cwd":ctx.workdir,"command":"echo fixture"},
-            "startedAt":"2026-10-18T00:00:00Z"
-        })).await.unwrap();
+        let plan = native(
+            &ctx,
+            "host.start",
+            json!({
+                "context":{"conversationId":ctx.conversation_id},
+                "request":{"shell":"cmd","cwd":ctx.workdir,"command":"echo fixture"},
+                "startedAt":"2026-10-18T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
         let id = plan["jobId"].as_str().unwrap();
         let (cancel, receiver) = watch::channel(false);
         let (_finished_tx, finished) = watch::channel(false);
-        ctx.runtime.jobs.lock().await.insert(id.into(), HostJob {
-            conversation_id:ctx.conversation_id.clone(),cancel,
-            result:Arc::new(Mutex::new(None)),finished,
-        });
+        ctx.runtime.jobs.lock().await.insert(
+            id.into(),
+            HostJob {
+                conversation_id: ctx.conversation_id.clone(),
+                cancel,
+                result: Arc::new(Mutex::new(None)),
+                finished,
+            },
+        );
         let view = observe_host_start(id, &ctx, Duration::ZERO).await.unwrap();
         assert_eq!(view["jobId"], id);
         assert_eq!(view["status"], "starting");
@@ -1407,14 +1409,23 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn real_toolhost_applies_sandbox_limits_and_large_output_keeps_both_commands_running() {
-        let Some(executable) = std::env::var_os("KYNXA_TEST_TOOLHOST_EXE") else { return; };
+        let Some(executable) = std::env::var_os("KYNXA_TEST_TOOLHOST_EXE") else {
+            return;
+        };
         let (mut ctx, _sender) = super::super::gateway::test_context();
         let root = ctx.workdir.parent().unwrap().to_owned();
         ctx.toolhost_exe = executable.into();
         ctx.approved = true;
         let output = "(for /L %i in (1,1,5000) do @echo 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789)";
-        let script = format!("{output} & echo sandbox-complete> sandbox-output-complete.txt & exit /b 0");
-        let sandbox = execute("terminal.run", json!({"command":"cmd","args":["/d","/c",script],"timeoutMs":15000}), &ctx).await.unwrap();
+        let script =
+            format!("{output} & echo sandbox-complete> sandbox-output-complete.txt & exit /b 0");
+        let sandbox = execute(
+            "terminal.run",
+            json!({"command":"cmd","args":["/d","/c",script],"timeoutMs":15000}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert_eq!(sandbox["exitCode"], 0, "{sandbox}");
         assert_eq!(sandbox["isError"], false);
         assert_eq!(sandbox["tokenVerified"], true);
@@ -1423,29 +1434,51 @@ mod tests {
         assert_eq!(sandbox["limits"]["resourceVersion"], 1);
         assert_eq!(sandbox["limits"]["cpuRateControl"], true);
         assert!((1..=10000).contains(&sandbox["limits"]["cpuRate"].as_u64().unwrap()));
-        assert_eq!(sandbox["limits"]["cpuThreads"], sandbox["resourceAdmission"]["limits"]["cpuThreads"]);
-        assert_eq!(sandbox["limits"]["jobMemoryBytes"], sandbox["resourceAdmission"]["limits"]["jobMemoryBytes"]);
+        assert_eq!(
+            sandbox["limits"]["cpuThreads"],
+            sandbox["resourceAdmission"]["limits"]["cpuThreads"]
+        );
+        assert_eq!(
+            sandbox["limits"]["jobMemoryBytes"],
+            sandbox["resourceAdmission"]["limits"]["jobMemoryBytes"]
+        );
         assert!(!ctx.workdir.join("sandbox-output-complete.txt").exists());
         let stage = std::path::Path::new(sandbox["stagingDirectory"].as_str().unwrap());
-        // The isolated command processor uses /u, including redirected marker files.
         // 隔离命令处理器使用 /u，重定向的标记文件同样需要按 UTF-16LE 解码。
         let marker = std::fs::read(stage.join("sandbox-output-complete.txt")).unwrap();
         assert_eq!(marker.len() % 2, 0);
-        let marker = String::from_utf16(&marker.chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect::<Vec<_>>()).unwrap();
-        assert_eq!(marker.trim_start_matches('\u{feff}').trim(), "sandbox-complete");
+        let marker = String::from_utf16(
+            &marker
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            marker.trim_start_matches('\u{feff}').trim(),
+            "sandbox-complete"
+        );
 
         let script = format!("{output} & echo host-complete> host-output-complete.txt & exit /b 0");
-        let started = execute("terminal.host.start", json!({
-            "shell":"cmd","script":script,"cwd":ctx.workdir,"timeoutMs":15000,
-            "reason":"Isolated output-overflow and resource receipt verification"
-        }), &ctx).await.unwrap();
+        let started = execute(
+            "terminal.host.start",
+            json!({
+                "shell":"cmd","script":script,"cwd":ctx.workdir,"timeoutMs":15000,
+                "reason":"Isolated output-overflow and resource receipt verification"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
         let id = started["jobId"].as_str().unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         let completed = loop {
-            let view = execute("terminal.host.read", json!({"jobId":id,"limit":1}), &ctx).await.unwrap();
-            if !["starting","running"].contains(&view["status"].as_str().unwrap_or("")) { break view; }
+            let view = execute("terminal.host.read", json!({"jobId":id,"limit":1}), &ctx)
+                .await
+                .unwrap();
+            if !["starting", "running"].contains(&view["status"].as_str().unwrap_or("")) {
+                break view;
+            }
             assert!(tokio::time::Instant::now() < deadline, "{view}");
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
@@ -1453,8 +1486,16 @@ mod tests {
         assert_eq!(completed["receipt"]["completed"], true);
         assert_eq!(completed["receipt"]["exitCode"], 0);
         assert_eq!(completed["receipt"]["outputTruncated"], true);
-        assert_eq!(completed["receipt"]["outputOverflowPolicy"], "truncate-keep-tail");
-        assert_eq!(std::fs::read_to_string(ctx.workdir.join("host-output-complete.txt")).unwrap().trim(), "host-complete");
+        assert_eq!(
+            completed["receipt"]["outputOverflowPolicy"],
+            "truncate-keep-tail"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ctx.workdir.join("host-output-complete.txt"))
+                .unwrap()
+                .trim(),
+            "host-complete"
+        );
         shutdown_checked(&ctx).await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1626,9 +1667,10 @@ mod tests {
         let neighbor = outside.join("keep-neighbor.txt");
         let workspace = ctx.workdir.join("keep-workspace.txt");
         let data = ctx.data_home.join("keep-data.txt");
-        for path in [&neighbor, &workspace, &data] { std::fs::write(path, "retained").unwrap(); }
+        for path in [&neighbor, &workspace, &data] {
+            std::fs::write(path, "retained").unwrap();
+        }
 
-        // Verify the resolved deletion target belongs only to this newly created fixture root.
         // 先核验解析后的删除目标，仅限本次新建的临时夹具根，不接触真实归档或产品数据。
         let resolved_target = std::fs::canonicalize(&target).unwrap();
         assert!(resolved_target.starts_with(std::fs::canonicalize(&root).unwrap()));
@@ -1640,22 +1682,44 @@ mod tests {
             "script":format!("$ErrorActionPreference = 'Stop'\nRemove-Item -LiteralPath '{literal}' -Recurse -Force -ErrorAction Stop\nif (Test-Path -LiteralPath '{literal}') {{ throw 'Target still exists' }}\nWrite-Output 'external-target-removed'")});
         ctx.toolhost_exe = executable.into();
         ctx.permission_mode = "ask".into();
-        let pending = super::super::gateway::execute("terminal.host.run", input.clone(), &ctx).await.unwrap();
+        let pending = super::super::gateway::execute("terminal.host.run", input.clone(), &ctx)
+            .await
+            .unwrap();
         assert_eq!(pending["requiresApproval"], true, "{pending}");
-        assert!(target.join("nested/old.txt").is_file(), "Ask mode must not dispatch the command");
+        assert!(
+            target.join("nested/old.txt").is_file(),
+            "Ask mode must not dispatch the command"
+        );
 
         ctx.permission_mode = "full".into();
-        assert!(!ctx.approved, "Full must use its own authority, not a fabricated approval");
-        let receipt = super::super::gateway::execute("terminal.host.run", input, &ctx).await.unwrap();
+        assert!(
+            !ctx.approved,
+            "Full must use its own authority, not a fabricated approval"
+        );
+        let receipt = super::super::gateway::execute("terminal.host.run", input, &ctx)
+            .await
+            .unwrap();
         assert_eq!(receipt["value"]["completed"], true, "{receipt}");
         assert_eq!(receipt["value"]["exitCode"], 0, "{receipt}");
         assert_eq!(receipt["isError"], false, "{receipt}");
-        assert_eq!(std::fs::canonicalize(receipt["value"]["cwd"].as_str().unwrap()).unwrap(),
-            std::fs::canonicalize(&outside).unwrap());
-        assert!(receipt["value"]["stdout"].as_str().unwrap().contains("external-target-removed"));
+        assert_eq!(
+            std::fs::canonicalize(receipt["value"]["cwd"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&outside).unwrap()
+        );
+        assert!(
+            receipt["value"]["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("external-target-removed")
+        );
         assert!(!target.exists());
         for path in [&neighbor, &workspace, &data] {
-            assert_eq!(std::fs::read_to_string(path).unwrap(), "retained", "{}", path.display());
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "retained",
+                "{}",
+                path.display()
+            );
         }
         shutdown_checked(&ctx).await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
@@ -1761,11 +1825,12 @@ mod tests {
             Some("ready")
         );
         let sample = owned.memory_usage().unwrap();
-        // Windows may create an owned console helper; the verified job tree is the measurement boundary.
         // Windows 可能创建自有控制台辅助进程；采样边界是已核验的作业树，不固定为一个进程。
         assert!(sample.processes >= 1);
         assert!(sample.private_bytes > 0 && sample.working_set_bytes > 0);
-        finish_helper_resources(&owned, &mut None, false).await.unwrap();
+        finish_helper_resources(&owned, &mut None, false)
+            .await
+            .unwrap();
         child.wait().await.unwrap();
         assert_eq!(owned.memory_usage().unwrap().processes, 0);
         assert!(!owned.has_running_processes().unwrap());

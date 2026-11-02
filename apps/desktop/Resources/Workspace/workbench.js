@@ -1,6 +1,7 @@
 import { element as el, button, input, field, number } from './preview-ui.js';
 import { createNotice } from './preview-notice.js';
 import { createSelectScope } from './workbench-controls.js';
+import { openTraining } from './training.js';
 
 const defaults = [
   { name: '资料报告', body: '根据 {{资料路径}} 中的资料，制作 {{报告主题}} 报告。引用真实来源，保存到 {{输出目录}}，展示最终报告。' },
@@ -40,7 +41,7 @@ export async function open(options) {
   const storedFontSize = Number(readStore('kynxa.workbench.fontsize', 15));
   root.style.setProperty('--workbench-font-size', (Number.isFinite(storedFontSize) ? Math.min(24, Math.max(12, storedFontSize)) : 15) + 'px');
   const identity = options.conversationId || 'local', storeKey = 'kynxa.workbench.' + identity;
-  let state = readStore(storeKey, { templates: defaults, bookmarks: [], collections: [], notes: '' }), disposed = false, activePage = options.state?.workbench?.page || 'home', revision = 0, speech;
+  let state = readStore(storeKey, { templates: defaults, bookmarks: [], collections: [], notes: '' }), disposed = false, activePage = options.state?.workbench?.page || 'home', revision = 0, speech, trainingView, trainingState = options.state?.workbench?.training || {}, isActive = true;
   state.templates ||= defaults; state.bookmarks ||= []; state.collections ||= [];
   function save() { writeStore(storeKey, state); }
   function report(text, error = false, marker = revision) { if (!disposed && marker === revision) feedback.show(text, error); }
@@ -76,7 +77,7 @@ export async function open(options) {
   function destructiveButton(text, action) { const control = button('', action, text); control.classList.add('danger'); control.append(icon('delete'), el('span', '', text)); return control; }
   function showList(parent, items, render) { parent.replaceChildren(); if (!items.length) { const empty = el('div', 'workbench-empty'); empty.append(icon('files'), el('span', '', '暂无内容')); parent.append(empty); } items.forEach((item, i) => { const n = el('div', 'workbench-list-item'); render(n, item, i); parent.append(n); }); }
   function quote(text, title = '工作台') { const value = String(text || '').trim(); if (!value) { notice('先填写或选中需要引用的内容。', true); return; } options.onSelection?.({ kind: 'workbench', title, text: value.slice(0, 24000) }); notice('已放入输入框，可继续编辑后发送。'); }
-  const tabs = [['home', '工作', '工作', 'work'], ['files', '成果', '成果与版本', 'files'], ['research', '资料', '资料', 'research'], ['templates', '模板', '模板', 'templates'], ['batch', '批量', '批量处理', 'batch'], ['connect', '辅助', '连接与辅助', 'connect'], ['diagnostics', '状态', '状态', 'diagnostics']];
+  const tabs = [['home', '工作', '工作', 'work'], ['files', '成果', '成果与版本', 'files'], ['research', '资料', '资料', 'research'], ['training', '训练', '模型训练台', 'diagnostics'], ['templates', '模板', '模板', 'templates'], ['batch', '批量', '批量处理', 'batch'], ['connect', '辅助', '连接与辅助', 'connect'], ['diagnostics', '状态', '状态', 'diagnostics']];
   const heading = el('div', 'workbench-heading'), identityMark = el('span', 'workbench-mark'), title = el('div', 'workbench-title'), exportProject = button('', () => exportText('项目工作台.json', JSON.stringify(state, null, 2), 'application/json'), '导出项目记录');
   identityMark.append(icon('work')); title.append(el('h1', '', '创作工作台'), el('p', '', '整理资料，继续创作。')); heading.append(identityMark, title);
   exportProject.classList.add('workbench-export'); exportProject.setAttribute('aria-label', '导出项目记录'); exportProject.append(icon('export'), el('span', '', '导出记录')); header.append(heading, exportProject);
@@ -99,9 +100,16 @@ export async function open(options) {
     event.preventDefault(); nav.scrollLeft = next;
   }, { passive: false });
   nav.addEventListener('keydown', event => { const buttons = [...track.querySelectorAll('button')], index = buttons.indexOf(document.activeElement); if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length; buttons[next].focus(); navigate(buttons[next].dataset.page); });
-  function navigate(id) { if (disposed) return; choices.close(); activePage = id; revision++; speech?.stop?.();
+  function navigate(id) { if (disposed) return; trainingView?.dispose(); trainingView = null; choices.close(); activePage = id; revision++; speech?.stop?.();
     track.querySelectorAll('button').forEach(b => { const selected = b.dataset.page === id; b.setAttribute('aria-selected', selected); b.tabIndex = selected ? 0 : -1; if (selected) { page.setAttribute('aria-labelledby', b.id); revealTab(b, true); } }); positionIndicator(); page.replaceChildren(); notice('');
-    options.onState?.({ workbench: { page: id } }); run(({ home, files, research, templates, batch, connect, diagnostics }[id] || home))(); }
+    options.onState?.({ workbench: { page: id, training: trainingState } }); run(({ home, files, research, training, templates, batch, connect, diagnostics }[id] || home))(); }
+  async function training() {
+    const marker = revision;
+    const view = await openTraining({ container: page, state: trainingState, request: options.request,
+      onExport: options.onExport, onState(next) { if (!disposed && marker === revision) { trainingState = next; options.onState?.({ workbench: { page: activePage, training: next } }); } } });
+    if (disposed || marker !== revision) { view?.dispose(); return; }
+    trainingView = view; trainingView?.setActive(isActive);
+  }
   async function home() {
     const marker = revision, { request, notice, saveProject } = pageActions(marker);
     const stored = await request('project.read'); if (marker !== revision) return;
@@ -373,5 +381,5 @@ export async function open(options) {
     page.append(row(button('刷新状态',run(refresh)),button('本地模型与设置',()=>action('settings')),button('工具与技能',()=>action('extensions'))),updated,view,detail);run(refresh)();
   }
   navigate(tabs.some(([id]) => id === activePage) ? activePage : 'home');
-  return { getState: () => ({ workbench: { page: activePage } }), setActive(active) { if (!active) { choices.close(); speech?.stop?.(); window.speechSynthesis?.cancel(); } }, dispose() { disposed = true; revision++; choices.dispose(); resizeObserver.disconnect(); speech?.stop?.(); window.speechSynthesis?.cancel(); feedback.dispose(); } };
+  return { getState: () => ({ workbench: { page: activePage, training: trainingState } }), setActive(active) { isActive = active; trainingView?.setActive(active); if (!active) { choices.close(); speech?.stop?.(); window.speechSynthesis?.cancel(); } }, dispose() { disposed = true; revision++; trainingView?.dispose(); choices.dispose(); resizeObserver.disconnect(); speech?.stop?.(); window.speechSynthesis?.cancel(); feedback.dispose(); } };
 }

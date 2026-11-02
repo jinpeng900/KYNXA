@@ -1,3 +1,5 @@
+@import url('./training.css');
+
 .workbench, .workbench-select-options {
   --ui-font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   --workbench-control-font-size: 13px;

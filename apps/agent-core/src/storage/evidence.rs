@@ -207,7 +207,6 @@ fn apply_edits(units: &mut Vec<u16>, edits: &[(usize, usize, String)]) {
     }
 }
 
-/// Apply redactions at original UTF-16 offsets, preserving the source encoding.
 /// 按原始 UTF-16 偏移脱敏，保留来源编码。
 fn redactions(mut units: Vec<u16>, known: &[Vec<u16>]) -> Vec<Value> {
     let mut stages = Vec::new();

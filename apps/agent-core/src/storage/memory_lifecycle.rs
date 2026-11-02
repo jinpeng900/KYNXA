@@ -8,7 +8,6 @@ fn invalid(message: &str) -> ContractError {
     ContractError::new(message, "INVALID_MEMORY", 400)
 }
 
-/// Manage candidate lifecycle here; keep asynchronous work and quoted bytes with the caller.
 /// 本模块管理候选生命周期，异步工作及原话字节由调用方持有。
 #[derive(Default)]
 pub struct MemoryLifecycleState {

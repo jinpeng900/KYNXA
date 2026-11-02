@@ -48,7 +48,6 @@ fn children<'a>(node: &'a Value, stack: &mut Vec<&'a Value>) {
     }
 }
 
-/// Acorn supplies syntax; native policy follows static aliases and rejects executable foreground requests.
 /// Acorn 提供语法；原生政策跟踪静态别名并拒绝可执行的前台请求。
 pub fn requests_foreground(syntax: &Value) -> bool {
     let mut windows = ["window", "globalThis", "self"]
@@ -122,7 +121,6 @@ pub fn requests_foreground(syntax: &Value) -> bool {
     false
 }
 
-/// Native JavaScript syntax parsing retains the old foreground alias guard without Acorn/Node.
 /// 原生 JavaScript 语法解析保留原前台别名保护，不依赖 Acorn 或 Node。
 fn tree_window(node: tree_sitter::Node, source: &str, aliases: &HashSet<String>) -> bool {
     let text = |node: tree_sitter::Node| node.utf8_text(source.as_bytes()).unwrap_or("");

@@ -1,4 +1,3 @@
-//! Formal deletion records exact owned paths before task rows disappear; failed cleanup is retryable.
 //! 正式删除在任务行消失前保存精确托管路径；清理失败保留计划，绝不递归删除工作目录。
 
 use super::*;
@@ -70,7 +69,6 @@ fn planned_file(reference: &Value, expected_path: &str) -> Result<TaskCleanupFil
 }
 
 impl TaskRepository {
-    /// Includes dependency consumers so deletion cannot leave a live task using a removed premise.
     /// 同时列出依赖使用者，避免删除后有效任务仍使用已经撤销的前置条件。
     pub fn cleanup_targets(&self, conversation_id: &str) -> Result<Vec<TaskRecord>> {
         conversation_identifier(conversation_id)?;
@@ -78,7 +76,6 @@ impl TaskRepository {
         affected_tasks(&connection, conversation_id)
     }
 
-    /// Caller persists cancellation and waits for real owned workers before this atomic metadata purge.
     /// 调用者先持久取消并等待真实所属 Worker，随后在一个事务中清理正式元数据。
     pub fn purge_conversation(&self, conversation_id: &str) -> Result<TaskCleanupPlan> {
         conversation_identifier(conversation_id)?;
@@ -112,7 +109,6 @@ impl TaskRepository {
                 }
             }
             let plan=TaskCleanupPlan {cleanup_id:uuid::Uuid::new_v4().to_string(),conversation_id:conversation_id.into(),task_ids:tasks.iter().map(|task|task.task_id.clone()).collect(),files:files.into_values().collect(),created_at_ms:now_ms(),last_error:None};
-            // Cleanup plans may span many small artifacts; they are not model context or event payloads.
             // 清理计划可以覆盖多个小产物；它不是模型上下文或事件正文，不套用 64KiB 事件上限。
             let document=serde_json::to_string(&plan).map_err(|_|failure())?;
             connection.execute("INSERT INTO task_cleanup_plans(cleanup_id,conversation_id,document) VALUES(?,?,?)",params![plan.cleanup_id,conversation_id,document]).map_err(|_|failure())?;
@@ -137,7 +133,6 @@ impl TaskRepository {
             .collect()
     }
 
-    /// Exact managed files only. Missing files are idempotent; changed/link paths keep the durable plan.
     /// 只删除精确托管文件；文件已不存在视为幂等成功，内容变化或链接路径保留持久清理计划。
     pub fn retry_cleanup_files(&self, cleanup_id: &str) -> Result<TaskCleanupPlan> {
         identifier(cleanup_id)?;

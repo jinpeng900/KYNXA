@@ -132,7 +132,6 @@ struct CorpusPlan {
     complete: bool,
 }
 
-/// Durable stores remain authoritative; native state owns reuse proofs, corpus plans and mutation shutdown.
 /// 持久存储仍是权威；原生状态拥有复用证明、语料计划及变更关闭账本，不以取消请求撤销已提交资料。
 #[derive(Default)]
 pub struct SourceManagementState {

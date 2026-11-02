@@ -68,7 +68,6 @@ public sealed partial class ShellPage
 
     private void ConsumeAcceptedGuidance(Guid chatId, QueuedPrompt prompt)
     {
-        // Acceptance consumes the durable message pair, even if a refreshed card uses another object instance.
         // 接受回执按固定消息对消费卡片，刷新后换了对象实例也不能留下可重发副本。
         if (_queuedPrompts.TryGetValue(chatId, out var queue))
             queue.RemoveAll(item => item.Id == prompt.Id && item.ReplyMessageId == prompt.ReplyMessageId);
@@ -90,7 +89,6 @@ public sealed partial class ShellPage
             || !HasQueuedTaskActivity(chatId)) return false;
         string text = PromptTextBox.Text.Trim();
         if (text.Length == 0 && !HasAttachmentDrafts) return true;
-        // Sending during execution leaves an editable waiting card; only its explicit guidance action interrupts work.
         // 执行中发送先留下可编辑等待卡片，只有明确点击引导才补充当前任务。
         var prompt = new QueuedPrompt(Guid.NewGuid(), text, _selectedModel?.ProviderId,
             _selectedModel?.ModelId, _layout.PermissionMode, TakeAttachmentDrafts());

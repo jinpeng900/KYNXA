@@ -13,7 +13,6 @@
         row.className = 'row';
         const formula = document.createElement('span');
         formula.className = 'formula ' + (item.block ? 'display' : 'inline');
-        // Separate options/macros for each formula prevent definitions leaking into another reply.
         // 每个公式独立使用选项与宏，避免定义泄漏到其他回复。
         const options = { displayMode: !!item.block, throwOnError: true, trust: false, maxExpand: 1000, maxSize: 100 };
         try {

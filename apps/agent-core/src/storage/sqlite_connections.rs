@@ -68,7 +68,6 @@ struct ConnectionPool {
     available: Condvar,
 }
 
-/// A lease owns its handle; the pool lock never covers SQL execution or an active snapshot.
 /// 租约独占数据库句柄，连接池锁不覆盖 SQL 执行或活动快照。
 pub struct SqliteConnectionLease {
     entry: Option<PooledConnection>,
@@ -109,7 +108,6 @@ impl Drop for SqliteConnectionLease {
         let Some(entry) = self.entry.take() else {
             return;
         };
-        // Clear request deadlines before cleanup; a cancelled request must not poison its next borrower.
         // 清理前撤除请求截止回调，已取消的请求不能污染下一位借用者。
         let clean_handler = entry
             .connection
@@ -190,7 +188,6 @@ fn pool_for(root: &Path, path: &Path) -> Result<Arc<ConnectionPool>, ContractErr
         if pool.identity == identity {
             return Ok(pool.clone());
         }
-        // Replacing a database retires old handles instead of querying the unlinked file forever.
         // 数据库文件替换后退休旧句柄，不能继续查询已脱离当前路径的旧文件。
         if let Ok(mut state) = pool.state.lock() {
             state.retire();
@@ -221,7 +218,6 @@ fn pool_for(root: &Path, path: &Path) -> Result<Arc<ConnectionPool>, ContractErr
     Ok(pool)
 }
 
-/// Each checkout starts a fresh transaction and binds a fresh deadline and cancellation context.
 /// 每次借用都启动新事务并绑定新的截止时间与取消上下文，不复用旧快照。
 pub fn acquire(
     root: &Path,
@@ -231,7 +227,6 @@ pub fn acquire(
     acquire_owned(root, path, timeout_ms, false)
 }
 
-/// Each database has one reusable writer; unrelated databases and read leases keep running.
 /// 每个数据库拥有一个可复用写句柄，独立数据库及读取租约继续并行执行。
 pub fn acquire_write(
     root: &Path,
@@ -340,7 +335,6 @@ fn acquire_owned(
         pool,
         writable,
     };
-    // Reused handles must honor this checkout's deadline during SQLite busy waits as well as SQL progress.
     // 复用句柄同时按本次期限限制SQLite忙等待及SQL执行，不能只缩短借连接排队时间。
     lease
         .busy_timeout(
@@ -382,7 +376,6 @@ pub fn close(root: &Path, path: &Path) -> Result<(), ContractError> {
     }
     Ok(())
 }
-/// Called with application admission closed and background writers already joined.
 /// 调用前关闭应用准入并等待后台写入者退出；迁移复制前结算 WAL 并释放全部本根连接。
 pub fn drain_root(root: &Path) -> Result<(), ContractError> {
     let mut pools = POOLS
@@ -410,7 +403,6 @@ pub fn drain_root(root: &Path) -> Result<(), ContractError> {
         checked_identity(root, &path)?;
         let pool = pools.get(&path).unwrap();
         let mut state = pool.state.lock().map_err(sqlite_store::failure)?;
-        // Idle readers hold no transaction; close them before checkpointing the writer.
         // 空闲读连接不持事务；先关闭读句柄再归并写连接 WAL，避免复制仅包含部分已提交页。
         state.reads.idle.clear();
         state.reads.handles = 0;
@@ -586,20 +578,42 @@ mod tests {
         let fixture = Fixture::new();
         {
             let writer = acquire_write(&fixture.root, &fixture.path, 120_000).unwrap();
-            writer.execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value='uncommitted';").unwrap();
-            writer.progress_handler(256, Some(||true)).unwrap();
-            let result = sqlite_store::sql_execute(&writer,
-                "WITH RECURSIVE spin(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM spin WHERE x<1000000) INSERT INTO sample SELECT x FROM spin", vec![]);
-            assert_eq!(result.as_ref().unwrap_err().code(), "RETRIEVAL_SEARCH_TIMEOUT");
-            let result = sqlite_store::finish(&writer, result.map(|_|serde_json::Value::Null));
+            writer
+                .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value='uncommitted';")
+                .unwrap();
+            writer.progress_handler(256, Some(|| true)).unwrap();
+            let result = sqlite_store::sql_execute(
+                &writer,
+                "WITH RECURSIVE spin(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM spin WHERE x<1000000) INSERT INTO sample SELECT x FROM spin",
+                vec![],
+            );
+            assert_eq!(
+                result.as_ref().unwrap_err().code(),
+                "RETRIEVAL_SEARCH_TIMEOUT"
+            );
+            let result = sqlite_store::finish(&writer, result.map(|_| serde_json::Value::Null));
             assert_eq!(result.unwrap_err().code(), "RETRIEVAL_SEARCH_TIMEOUT");
             assert!(writer.is_autocommit());
         }
         let writer = acquire_write(&fixture.root, &fixture.path, 120_000).unwrap();
-        assert_eq!(writer.query_row("SELECT value FROM sample", [], |row|row.get::<_,String>(0)).unwrap(), "first");
-        writer.execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value='confirmed';").unwrap();
+        assert_eq!(
+            writer
+                .query_row("SELECT value FROM sample", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "first"
+        );
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value='confirmed';")
+            .unwrap();
         sqlite_store::finish(&writer, Ok(serde_json::json!({"saved":true}))).unwrap();
-        assert_eq!(writer.query_row("SELECT value FROM sample", [], |row|row.get::<_,String>(0)).unwrap(), "confirmed");
+        assert_eq!(
+            writer
+                .query_row("SELECT value FROM sample", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "confirmed"
+        );
     }
 
     #[test]
@@ -626,7 +640,6 @@ mod tests {
             independent_writer
                 .execute("UPDATE sample SET value='independent'", [])
                 .unwrap();
-            // Dropping an unfinished write rolls it back before reusing the same writer handle.
             // 未完成写事务在句柄复用前回滚，其他数据库的写入不受该事务阻塞。
         }
         {

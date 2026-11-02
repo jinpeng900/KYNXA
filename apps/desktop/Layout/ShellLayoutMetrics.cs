@@ -1,7 +1,6 @@
 namespace KYNXA_Desktop.Layout;
 
 /// <summary>
-/// Shell geometry in device-independent pixels; contains no view or persistence state.
 /// 主界面几何尺寸使用设备无关像素；不包含视图或持久化状态。
 /// </summary>
 public static class ShellLayoutMetrics
@@ -44,7 +43,6 @@ public static class ShellLayoutMetrics
         availableWidth >= 900 && availableHeight >= 440;
 
     /// <summary>
-    /// A compact viewport uses the existing workspace as an overlay rather than removing its entry point.
     /// 紧凑视口复用当前工作区作为覆盖栏，保留入口，不要求聊天与右栏同时容纳在两列内。
     /// </summary>
     public static bool CanOpenWorkPanel(double availableWidth, double availableHeight) =>

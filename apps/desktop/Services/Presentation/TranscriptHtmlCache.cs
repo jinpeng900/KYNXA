@@ -41,7 +41,6 @@ internal static class TranscriptHtmlCache
         {
             TranscriptSegmentHtml? prior = null;
             byId?.TryGetValue(segment.Id, out prior);
-            // State changes reuse formatting, while stream closure still requires a full Markdown render.
             // 状态变化复用排版；流结束仍须完整解析，校正引用、公式和未闭合代码块。
             if (prior is not null && prior.Source.Content == segment.Content
                 && (prior.Source.Status == "streaming") == (segment.Status == "streaming"))

@@ -8,7 +8,6 @@ using Microsoft.UI.Xaml.Data;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Updates explicitly marked UI labels without inspecting user-authored content.
 /// 只更新明确标记的 UI 文案，不检查用户自行编写的内容。
 /// </summary>
 public static class UiLocalization
@@ -24,7 +23,6 @@ public static class UiLocalization
         ArgumentNullException.ThrowIfNull(property);
         ArgumentNullException.ThrowIfNull(key);
         var source = new LocalizedTextValue(key, target.DispatcherQueue);
-        // Native bindings retain their value source after the managed wrapper is collected.
         // 原生绑定持有值源，托管包装对象回收后仍能更新文字。
         BindingOperations.SetBinding(target, property, new Binding
         {
@@ -130,7 +128,6 @@ public static class UiLocalization
             if (target is not Button button) return;
             button.Loaded -= LocalizeTemplateButton;
             if (args.NewValue is not string) return;
-            // SDK owners may overwrite tooltips while applying their template; bind once the native button is loaded.
             // SDK 所属控件会在应用模板时覆盖悬浮提示，因此须在原生按钮加载完成后绑定。
             button.Loaded += LocalizeTemplateButton;
             if (button.IsLoaded) LocalizeTemplateButton(button, new RoutedEventArgs());
@@ -149,7 +146,6 @@ public static class UiLocalization
 }
 
 /// <summary>
-/// A binding value with no control reference; the global registry holds it weakly.
 /// 绑定值不引用控件或窗口，全局仅保留弱引用，可随绑定释放。
 /// </summary>
 [Microsoft.UI.Xaml.Data.Bindable]

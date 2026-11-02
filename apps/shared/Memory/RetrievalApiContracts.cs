@@ -4,7 +4,6 @@ using System.Text.Json.Serialization;
 namespace KYNXA.Contracts;
 
 /// <summary>
-/// Retrieval configuration and derived-index transport; original conversations remain authoritative.
 /// 检索配置与派生索引传输合同；原始聊天仍为正式数据来源。
 /// </summary>
 public sealed record RetrievalSettingsDocument(int SchemaVersion, long Revision, RetrievalLocalSettings Local,
@@ -18,7 +17,6 @@ public sealed record RetrievalLocalSettings(bool Enabled, string Semantic, strin
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RerankDevicePolicy = null);
 
-// Omit unspecified settings so older clients cannot reset backend policy.
 // 省略未指定设置，避免旧界面重置后端设备策略和容量。
 public sealed record RetrievalIndexingLimits(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumFiles = null,
@@ -43,7 +41,6 @@ public sealed record RetrievalWebSettings(string Mode, string ProviderId, string
     string BrowserRead = "auto");
 public sealed record RetrievalCacheSettings(long MemoryLimitBytes, long DiskLimitBytes);
 
-// Nullable patch fields are omitted, preserving settings outside this window's responsibility.
 // 可空补丁字段不发送，保留本窗口职责以外的设置。
 public sealed record RetrievalSettingsPatch(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalLocalSettings? Local = null,
@@ -90,7 +87,6 @@ public sealed record RetrievalRerankingStatus(string State,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalInferenceBackendStatus? InferenceBackend = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? ResourceReservation = null);
 
-// Keep observations bounded and independent of native allocator layout.
 // 观察数据沿用有界 HTTP 响应，不依赖原生分配器布局；存在 GPU 不代表已启用。
 public sealed record RetrievalStatus(string Backend, int SourceCount, int ChunkCount,
     RetrievalEmbeddingStatus Embedding, RetrievalIndexJob[] Jobs,
@@ -124,7 +120,6 @@ public sealed record RetrievalIndexJob(string JobId, string Status, int Complete
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Semantic = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? ProjectId = null);
 
-// Keep status strings forward-compatible; coverage measures processed eligible sources.
 // 状态用字符串兼容 partial 和未来值；覆盖仅统计来源处理，不证明答案或任务正确。
 public sealed record RetrievalCoverageStatus(int Discovered, int Lexical, int Semantic, int Failed, int Skipped,
     int Partial, bool Complete,

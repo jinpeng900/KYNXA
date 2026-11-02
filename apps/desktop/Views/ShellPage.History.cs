@@ -44,7 +44,6 @@ public sealed partial class ShellPage
         _historyConversationId = chat.Id;
         if (!_historyPages.TryGetValue(chat.Id, out var state) || state.Chat != chat)
         {
-            // Legacy gateways and test fixtures may still provide a complete catalog body.
             // 旧网关与测试夹具可能仍返回完整正文，保持兼容，不再次重复加载。
             state = new(chat) { Initialized = chat.Messages.Count > 0 };
             _historyPages[chat.Id] = state;
@@ -52,7 +51,6 @@ public sealed partial class ShellPage
         }
         if (opened && state.Initialized && (state.Window.HasNewer || state.LatestPagePending) && state.LatestPage is { } latest)
         {
-            // Returning from old history opens the retained latest page first; no old-page flash before network refresh.
             // 从旧历史切回聊天先使用保留的最近页，不先闪出旧页再等待网络刷新。
             chat.Messages = state.Window.Apply(latest, state.LatestPageCharacters, newer: false, reset: true, PreserveLocalHistory(chat));
             _projectStore.AcceptHistoryPage(latest);
@@ -114,7 +112,6 @@ public sealed partial class ShellPage
             catch (GatewayApiException error) when (!reset && error.ErrorCode == "CONVERSATION_HISTORY_CHANGED")
             {
                 if (!OwnsHistoryState(state)) return;
-                // A changed snapshot restarts at the latest page; old pages cannot mix into the new version.
                 // 快照变化后重读最近页，旧页不能混入新版本，同时保留本机正在发送的消息。
                 page = await _projectStore.LoadHistoryPageAsync(chat.Id, limit: RecentHistoryPageMessages,
                     cancellationToken: _historyLifetime.Token, maximumBytes: RecentHistoryPageBytes);
@@ -124,7 +121,6 @@ public sealed partial class ShellPage
             if (direction == "refresh" && liveAtRequest.Length == 0 && page.Snapshot is not null && page.Snapshot == state.LatestPage?.Snapshot
                 && page.StartIndex == state.LatestPage.StartIndex && page.EndIndex == state.LatestPage.EndIndex) return;
             var preserved = PreserveRequestTail();
-            // Count original text and tool payloads away from the UI thread before applying this page.
             // 在 UI 线程之外统计原文及工具回执，再应用有界页面窗口。
             var measured = await Task.Run(() => (Page: ConversationHistoryWindow.Measure(page.Messages),
                 Preserved: ConversationHistoryWindow.Measure(preserved)));
@@ -136,7 +132,6 @@ public sealed partial class ShellPage
             bool hasNewerLocalTail = preserved.Count > 0;
             if (!followingLatest)
             {
-                // Keep refreshed history ready for latest/reopen without replacing the reader's page.
                 // 后台新页留待跳转或重开，不替换正在阅读或选择的页面。
                 state.LatestPage = hasNewerLocalTail ? null : page;
                 state.LatestPageCharacters = measured.Page; state.LatestPagePending = true;
@@ -144,10 +139,8 @@ public sealed partial class ShellPage
                 PublishHistoryAvailability(state);
                 return;
             }
-            // Re-capture the live tail before replacement to preserve messages sent during measurement.
             // 替换历史窗口前重取实时尾部，保留后台统计期间新发的消息。
             chat.Messages = state.Window.Apply(page, measured.Page, newer, reset, preserved);
-            // A page predating live output is safe to merge, but unsafe to reuse later as the latest snapshot.
             // 早于实时输出的分页可合并，却不能以后当最近快照再倒写；保留原分页与本机尾部各自身份。
             if (hasNewerLocalTail) state.LatestPage = null;
             else if (!page.HasNewer) { state.LatestPage = page; state.LatestPageCharacters = measured.Page; }
@@ -163,14 +156,12 @@ public sealed partial class ShellPage
             if (ActiveChatId == chat.Id) UpdateConversationPresentation(openAtBottom: direction == "latest");
             PublishHistoryAvailability(state);
             TrimInactiveHistory();
-            // Page totals are already measured; only a live local tail can add work outside the page window.
             // 分页总量已经统计，只有本机实时尾部可能在页面窗口之外新增内容。
             if (preserved.Count > 0) _ = MeasureHistoryProjectionAsync(state);
         }
         catch (OperationCanceledException) when (_historyLifetime.IsCancellationRequested) { }
         catch (Exception error)
         {
-            // Do not erase cached messages or send another model request when history loading fails.
             // 历史读取失败保留已有消息，不清空对话，也不另派发模型请求。
             if (OwnsHistoryState(state) && ActiveChatId == state.Chat.Id)
                 ShowActionFeedback(UiText.Get("项目操作未完成") + ": " + error.Message);
@@ -181,7 +172,6 @@ public sealed partial class ShellPage
             if (OwnsHistoryState(state) && ActiveChatId == state.Chat.Id)
                 RecoverRunningTaskObservation(state.Chat, FindChat(state.Chat.Id).Project?.Id);
         }
-        // Show the recent tail first; fetch the full page without disturbing readers who scroll up.
         // 先显示最近尾部，再后台补页；用户上翻时保留阅读锚点和内容。
         if (direction == "initial" && state.Initialized && state.HasMore && OwnsHistoryState(state)
             && ActiveChatId == state.Chat.Id)
@@ -230,7 +220,6 @@ public sealed partial class ShellPage
         long characters = await Task.Run(() => ConversationHistoryWindow.Measure(snapshot));
         if (!OwnsHistoryState(state) || state.ProjectionVersion != version) return;
         state.CachedCharacters = characters + (state.Window.HasNewer || state.LatestPagePending ? state.LatestPageCharacters : 0);
-        // Compact newly accumulated replies, not an oversized page that the gateway deliberately retained.
         // 只收缩新累积的回复，不反复重读网关为保留原文而返回的单个超额页。
         if (!_pendingReplies.ContainsKey(state.Chat.Id) && !state.Loading && _projectStore.CanReleaseHistory(state.Chat)
             && snapshot.Length > state.Window.MessageCount

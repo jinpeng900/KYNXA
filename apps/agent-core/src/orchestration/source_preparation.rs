@@ -46,7 +46,6 @@ struct Embedding {
     length: usize,
 }
 
-/// Native preparation owns bounded fingerprints and receipt decisions; raw SDK bodies and identity handles stay outside.
 /// 原生准备服务拥有有界指纹及回执决策；原始 SDK 正文与对象身份句柄留在外部。
 #[derive(Default)]
 pub struct SourcePreparationState {

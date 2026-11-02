@@ -18,7 +18,6 @@ using Windows.Graphics;
 namespace KYNXA_Desktop;
 
 /// <summary>
-/// Presentation and confirmations only. The gateway owns memory persistence.
 /// 本窗口仅负责展示和确认；记忆的正式持久化由网关负责。
 /// </summary>
 public sealed partial class MemoryManagementWindow : Window
@@ -69,7 +68,6 @@ public sealed partial class MemoryManagementWindow : Window
     }
 
     public bool HasUnsavedChanges => _viewModel.HasChanges;
-    // Active operations still guard storage and scope changes; loading is not an unsaved edit.
     // 进行中的操作仍保护存储与范围切换；加载不等于未保存的编辑。
     public bool HasPendingChanges => _viewModel.IsBusy || HasUnsavedChanges;
     public bool BlocksSettingsClose => _viewModel.IsBlockingOperation || _dialogOpen;
@@ -85,7 +83,6 @@ public sealed partial class MemoryManagementWindow : Window
     }
 
     /// <summary>
-    /// Reuses the existing editor inside the settings owner; switching categories keeps its draft and loaded state.
     /// 将现有编辑器嵌入所属设置窗口；切换分类时保留草稿和已加载状态。
     /// </summary>
     public FrameworkElement AttachToSettings(Window owner)
@@ -109,7 +106,6 @@ public sealed partial class MemoryManagementWindow : Window
         _settingsOwner = null;
     }
 
-    // Called only when the application exits or after the migration guard checked the editor.
     // 仅在应用退出，或迁移保护已检查编辑器之后调用。
     public void CloseForOwner()
     {
@@ -156,7 +152,6 @@ public sealed partial class MemoryManagementWindow : Window
                 element is TextBlock { IsTextSelectionEnabled: true }) return;
         }
 
-        // Blank space dismisses text input without handling the click or changing the draft.
         // 点击空白处仅移出文本输入焦点，不吞掉点击，也不修改草稿。
         MemoryEditorScroll.Focus(FocusState.Pointer);
     }
@@ -184,7 +179,6 @@ public sealed partial class MemoryManagementWindow : Window
     private void Appearance_Changed(object? sender, EventArgs e)
     {
         if (_closed) return;
-        // Theme changes update only retained scope buttons; the memory editor and its rows remain untouched.
         // 主题变化只更新现有范围按钮，保留记忆编辑器和列表行的全部状态。
         if (DispatcherQueue.HasThreadAccess) RefreshScopeButtons();
         else DispatcherQueue.TryEnqueue(RefreshScopeButtons);
@@ -221,7 +215,6 @@ public sealed partial class MemoryManagementWindow : Window
             if (_scope == MemoryScopes.User) MemoryScopeLabel.Text = UiText.Get("全局记忆");
             if (IsArchivedProject) MemoryScopeLabel.Text += "\n" + UiText.Get("工作已归档，共享记忆暂停用于聊天。");
             if (MemoryContentBox.Text != _viewModel.EditorContent) MemoryContentBox.Text = _viewModel.EditorContent;
-            // Read the editor's existing stable kind; rendering and localization never replace a draft's saved key.
             // 回填编辑器已有的稳定类型；渲染和本地化不能替换草稿保存的类型键。
             _kindPicker.SelectedKey = _viewModel.EditorKind;
             bool editable = _viewModel.Target is not null && !_viewModel.IsBusy;
@@ -422,7 +415,6 @@ public sealed partial class MemoryManagementWindow : Window
             action == "update" ? "确认更新已有记忆？" : "确认删除已有记忆？",
             action == "update" ? "此建议将替换上方显示的目标记忆，请核对内容与来源。" : "此建议将删除上方显示的目标记忆，请核对目标与来源。",
             action == "update" ? "确认更新" : "确认删除")) return;
-        // An open dialog grants authority only to the entry the user reviewed.
         // 已打开的确认框仅授权用户刚才核对的条目，切换或关闭后不继续执行。
         if (!_closed && ReferenceEquals(_viewModel.SelectedEntry, reviewedEntry) && _viewModel.ScopeRevision == reviewedRevision)
             await _viewModel.ConfirmAsync();

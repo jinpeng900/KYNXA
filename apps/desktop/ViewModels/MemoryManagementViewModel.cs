@@ -8,7 +8,6 @@ using KYNXA_Desktop.Services;
 namespace KYNXA_Desktop.ViewModels;
 
 /// <summary>
-/// A saved chat, a real project, or the user scope. The display name is never used as identity.
 /// 已保存的聊天、真实项目或用户范围；显示名称不能作为身份。
 /// </summary>
 public sealed record MemoryTarget(string Scope, Guid? Id, string DisplayName, bool IsArchived = false)
@@ -35,7 +34,6 @@ public enum MemoryOperationResult
 }
 
 /// <summary>
-/// In-memory editor state. Late responses are ignored after a target change or disposal.
 /// 内存编辑器状态；目标改变或释放后忽略晚到响应。
 /// </summary>
 public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposable
@@ -76,7 +74,6 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     public Exception? Error { get; private set; }
     public Exception? RefreshError { get; private set; }
     public bool IsNew => _editingId is null;
-    // Choosing a type for an empty new memory does not create a draft worth discarding.
     // 空白新记忆只选择类型时无需提示放弃；已有条目的类型变化仍需保存。
     public bool HasChanges => IsNew ? !string.IsNullOrWhiteSpace(_editorContent)
         : _editorContent != _baselineContent || _editorKind != _baselineKind;
@@ -327,7 +324,6 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
 
     private void ApplyDocument(MemoryScopeDocument document)
     {
-        // Keep ordering and selection tied to backend IDs, including inactive entries.
         // 排序与选择始终绑定后端 ID，包括未启用条目。
         Guid? selectedId = SelectedEntry?.Id;
         Entries.Clear();
@@ -353,7 +349,6 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     {
         SelectedEntry = entry;
         _editingId = entry?.Id;
-        // Confirmation belongs to the exact draft the editor displayed, not a newer row loaded after a conflict.
         // 确认绑定编辑器已展示的草稿版本；冲突刷新出的新条目不能借用旧表单的确认。
         _editorEntryRevision = entry?.Revision;
         _editorContent = _baselineContent = entry?.Content ?? string.Empty;
@@ -367,7 +362,6 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _operationCancellation = source;
         IsBusy = true;
-        // Reads can be cancelled when the editor closes; writes retain the close guard until their receipt is handled.
         // 关闭编辑器可取消只读请求；写入则保留关闭保护，直到处理完成回执。
         IsBlockingOperation = blocksClose;
         return new(source, _operationGeneration);

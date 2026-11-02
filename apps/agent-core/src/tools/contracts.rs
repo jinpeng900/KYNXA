@@ -2,7 +2,6 @@ use serde_json::{Value, json};
 
 use super::intent::utf16_length;
 
-// Provenance is descriptive, never a grant. All returned fields are bounded fixed enums.
 // 执行来源只是说明，不能授予权限；返回字段只包含受限的固定枚举，不包含端点和凭据。
 fn normalize_environment(input: &Value) -> Option<Value> {
     let object = input.as_object()?;
@@ -299,7 +298,6 @@ fn validate_input(schema: &Value, node: &Value, path: &str, depth: usize) -> Opt
         }
         if !schema["items"].is_null() {
             for (index, child) in children.iter().enumerate() {
-                // Empty array slots cross JSON as null; explicit null retains a typed projection.
                 // 稀疏数组空槽通过 JSON 变为 null；显式 null 保留类型投影，仍执行完整校验。
                 if child.is_null() {
                     continue;

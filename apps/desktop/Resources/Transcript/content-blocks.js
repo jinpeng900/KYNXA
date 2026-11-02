@@ -21,7 +21,6 @@
   const states = new WeakMap();
   const records = new Set();
   const pendingCopies = new Map();
-  // A body owns only small preferences; cached conversations retain them without a second content cache.
   // 正文仅拥有少量阅读偏好；聊天缓存恢复时复用这些偏好，不另存一份聊天内容。
   const readingPreferences = new WeakMap();
   const requestNonce = Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
@@ -43,14 +42,12 @@
     return translated(state.pre.dataset.codeComplete === 'false' ? 'copyCurrentContent' : 'copyBlock');
   }
   function localize(state) {
-    // Labels are untrusted model text; textContent preserves them as text, never markup.
     // 标签来自不可信模型文本，使用 textContent 仅显示文字，绝不解释为标记。
     const label = state.code.dataset.language || translated('blockPlainText');
     if (state.label.textContent !== label) state.label.textContent = label;
     state.label.title = state.label.textContent;
     const status = state.copy.dataset.copyState;
     const description = copyLabel(state);
-    // Success already has inline text; avoid a second floating native title tooltip.
     // 成功已有框内小字，无需再弹出重复的原生 title 提示。
     if (status) state.copy.removeAttribute('title');
     else state.copy.title = description;
@@ -91,12 +88,10 @@
     const style = getComputedStyle(state.pre);
     const lineHeight = parseFloat(style.lineHeight) || 25.5;
     const padding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-    // The clipped preview has no bottom padding; account for its horizontal scrollbar instead.
     // 裁切预览不保留底部内边距，改为计入横向滚动条厚度，避免露出下一行的半截文字。
     const scrollbarHeight = Math.max(0, state.pre.offsetHeight - state.pre.clientHeight);
     state.block.style.setProperty('--content-block-preview-height', (lineHeight * PREVIEW_LINES + padding + scrollbarHeight) + 'px');
     state.isLong = state.lineCount > LONG_BLOCK_LINES || state.pre.scrollHeight > LONG_BLOCK_HEIGHT_PX;
-    // An open fence always shows all received content; completion only exposes a manual fold action.
     // 未闭合围栏始终展示已接收的全部内容；围栏完整时仅提供手动收起，不自动折叠。
     state.fold.hidden = !complete || !state.isLong;
     if (state.fold.hidden && state.block.dataset.collapsed === 'true') {
@@ -149,7 +144,6 @@
     let block = pre.parentElement;
     if (!block.classList.contains('content-block')) {
       block = document.createElement('div'); block.className = 'content-block';
-      // A one-for-one wrapper preserves the Markdown patcher's top-level block count.
       // 一对一包装保留 Markdown 增量更新器的顶层块数量。
       pre.replaceWith(block); block.append(pre);
     }
@@ -166,7 +160,6 @@
       copyTimer: 0, copyRequestId: null, readingTimer: 0, readingNotice: false };
     for (const button of [copy, wrap, fold]) {
       button.addEventListener('pointerdown', event => {
-        // Mouse activation preserves a reading range so layout hooks can reject rather than erase it.
         // 鼠标操作保留阅读选区，使布局钩子能够明确拒绝操作，而非悄悄清除选区。
         if (event.pointerType === 'mouse' && event.button === 0) event.preventDefault();
       });
@@ -192,7 +185,6 @@
       if (!preferences.has(index)) preferences.set(index, { wrap: false, collapsed: false, scrollLeft: 0 });
       const existing = states.get(block);
       const state = existing || createState(pre, code, preferences.get(index));
-      // Cached DOM retains its original listeners and weak state while detached from this view.
       // 缓存 DOM 脱离当前界面时保留原有事件和弱引用状态，恢复时只重新登记与本地化。
       records.add(state); refreshReading(state); readingResizeObserver?.observe(state.block);
       if (!existing && !state.preferences.wrap) state.pre.scrollLeft = state.preferences.scrollLeft || 0;
@@ -210,7 +202,6 @@
         const state = activeStates.get(preference);
         const scrollLeft = Math.max(0, state && !preference.wrap ? state.pre.scrollLeft : preference.scrollLeft || 0);
         if (!preference.wrap && !preference.collapsed && !scrollLeft) continue;
-        // Virtual rows retain only bounded scalar preferences, never source copies or detached DOM.
         // 虚拟行仅保留有界的标量偏好，不复制源码，也不持有已卸载 DOM。
         saved.push({ bodyIndex, blockIndex, wrap: preference.wrap === true, collapsed: preference.collapsed === true, scrollLeft });
         if (saved.length >= MAX_SAVED_READING_BLOCKS) return saved;
@@ -244,7 +235,6 @@
       if (previous.copyRequestId === firstId) previous.copyRequestId = null;
     }
     state.copyRequestId = requestId; pendingCopies.set(requestId, state);
-    // Read a click-time snapshot, including incomplete streaming text, without normalizing whitespace.
     // 点击时读取快照，包含流式输出的当前文本，不归一化空白、缩进或换行。
     const source = state.code.textContent;
     try {
@@ -263,7 +253,6 @@
     pendingCopies.delete(command?.requestId);
     if (!state || !state.block.isConnected || state.copyRequestId !== command.requestId) return;
     state.copyRequestId = null;
-    // Only the native clipboard receipt can report success; old instances cannot affect new blocks.
     // 仅原生剪贴板回执能够报告成功，旧实例回执不能影响新的内容块。
     showFeedback(state, command.success === true);
   }
@@ -289,7 +278,6 @@
     if (!state || !block.isConnected) return false;
     if (state.block.dataset.collapsed !== 'true') return true;
     if (hooks.beforeLayoutChange?.(block) === false) { showReadingNotice(state); return false; }
-    // Search expands only on explicit result navigation and persists the same reading preference.
     // 搜索仅在主动跳转结果时展开内容，并复用原有阅读偏好，不创建临时源码副本。
     state.preferences.collapsed = false; refreshReading(state); hooks.afterLayoutChange?.(block);
     return true;

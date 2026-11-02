@@ -1,7 +1,5 @@
-//! Public webpage retrieval, executed from the configured gateway host.
 //! 从实际网关主机读取公共网页；不猜测执行环境、不自动打开用户浏览器。
 //!
-//! Extraction and UTF-16 pagination live here; proxy selection and destination validation live in gateway_web_proxy.
 //! 本模块负责正文提取与 UTF-16 分页；代理选择和目的地核验由 gateway_web_proxy 负责。
 
 use super::gateway::{GatewayToolContext, check_cancelled, failure, wait_for_cancellation};
@@ -18,7 +16,6 @@ async fn decoded_body_bounded(
     response: reqwest::Response,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, GatewayError> {
-    // Cap reqwest's decoded stream, not the compressed Content-Length.
     // 限制 reqwest 解压后的正文大小，不能按压缩 Content-Length 计算。
     if response
         .content_length()
@@ -136,7 +133,6 @@ pub(crate) fn decode_text(
             .then(|| value.trim().trim_matches(['\'', '"']).to_owned())
     });
     let meta_charset = if mime == "text/html" || mime == "application/xhtml+xml" {
-        // Read only the bounded HTML header to discover declared charset; do not treat bad bytes as an unreadable page.
         // 只检查有界 HTML 头中的编码声明；局部无效字节不能导致整页无法读取。
         let header = String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]);
         let document = Html::parse_document(&header);
@@ -162,7 +158,6 @@ pub(crate) fn decode_text(
     } else {
         None
     };
-    // Encoding precedence is BOM, explicit HTTP charset, HTML metadata, then UTF-8.
     // 编码依次采用 BOM、明确 HTTP 声明、HTML 元数据和 UTF-8 默认值。
     let (encoding, source) = if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(bytes) {
         (encoding, "bom")
@@ -191,7 +186,6 @@ pub(crate) fn decode_text(
     ))
 }
 
-/// One guarded transport serves webpage tools and explicitly imported document URLs.
 /// 网页工具与明确导入的文档链接共用目的地核验、代理和逐跳重定向路径。
 pub(crate) struct PublicDownload {
     pub bytes: Vec<u8>,
@@ -251,7 +245,6 @@ fn redirect_target(
                     .any(|character| character.is_control() || character == '\\')
         })
         .ok_or_else(|| failure("WEB_REDIRECT_FAILED", "网页重定向缺少有效 Location。", 502))?;
-    // Encode UTF-8 Location values through URL joining, then recheck the public destination.
     // 合并 URL 时编码 UTF-8 Location，再核验公共目的地址。
     let target = base
         .join(location)
@@ -290,7 +283,6 @@ fn download_failure(
         json!({"action":"stop-this-read","retrySameUrl":false,
             "notice":"Keep the original permission boundary; do not bypass it with another transport."})
     } else {
-        // Recovery is a scoped suggestion, never an automatic search or permission to navigate a user's page.
         // 恢复只提供当前来源的建议；不会自动搜索，也不授权改变用户页面或复制登录凭据。
         json!({"action":if status==Some(404){"locate-current-source"}else{"use-another-enabled-read-path"},
             "retrySameUrl":retryable,"tool":"web.search",
@@ -302,7 +294,6 @@ fn download_failure(
         "redirectCount":redirects.len(),"redirects":safe_redirects,"retryable":retryable,"recovery":recovery}))
 }
 
-/// Keep one deadline and one redirect policy for production transport and deterministic loopback checks.
 /// 生产传输与确定性回环验证共用总截止和跳转规则；测试注入不改变正式目的地准入。
 async fn download_with_sender<F, Pending>(
     requested_url: &str,
@@ -333,7 +324,6 @@ where
             .await
             .unwrap_or_else(|_| Err(failure("WEB_TIMEOUT", "网页总读取预算已到期。", 504)))
             .map_err(|error| download_failure(error, &url, None, &redirects))?;
-        // The private relay must remain owned until the response body has been consumed or this hop ends.
         // 私有转接在响应正文读取完成或当前跳结束前保持所有权，不能收到响应头就提前关闭。
         let GuardedResponse {
             response,
@@ -472,7 +462,6 @@ async fn download_inner(
     .await
 }
 
-/// Cancellation drops the same guarded request and private relay; imported URLs do not gain a different network policy.
 /// 取消释放同一受控请求及私有转接；导入链接不会取得另一套网络权限。
 pub(crate) async fn download_public(
     requested_url: &str,
@@ -530,7 +519,6 @@ fn static_page_state(decoded: &str, url: &url::Url, mime: &str, title: &str, tex
         .iter()
         .any(|marker| challenge_title.contains(marker));
     let needs_human = google_challenge || cloudflare_challenge;
-    // Only a bounded, identifiable empty script shell requests rendering; ordinary short factual pages remain usable.
     // 仅识别有明确脚本空壳特征的短页；正常简短正文仍可使用，验证码从不当作来源证据。
     let scripts = document
         .select(&Selector::parse("script").expect("script selector"))
@@ -815,7 +803,6 @@ mod tests {
                 .build()
                 .unwrap();
             let address = self.address;
-            // Only this test sender maps an already validated public URL to its owned loopback HTTP fixture.
             // 仅测试发送器把已核验公共 URL 映射到自有回环 HTTP 服务；生产发送器和逐跳准入不变。
             download_with_sender(
                 &format!("http://example.org{path}"),
@@ -1112,7 +1099,6 @@ mod tests {
                 }),
             );
         }
-        // A 2 KiB gzip fixture expands beyond 2 MiB; its compressed Content-Length cannot bypass the decoded cap.
         // 约 2 KiB 的 gzip 夹具解压后超过 2 MiB；较小的 Content-Length 不能绕过正文限额。
         service = service.route(
             "/limit",

@@ -116,7 +116,6 @@ fn is_symbol_shape(value: &str) -> bool {
     )
 }
 
-/// Treat language clues as preferences; exclude domains only for explicit constraints.
 /// 自然语言线索仅影响偏好，显式约束才排除检索范围。
 pub fn interpret(query: &Value, options: &Value, context: &Value, relation: &Value) -> Value {
     let text = active(query);

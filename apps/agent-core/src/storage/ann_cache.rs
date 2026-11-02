@@ -102,7 +102,6 @@ fn temporary(directory: &Path, key: &str, value: &Value) -> Result<PathBuf, Cont
     Ok(directory.join(leaf))
 }
 
-/// Storage verifies and publishes opaque graph bytes and manifests, then prunes the cache.
 /// 存储层核验并发布不透明图数据和清单，负责缓存清理。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let _guard = CACHE_TRANSACTIONS.lock().map_err(|_| {
@@ -159,7 +158,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             if metadata["identity"]["scopeKey"] != scope {
                 continue;
             }
-            // Verify both cache files before deletion; never touch source, workspace or Trash content.
             // 先核对两个缓存文件再删除，不触碰来源、工作目录或 Trash 原文。
             let graph_exists = inspect(root, &graph, false)?;
             inspect(root, &manifest, false)?;
@@ -321,7 +319,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             handle.write_all(raw.as_bytes()).map_err(io_error)?;
             handle.sync_all().map_err(io_error)?;
             drop(handle);
-            // Bind disposable publication to the actual scope generation while preventing a writer race.
             // 可重建缓存发布绑定实际范围版本，并在文件发布期间阻止正式写入竞态。
             let index_path = root.join("retrieval.sqlite");
             let generation_guard = if managed_files::inspect(

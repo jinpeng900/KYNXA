@@ -47,7 +47,6 @@ public sealed partial class LocalModelsPage
         public string RecommendedLabel => Model.Recommended ? UiText.Get("适合本机") : "";
         public string PathText => Model.Path ?? "";
         public Visibility PathVisibility => string.IsNullOrWhiteSpace(Model.Path) ? Visibility.Collapsed : Visibility.Visible;
-        // Catalog capabilities describe the model family; runtime readiness needs an observed identity and template.
         // 目录能力描述模型类别；实际就绪须有模型身份与工具模板观测，连接成功不能冒充可调用工具。
         public string RuntimeDescription => Model.Installed && Model.Runtime is { } runtime
             ? string.Join(" · ", new[]

@@ -16,9 +16,7 @@ public sealed partial class ConversationDocumentPanel
 
     private void InitializePreviewToolbar()
     {
-        // Keep the address flexible; secondary actions share one menu at every sidebar width.
         // 地址栏始终可伸展；次要操作归入同一个菜单，窄侧栏也不会挤掉地址。
-        // Group navigation so collapsed history buttons leave no empty grid gaps in file previews.
         // 导航共用一列；文件预览隐藏前进后退时，不保留空列间距。
         var navigation = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         foreach (var button in new[] { _back, _forward, _reload }) navigation.Children.Add(button);
