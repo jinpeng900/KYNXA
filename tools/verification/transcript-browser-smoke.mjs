@@ -9,7 +9,10 @@ const resources = fileURLToPath(new URL('../../apps/desktop/Resources/', import.
 const browser = process.argv[2];
 if (!browser || !fs.existsSync(browser)) throw new Error('Pass an installed Edge or Chromium executable.');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'kynxa-transcript-smoke-'));
-const host = `window.chrome ||= {}; window.chrome.webview = {
+// 云端无头浏览器可能不产生动画帧，这里用定时器代替，结果不依赖显卡。
+const host = `window.requestAnimationFrame = callback => setTimeout(() => callback(performance.now()), 16);
+window.cancelAnimationFrame = id => clearTimeout(id);
+window.chrome ||= {}; window.chrome.webview = {
   addEventListener(type, handler) { if (type === 'message') window.receive = data => handler({data}); }, postMessage() {} };`;
 const test = `(async () => {
 const checks = [], errors = [];
