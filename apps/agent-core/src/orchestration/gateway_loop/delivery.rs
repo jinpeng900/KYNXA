@@ -111,21 +111,31 @@ fn current_public_reply(
     }
 }
 
-/// 取最后一轮写好的公开回答；内部检查、工具轮次和已经显示过的内容不算。
-/// 上下文放不下，而最后一轮已经是公开的完整回答。
+/// 回答已经显示，只是后续核验放不下或模型只回了空内容；之后的空轮次不算新进展。
 fn answer_outgrew_review(code: &str, rounds: &[Value], shown: &str) -> bool {
     matches!(
         code,
-        "CONTEXT_INPUT_TOO_LARGE" | "CONTEXT_IRREDUCIBLE_INPUT" | "TOOL_CONTEXT_BUDGET_EXCEEDED"
-    ) && rounds.last().is_some_and(|round| {
-        round["calls"].as_array().is_some_and(Vec::is_empty)
-            && round["text"]
-                .as_str()
-                .is_some_and(|text| !text.trim().is_empty() && shown.contains(text.trim()))
-    })
+        "CONTEXT_INPUT_TOO_LARGE"
+            | "CONTEXT_IRREDUCIBLE_INPUT"
+            | "TOOL_CONTEXT_BUDGET_EXCEEDED"
+            | "MODEL_RESPONSE_EMPTY"
+    ) && rounds
+        .iter()
+        .rev()
+        .find(|round| {
+            round["calls"].as_array().is_some_and(|calls| !calls.is_empty())
+                || round["text"].as_str().is_some_and(|text| !text.trim().is_empty())
+        })
+        .is_some_and(|round| {
+            round["calls"].as_array().is_some_and(Vec::is_empty)
+                && round["text"]
+                    .as_str()
+                    .is_some_and(|text| shown.contains(text.trim()))
+        })
 }
 
-pub(super) fn unpublished_answer(rounds: &[Value], shown: &str) -> Option<String> {
+/// 取最后一轮写好的公开回答；内部检查和工具轮次不算。
+pub(super) fn latest_answer(rounds: &[Value]) -> Option<&str> {
     let round = rounds.iter().rev().find(|round| {
         round["reviewing"] != true
             && round["calls"].as_array().is_none_or(Vec::is_empty)
@@ -136,7 +146,11 @@ pub(super) fn unpublished_answer(rounds: &[Value], shown: &str) -> Option<String
                 .as_str()
                 .is_some_and(|text| !text.trim().is_empty())
     })?;
-    let text = round["text"].as_str()?.trim();
+    round["text"].as_str().map(str::trim)
+}
+
+pub(super) fn unpublished_answer(rounds: &[Value], shown: &str) -> Option<String> {
+    let text = latest_answer(rounds)?;
     (!shown.contains(text)).then(|| text.to_owned())
 }
 
@@ -704,5 +718,27 @@ mod context_stop_tests {
         assert!(!answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &answer, "别的内容"));
         let working = [json!({"text":"我先读文件","calls":[{"id":"read"}]})];
         assert!(!answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &working, "我先读文件"));
+    }
+
+    #[test]
+    fn a_control_only_round_after_a_shown_answer_is_not_an_empty_reply() {
+        let rounds = [
+            json!({"text":"完整回答","calls":[]}),
+            json!({"text":"","calls":[]}),
+            json!({"text":"","calls":[]}),
+        ];
+        assert!(answer_outgrew_review("MODEL_RESPONSE_EMPTY", &rounds, "完整回答"));
+        assert!(!answer_outgrew_review("MODEL_RESPONSE_EMPTY", &rounds, "别的内容"));
+        let nothing = [json!({"text":"","calls":[]})];
+        assert!(!answer_outgrew_review("MODEL_RESPONSE_EMPTY", &nothing, ""));
+        let working = [
+            json!({"text":"完整回答","calls":[]}),
+            json!({"text":"","calls":[{"id":"read"}]}),
+            json!({"text":"","calls":[]}),
+        ];
+        assert!(!answer_outgrew_review("MODEL_RESPONSE_EMPTY", &working, "完整回答"));
+        assert_eq!(super::latest_answer(&rounds), Some("完整回答"));
+        assert_eq!(super::unpublished_answer(&rounds, "完整回答"), None);
+        assert_eq!(super::unpublished_answer(&rounds, "").as_deref(), Some("完整回答"));
     }
 }

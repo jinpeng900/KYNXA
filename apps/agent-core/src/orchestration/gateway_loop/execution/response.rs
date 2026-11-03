@@ -393,13 +393,17 @@ impl Execution {
         if !reviewing
             && !has_replanned_action
             && missing_public_answer(&response.content, text, !response.calls.is_empty())
-            && let Some(answer) = crate::orchestration::gateway_loop::delivery::unpublished_answer(
+            && let Some(answer) = crate::orchestration::gateway_loop::delivery::latest_answer(
                 &self.prepared.state.transcript.rounds,
-                &self.prepared.state.content(),
             )
         {
-            self.prepared.state.delivery.pending_delivery = answer;
-            reviewing = true;
+            if !self.prepared.state.content().contains(answer) {
+                self.prepared.state.delivery.pending_delivery = answer.to_owned();
+                reviewing = true;
+            } else if inspected["source"] == "model-task-state" {
+                // 回答已经显示，只有真实的状态标记才算审查结论；真正的空回复仍走下面的补正文。
+                reviewing = true;
+            }
         }
         if !reviewing
             && !has_replanned_action
