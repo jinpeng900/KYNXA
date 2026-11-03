@@ -15,7 +15,7 @@ public interface IMemoryApi
 }
 
 /// <summary>
-/// 记忆 API 传输层；桌面不持久化草稿、快照或正式记忆。
+/// 记忆 API 传输层；桌面不保存草稿、快照或正式记忆。
 /// </summary>
 public sealed class MemoryApiClient : IMemoryApi, IDisposable
 {
@@ -185,7 +185,7 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
             !quote.Text.Contains('\0')) && quotes.Select(quote => quote.MessageId).Distinct().Count() == quotes.Length &&
         quotes.Any(quote => quote.MessageId == sourceMessageId);
 
-    // 展示确认操作前，同时核验原始来源字段和编辑器的强类型约定。
+    // 展示确认操作前，同时检查原始来源字段和编辑器的强类型约定。
     private static void ValidateRawProvenance(MemoryEntry entry, JsonElement rawEntry)
     {
         var candidate = Field(rawEntry, "candidate");

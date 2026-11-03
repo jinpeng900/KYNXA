@@ -170,7 +170,7 @@ impl ModelSlots {
             .await
     }
 
-    /// 前台请求优先于排队中的恢复和准备；已经派发的请求保留执行与回执，不通过抢占中断它们。
+    /// 前台请求优先于排队中的恢复和准备；已经派发的请求保留执行与结果，不通过抢占中断它们。
     pub async fn acquire_with_priority(
         self: &Arc<Self>,
         connection: &Value,

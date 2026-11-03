@@ -15,7 +15,6 @@ impl Execution {
         "generationElapsedMs":crate::orchestration::gateway_runtime::generation_elapsed_ms(
             self.prepared.state.delivery.generation_duration_base_ms, self.prepared.state.delivery.model_started),
         "generationActive":true})).await;
-        // 消息达到存储边界时续段，不结束所属任务。
         if self
             .prepared
             .state
@@ -260,7 +259,7 @@ impl Execution {
         let delivery_version = json!({"revision":verification["mutationRevision"],
             "signature":verification["codeVersionCoverage"]["latestSnapshot"]["signature"]})
         .to_string();
-        // 核验后优先交付，仍保留原生工具通道处理真实缺口。
+        // 检查后优先交付，仍保留原生工具通道处理真实缺口。
         let synthesize_delivery = !self.rounds.review_pending
             && cached_completion_review(&self.prepared.state)
                 .is_none_or(|review| review["action"] != "resume")
@@ -481,7 +480,6 @@ impl Execution {
                 self.prepared.state.tools.selected.push(tool.clone());
             }
         }
-        // 交付建议要给模型刚加载的能力让路。
         let mut declared_tools = self.prepared.state.tools.selected.clone();
         let mut pinned_tool_names = self
             .prepared
@@ -523,7 +521,7 @@ impl Execution {
         }
         // 缩小已声明目录以回收上下文，保留完整能力发现入口。
         loop {
-            // 核验及无工具交付轮次的声明预算为零时，裁剪不重新装回工具。
+            // 检查及无工具交付轮次的声明预算为零时，裁剪不重新装回工具。
             if declarations_disabled {
                 break;
             }
@@ -753,7 +751,7 @@ impl Execution {
                     self.prepared.state.tools.selected = declared_tools;
                     return Ok(PhaseOutcome::Continue);
                 }
-                // 整理失败时保留历史和副作用，通过持久化链路交付无工具进展答复。
+                // 整理失败时保留历史和副作用，通过保存链路交付无工具进展答复。
                 self.rounds.stopped = Some(error.into());
                 return Ok(PhaseOutcome::Stop);
             }
@@ -843,7 +841,6 @@ impl Execution {
             ));
             return Ok(PhaseOutcome::Stop);
         }
-        // 压缩后重核时间线容量，保留压缩用量和成果。
         if self.prepared.state.needs_message_continuation(round) {
             self.rounds.stopped = Some(GatewayError::new(
                 "TOOL_RUN_MESSAGE_CAPACITY",
@@ -852,7 +849,6 @@ impl Execution {
             ));
             return Ok(PhaseOutcome::Stop);
         }
-        // 压缩等待结束后、派发前重核记忆撤回。
         if let Some(status) = self
             .prepared
             .live_memory
@@ -868,7 +864,7 @@ impl Execution {
             self.rounds.review_pending = false;
             return Ok(PhaseOutcome::Continue);
         }
-        // 准入等待前保存下一步和回执，等待不作为任务终态。
+        // 准入等待前保存下一步和结果，等待不作为任务终态。
         checkpoint_completion_review(
             &mut self.prepared.state,
             self.rounds.review_pending,
@@ -974,7 +970,6 @@ fn apply_compacted_context(
     state.context.history_sources = compact.history_sources;
     *system = compact.system;
     for (marker, notice) in live_notices {
-        // 仅补回缺失的当前提示，相同控制不移动。
         append_control_notice(state, marker, notice.as_deref());
     }
 }

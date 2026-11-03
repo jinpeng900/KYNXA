@@ -25,7 +25,7 @@ internal static class ConversationExport
         foreach (var block in blocks)
         {
             markdown.Append("## ").AppendLine(HeadingText(block.Role == "user" ? userLabel : assistantLabel)).AppendLine();
-            // 保留原 Markdown、TeX 与代码缩进；隐藏的思考和工具回执仍保留在网关归档中。
+            // 保留原 Markdown、TeX 与代码缩进；隐藏的思考和工具结果仍保留在网关归档中。
             markdown.Append(block.Content).AppendLine().AppendLine();
         }
         return markdown.ToString();

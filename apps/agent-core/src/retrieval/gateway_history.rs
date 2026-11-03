@@ -72,7 +72,7 @@ fn conversation_relationship(catalog: &Value, id: &Value) -> ContractResult {
 }
 
 fn check_context(catalog: &Value, context: &Value) -> ContractResult {
-    // 扫描前核验正式归属；请求携带的预期范围仍是不可静默扩大或切换的边界。
+    // 扫描前检查正式归属；请求携带的预期范围仍是不可静默扩大或切换的边界。
     storage::identity(&context["conversationId"])?;
     let relationship = conversation_relationship(catalog, &context["conversationId"])?;
     let expected = context
@@ -287,7 +287,7 @@ fn checked_scope(
     expected: &str,
     versions: &mut [(Value, conversation_history::HistoryRead)],
 ) -> Result<(), ContractError> {
-    // I/O 完成后再次核验归属与已观察日志快照；扫描期间不长时间持有目录锁。
+    // I/O 完成后再次检查归属与已观察日志快照；扫描期间不长时间持有目录锁。
     gateway::with_catalog(&config.data_root, |catalog, _| {
         let (locations, _) = scope_locations(catalog, context, scope)?;
         if scope_identity(context, &locations, input, scope, role) != expected {
@@ -517,7 +517,7 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
 }
 
 fn read(config: &GatewayConfig, input: &Value, context: &Value) -> ContractResult {
-    // 只读取被引用消息；返回正文前再次核验归属和原始快照。
+    // 只读取被引用消息；返回正文前再次检查归属和原始快照。
     let source = input
         .get("sourceConversationId")
         .unwrap_or(&context["conversationId"]);

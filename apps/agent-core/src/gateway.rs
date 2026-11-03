@@ -350,7 +350,7 @@ impl RequestEventStream {
         })
     }
     async fn recover(&mut self) -> bool {
-        // 先重新订阅，再读替换快照；快照水位覆盖已错过的事件。
+        // 先重新订阅，再读替换快照；快照位置覆盖已错过的事件。
         self.receiver = self.run.events.subscribe();
         match self.run.recovery(self.delivered).await {
             Ok(recovery) => {
@@ -1380,7 +1380,7 @@ pub fn initialize_storage(target: &str) -> Result<Value, GatewayError> {
 
 /// 进程退出即释放系统锁；旧 PID 文件不能授权第二个写入者。
 pub(crate) fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, GatewayError> {
-    // 此根目录仅由可信应用配置选定；逐层核验并准备缺失祖先，不能只假设最终一层存在。
+    // 此根目录仅由可信应用配置选定；逐层检查并准备缺失祖先，不能只假设最终一层存在。
     let volume_root: std::path::PathBuf = root
         .components()
         .take_while(|part| {

@@ -18,7 +18,7 @@ using Windows.Graphics;
 namespace KYNXA_Desktop;
 
 /// <summary>
-/// 本窗口仅负责展示和确认；记忆的正式持久化由网关负责。
+/// 本窗口仅负责展示和确认；记忆的正式保存由网关负责。
 /// </summary>
 public sealed partial class MemoryManagementWindow : Window
 {

@@ -237,7 +237,6 @@ pub(super) async fn create(
     check_cancelled(context)?;
     let expected = arguments["expectedHash"].clone();
     let result_format = format.clone();
-    // 重命名后取消仍保留文件已提交的回执。
     let receipt = tokio::task::spawn_blocking(move || {
         let bytes = match content {
             GeneratedContent::Bytes(bytes) => bytes,

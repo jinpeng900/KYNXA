@@ -216,7 +216,7 @@ impl ResourceBudget {
                 ),
             );
             observations.sort_by_key(|observation| &observation.lease_id);
-            // 已核验显存增量跨租约只抵扣一次；未知用量保留完整预约。
+            // 已检查显存增量跨租约只抵扣一次；未知用量保留完整预约。
             for observation in observations {
                 let credit =
                     available_credit.min(self.leases[&observation.lease_id].gpu_memory_bytes);

@@ -1,4 +1,4 @@
-//! 按回执类型、目标和版本核对验收引用，不确认语义质量。
+//! 按结果类型、目标和版本核对验收引用，不确认含义质量。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -23,7 +23,7 @@ enum EvidenceKind {
     Visual,
 }
 
-/// 必需身份字段取自回执，动态目标元信息仍作为协议数据保留。
+/// 必需身份字段取自结果，动态目标元信息仍作为协议数据保留。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletionProof {
@@ -48,7 +48,7 @@ fn normalized_command_text(text: &str) -> String {
     text
 }
 
-/// 同次评审复用一份当前映射，不另建持久回执记录。
+/// 同次评审复用一份当前映射，不另建持久结果记录。
 pub(super) struct CompletionEvidenceSet {
     pub verification: Value,
     pub valid_references: Vec<Value>,
@@ -140,7 +140,7 @@ impl CompletionEvidenceSet {
     }
 }
 
-/// 仅把明确目标关联到原生回执身份，无法确定的依赖继续参与核验。
+/// 仅把明确目标关联到原生结果身份，无法确定的依赖继续参与检查。
 pub(super) fn validation_scope(requirements: &[String], records: &[Value]) -> ValidationScope {
     let records = current(records);
     // 检查意图来自当前正式要求，与模型填写的证据标签无关。
@@ -402,7 +402,7 @@ pub(super) fn from_receipt(call: &Value, receipt: &Value) -> Value {
     {
         kinds.push(EvidenceKind::ObservedState);
     }
-    // 终端退出码不单独证明质量，由调用端补入已核验版本的检查记录。
+    // 终端退出码不单独证明质量，由调用端补入已检查版本的检查记录。
     let terminal = name.starts_with("terminal.");
     let exited_cleanly = body["exitCode"].as_i64().is_none_or(|code| code == 0);
     let command = terminal
@@ -484,7 +484,7 @@ pub(super) fn current(records: &[Value]) -> Vec<Value> {
     for (index, record) in records.iter().enumerate() {
         let next_sequence = record["mutationSequence"].as_u64().unwrap_or(sequence);
         let mutating = record["mutating"] == true;
-        // 修改序号有缺口时，未保留的回执可能改过任何目标。
+        // 修改序号有缺口时，未保留的结果可能改过任何目标。
         if next_sequence > sequence.saturating_add(u64::from(mutating)) {
             last_opaque = Some(index);
             last_mutation = Some(index);
@@ -884,7 +884,7 @@ fn acceptance_clauses(requirement: &str) -> Vec<&str> {
                 continue;
             }
         }
-        // 明确的下一动作单独核验，前一读取目标与后一写入目标分开；引号及 URL 内标点保留。
+        // 明确的下一动作单独检查，前一读取目标与后一写入目标分开；引号及 URL 内标点保留。
         if !requirement[start..found.start()].trim().is_empty() {
             clauses.push(&requirement[start..found.start()]);
         }
@@ -896,7 +896,7 @@ fn acceptance_clauses(requirement: &str) -> Vec<&str> {
     clauses
 }
 
-/// 终端回执不记录操作了哪些文件，成功退出的命令里出现该文件名就算对应上。
+/// 终端结果不记录操作了哪些文件，成功退出的命令里出现该文件名就算对应上。
 fn command_names_target(record: &Value, expected: &str) -> bool {
     record["targets"].as_array().is_none_or(Vec::is_empty)
         && record["command"].as_str().is_some_and(|command| {
@@ -906,7 +906,7 @@ fn command_names_target(record: &Value, expected: &str) -> bool {
         })
 }
 
-/// 核对引用回执的覆盖范围，目标和证明类型以回执为准。
+/// 核对引用结果的覆盖范围，目标和证明类型以结果为准。
 pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]) -> bool {
     let clauses = acceptance_clauses(requirement);
     if clauses.len() > 1 {

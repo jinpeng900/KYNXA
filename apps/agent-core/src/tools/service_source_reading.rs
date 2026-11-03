@@ -10,7 +10,7 @@ use std::sync::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// 通知复用扫描器的目录排除；自定义忽略规则和权限仍由扫描器核验。
+/// 通知复用扫描器的目录排除；自定义忽略规则和权限仍由扫描器检查。
 pub(crate) fn watch_path_relevant(path: &Path) -> bool {
     !path.components().any(|part| {
         part.as_os_str()
@@ -176,7 +176,7 @@ fn metadata(path: &Path, info: std::fs::Metadata) -> ServiceResult<Value> {
         json!({"sizeBytes": fact["size"], "mtimeMs": fact["mtimeMs"], "ctimeMs": fact["ctimeMs"], "device": fact["dev"], "inode": fact["ino"]}),
     )
 }
-// 公开元数据遵循 Node Number 往返；后文打开文件对象的身份仍按精确 FileVersion 核验。
+// 公开元数据遵循 Node Number 往返；后文打开文件对象的身份仍按精确 FileVersion 检查。
 fn same(left: &Value, right: &Value) -> bool {
     !left.is_null()
         && ["sizeBytes", "mtimeMs", "ctimeMs", "device", "inode"]
@@ -1007,8 +1007,8 @@ fn append_window(
     *byte += bytes;
 }
 
-/// 原生线程读取来源，使用取消标记并核验已打开句柄。
-/// 二进制解码复用同一核验，不经过 JSON/base64 传输。
+/// 原生线程读取来源，使用取消标记并检查已打开句柄。
+/// 二进制解码复用同一检查，不经过 JSON/base64 传输。
 pub(crate) fn read_binary_stable(
     path: &Path,
     maximum: u64,

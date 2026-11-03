@@ -203,7 +203,7 @@ async fn prepare(
     let owned_local = local.clone();
     let token = cancel.clone();
     let vectors = tokio::task::spawn_blocking(move || {
-        // 既有E5段落队列按片让出给查询，不建立私有模型或推理线程。
+        // 现有E5段落队列按片让出给查询，不建立私有模型或推理线程。
         let mut vectors = Vec::with_capacity(cards.len());
         let mut indexes = Vec::with_capacity(cards.len());
         let mut identity = None;
@@ -388,7 +388,7 @@ pub(crate) async fn supplement(
     }
 }
 
-/// 只在既有E5所有者就绪后预热受信任元信息；此处不启动任何MCP服务。
+/// 只在现有E5所有者就绪后预热受信任元信息；此处不启动任何MCP服务。
 pub(crate) fn prewarm(context: &GatewayToolContext) {
     if context.runtime.semantic.config.get().is_none()
         || context

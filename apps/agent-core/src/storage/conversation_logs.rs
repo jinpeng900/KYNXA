@@ -205,7 +205,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                         .iter()
                         .rposition(|byte| *byte == b'\n')
                         .map_or(0, |index| index + 1);
-                    // 仅为识别末尾截断字符允许有损映射；恢复回执在截断前备份完整原始残尾字节。
+                    // 仅为识别末尾截断字符允许有损映射；恢复结果在截断前备份完整原始残尾字节。
                     if bytes.ends_with(b"\n")
                         || encoding.error_len().is_some()
                         || encoding.valid_up_to() < tail_start

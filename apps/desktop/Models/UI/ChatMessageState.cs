@@ -44,7 +44,7 @@ public sealed class ChatMessageState
     public string Model { get; set; } = string.Empty;
     public long ReasoningDurationMs { get; set; }
     public long DurationMs { get; set; }
-    // 活动计时仅存在于当前进程；正式总用时仍由网关保存，不持久化 Stopwatch 时间戳。
+    // 活动计时仅存在于当前进程；正式总用时仍由网关保存，不保存 Stopwatch 时间戳。
     [JsonIgnore]
     public long? GenerationStartedTimestamp { get; set; }
     [JsonIgnore]

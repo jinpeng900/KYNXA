@@ -301,7 +301,7 @@ pub(super) fn steering_revision_instruction(state: &LoopState) -> String {
     )
 }
 
-/// 仅应用绑定最新正式引导的要求变更，执行回执保持不变。
+/// 仅应用绑定最新正式引导的要求变更，执行结果保持不变。
 pub(super) fn apply_steering_revision(
     state: &mut LoopState,
     inspected: &Value,
@@ -466,7 +466,7 @@ pub(super) fn checkpoint_completion_review(
         .checkpoint_review(pending, evidence, attempts);
 }
 
-/// 调用语法文本仅作导航，须经正式派发核对结果，仍可复用相同操作的成功回执。
+/// 调用语法文本仅作导航，须经正式派发核对结果，仍可复用相同操作的成功结果。
 pub(super) fn retain_unexecuted_tool_intent(
     state: &mut LoopState,
     requested: &[String],
@@ -484,7 +484,7 @@ pub(super) fn retain_unexecuted_tool_intent(
     true
 }
 
-/// 仅继承正式产物目标，凭当前回执重核版本和读取覆盖。
+/// 仅继承正式产物目标，凭当前结果重核版本和读取覆盖。
 pub(super) async fn restore_continued_readback_targets(
     run: &RequestRun,
     limits: &Value,
@@ -531,7 +531,7 @@ pub(super) fn current_effectful_work(state: &LoopState) -> bool {
         && state.completion.mutation_sequence > 0
 }
 
-/// 每个工作版本只执行一次替代动作，新回执 ID 不重置次数。
+/// 每个工作版本只执行一次替代动作，新结果 ID 不重置次数。
 fn replanned_action(
     checkpoint: &mut Value,
     selected: &[Value],

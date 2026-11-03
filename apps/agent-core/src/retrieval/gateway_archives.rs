@@ -567,7 +567,7 @@ pub(crate) fn scan(
     scan_loaded(config, path, &bytes, metadata, settings, cancel, consume)
 }
 
-/// 已核验的 URL 响应复用相同成员额度，不虚构本机文件访问授权。
+/// 已检查的 URL 响应复用相同成员额度，不虚构本机文件访问授权。
 pub(crate) fn scan_bytes(
     config: &GatewayConfig,
     name: &Path,

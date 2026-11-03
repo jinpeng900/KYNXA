@@ -440,7 +440,7 @@ impl<'a> Sources<'a> {
     }
 }
 
-/// 原生 JSON 回执复用 URL、摘录与去重规则，不再建立另一份图映射。
+/// 原生 JSON 结果复用 URL、摘录与去重规则，不再建立另一份图映射。
 pub(crate) fn normalize_result(value: &Value, maximum: usize) -> Vec<Value> {
     let mut sources = Sources {
         nodes: HashMap::new(),

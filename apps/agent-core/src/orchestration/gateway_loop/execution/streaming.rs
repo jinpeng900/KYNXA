@@ -96,7 +96,6 @@ impl Execution {
         } = prepared;
         let segment = new_id();
         let current = Arc::new(Mutex::new((String::new(), String::new())));
-        // 缓冲进度或最终答复可发布时才建可见分段。
         let buffered_delivery = requires_task_verification(&self.prepared.state);
         if !self.rounds.review_pending && !buffered_delivery {
             let phase = self.prepared.state.begin_segment(round, &segment);
@@ -118,7 +117,7 @@ impl Execution {
             &self.prepared.state.context.history,
             &self.prepared.system,
             if reviewing {
-                // 核验输出随清单增大且不超协商额度，不用固定 512 token 截断。
+                // 检查输出随清单增大且不超协商额度，不用固定 512 token 截断。
                 Some(budget::review_output_limit(
                     self.prepared.state.completion.acceptance_requirements.len(),
                     self.rounds.review_attempts,
@@ -229,7 +228,6 @@ impl Execution {
             self.prepared.state.visual.pending_visual_readback = false;
             self.prepared.state.visual.pending_visual_hashes.clear();
         }
-        // 失败请求同样计量，与真实发送次数一致。
         if dispatched {
             let _ = self.prepared.state.progress.apply(
                 "progress.recordModel",
@@ -455,7 +453,6 @@ fn start_relay(
     let relay_segment = segment.clone();
     let relay = tokio::spawn(async move {
         let mut projection = TaskTextProjection::default();
-        // 首个增量发送前过滤复述的内部历史。
         let mut history_filter = crate::orchestration::task::HistoryEchoFilter::default();
         let mut ready_event = None;
         while let Some(mut event) = match ready_event.take() {

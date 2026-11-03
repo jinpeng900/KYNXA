@@ -265,7 +265,6 @@ fn context_recovery_plan(args: &Value) -> Value {
         "expiresAt".to_owned(),
         json!(now.saturating_add(OBSERVED_CONTEXT_LIMIT_LIFETIME_MS)),
     );
-    // 读取不续期；按最近成功写入的顺序淘汰。
     let remaining_keys: Vec<&Value> = args["cacheKeys"]
         .as_array()
         .into_iter()

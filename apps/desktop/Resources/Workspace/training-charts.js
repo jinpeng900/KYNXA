@@ -59,7 +59,6 @@ export function metricsCsv(rows) {
   return '\uFEFF' + [keys.map(cell).join(','), ...rows.map(r => keys.map(k => cell(r[k])).join(','))].join('\r\n');
 }
 
-// 曲线只使用实际指标；平滑显示不覆盖原始记录。
 export function createTrainingChart(parent, { rows = [], comparison = [], title = '训练指标', liveState = 'created', onExport, viewState = {}, onViewState } = {}) {
   const wrap = el('section', 'training-chart'), top = el('div', 'training-chart-toolbar'), plot = el('div', 'training-chart-plot');
   const legend = el('div', 'training-chart-legend'), tip = el('div', 'training-chart-tip'), live = el('span', 'training-chart-live'), empty = el('p', 'training-empty', '等待训练指标');

@@ -1,8 +1,7 @@
-//! 根任务工具派发与正式回执结算，与模型规划分开。
+//! 根任务工具派发与正式结果结算，与模型规划分开。
 
 use super::*;
 
-/// 只借用本轮所需状态，不复制任务状态或记录。
 pub(super) struct ToolRound<'a> {
     pub runtime: &'a Arc<GatewayRuntime>,
     pub run: &'a Arc<RequestRun>,
@@ -57,7 +56,7 @@ impl ToolRound<'_> {
             evidence_changed: summarized_work_changed,
             ..Default::default()
         };
-        // 独立读取批量执行，回执、历史及归档仍按原调用顺序结算。
+        // 独立读取批量执行，结果、历史及归档仍按原调用顺序结算。
         let batch_catalog = ctx.runtime.schemas.read().await.clone();
         let experience_names = response
             .calls
@@ -87,7 +86,7 @@ impl ToolRound<'_> {
                 stopped = Some(GatewayError::new("ABORT_ERR", "任务已取消。", 499));
                 break;
             }
-            // 下一批派发前重核撤回，已完成的预取回执正常结算。
+            // 下一批派发前重核撤回，已完成的预取结果正常结算。
             if prefetch.is_none()
                 && !memory_plan_invalidated
                 && let Some(status) = live_memory
@@ -104,7 +103,6 @@ impl ToolRound<'_> {
                 memory_plan_invalidated = true;
             }
             if prefetch.is_none() && (memory_plan_invalidated || steering_pending(&run, &ctx)) {
-                // 应用插话前，为未派发调用配对跳过结果。
                 for skipped in &response.calls {
                     if !results
                         .iter()
@@ -223,7 +221,6 @@ impl ToolRound<'_> {
             ))?;
             state.delivery.timeline_order += 1;
             let tool_order = state.delivery.timeline_order;
-            // 批次已公布这些调用顺序，不重复登记。
             if prefetch.is_none() {
                 let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":"running","summary":"执行中","round":round,"order":tool_order});
                 run.emit(json!({"type":"tool_call","tool":activity})).await;
@@ -376,7 +373,6 @@ impl ToolRound<'_> {
                             .await
                         {
                             Ok(true) => {
-                                // 审批后重核记忆，等待期间撤回的内容仍无效。
                                 if let Some(status) = live_memory
                                     .refresh(
                                         &runtime.config.data_root,
@@ -451,7 +447,6 @@ impl ToolRound<'_> {
             receipt["resultRef"] = reference.clone();
             let mut completion_proof =
                 super::super::completion_evidence::from_receipt(&call, &receipt);
-            // 批次调用完成时已结算，此处仅结算其他派发。
             if operation_dispatched
                 && archived_reference.is_none()
                 && let Some(journal) = &run.journal
@@ -580,7 +575,6 @@ impl ToolRound<'_> {
             if name == "task.document" && receipt["content"]["informationAdded"] == true {
                 round_progress.artifact_updated = true;
             }
-            // 重复映射缩短时，侧车仍保留真实归档来源身份。
             state.context.result_sources.push(json!({"callId":call["id"],"name":call["name"],"arguments":call["arguments"],"sourceMetadata":source_metadata,"originalResultRef":if call["name"]=="tool.result.read" {source_metadata["resultRef"].clone()} else {Value::Null},"observation":is_observation,"executed":receipt["executed"]!=false,"originalExcerpt":crate::models::tool_context::source_excerpt(&canonical,512),"round":round,"status":receipt["status"],"resultRef":reference,"archiveOwner":{"requestId":run.request_id,"toolCallId":call["id"],"toolName":call["name"]}}));
             let _=state.tools.effects.apply("effects.observe",&json!({"call":call,"result":receipt,"observation":is_observation,"workspaceRoot":version_context.workdir}));
             if is_observation && receipt["isError"] != true {
@@ -643,7 +637,7 @@ impl ToolRound<'_> {
             }
             let _=state.progress.apply("progress.recordTool",&json!({"id":call["id"],"round":round,"durationMs":tool_start.elapsed().as_millis() as u64,"approvalMs":0,"reused":receipt["reused"]==true,"dispatched":receipt["executed"]!=false}));
             let after_version = if track_version && !before_version.is_null() {
-                // 核验失败或取消时保留执行回执，核验状态保持未知。
+                // 检查失败或取消时保留执行结果，检查状态保持未知。
                 match tools::capture_code_version(&version_context).await {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
@@ -751,7 +745,6 @@ impl ToolRound<'_> {
                 &receipt,
             );
             if name == "tool.search" && receipt["isError"] != true {
-                // 优先保留已加载匹配项，不新增加载或授权。
                 if let Some(index) = receipt["content"]["tools"]
                     .as_array()
                     .into_iter()
@@ -898,7 +891,7 @@ impl ToolRound<'_> {
             refresh_document_navigation(&mut state);
         }
         if guard["warning"] == true || guard["finalize"] == true {
-            // 压缩后保留纠偏指导，不不断追加永久用户轮次。
+            // 压缩后保留纠偏指导，不断追加永久用户轮次。
             if !system.contains(REPEATED_READ_GUIDANCE) {
                 system.push_str(REPEATED_READ_GUIDANCE);
             }

@@ -382,7 +382,7 @@ internal static class HostTerminalRunner
             catch (DecoderFallbackException) { result.Append(oem.GetString(bytes, start, count)); }
             start = end + 1;
         }
-        // 行内混合编码或同时符合 UTF-8 的 OEM 字节有歧义；回执注明逐行策略，不保证任意字节无损解码。
+        // 行内混合编码或同时符合 UTF-8 的 OEM 字节有歧义；结果注明逐行策略，不保证任意字节无损解码。
         return result.ToString();
     }
 

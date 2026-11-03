@@ -53,7 +53,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         await _loaded.Task.WaitAsync(_lifetime.Token);
         WatchViewportVisibility();
         _conversationId = conversationId;
-        // 视图关闭后仍接收启动回执，以便关闭对应进程。
         _opening = _api.OpenAsync(conversationId, address, CancellationToken.None);
         _page = await _opening;
         if (_disposed) return;
@@ -74,7 +73,7 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
             // 仅显示仍在屏幕外的窗口，让 Chrome 先完成自身工具栏布局，再一次性校准，不抢焦点。
             ShowWindow(_chrome, 4);
             await Task.Delay(40, _lifetime.Token);
-            // 打开回执已包含窗口和视口，先挂载显示，再按原有流程更新导航状态。
+            // 打开结果已包含窗口和视口，先挂载显示，再按原有流程更新导航状态。
             InitializeContentInsets(_page.Viewport);
             AttachBrowserWindow();
             WatchContentGeometry(_page.ProcessId);

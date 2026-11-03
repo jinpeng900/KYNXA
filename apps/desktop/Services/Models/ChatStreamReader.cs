@@ -74,7 +74,7 @@ public static class ChatStreamReader
                                 || streamEvent.UserMessageId is not Guid userMessageId || userMessageId == Guid.Empty
                                 || streamEvent.SupersededReplyMessageId == Guid.Empty)
                                 throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
-                            // 引导边界开启新的可见回复，任务身份及工具回执继续沿用，不重开整个请求。
+                            // 引导边界开启新的可见回复，任务身份及工具结果继续沿用，不重开整个请求。
                             assistantSegments.Clear();
                             lastTimelineOrder = -1;
                             break;
@@ -132,7 +132,7 @@ public static class ChatStreamReader
                             if (streamEvent.Type == "tool_result") { activeToolCalls.Remove(toolCallId); terminalOutputSequences.Remove(toolCallId); }
                             break;
                         case "approval_closed":
-                            // 审批关闭不结束工具或回复；后续真实工具回执仍必须正常接收。
+                            // 审批关闭不结束工具或回复；后续真实工具结果仍必须正常接收。
                             if (streamEvent.ApprovalId is not Guid closedId || closedId == Guid.Empty ||
                                 string.IsNullOrWhiteSpace(streamEvent.ToolCallId) || streamEvent.ToolCallId.Length > 200 ||
                                 streamEvent.TaskId == Guid.Empty || streamEvent.Scope is not (null or "once" or "task"))
@@ -167,7 +167,7 @@ public static class ChatStreamReader
                         case "task_tool_result":
                         case "task_finished":
                         case "task_approval_closed":
-                            // 子任务诊断不加入主代理工具记录，也不结束主回复；正式回执通过任务 API 读取。
+                            // 子任务诊断不加入主代理工具记录，也不结束主回复；正式结果通过任务 API 读取。
                             if (streamEvent.TaskId is not Guid task || task == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty
                                 || (rootTaskId is Guid root && streamEvent.RootRequestTaskId is Guid actual && root != actual))
                                 throw new InvalidDataException(UiText.Get("任务事件无效。"));

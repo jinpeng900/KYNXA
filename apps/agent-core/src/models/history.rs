@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-/// 只映射已保存的任务结果，不暴露私有诊断正文。
 pub fn task_completion(value: &Value) -> Value {
     if !matches!(
         string(&value["completionState"]),

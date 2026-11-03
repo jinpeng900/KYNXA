@@ -1,4 +1,4 @@
-//! 核验工作来源后恢复根任务，保留逐文档失效和原有状态提交顺序。
+//! 检查工作来源后恢复根任务，保留逐文档失效和原有状态提交顺序。
 
 use super::*;
 use crate::orchestration::gateway_task_journal::TaskJournal;
@@ -51,7 +51,6 @@ pub(super) async fn restore_root_work_context(
             .latest_checkpoint()?
             .is_none_or(|checkpoint| checkpoint.through_event_sequence < recovered_sequence)
         {
-            // 回执晚于私有快照时优先使用更新后的正式记录。
             state.assistant["WorkContextRestore"] = json!({"restored":false,"reason":"recovered-receipt-newer-than-checkpoint","fallback":"formal-original-readback"});
             return Ok(false);
         }
@@ -169,7 +168,6 @@ async fn restore_document_sources(
     state: &mut LoopState,
     cancellation: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<VerifiedSources, GatewayError> {
-    // 独立恢复逐文档成果，仅撤销已变化文件的成果。
     let mut checked_document_files = HashSet::new();
     let mut checked_document_knowledge = HashSet::new();
     let mut changed_document_count = 0;
@@ -207,7 +205,7 @@ async fn restore_document_sources(
                 }
                 for observation in record["observations"].as_array().into_iter().flatten() {
                     let is_knowledge=observation["tool"]=="knowledge.read";
-                    // 文件核验当前字节，知识资料核验原始读取和当前范围。
+                    // 文件检查当前字节，知识资料检查原始读取和当前范围。
                     if !is_knowledge && file_version.is_some() {continue;}
                     let expected=observation["resultRef"].clone();
                     let root=runtime.config.data_root.clone();
@@ -247,7 +245,6 @@ async fn restore_document_sources(
                 changed_document_count += 1;
             }
         }
-        // 对话快照回退时，仅保留已核验的文档成果。
         state.documents = restored_documents;
     }
     if changed_document_count > 0 {
@@ -413,13 +410,13 @@ async fn verify_receipt_sources(
         let root = runtime.config.data_root.clone();
         let chat = run.conversation_id.clone();
         let id = reference["id"].as_str().unwrap().to_owned();
-        // 私有附件仅内部核验，正文不进入公开结果和归档。
+        // 私有附件仅内部检查，正文不进入公开结果和归档。
         let classification_only = reference_index >= required_reference_count;
         let loaded =
             tokio::task::spawn_blocking(move || data::load_private_tool_result(&root, &chat, &id))
                 .await
                 .map_err(|_| invalid_context())?;
-        // 可选旧证据不可读时保留原待核验项，不拒绝其余有效检查点。
+        // 可选旧证据不可读时保留原待检查项，不拒绝其余有效检查点。
         let archive = match loaded {
             Ok(archive) => archive,
             Err(_) if classification_only => continue,
@@ -462,7 +459,7 @@ async fn verify_receipt_sources(
         }
         if archive["toolName"] == "knowledge.read" {
             if let Some(source_ref) = archive["canonical"]["sourceRef"].as_str() {
-                // 索引替换后仅复用已核验原始读取，不沿用旧结构或未读片段。
+                // 索引替换后仅复用已检查原始读取，不沿用旧结构或未读片段。
                 let config = runtime.config.clone();
                 let context =
                     json!({"conversationId":run.conversation_id,"requestId":run.request_id});
@@ -605,7 +602,6 @@ async fn apply_restored_context(
             .as_str()
             .ok_or_else(invalid_context)?
             .to_owned();
-        // 仅恢复图片，保留已提取文本和读取覆盖。
         let prepared = crate::orchestration::gateway_attachments::prepare_context(
             runtime,
             &run.conversation_id,
@@ -678,7 +674,7 @@ async fn apply_restored_context(
             .collect();
     }
     if saved_progress.is_object() {
-        // 从自有检查点或正式执行回执恢复检查状态，不采信模型文字。
+        // 从自有检查点或正式执行结果恢复检查状态，不采信模型文字。
         // 旧检查点可能尚未接入诊断计数，只补齐已知停滞下界，不在每轮重复累加。
         if let Some(diagnostics) = saved_progress
             .get_mut("diagnostics")

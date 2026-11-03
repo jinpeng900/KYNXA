@@ -151,7 +151,7 @@
     refreshElapsedText(entry);
   }
   function statusText(message, presentation = presentationFor(message)) {
-    // 普通待办由正文说明，不叠加“部分完成”；核验失败和未知副作用仍明确显示。
+    // 普通待办由正文说明，不叠加“部分完成”；检查失败和未知副作用仍明确显示。
     const taskStatus = {'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
     if (taskStatus) return taskStatus + (message.error ? ' · ' + message.error : '');
     if (presentation.mode === 'incomplete') return uiStrings.interrupted;
@@ -285,7 +285,7 @@
     pendingCopies.delete(command.requestId);
     if (!request || command.conversationId !== conversationId || request.conversationId !== conversationId
       || request.entry.copyRequestId !== command.requestId || !request.entry.mounted || !request.entry.article.isConnected) return;
-    // 只有原生宿主写入剪贴板后才显示成功，忽略已经过期的操作回执。
+    // 只有原生宿主写入剪贴板后才显示成功，忽略已经过期的操作结果。
     clearCopyFeedback();
     copyFeedbackEntry = request.entry;
     copyFeedbackEntry.copy.dataset.copyState = command.success === true ? 'success' : 'error';

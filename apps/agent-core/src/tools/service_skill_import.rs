@@ -172,7 +172,7 @@ pub fn import_package(
                 json!({"imported":false,"reused":true,"directory":path_text(&target),"origin":"data"}),
             );
         }
-        // 只有完整且经过校验的暂存包才能提交；随后取消仍保留真实提交回执。
+        // 只有完整且经过校验的暂存包才能提交；随后取消仍保留真实提交结果。
         match fs::rename(&stage, &target) {
             Ok(()) => Ok(
                 json!({"imported":true,"reused":false,"directory":path_text(&target),"origin":"data"}),
@@ -193,7 +193,7 @@ pub fn import_package(
             Err(error) => Err(ServiceError::io(error)),
         }
     })();
-    // 递归清理前核验真实暂存边界，同时拒绝目录替换和链接竞态。
+    // 递归清理前检查真实暂存边界，同时拒绝目录替换和链接竞态。
     if !within(&staging_parent, &stage) || stage == staging_parent {
         return Err(ServiceError::new(
             "UNSAFE_SKILL_RESOURCE_PATH",

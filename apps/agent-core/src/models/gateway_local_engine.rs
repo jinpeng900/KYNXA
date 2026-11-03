@@ -25,7 +25,7 @@ use tokio::{
 
 const RELEASE: &str = "b11669";
 const MIB: u64 = 1024 * 1024;
-// Qwen2.5-VL 的普通视觉模板可能未处理工具字段；专用模板保留视觉标记并补齐 Hermes 调用与回执。
+// Qwen2.5-VL 的普通视觉模板可能未处理工具字段；专用模板保留视觉标记并补齐 Hermes 调用与结果。
 const QWEN25_VL_TOOL_TEMPLATE: &str = r#"{%- macro render(content) -%}
 {%- if content is string -%}{{- content -}}
 {%- elif content is not none -%}
@@ -103,7 +103,6 @@ fn file_identity(path: &Path) -> Result<FileIdentity, ModelError> {
     let path = std::fs::canonicalize(path).map_err(io_error)?;
     let file = std::fs::File::open(&path).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
-    // 复用句柄身份识别文件替换，不读取权重。
     let identity = crate::file_identity::handle_identity(&file).map_err(io_error)?;
     Ok(FileIdentity {
         path,
@@ -878,7 +877,7 @@ pub async fn count_request_tokens(
         .as_str()
         .unwrap_or("")
         .trim_end_matches('/');
-    // 同时匹配已核验的服务地址和模型标识；其他数据根目录可能有同名模型。
+    // 同时匹配已检查的服务地址和模型标识；其他数据根目录可能有同名模型。
     let owners = ENGINES
         .get()
         .and_then(|engines| engines.lock().ok())

@@ -1,4 +1,4 @@
-//! 逐文档公开工作结果复用既有任务产物存储；不再建立第二份状态记录或复制原文。
+//! 逐文档公开工作结果复用现有任务产物存储；不再建立第二份状态记录或复制原文。
 
 use super::gateway_task_journal::TaskJournal;
 use crate::gateway_contract::GatewayError;
@@ -17,7 +17,7 @@ pub struct DocumentWorkRecords {
 }
 
 impl DocumentWorkRecords {
-    /// 仅在读取成功且原回执已归档后调用；这里只记元数据，不算语义分析完成。
+    /// 仅在读取成功且原结果已归档后调用；这里只记元数据，不算含义分析完成。
     pub async fn observe_read(
         &mut self,
         journal: &TaskJournal,
@@ -74,7 +74,7 @@ impl DocumentWorkRecords {
         Ok(Some(entry))
     }
 
-    /// 主模型分析直接保存，不额外调用模型；结论绑定实际读取，仍不声明语义正确或任务完成。
+    /// 主模型分析直接保存，不额外调用模型；结论绑定实际读取，仍不声明含义正确或任务完成。
     pub async fn record_analysis(
         &mut self,
         journal: &TaskJournal,
@@ -173,7 +173,7 @@ impl DocumentWorkRecords {
         let mut information_added = false;
         for record in updates.into_values() {
             let previous = self.records.get(text(&record["sourceIdentity"]));
-            // 新回执 ID 和摘要游标属于持久化元信息；只有原始读取覆盖或事实正文新增才算工作进展。
+            // 新结果 ID 和摘要游标属于保存元信息；只有原始读取覆盖或事实正文新增才算工作进展。
             information_added |= previous.is_none_or(|previous| {
                 adds_read_coverage(previous, &record)
                     || array(&record["summaryFacts"]).iter().any(|fact| {
@@ -436,7 +436,7 @@ fn document_identity(source: &Value, result_ref: &Value) -> Result<(Value, Value
             version.insert(field.into(), value.clone());
         }
     }
-    // 取不到内容版本时按原回执隔离，不复用其他读取的分析。
+    // 取不到内容版本时按原结果隔离，不复用其他读取的分析。
     if !version.contains_key("sha256")
         && !version.contains_key("contentHash")
         && !version.contains_key("sourceRevision")
@@ -479,7 +479,7 @@ fn source_range(source: &Value) -> Value {
     }
 }
 
-/// 同一文档版本按最后一次读取的工具和实际返回范围计数，回执重放不算新读取。
+/// 同一文档版本按最后一次读取的工具和实际返回范围计数，结果重放不算新读取。
 fn matching_read_count(record: &Value) -> usize {
     let observations = array(&record["observations"]);
     let Some(latest) = observations.last() else {

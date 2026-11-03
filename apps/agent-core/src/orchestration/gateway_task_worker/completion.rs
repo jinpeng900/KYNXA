@@ -352,14 +352,14 @@ async fn observe_unexecuted_response(
     Ok(())
 }
 
-/// 子任务沿用根任务的成功回执约定，工具参数不作证明。
+/// 子任务沿用根任务的成功结果约定，工具参数不作证明。
 pub(super) fn verified_completion_receipt(saved: &Value) -> bool {
     saved["verifiedSuccess"] != false
         && saved["completionProofVerification"] != "pending"
         && task::successful_completion_receipt(&saved["result"])
 }
 
-/// 同一次评审复用相同回执事实；临时快照不持久化，新操作后重新生成。
+/// 同一次评审复用相同结果事实；临时快照不保存，新操作后重新生成。
 pub(super) struct ChildCompletionReview {
     pub(super) verification: Value,
     pub(super) valid_evidence: Vec<Value>,
@@ -489,7 +489,7 @@ pub(super) async fn restore_completion_proofs(
             saved["call"]["id"] == observation["id"]
                 && saved["result"]["resultRef"] == observation["ref"]
         }) {
-            // 证明及失效状态一起恢复，历史回执正文与副作用事实保持原样。
+            // 证明及失效状态一起恢复，历史结果正文与副作用事实保持原样。
             for field in ["completionProof", "verifiedSuccess"] {
                 if let Some(value) = observation.get(field) {
                     saved[field] = value.clone();

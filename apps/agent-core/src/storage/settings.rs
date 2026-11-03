@@ -440,7 +440,7 @@ fn project_next(args: &Value) -> ContractResult {
     Ok(result)
 }
 
-/// 配置仍由网关独占执行 CAS 持久化；此模块只计算策略和校验结果。
+/// 配置仍由网关独占执行 CAS 保存；此模块只计算策略和校验结果。
 pub fn apply(operation: &str, args: &Value) -> ContractResult {
     match operation {
         "storage.settings.storageBudget" => {

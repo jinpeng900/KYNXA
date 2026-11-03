@@ -218,7 +218,7 @@ pub(crate) struct HistoryRead {
     path: std::path::PathBuf,
 }
 impl HistoryRead {
-    /// 追加已核验消息并更新现有偏移与哈希，不为每次工具回执重新读取整个历史日志。
+    /// 追加已检查消息并更新现有偏移与哈希，不为每次工具结果重新读取整个历史日志。
     pub(crate) fn append_message(&mut self, raw_message: &str, unchanged: bool) -> ContractResult {
         let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
             .lock()
@@ -367,7 +367,7 @@ pub(crate) fn read_latest(
 }
 
 /// 在已有版本化偏移缓存内复用规范化消息，不改写正式原文日志。
-/// 映射器共用同一存储消息表示；公开字段过滤与即时范围核验仍由调用方负责。
+/// 映射器共用同一存储消息表示；公开字段过滤与即时范围检查仍由调用方负责。
 pub(crate) fn read_projected(
     root: &Path,
     location: &Value,
@@ -391,7 +391,6 @@ fn read_snapshot(
 ) -> Result<HistoryRead, ContractError> {
     conversation_logs::check_cancelled()?;
     let path = conversation_logs::directory(root, location)?.join("events.jsonl");
-    // 仅打开时持写锁，追加或移动后须重核版本。
     let reader = {
         let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
             .lock()
@@ -516,7 +515,7 @@ fn indexed(
     owner: &str,
 ) -> Result<Arc<HistoryIndex>, ContractError> {
     let version_token = reader.version_token()?;
-    // Windows 身份及变更时间核验后复用偏移，变更时间未知时仍核对完整哈希。
+    // Windows 身份及变更时间检查后复用偏移，变更时间未知时仍核对完整哈希。
     let byte_snapshot = if version_token.is_none() {
         Some(source_hash(reader)?)
     } else {
@@ -599,7 +598,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 retained_entries += 1;
             }
         }
-        // 根据容量事实从旧到新淘汰，不复制原始正文。
         for (index, entry) in entries.iter().enumerate() {
             if retained_bytes <= max_bytes as u64 && retained_entries <= max_entries {
                 break;
@@ -621,7 +619,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     read_page(arguments).map(|(page, _)| page)
 }
 
-/// 分页来源凭证独立于可淘汰缓存保留，直至调用方完成归属核验。
+/// 分页来源凭证独立于可淘汰缓存保留，直至调用方完成归属检查。
 pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), ContractError> {
     conversation_logs::check_cancelled()?;
     let root = Path::new(arguments["root"].as_str().unwrap_or(""));
@@ -695,7 +693,7 @@ pub(crate) fn read_page(arguments: &Value) -> Result<(Value, HistoryRead), Contr
     let mut end = boundary;
     let mut bytes = 0;
     let mut messages = Vec::new();
-    // 双向分页共用归属及版本核验，限制正文驻留不影响导航。
+    // 双向分页共用归属及版本检查，限制正文驻留不影响导航。
     let positions: Box<dyn Iterator<Item = usize>> = if newer {
         Box::new(boundary..boundary.saturating_add(limit).min(index.records.len()))
     } else {
@@ -896,7 +894,7 @@ mod tests {
             .lock()
             .unwrap()
             .retain(|(key, _)| key != &owner);
-        // 即使 Windows 卷提供变更时间，也覆盖缺少该标识时的完整字节核验。
+        // 即使 Windows 卷提供变更时间，也覆盖缺少该标识时的完整字节检查。
         Arc::make_mut(changed_snapshot.index.as_mut().unwrap()).version_token = None;
         fs::write(&path, original.replace("before", "after!")).unwrap();
         OpenOptions::new()

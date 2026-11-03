@@ -258,7 +258,7 @@ fn public_descriptor(descriptor: &Value) -> Value {
     value
 }
 
-/// 完成计划依据实际派发与 SDK 回执事实。
+/// 完成计划依据实际派发与 SDK 结果事实。
 pub(super) fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> {
     match operation {
         "broker.completion.safeCode" => Ok(json!(safe_code(

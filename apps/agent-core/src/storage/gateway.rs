@@ -1334,7 +1334,7 @@ pub fn ensure_conversation(root: &Path, id: &str, title: &str) -> ContractResult
     })
 }
 pub fn read_model_messages(root: &Path, id: &str) -> Result<Vec<Value>, ContractError> {
-    // 历史映射与正式写入共用所有者锁；外部文件身份与版本核验仍然生效。
+    // 历史映射与正式写入共用所有者锁；外部文件身份与版本检查仍然生效。
     with_conversation_catalog(root, id, |catalog, _| {
         #[cfg(test)]
         let observer = MODEL_READ_OBSERVERS
@@ -1722,7 +1722,7 @@ pub fn load_private_tool_result(root: &Path, conversation_id: &str, id: &str) ->
     })
 }
 
-/// 根据派发后唯一原回执恢复，不凭工作文件现状推断执行。
+/// 根据派发后唯一原结果恢复，不凭工作文件现状推断执行。
 pub(crate) fn find_recovery_tool_result(
     root: &Path,
     conversation_id: &str,
@@ -2013,7 +2013,7 @@ pub fn protect_model_images(
     })
 }
 
-/// 每个会话分批检查；过期只删除载荷，不删回执或哈希元数据。
+/// 每个会话分批检查；过期只删除载荷，不删结果或哈希元数据。
 pub fn cleanup_expired_model_images(root: &Path, now_ms: i64, limit: usize) -> ContractResult {
     let empty = || json!({"scanned":0,"removed":0,"removedBytes":0});
     if limit == 0 {
@@ -2091,7 +2091,7 @@ pub fn cleanup_expired_model_images(root: &Path, now_ms: i64, limit: usize) -> C
     Ok(json!({"scanned":scanned,"removed":removed,"removedBytes":bytes}))
 }
 
-/// 正式轮次及回执版本匹配时才提交语义检查点。
+/// 正式轮次及结果版本匹配时才提交含义检查点。
 pub fn save_model_summary(
     root: &Path,
     conversation_id: &str,
@@ -2212,7 +2212,7 @@ pub fn handle_text(
                 let id = super::identity(&json!(id))?;
                 let ids =
                     std::collections::HashSet::from([id.as_str().unwrap().to_ascii_lowercase()]);
-                // 已知回复按现有版本索引定位，不扫描任意数量的历史页；归属与原文核验保持不变。
+                // 已知回复按现有版本索引定位，不扫描任意数量的历史页；归属与原文检查保持不变。
                 let read =
                     match conversation_history::read_latest(root, &location, Some(&ids), false) {
                         Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
@@ -2944,7 +2944,7 @@ mod gateway_tests {
         let path = format!("/api/conversations/{target}/messages");
         let query = [("limit".into(), "4".into())];
 
-        // 历史页核验自身来源；完整目录操作仍检查全部布局，无关聊天异常不影响目标聊天显示。
+        // 历史页检查自身来源；完整目录操作仍检查全部布局，无关聊天异常不影响目标聊天显示。
         let page = handle_text("GET", &path, &query, &root).unwrap().unwrap();
         let page: Value = serde_json::from_str(&page.1).unwrap();
         assert_eq!(page["messages"][0]["Id"], message["Id"]);
@@ -3174,7 +3174,7 @@ fn raw_messages_at(root: &Path, location: &Value) -> Result<Vec<String>, Contrac
     read.verify()?;
     Ok(messages)
 }
-/// 分派正式数据操作；锁、版本核验与提交边界由对应存储辅助函数负责。
+/// 分派正式数据操作；锁、版本检查与提交边界由对应存储辅助函数负责。
 pub fn handle(
     method: &str,
     path: &str,
@@ -3246,7 +3246,7 @@ pub fn handle(
         let id = parts[2];
         if parts.len() == 5 && parts[3] == "tool-results" && method == "GET" {
             if query_value(query, "offset").is_some() || query_value(query, "limit").is_some() {
-                // 既有分页读取器拥有目录锁，已持有同一所有者锁时不再进入。
+                // 现有分页读取器拥有目录锁，已持有同一所有者锁时不再进入。
                 return Some((|| {
                     let read_unsigned_page_argument =
                         |field: &str, default: u64| -> Result<u64, ContractError> {

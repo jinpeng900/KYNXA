@@ -59,7 +59,6 @@ internal static class AppContainerRunner
             {
                 BasicLimitInformation = new JobBasicLimitInformation
                 {
-                    // 子进程继承此作业对象，不启用脱离作业的标志。
                     LimitFlags = 0x2000 | 0x8 | 0x100 | 0x200 | 0x400,
                     ActiveProcessLimit = MaximumProcessCount
                 },
@@ -83,7 +82,7 @@ internal static class AppContainerRunner
 
             var output = new BoundedOutput(isCmd);
             string[] commandArguments = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
-            // 模块解析限定在已核验无链接快照中，不为 Node 探测宿主祖先目录扩大权限。
+            // 模块解析限定在已检查无链接快照中，不为 Node 探测宿主祖先目录扩大权限。
             string[] effectiveArguments = isCmd ? commandArguments : ["--preserve-symlinks", "--preserve-symlinks-main", .. commandArguments];
             var (stdout, stderr) = StartSandboxProcess(executable, effectiveArguments, stagingDirectory, temporaryDirectory, appContainerSid, jobHandle, ref processInformation, output, isCmd);
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
@@ -108,7 +107,6 @@ internal static class AppContainerRunner
                 }
                 await Task.Delay(10);
             }
-            // 原脚本正常退出时也终止仍存活的子孙进程。
             Check(TerminateJobObject(jobHandle, timedOut ? 124u : 125u), "TerminateJobObject completion");
             await WaitForEmptyJobAsync(jobHandle);
             Check(GetExitCodeProcess(processInformation.Process, out uint exitCode), "GetExitCodeProcess");

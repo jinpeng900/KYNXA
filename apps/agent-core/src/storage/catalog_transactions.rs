@@ -163,7 +163,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         .as_bytes()
         .to_vec();
     managed_files::atomic_write(root, &catalog_path, &catalog_bytes, u64::MAX)?;
-    // 正式替换完成即为提交回执，后续清理不影响这个结果。
+    // 正式替换完成即为提交结果，后续清理不影响这个结果。
     let cleanup_pending = match fs::remove_file(&journal_path) {
         Ok(()) => false,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,

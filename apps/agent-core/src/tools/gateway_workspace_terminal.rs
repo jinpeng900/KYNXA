@@ -1,4 +1,4 @@
-//! 聊天自有 ConPTY 会话与可见终端共享原始输入及有回执的命令，工作目录由正式归属解析。
+//! 聊天自有 ConPTY 会话与可见终端共享原始输入及有结果的命令，工作目录由正式归属解析。
 
 use super::gateway::{GatewayToolContext, ToolRuntime, check_cancelled, emit, failure};
 use crate::gateway_contract::GatewayError;
@@ -232,7 +232,7 @@ impl TerminalOutput {
             // 协议标记在编码脚本运行时生成，PS>/>> 文本和输入回显都不算执行证明。
             let mut pending = std::mem::take(&mut state.pending_protocol);
             pending.push_str(&text);
-            // 取嵌套标题/光标转义之外的首个 BEL 作为帧尾，再核验标记身份。
+            // 取嵌套标题/光标转义之外的首个 BEL 作为帧尾，再检查标记身份。
             let identity = &self.marker_prefix[PROTOCOL_OPENER.len()..];
             loop {
                 if let Some(start) = pending.find(PROTOCOL_OPENER) {
@@ -308,7 +308,7 @@ impl TerminalOutput {
                     })
             })
             .transpose()?;
-        // 回执及其字节窗口在同一锁内观测，后续命令的输出不会混入。
+        // 结果及其字节窗口在同一锁内观测，后续命令的输出不会混入。
         let after = after.max(selected.map_or(0, |command| command.after));
         let limit = selected
             .and_then(|command| command.end_cursor)
@@ -434,7 +434,7 @@ fn encoded_script(script: &str) -> String {
 }
 
 fn shell_bootstrap(prefix: &str) -> String {
-    // OSC shell 集成元数据不参与屏幕文字绘制，回绕和重绘不影响回执身份。
+    // OSC shell 集成元数据不参与屏幕文字绘制，回绕和重绘不影响结果身份。
     format!(
         "function global:prompt {{ [Console]::Write('{prefix}READY:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)) + '\u{7}'); 'PS ' + (Get-Location).Path + '> ' }}"
     )
@@ -442,7 +442,7 @@ fn shell_bootstrap(prefix: &str) -> String {
 
 fn command_input(command: &str, prefix: &str, token: &str) -> String {
     let payload = BASE64.encode(command.as_bytes());
-    // 整段编码包装只用一次回车提交；语法或运行失败仍返回真实失败回执，不再陷入多行续行。
+    // 整段编码包装只用一次回车提交；语法或运行失败仍返回真实失败结果，不再陷入多行续行。
     let wrapper = format!(
         r#"& {{
     $kynxaCode = 'unknown'

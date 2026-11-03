@@ -44,7 +44,7 @@ fn canonical(value: &Value) -> Value {
     }
 }
 
-/// 仅内置 UTF-8 覆盖可变更正文；每次写入仍须核验 expectedHash。
+/// 仅内置 UTF-8 覆盖可变更正文；每次写入仍须检查 expectedHash。
 pub(crate) fn fingerprint(
     name: &str,
     arguments: &Value,

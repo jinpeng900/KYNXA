@@ -165,7 +165,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
         if (!_rendering && _ready.Task.IsCompletedSuccessfully)
         {
             _refresh.Stop();
-            // 优先显示已发送消息，聊天编码移出发送事件。
             DispatcherQueue.TryEnqueue(prioritize ? Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal
                 : Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
                 async () => { if (!_disposed) await FlushAsync(); });
@@ -569,7 +568,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
         catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
 
-        // 点击只代表请求；回执应绑定聊天与操作，反映剪贴板实际结果。
+        // 点击只代表请求；结果应绑定聊天与操作，反映剪贴板实际结果。
         Post(new { type = "copyResult", conversationId = _conversationId?.ToString() ?? "", requestId = request.GetString(), success = succeeded });
     }
 

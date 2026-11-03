@@ -288,9 +288,9 @@ fn recognize(
                         "bytesBase64":base64::engine::general_purpose::STANDARD.encode(bytes),
                         "pages":pages,"maximumOutputBytes":maximum,"format":format}).to_string();
                     wire.push('\n');
-                    // EOF 表示调用方丢失并触发 ToolHost 取消；收到回执并确认退出前保留标准输入。
+                    // EOF 表示调用方丢失并触发 ToolHost 取消；收到结果并确认退出前保留标准输入。
                     stdin.write_all(wire.as_bytes()).await.map_err(|_| failure("OCR_FAILED"))?;
-                    // JSON 转义帧与识别文字的 UTF-8 字节数分别按额度核验。
+                    // JSON 转义帧与识别文字的 UTF-8 字节数分别按额度检查。
                     let wire = gateway_process::bounded_line(&mut BufReader::new(stdout), maximum.saturating_mul(6) + 65536)
                         .await.map_err(|_| failure("DOCUMENT_OUTPUT_LIMIT"))?
                         .ok_or_else(|| failure("OCR_INVALID_RESULT"))?;
@@ -327,7 +327,7 @@ fn recognize(
     result
 }
 
-/// 栅格 OCR 发布识别文字并保留原图哈希，只提供文字，不作图像语义理解。
+/// 栅格 OCR 发布识别文字并保留原图哈希，只提供文字，不作图像含义理解。
 fn image(
     config: Option<&crate::gateway_contract::GatewayConfig>,
     encoding: &str,

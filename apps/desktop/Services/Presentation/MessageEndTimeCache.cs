@@ -180,7 +180,6 @@ public sealed class MessageEndTimeCache
             }
             catch (IOException) when (elapsed.Elapsed < LockTimeout)
             {
-                // 异步等待写锁并设置超时，避免持续阻塞聊天。
                 await Task.Delay(TimeSpan.FromMilliseconds(40)).ConfigureAwait(false);
             }
             catch (Exception error) when (IsCacheFailure(error))

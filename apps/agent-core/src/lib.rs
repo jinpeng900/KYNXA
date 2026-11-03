@@ -178,7 +178,7 @@ impl RunSession {
     }
 }
 
-/// 引擎管理独立控制与服务，调用方负责授权并提供真实回执。
+/// 引擎管理独立控制与服务，调用方负责授权并提供真实结果。
 #[derive(Default)]
 pub struct AgentEngine {
     sessions: HashMap<String, RunSession>,

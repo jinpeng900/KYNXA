@@ -581,7 +581,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         .filter(|item| !retained.contains(&key(&item["Id"]).unwrap_or_default()))
         .cloned()
         .collect();
-    // 按正式目录遍历顺序产生移动意图和删除回执，保证恢复顺序稳定。
+    // 按正式目录遍历顺序产生移动意图和删除结果，保证恢复顺序稳定。
     for location in locations(current) {
         if !retained.contains(&key(&location["Id"])?) {
             moves.push(

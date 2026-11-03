@@ -46,7 +46,7 @@ fn builtins() -> &'static (Vec<Value>, String) {
     static CATALOG: OnceLock<(Vec<Value>, String)> = OnceLock::new();
     CATALOG.get_or_init(|| {
         let descriptors = super::gateway::builtin_catalog();
-        // 目录哈希只刷新元信息；按工具核验经验，不清空无关统计。
+        // 目录哈希只刷新元信息；按工具检查经验，不清空无关统计。
         let fingerprint = digest(&json!(descriptors));
         (descriptors, fingerprint)
     })
@@ -85,7 +85,7 @@ fn report_failure(code: &str) {
     eprintln!("[tool-memory] {code}");
 }
 
-/// 在既有配置读取边界首次加载；后续未变化时不读盘、不联网、不调用模型。
+/// 在现有配置读取边界首次加载；后续未变化时不读盘、不联网、不调用模型。
 pub(crate) async fn synchronize(ctx: &GatewayToolContext) {
     let (sources, disabled, signature) = configuration(ctx);
     let root = ctx.data_home.clone();
@@ -161,7 +161,7 @@ pub(crate) fn cached_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// 操作派发前只捕获当前已核验元信息视图的身份；缺失、撤销或繁忙时不执行工具。
+/// 操作派发前只捕获当前已检查元信息视图的身份；缺失、撤销或繁忙时不执行工具。
 pub(crate) fn experience_identities(
     ctx: &GatewayToolContext,
     names: &[String],
@@ -290,7 +290,7 @@ fn learning_outcome<'a>(
                 return None;
             }
             let failed = value["isError"] == true || ["failed", "error"].contains(&status);
-            // 传输成功不等于内容可用：验证页面和未核验文件都不算成果。
+            // 传输成功不等于内容可用：验证页面和未检查文件都不算成果。
             if !failed && value["evidenceUsable"] == false {
                 return Some((
                     false,

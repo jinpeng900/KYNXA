@@ -8,7 +8,6 @@ pub struct HandleIdentity {
     pub is_link: bool,
 }
 
-/// 按统一规则核对已打开对象的链接和文件身份。
 pub fn handle_identity(file: &File) -> std::io::Result<HandleIdentity> {
     #[cfg(windows)]
     {

@@ -1,6 +1,5 @@
 import { element as el } from './preview-ui.js';
 
-// 预设只修改待创建参数，已运行实验保持原配置。
 export function trainingPreset(algorithm, defaults, kind) {
   const result = structuredClone(defaults);
   if (kind === 'default') return result;

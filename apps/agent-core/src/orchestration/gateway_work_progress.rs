@@ -1,4 +1,4 @@
-//! 从真实工作回执派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式记录。
+//! 从真实工作结果派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式记录。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ const VOLATILE_OUTCOME_FIELDS: [&str; 16] = [
 const INITIAL_DISCOVERY_ROUNDS: u64 = 2;
 const IDENTICAL_FAILURE_ATTEMPTS: u64 = 2;
 
-/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果核验记录。
+/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果检查记录。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeterministicFailures {
@@ -47,7 +47,7 @@ struct FailedAction {
 }
 
 impl DeterministicFailures {
-    /// 只抑制条件未变的失败动作；调用端仍配对工具回执，任务和其他操作继续。
+    /// 只抑制条件未变的失败动作；调用端仍配对工具结果，任务和其他操作继续。
     pub fn before_dispatch(
         &self,
         call: &Value,
@@ -114,7 +114,7 @@ impl DeterministicFailures {
                 let key = self.failure_key(call, definition, environment, class);
                 self.actions.remove(&key);
             }
-            // 条件只取真实回执状态，调用 ID、说明和归档 ID 变化不影响保护。
+            // 条件只取真实结果状态，调用 ID、说明和归档 ID 变化不影响保护。
             if let Some(condition) = observed_condition(receipt) {
                 for target in action_targets(call) {
                     self.observed_conditions
@@ -462,7 +462,7 @@ fn deterministic_failure(receipt: &Value) -> Option<(&'static str, String)> {
     None
 }
 
-/// 调用端在核对正式回执后提供来源与范围变化；调用理由、归档新 ID 或缓存命中不算新证据。
+/// 调用端在核对正式结果后提供来源与范围变化；调用理由、归档新 ID 或缓存命中不算新证据。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RoundProgress {
@@ -475,7 +475,7 @@ pub struct RoundProgress {
     pub discovery_calls: u64,
     pub work_calls: u64,
     pub waiting_only: bool,
-    /// 这些动作都被已有同条件失败保护拒绝，纠偏回执不算新工作。
+    /// 这些动作都被已有同条件失败保护拒绝，纠偏结果不算新工作。
     pub suppressed_calls: u64,
     pub strategy_changed: bool,
     /// 执行阶段只叙述未变工作的轮次计为停滞；普通文字回答不传入此标记。
@@ -599,7 +599,6 @@ impl WorkProgress {
         self.text_only_rounds = 0;
     }
 
-    /// 工作停滞时提前转入综合建议，额度不变。
     pub fn delivery_plan(&self, max_tool_calls: u64, used_tool_calls: u64) -> DeliveryBudgetPlan {
         let mut plan = delivery_budget_plan(max_tool_calls, used_tool_calls);
         if self.needs_strategy_change() && plan.phase == ToolBudgetPhase::Analyze {
@@ -615,7 +614,7 @@ impl WorkProgress {
             || round.evidence_changed
             || round.artifact_updated
             || round.new_read_range;
-        // 纯文字轮次不带文档计数，已有的完成水位保持不变。
+        // 纯文字轮次不带文档计数，已有的完成位置保持不变。
         self.completed_source_count = self
             .completed_source_count
             .max(round.completed_source_count);
@@ -719,7 +718,7 @@ pub struct DeliveryBudgetPlan {
 
 pub fn delivery_budget_plan(max_tool_calls: u64, used_tool_calls: u64) -> DeliveryBudgetPlan {
     let remaining_tool_calls = max_tool_calls.saturating_sub(used_tool_calls);
-    // 常用额度约保留五分之一给综合和核验；小额度同比缩小，不锁死十二次调用。
+    // 常用额度约保留五分之一给综合和检查；小额度同比缩小，不锁死十二次调用。
     let proportional_reserve = max_tool_calls / 5 + u64::from(max_tool_calls % 5 != 0);
     let small_grant_cap = (max_tool_calls / 3).max(u64::from(max_tool_calls > 0));
     let delivery_reserve_calls = proportional_reserve.clamp(12, 48).min(small_grant_cap);

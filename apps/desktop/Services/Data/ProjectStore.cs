@@ -12,7 +12,7 @@ public sealed record ConversationHistoryPage(Guid ConversationId, List<ChatMessa
     string? NewerCursor = null, bool HasNewer = false, int StartIndex = 0, int EndIndex = 0);
 
 /// <summary>
-/// 网关拥有正式聊天持久化；桌面只保留当前展示映射。
+/// 网关拥有正式聊天保存；桌面只保留当前展示映射。
 /// </summary>
 public sealed class ProjectStore(string dataDirectory) : IDisposable
 {
@@ -86,7 +86,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     /// <summary>
-    /// 网关确认持久化后才确认用户消息 ID，后续保存不再上传；仅 started 事件不足为据。
+    /// 网关确认保存后才确认用户消息 ID，后续保存不再上传；仅 started 事件不足为据。
     /// </summary>
     internal void AcceptSubmittedMessage(Guid conversationId, Guid userMessageId)
     {
@@ -222,7 +222,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
                 catalog = await ReadAsync(retry, cancellationToken);
             }
             else catalog = await ReadAsync(response, cancellationToken);
-            // 目录回执只更新提交后未改的绑定，保留后续更换或取消关联的修改。
+            // 目录结果只更新提交后未改的绑定，保留后续更换或取消关联的修改。
             var savedBindings = catalog.Projects.ToDictionary(project => project.Id);
             foreach (var project in projectReferences ?? _loadedProjects)
                 if (snapshotBindings.TryGetValue(project.Id, out var submitted) && JsonElement.DeepEquals(WorkBinding(project), submitted) &&

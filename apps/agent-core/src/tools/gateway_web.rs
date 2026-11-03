@@ -1,6 +1,6 @@
 //! 从实际网关主机读取公共网页；不猜测执行环境、不自动打开用户浏览器。
 //!
-//! 本模块负责正文提取与 UTF-16 分页；代理选择和目的地核验由 gateway_web_proxy 负责。
+//! 本模块负责正文提取与 UTF-16 分页；代理选择和目的地检查由 gateway_web_proxy 负责。
 
 use super::gateway::{GatewayToolContext, check_cancelled, failure, wait_for_cancellation};
 use crate::gateway_contract::GatewayError;
@@ -186,7 +186,7 @@ pub(crate) fn decode_text(
     ))
 }
 
-/// 网页工具与明确导入的文档链接共用目的地核验、代理和逐跳重定向路径。
+/// 网页工具与明确导入的文档链接共用目的地检查、代理和逐跳重定向路径。
 pub(crate) struct PublicDownload {
     pub bytes: Vec<u8>,
     pub final_url: url::Url,
@@ -245,7 +245,7 @@ fn redirect_target(
                     .any(|character| character.is_control() || character == '\\')
         })
         .ok_or_else(|| failure("WEB_REDIRECT_FAILED", "网页重定向缺少有效 Location。", 502))?;
-    // 合并 URL 时编码 UTF-8 Location，再核验公共目的地址。
+    // 合并 URL 时编码 UTF-8 Location，再检查公共目的地址。
     let target = base
         .join(location)
         .map_err(|_| failure("WEB_REDIRECT_FAILED", "网页重定向地址无效。", 502))?;
@@ -801,7 +801,7 @@ mod tests {
                 .build()
                 .unwrap();
             let address = self.address;
-            // 仅测试发送器把已核验公共 URL 映射到自有回环 HTTP 服务；生产发送器和逐跳准入不变。
+            // 仅测试发送器把已检查公共 URL 映射到自有回环 HTTP 服务；生产发送器和逐跳准入不变。
             download_with_sender(
                 &format!("http://example.org{path}"),
                 4096,

@@ -1,4 +1,4 @@
-//! 子回执映射保留原文，只更新本次执行涉及的证据。
+//! 子结果映射保留原文，只更新本次执行涉及的证据。
 
 use super::dispatch::PreparedCall;
 use super::*;
@@ -137,7 +137,6 @@ pub(super) async fn settle(
     )?;
     let mut model_receipt = receipt.clone();
     model_receipt["content"] = projected;
-    // 保存原回执后再分配证据引用，沿用根任务协议。
     if ["knowledge.search", "knowledge.plan"].contains(&name) && receipt["isError"] != true {
         if let Some(archive_id) = receipt["resultRef"]["id"].as_str().filter(|_| {
             model_receipt["content"]["items"].is_array()

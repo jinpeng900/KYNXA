@@ -477,7 +477,7 @@ pub fn conversation_list(
     Ok(saved_page(rows, offset, limit))
 }
 
-/// 工作分页仅使用正式目录归属的聊天，并在返回元信息前再次核验归属。
+/// 工作分页仅使用正式目录归属的聊天，并在返回元信息前再次检查归属。
 pub fn project_list(root: &Path, project: &str, offset: usize, limit: usize) -> ContractResult {
     let project = id(&json!(project))?;
     let (document, hash) = saved_catalog(root)?;

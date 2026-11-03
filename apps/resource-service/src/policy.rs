@@ -270,7 +270,6 @@ impl AdaptivePolicy {
         };
         let is_idle = hardware.cpu.usage_percent.is_some_and(|usage| usage < 35.0)
             && hardware.memory.available_bytes >= 2 * 1024 * 1024 * 1024;
-        // 检索规划租约不授予模型推理权限。
         let has_gpu_headroom = gpu_headroom_bytes >= 512 * 1024 * 1024;
         let rerank_candidates = if factor < 1.0
             || pressure

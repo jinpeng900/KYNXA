@@ -1,4 +1,4 @@
-//! 衍生步骤引用既有已验收任务及回执。
+//! 衍生步骤引用现有已验收任务及结果。
 
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -38,13 +38,13 @@ impl TaskRepository {
             })
             .map_err(|_| failure())?;
         let mut candidates = Vec::new();
-        // 同一任务相邻候选共用一次回执读取；只保留一项任务的操作列表，避免重复I/O和整项目操作驻留。
+        // 同一任务相邻候选共用一次结果读取；只保留一项任务的操作列表，避免重复I/O和整项目操作驻留。
         let mut receipt_task = String::new();
         let mut operations = Vec::new();
         for row in rows {
             let (task_id, document) = row.map_err(|_| failure())?;
             let event: TaskEvent = decode(document)?;
-            // 程序保存的候选仅在原成功操作回执仍存在时可复用，不凭模型自报或派生统计确认。
+            // 程序保存的候选仅在原成功操作结果仍存在时可复用，不凭模型自报或派生统计确认。
             if receipt_task != task_id {
                 operations = read_operations(&connection, &task_id)?;
                 receipt_task = task_id.clone();

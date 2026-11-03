@@ -7,7 +7,6 @@ function sourceLabel(row) {
   return [base, source.sheetName, row.sourceRow ? `第 ${row.sourceRow} 行` : '', Number.isInteger(row.chunkIndex) ? `片段 ${row.chunkIndex + 1}` : ''].filter(Boolean).join(' · ');
 }
 
-// 已保存版本只读，修改在来源表单完成后另存。
 export function createTrainingDatasetPreview(host, { request, control }) {
   let selected = null, disposed = false, sequence = 0, page = null, loading = false, offsets = [], thumbnails = new Map();
   async function imageFor(node, row, version) {

@@ -249,7 +249,7 @@ fn read_page(
     if first != handle_version(&file, &file.metadata().map_err(ServiceError::io)?)? {
         return Err(conflict("文件在读取前已变化，请重新搜索或读取。"));
     }
-    // 全文件流式核验版本，只保留一页输出及一个解码块，长行也不占整行内存。
+    // 全文件流式检查版本，只保留一页输出及一个解码块，长行也不占整行内存。
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut pending = Vec::new();
@@ -475,7 +475,7 @@ fn atomic_write(
         check_hash_bounded(path, expected, maximum_existing_bytes)?;
         revalidate(binding)?;
         cancelled(cancellation)?;
-        // 原子替换派发后，即使随后取消也返回真实提交回执。
+        // 原子替换派发后，即使随后取消也返回真实提交结果。
         fs::rename(&temporary, path).map_err(ServiceError::io)?;
         Ok(json!({"path":path_text(path),"bytes":bytes.len(),"sha256":sha256(bytes)}))
     })();
@@ -630,7 +630,7 @@ pub(super) fn commit_binary_new(
         inspect(parent, false, false)?;
         revalidate(binding)?;
         cancelled(cancellation)?;
-        // 复用现有硬链接发布方式，目标在最后核验后才出现也不会被覆盖。
+        // 复用现有硬链接发布方式，目标在最后检查后才出现也不会被覆盖。
         match fs::hard_link(&temporary, path) {
             Ok(()) => Ok(receipt(false)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -643,7 +643,7 @@ pub(super) fn commit_binary_new(
         if let Err(error) = fs::remove_file(&temporary) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 if let Ok(committed) = &mut result {
-                    // 已发布的文件仍返回成功回执，暂存名称清理失败不影响结果。
+                    // 已发布的文件仍返回成功结果，暂存名称清理失败不影响结果。
                     committed["temporaryCleanupPending"] = json!(true);
                 }
             }

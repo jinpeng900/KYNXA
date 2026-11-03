@@ -1,4 +1,4 @@
-//! 检索候选通道仅短期复用元数据，原文、融合、权限和向量就绪状态仍逐次核验。
+//! 检索候选通道仅短期复用元数据，原文、融合、权限和向量就绪状态仍逐次检查。
 
 use super::cache::{ByteLru, retained_json_bytes};
 use super::cache_budget::Feedback;

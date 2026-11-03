@@ -24,7 +24,6 @@ fn valid(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_:".contains(&b))
 }
 
-/// 工作线程通过原子标记共享取消状态。
 pub struct CancellationLease {
     id: String,
     pub token: Arc<AtomicBool>,

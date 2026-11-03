@@ -78,7 +78,7 @@ pub(crate) fn valid_model(value: &Value) -> bool {
     })
 }
 
-/// 此处校验凭据、端点和保留的默认值；适配器只负责持久化。
+/// 此处校验凭据、端点和保留的默认值；适配器只负责保存。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     let value = match operation {
         "models.connections.localEndpoint" => json!(local_host(string(&args["hostname"]))),

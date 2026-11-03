@@ -1,4 +1,4 @@
-//! 原生语法适配器接入既有限量结构选择与关系规则，词法候选不算已解析调用。
+//! 原生语法适配器接入现有限量结构选择与关系规则，词法候选不算已解析调用。
 
 use crate::storage::{ContractError, gateway};
 use serde_json::{Value, json};

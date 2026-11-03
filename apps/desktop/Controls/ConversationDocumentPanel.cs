@@ -722,7 +722,7 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
                 args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", "");
                 return;
             }
-            // 静态映射不触发此事件；独立代理域仅提供本视图已核验的原件。
+            // 静态映射不触发此事件；独立代理域仅提供本视图已检查的原件。
             var bytes = await _api.ReadDocumentContentAsync(address, work.Cancellation.Token);
             if (!IsLive(work) || !ReferenceEquals(work.Preview, preview))
             {
@@ -858,7 +858,7 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
             string? type = message.GetProperty("type").GetString();
             if (type == "ready") { view.Ready.TrySetResult(); if (ReferenceEquals(_document, view.Browser)) ApplyAppearance(); return; }
             if (!message.TryGetProperty("key", out var key) || key.GetString() is not { Length: > 0 } messageKey) return;
-            // 滚动保存回执可能晚于标签切换，仍按原标签键保存，而不是丢弃或归到新标签。
+            // 滚动保存结果可能晚于标签切换，仍按原标签键保存，而不是丢弃或归到新标签。
             if (type == "state" && message.TryGetProperty("state", out var state))
             {
                 if (messageKey == view.Key && (!message.TryGetProperty("renderId", out var stateRender)
@@ -1356,7 +1356,7 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     }
 
     /// <summary>Wait for owned browser cleanup, including an open receipt still arriving from Rust.</summary>
-    /// <remarks>等待本视图持有的浏览器完成关闭；尚未收到启动回执的会话也纳入退出等待。</remarks>
+    /// <remarks>等待本视图持有的浏览器完成关闭；尚未收到启动结果的会话也纳入退出等待。</remarks>
     public Task CloseAllAsync()
     {
         ++_generation;

@@ -356,7 +356,6 @@ public sealed partial class MarkdownReply
                 Math.Max(rowRects[0].First.Height, rowRects[^1].Last.Bottom - rowRects[0].First.Y) + 12);
             int before = _backgrounds.Children.Count;
             AddBackground(rect, true);
-            // 表格背景放在本画布已收集的行内代码装饰之后。
             if (_backgrounds.Children.Count > before)
             {
                 var background = _backgrounds.Children[^1];

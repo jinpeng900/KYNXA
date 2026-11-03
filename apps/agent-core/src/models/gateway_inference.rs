@@ -883,7 +883,6 @@ pub fn embed_blocking(
     embed_with_options(root, texts, kind, &InferenceOptions::default(), cancel)
 }
 
-/// 使用调用方已准入的硬件额度，不另建调度器。
 pub fn embed_with_options(
     root: &Path,
     texts: &[String],

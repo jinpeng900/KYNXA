@@ -14,7 +14,7 @@ const LIMITS: [(&str, u64, u64, u64); 4] = [
 const MAX_DURATION_MS: u64 = 21_600_000;
 /// 保证时长与四执行器树预算都能在共享 JSON 约定中精确表示。
 const MAX_EXPLICIT_DURATION_MS: u64 = 9_007_199_254_740_991 / 4;
-/// 用户要求的最低时长之后预留的收尾余量，保证核验与交付仍在额度内。
+/// 用户要求的最低时长之后预留的收尾余量，保证检查与交付仍在额度内。
 const MINIMUM_ACTIVE_MARGIN_MS: u64 = 1_800_000;
 
 /// 为证据 ID 和思考留足输出；验收重试可增额，始终遵守实际协商上限。
@@ -26,7 +26,7 @@ pub(super) fn review_output_limit(requirements: usize, attempts: u64, available:
         .min(available)
 }
 
-/// 工具提议被截断时恢复执行额度，再重试短核验也没有意义。
+/// 工具提议被截断时恢复执行额度，再重试短检查也没有意义。
 pub(super) const TRUNCATED_REVIEW_EXECUTION_NOTICE: &str = "The review proposed an operation but its arguments were cut off before dispatch. Return to execution with the normal negotiated output budget. Generate only the missing complete call; split large payloads into smaller valid steps when needed. No truncated operation ran. Preserve successful receipts and follow the latest user instruction; do not add work or repeat completed effects.";
 
 pub(super) fn resume_execution_after_truncated_review(
@@ -253,7 +253,6 @@ pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     for (name, default, minimum, maximum) in LIMITS {
         let requested = object.and_then(|object| object.get(name));
         let number = requested.and_then(Value::as_u64);
-        // 超限请求取支持的最大值，不退回默认值。
         let valid = number
             .map(|value| value.min(maximum))
             .filter(|value| *value >= minimum);
@@ -276,7 +275,6 @@ pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     json!({"limits":resolved,"corrections":corrections})
 }
 
-/// 合并传输额度与用户明确要求的最低工作时长。
 pub(crate) fn resolve_input_limits(input: &Value) -> Value {
     let mut resolved = resolve_request_limits(input.get("runLimits").unwrap_or(&Value::Null));
     let message = input["message"].as_str().unwrap_or("");
@@ -297,7 +295,6 @@ pub(crate) fn resolve_input_limits(input: &Value) -> Value {
     resolved
 }
 
-/// 为最低有效工作时长和收尾预留足够额度。
 pub(crate) fn apply_minimum_active(resolved: &mut Value, minimum: u64) {
     let minimum = minimum.min(MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS);
     let current = resolved["limits"]["maxDurationMs"]
@@ -331,7 +328,7 @@ pub(crate) fn model_request_allowance(max_duration_ms: u64) -> u64 {
     (max_duration_ms / 10_000).max(256)
 }
 
-/// 只按核验过的原始接受输入区分可续执行段和明确上限。
+/// 只按检查过的原始接受输入区分可续执行段和明确上限。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OperationalBudgetPolicy {
     pub(super) renew_model_requests: bool,

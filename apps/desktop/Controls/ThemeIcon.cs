@@ -8,7 +8,7 @@ using PathShape = Microsoft.UI.Xaml.Shapes.Path;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>Displays trusted, built-in vector geometry with a shared semantic brush.</summary>
-/// <remarks>仅显示内置的固定矢量几何，通过共享语义画刷跟随主题；不读取或解析用户 SVG、HTML。</remarks>
+/// <remarks>仅显示内置的固定矢量几何，通过共享含义画刷跟随主题；不读取或解析用户 SVG、HTML。</remarks>
 public sealed class ThemeIcon : UserControl
 {
     public static readonly DependencyProperty IconKeyProperty = DependencyProperty.Register(

@@ -19,7 +19,6 @@ pub struct DocumentFormat {
     pub version: &'static str,
 }
 
-/// 解析规范格式标识，支持复合压缩后缀。
 pub fn detect(path: &Path) -> Option<DocumentFormat> {
     let filename = path.file_name()?.to_str()?.to_ascii_lowercase();
     for (suffix, name) in [

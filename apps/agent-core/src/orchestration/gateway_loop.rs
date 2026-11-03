@@ -1,4 +1,4 @@
-//! 模型选择动作，原生记录维护执行回执。
+//! 模型选择动作，原生记录维护执行结果。
 
 mod acceptance;
 mod context;
@@ -57,7 +57,6 @@ use tokio::sync::{Mutex, mpsc};
 
 /// 转录与分段约定限制每条回复最多 512 个模型轮次。
 const MAX_MESSAGE_ROUNDS: u64 = crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64;
-// 派发前为工具轮、压缩和交付预留保存空间。
 const MESSAGE_SEGMENT_RESERVE: usize = 2;
 const MESSAGE_ORDER_RESERVE: u64 = crate::models::protocol::MAX_TURN_CALLS as u64 + 3;
 
@@ -100,7 +99,6 @@ fn observe_work_progress(
 }
 
 fn memory_refresh_notice(state: &mut LoopState, status: &Value) {
-    // 仅丢弃导航缓存，保留正式历史和执行回执。
     state.cache.previous_summary = Value::Null;
     state.completion.reset_review_preserving_intent(Value::Null);
     state.broker_note(&format!("Broker: confirmed memory was updated, withdrawn or moved out of scope. Its old interpretations in history, summaries and prior tool results are no longer memory instructions. Follow the current confirmed-memory block and user request; preserve existing output and successful effects. Affected identities: {}", status["invalidSources"]));
@@ -134,7 +132,6 @@ async fn prior_task_note(run: &RequestRun) -> Option<String> {
     if related.is_empty() {
         return None;
     }
-    // 从已结算结果恢复剩余要求和下一步。
     let repository = journal.repository().clone();
     let outcomes = tokio::task::spawn_blocking(move || {
         related
@@ -181,7 +178,6 @@ async fn prior_task_note(run: &RequestRun) -> Option<String> {
     ))
 }
 
-/// 程序补读使用成对协议历史和原工具执行器。
 fn planned_continuation(protocol: &str, calls: &[Value], original: &[Value]) -> Option<Vec<Value>> {
     let wire = calls.iter().map(|call| {
         let name = crate::models::protocol::wire_name(call["name"].as_str().unwrap_or(""));
@@ -337,7 +333,7 @@ async fn wait_for_internal_recovery(run: &RequestRun, attempt: u64) -> bool {
     resume
 }
 
-/// 单次恢复已有回执，保留未确认事实，不另设用户决策状态。
+/// 单次恢复已有结果，保留未确认事实，不另设用户决策状态。
 async fn reconcile_live_recovery(
     runtime: &GatewayRuntime,
     run: &RequestRun,
@@ -365,7 +361,7 @@ async fn reconcile_live_recovery(
     )?;
     journal.reconcile_remote_tasks(&context).await?;
     journal.reconcile_receipts().await?;
-    // 本地 I/O 已全部返回；缺少回执时状态保持未知。
+    // 本地 I/O 已全部返回；缺少结果时状态保持未知。
     for operation in journal
         .repository()
         .operations(journal.task_id())?
@@ -453,7 +449,6 @@ struct TranscriptState {
     pending_context_before: Vec<Value>,
 }
 
-/// 按阶段组合状态，正式检查点字段保持原约定。
 struct LoopState {
     assistant: Value,
     progress: RunProgress,
@@ -506,7 +501,6 @@ fn select_loaded_tools(state: &mut LoopState, loaded: &Value, requested_names: &
                 .insert(2.min(state.tools.selected.len()), named);
         }
     }
-    // 保留模型请求的能力顺序，不按目录重排。
     if let Some(index) = requested_names
         .as_array()
         .into_iter()
@@ -526,7 +520,6 @@ fn select_loaded_tools(state: &mut LoopState, loaded: &Value, requested_names: &
     }
 }
 
-/// 小窗口裁剪声明时保留当前能力和加载入口。
 fn trim_optional_tool(declared: &mut Vec<Value>) -> bool {
     trim_optional_tool_preserving(declared, &[])
 }
@@ -731,7 +724,6 @@ async fn apply_user_steering(
     let prior_tool_attempts = count_tool_attempts(&state.assistant);
     state.assistant["SupersededByUserMessageId"] = latest["Id"].clone();
     state.save(runtime, run, "interrupted", None).await?;
-    // 仅切换展示，历史、副作用和用量仍归原请求。
     state
         .assistant
         .as_object_mut()
@@ -815,7 +807,7 @@ fn analyzed_document_count(documents: &DocumentWorkRecords) -> u64 {
         })
 }
 
-/// 仅精简面向模型的重复正文，完整回执、读取入口和计量保持不变。
+/// 仅精简面向模型的重复正文，完整结果、读取入口和计量保持不变。
 fn should_project_repeated_source_read(tool: &str, document: &Value) -> bool {
     matches!(tool, "filesystem.read" | "document.read")
         && document["informationAdded"] == false
@@ -872,7 +864,7 @@ fn repeated_read_projection(
     projection
 }
 
-/// 按原顺序准入并公布批次前导调用，再并发执行；复用回执、额度不足或缺少目录时转回串行处理。
+/// 按原顺序准入并公布批次前导调用，再并发执行；复用结果、额度不足或缺少目录时转回串行处理。
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_tool_batch(
     state: &mut LoopState,
@@ -1184,7 +1176,6 @@ fn document_notice(state: &LoopState) -> Option<String> {
             "withSavedFindings":entries.iter().filter(|entry|entry["active"]==true&&entry["analysisState"]!="not-recorded").count(),
             "directory":{"tool":"task.document","arguments":{"action":"list","offset":0,"count":16}},
             "semanticCorrectnessCertified":false});
-        // 压缩移除写入消息后仍保留成功产物路径。
         let mut produced_artifacts = Vec::new();
         let mut seen_artifact_paths = HashSet::new();
         for source in state.context.result_sources.iter().rev().filter(|source| {
@@ -1261,7 +1252,6 @@ fn bounded_advisory_notice(
     })
 }
 
-/// 仅裁剪导航，保留事实、副作用、目标和插话。
 fn compact_document_notice(
     directory: &Value,
     result_sources: &[Value],
@@ -1329,7 +1319,6 @@ fn compact_document_notice(
             (entry, locator, label)
         })
         .collect::<Vec<_>>();
-    // 名称唯一时缩短导航，同名时保留完整位置。
     let mut identities = active
         .iter()
         .map(|(entry, locator, label)| {
@@ -1427,7 +1416,7 @@ impl LoopState {
                 .pending_context_before
                 .push(snapshot.clone());
         }
-        // 失败、静默轮或后续提示可使 system 位置失效；仅降级事实，不重排回执。
+        // 失败、静默轮或后续提示可使 system 位置失效；仅降级事实，不重排结果。
         for (original_hash, message) in crate::models::runtime_context::normalize_positions(
             &mut self.context.history,
             &mut self.context.history_sources,
@@ -1494,7 +1483,7 @@ impl LoopState {
         let prior_calls = count_tool_attempts(&self.assistant);
         self.assistant["Id"] = json!(reply_id);
         self.assistant["PreviousReplyMessageId"] = previous_reply.clone();
-        // 新轮次使用独立命名空间，防止旧操作 ID 冲突，回执身份不变。
+        // 新轮次使用独立命名空间，防止旧操作 ID 冲突，结果身份不变。
         self.assistant["OperationNamespace"] = json!(reply_id);
         self.assistant["CreatedAt"] = json!(now_iso8601());
         for field in ["TaskContinues", "ContinuedByReplyMessageId", "ToolRun"] {
@@ -1561,7 +1550,7 @@ impl LoopState {
             .await
             .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "回复保存失败。", 500))??;
         if let Some(journal) = &run.journal {
-            // 保存已观测工作只结算回执，过期尝试不能写入。
+            // 保存已观测工作只结算结果，过期尝试不能写入。
             if journal
                 .repository()
                 .check_receipt_attempt(journal.token())
@@ -1647,7 +1636,7 @@ impl LoopState {
     }
 }
 
-/// 保存流程外逸错误，保留已发布正文与成功操作回执。
+/// 保存流程外逸错误，保留已发布正文与成功操作结果。
 fn settle_failed_reply(
     root: &std::path::Path,
     conversation: &str,
@@ -1930,7 +1919,7 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             value["error"] = json!("任务已暂停，进度与回执已保存。继续时从断点恢复。");
         }
         if value["taskCompletion"]["userStopped"] == true {
-            // 用户停止作用于整棵任务树，已派发操作仍保留并结算原回执。
+            // 用户停止作用于整棵任务树，已派发操作仍保留并结算原结果。
             let paused: Result<(), GatewayError> = async {
                 for attempt in 0..2 {
                     let current = journal.load_current()?;
@@ -2048,7 +2037,7 @@ where
     tokio::join!(measured(left), measured(right))
 }
 
-/// 准备范围内上下文、循环执行核验动作，最后持久化任务终态。
+/// 准备范围内上下文、循环执行检查动作，最后保存任务终态。
 async fn execute(
     runtime: Arc<GatewayRuntime>,
     run: Arc<RequestRun>,

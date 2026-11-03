@@ -1325,7 +1325,7 @@ impl McpClient {
         Ok(())
     }
 
-    /// Streamable HTTP 在既有会话中复用独立交换；stdio/SSE 保持原有顺序队列。
+    /// Streamable HTTP 在现有会话中复用独立交换；stdio/SSE 保持原有顺序队列。
     fn independent_http_read(&self, descriptor: &Value, args: &Value) -> Option<Self> {
         if descriptor["annotations"]["readOnlyHint"] != true
             || descriptor["annotations"]["destructiveHint"] == true
@@ -1477,7 +1477,6 @@ async fn admit_buffers(
     let request = json!({"taskId":uuid::Uuid::new_v4().to_string(),"workspaceId":if workspace.is_empty(){"mcp"}else{workspace},
         "kind":if background{"background"}else{"foreground"},"workload":"compute","cpuThreads":1,
         "memoryBytes":MAX_RPC_BYTES,"gpuMemoryBytes":0,"waitMs":if background{5000}else{30000},"ttlMs":30000});
-    // 调用方取消后仍结算晚到额度，再释放准入任务。
     let attempt = tokio::spawn(async move { service.acquire_waiting(request, cancellation).await });
     let lease = attempt
         .await
@@ -1490,7 +1489,7 @@ pub(crate) fn configuration_generation(ctx: &GatewayToolContext) -> u64 {
     ctx.runtime.mcp_lifecycle.generation.load(Ordering::Acquire)
 }
 
-/// 已存定义供发现使用，不启动服务；执行时重新连接并核验实际定义。
+/// 已存定义供发现使用，不启动服务；执行时重新连接并检查实际定义。
 pub(crate) fn reusable_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
     let generation = configuration_generation(ctx);
     let mut candidates = ctx
@@ -1651,7 +1650,6 @@ async fn connection_with_priority(
     };
     lifecycle.check(id, generation)?;
     let _buffers = admit_buffers(ctx, id, generation, background).await?;
-    // 连接诊断复用原生记录，读取设置不发起新握手。
     let diagnostic_id = native(
         ctx,
         "mcp.diagnosis.begin",
@@ -1725,7 +1723,7 @@ fn start_maintenance(ctx: &GatewayToolContext) {
                 break;
             }
             let (_keep, cancellation) = tokio::sync::watch::channel(false);
-            // 维护不保留请求重放缓冲、权限或配置，仅通过既有 runtime 诊断和拥有的连接释放资源。
+            // 维护不保留请求重放缓冲、权限或配置，仅通过现有 runtime 诊断和拥有的连接释放资源。
             let ctx = GatewayToolContext {
                 data_home: Default::default(),
                 extension_root: Default::default(),

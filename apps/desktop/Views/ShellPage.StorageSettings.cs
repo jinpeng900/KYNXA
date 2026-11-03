@@ -229,7 +229,6 @@ public sealed partial class ShellPage
         {
             PreventClose(sender, e);
             if (ownerClosing || e.Cancel) return;
-            // 加载可随窗口取消，不属于用户尚未保存的编辑。
             string? writing = _memoryManagementWindow is { BlocksSettingsClose: true } ? "memory"
                 : _toolManagementWindow is { BlocksSettingsClose: true } ? "tools"
                 : _retrievalSettingsWindow is { BlocksSettingsClose: true } ? "retrieval" : null;
@@ -388,7 +387,6 @@ public sealed partial class ShellPage
             {
                 try
                 {
-                    // 请求网关加载新根目录前，先释放维护状态。
                     Guid? activeWork = _activeProjectChat?.Id, activeChat = _activeStandaloneChat?.Id;
                     var catalog = await _projectStore.LoadAsync();
                     _projects = catalog.Projects;

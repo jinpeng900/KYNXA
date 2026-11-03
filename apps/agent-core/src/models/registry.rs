@@ -7,7 +7,7 @@ fn signature(serialized: &str) -> String {
     format!("{:x}", Sha256::digest(serialized.as_bytes()))
 }
 
-/// 精确模型身份绑定固定资产和映射语义，向量不跨空间重新标记。
+/// 精确模型身份绑定固定资产和映射含义，向量不跨空间重新标记。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.registry.register" => {

@@ -21,7 +21,7 @@ internal static class TranscriptPresentation
             .OrderBy(item => item.Order).Select(item => item.Tool).ToArray();
         if (status == "completed")
         {
-            // 交付和验收分开；任务仍需核验时，已完成的正文也应正常展示。
+            // 交付和验收分开；任务仍需检查时，已完成的正文也应正常展示。
             if (ordered.Length == 0 && !string.IsNullOrWhiteSpace(content))
                 return new("final", content, [], []);
 
@@ -39,7 +39,6 @@ internal static class TranscriptPresentation
                 return new("final", answer, [final], []);
             }
 
-            // 存在阶段记录不代表整个请求已成功完成。
             return Process("incomplete", ordered, orderedTools, ordered.Length == 0 ? content : "");
         }
 

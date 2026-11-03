@@ -1,4 +1,4 @@
-//! 带版本的记忆范围复用正式目录归属与既有仓储迁移规则。
+//! 带版本的记忆范围复用正式目录归属与现有仓储迁移规则。
 
 use super::{
     ContractResult,
@@ -101,9 +101,9 @@ pub(crate) fn read_index_document(root: &Path, scope: &str, id: &str) -> Contrac
     )?;
     Ok(decorated.remove(0))
 }
-/// 启动仅发现合法范围的已确认记录；持久草稿和候选不进入语义准备队列。
+/// 启动仅发现合法范围的已确认记录；持久草稿和候选不进入含义准备队列。
 pub(crate) fn startup_index_scopes(root: &Path, cancel: &Arc<AtomicBool>) -> ContractResult {
-    // 仅在目录锁内取得身份快照；枚举不长期阻塞前台，实际维护发布前重新核验归属。
+    // 仅在目录锁内取得身份快照；枚举不长期阻塞前台，实际维护发布前重新检查归属。
     let catalog = gateway::load_catalog(root)?;
     let mut candidates = vec![("user".to_string(), "user".to_string())];
     for chat in catalog["Chats"]
@@ -155,7 +155,7 @@ pub(crate) fn startup_index_scopes(root: &Path, cancel: &Arc<AtomicBool>) -> Con
                 },
             )?;
             let (_, digest) = read_scope(root, &path, &scope, &scope_id)?;
-            // 空文件同样清理之前已确认的索引；后续语义选择始终排除草稿。
+            // 空文件同样清理之前已确认的索引；后续含义选择始终排除草稿。
             if digest.is_some() {
                 Ok(json!({"scope":scope,"scopeId":scope_id}))
             } else {
@@ -420,7 +420,7 @@ pub fn capture_explicit_instruction(
     }
     Ok(result)
 }
-/// 仅撤出已删除聊天的排队候选；正在运行的提取仍在提交前核验正式目录，不影响其他聊天或共享确认记忆。
+/// 仅撤出已删除聊天的排队候选；正在运行的提取仍在提交前检查正式目录，不影响其他聊天或共享确认记忆。
 pub(crate) fn retire_chat_candidates(root: &Path, conversation: &str) -> ContractResult {
     let owner = CANDIDATES
         .get()

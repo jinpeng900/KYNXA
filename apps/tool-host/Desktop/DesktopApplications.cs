@@ -105,7 +105,7 @@ internal static class DesktopApplications
     }
 
     /// <summary>
-    /// 校验程序与参数后启动，回执仅报告实际观察到的启动和窗口放置事实。
+    /// 校验程序与参数后启动，结果仅报告实际观察到的启动和窗口放置事实。
     /// </summary>
     internal static Dictionary<string, object?> Launch(DesktopRequest request, CancellationToken cancellation)
     {

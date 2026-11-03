@@ -132,7 +132,7 @@ fn inspect_handle_identity(path: &Path, handle: &std::fs::File) -> Result<bool, 
     if identity.is_link {
         return Err(unsafe_path());
     }
-    // SQLite 可在路径检查与句柄核验之间删除旁车；仅已无目录项的零链接对象按不存在处理。
+    // SQLite 可在路径检查与句柄检查之间删除旁车；仅已无目录项的零链接对象按不存在处理。
     if identity.links == 0
         && matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
     {
@@ -172,7 +172,7 @@ mod identity_tests {
     }
 }
 
-/// 限量读取持有已校验文件对象，窗口读取结束后再核验身份，避免绕过既有路径与版本保护。
+/// 限量读取持有已校验文件对象，窗口读取结束后再检查身份，避免绕过现有路径与版本保护。
 pub struct StableReader {
     pub file: std::fs::File,
     root: PathBuf,
@@ -181,7 +181,7 @@ pub struct StableReader {
     metadata: fs::Metadata,
 }
 
-/// 保留已核验对象身份，不在等待另一存储所有者的锁时持有文件句柄。
+/// 保留已检查对象身份，不在等待另一存储所有者的锁时持有文件句柄。
 pub(crate) struct StableFileVersion {
     root: PathBuf,
     path: PathBuf,
@@ -349,7 +349,7 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// 独占创建同目录临时文件并同步写入磁盘，再替换正式文件，返回实际提交回执。
+/// 独占创建同目录临时文件并同步写入磁盘，再替换正式文件，返回实际提交结果。
 pub fn atomic_write(
     root: &Path,
     path: &Path,

@@ -148,7 +148,7 @@ fn describe_observation(args: &Value) -> Value {
             return Value::Null;
         }
         let target = json!({"sourceId": value["sourceId"], "scopeKey": value["scopeKey"]});
-        // 比较键保持既有 JSON 字段顺序，同时不复制来源正文。
+        // 比较键保持现有 JSON 字段顺序，同时不复制来源正文。
         let serialized = format!(
             "{{\"sourceId\":{},\"scopeKey\":{}}}",
             value["sourceId"], value["scopeKey"]

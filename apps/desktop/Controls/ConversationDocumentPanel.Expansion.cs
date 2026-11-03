@@ -187,7 +187,7 @@ public sealed partial class ConversationDocumentPanel
         if (action is null)
         { SendWorkbenchResult(view, work, renderId, requestId, null, "工作台操作无效。"); return; }
         string identity = view.Key + ":" + renderId + ":" + requestId;
-        // 同一请求沿用原回执，不再派发；取消请求保留一个独立名额。
+        // 同一请求沿用原结果，不再派发；取消请求保留一个独立名额。
         if (_workbenchRequests.Contains(identity)) return;
         if (_workbenchRequests.Count >= (action == "media.cancel" ? 13 : 12))
         { SendWorkbenchResult(view, work, renderId, requestId, null, "工作台正忙，请稍后重试。"); return; }

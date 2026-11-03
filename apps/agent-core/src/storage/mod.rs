@@ -437,7 +437,7 @@ fn undefined_policy(arguments: &Value) -> Value {
     json!({"optionalPaths": optional_paths, "defaults": defaults})
 }
 
-/// 领域约定与已声明 I/O 服务共用错误封装；适配器保留原始字节、日期与既有哈希身份。
+/// 领域约定与已声明 I/O 服务共用错误封装；适配器保留原始字节、日期与现有哈希身份。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     let boundary_before = sqlite_connections::boundary_counts();
     let result = if operation == "storage.undefinedPolicy" {

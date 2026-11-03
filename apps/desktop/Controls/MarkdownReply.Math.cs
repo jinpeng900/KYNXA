@@ -64,7 +64,6 @@ public sealed partial class MarkdownReply
         // WebView2 无法启动时，原生渲染器继续提供离线回退。
         rendered ??= MathFormulaRenderer.Render(entry.Latex, entry.Block);
         if (!_formulas.Contains(entry)) return; // A changed tail/chat must never receive an old image.
-        // 回复或聊天已切换时，忽略旧任务返回的图片。
         entry.Formula = rendered;
         entry.Ready = true;
         if (IsLoaded) ApplyReadyFormulas();
@@ -106,7 +105,6 @@ public sealed partial class MarkdownReply
         // 原生源文保留选择、键盘复制与屏幕阅读器能力；对应的非交互图片只补充公式排版。
         var measure = new TextBlock { Text = entry.Source.Text, FontFamily = CodeFont, FontSize = 14 };
         measure.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        // 源文保持正文字号，避免其上升部改变整行基线。
         entry.Source.CharacterSpacing = (int)Math.Round((formula.Width - measure.DesiredSize.Width) * 1000 / (14 * Math.Max(1, entry.Source.Text.Length)));
         entry.Source.Foreground = _formulaTransparent;
         InvalidateTableFormula(entry.Source);

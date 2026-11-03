@@ -7,7 +7,7 @@ using Microsoft.UI.Xaml.Media;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// 共享菜单展示；选择、持久化与具体动作仍由调用方负责。
+/// 共享菜单展示；选择、保存与具体动作仍由调用方负责。
 /// </summary>
 internal static class PickerMenu
 {
@@ -27,7 +27,7 @@ internal static class PickerMenu
 
     public static double SetContentWidth(Flyout flyout, double requestedWidth, double viewportWidth)
     {
-        // 匹配当前菜单的内容宽度及既有内边距、边框，不改变共用菜单样式。
+        // 匹配当前菜单的内容宽度及现有内边距、边框，不改变共用菜单样式。
         double presenterWidth = Math.Min(requestedWidth + PresenterChrome, Math.Max(0, viewportWidth - ViewportInset * 2));
         var presenterStyle = new Style(typeof(FlyoutPresenter)) { BasedOn = flyout.FlyoutPresenterStyle };
         presenterStyle.Setters.Add(new Setter(FrameworkElement.WidthProperty, presenterWidth));

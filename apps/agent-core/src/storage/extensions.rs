@@ -220,7 +220,7 @@ fn layout(root: &Path) -> ContractResult {
     Ok(document.unwrap_or(Value::Null))
 }
 
-/// 暂存回执提供回调边界，文件所有权及发布仍归存储服务。
+/// 暂存结果提供回调边界，文件所有权及发布仍归存储服务。
 fn stage(root: &Path) -> ContractResult {
     layout(root)?;
     let path = root.join("extension-layout.json");

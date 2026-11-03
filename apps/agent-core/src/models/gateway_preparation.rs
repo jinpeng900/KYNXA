@@ -242,7 +242,7 @@ impl PreparationService {
         }).await.unwrap_or(false)
     }
 
-    /// 只复用当前本地预载等待；结束或未知结果交由正式请求核验。
+    /// 只复用当前本地预载等待；结束或未知结果交由正式请求检查。
     pub async fn wait_model(
         &self,
         provider_id: &str,
@@ -678,7 +678,7 @@ impl PreparationService {
             .await;
             let loaded = match result {
                 Ok(result) if result["done"] == true => {
-                    // 装载完成回执已确定该增量操作结束，后续遥测失败不意味着装载仍在进行。
+                    // 装载完成结果已确定该增量操作结束，后续遥测失败不意味着装载仍在进行。
                     preload.complete().await;
                     gateway_config::observe_local_fresh(connection, model, Some(context), token)
                         .await
@@ -745,7 +745,7 @@ async fn reconcile_preload(pending: &std::sync::Mutex<HashMap<String, String>>, 
     }
 }
 
-/// 外部装载派发后，以完成回执或新鲜驻留观测核销预约；调用方取消时外部服务可能仍在运行。
+/// 外部装载派发后，以完成结果或新鲜驻留观测核销预约；调用方取消时外部服务可能仍在运行。
 struct PendingPreload {
     lease: Option<crate::resources::gateway::ResourceLease>,
     pending: Arc<std::sync::Mutex<HashMap<String, String>>>,
@@ -810,7 +810,7 @@ impl Drop for PendingPreload {
         let Some(mut lease) = self.lease.take() else {
             return;
         };
-        // 未知的外部装载仍保留资源预约；静止阶段不再启动旧根目录所属的核验任务。
+        // 未知的外部装载仍保留资源预约；静止阶段不再启动旧根目录所属的检查任务。
         if self.activity.stopped.load(Ordering::Acquire) {
             return;
         }
@@ -847,7 +847,7 @@ impl Drop for PendingPreload {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 };
-                // 核验限量；仍未知的租约停止续租后进入既有隔离记录，后续新鲜驻留观测可受控核销。
+                // 检查限量；仍未知的租约停止续租后进入现有隔离记录，后续新鲜驻留观测可受控核销。
                 tokio::select! {
                     _ = tokio::time::timeout(Duration::from_secs(60), verify) => {},
                     _ = owner.wait_stopped() => {},

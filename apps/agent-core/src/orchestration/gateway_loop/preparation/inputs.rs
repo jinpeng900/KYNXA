@@ -1,4 +1,4 @@
-//! 初始模型输入维护已核验的历史、证据及附件来源。
+//! 初始模型输入维护已检查的历史、证据及附件来源。
 
 use super::super::{
     CacheState, CompletionState, ContextState, DeliveryState, DocumentWorkRecords, GatewayError,
@@ -283,7 +283,6 @@ impl RootExecution {
                 Ok(Ok(value))=>{
                     if let Some(reference)=value.get("resultRef").filter(|value|!value.is_null()){
                         state.assistant["RetrievalResultRef"]=reference.clone();
-                        // 先保存回执，再向模型提供证据短引用。
                         state.save(&runtime,&run,"streaming",None).await?;
                     }
                     if let Some(notice)=value["systemNotice"].as_str().filter(|text|!text.is_empty()){
@@ -408,7 +407,6 @@ impl RootExecution {
                 state.context.history_sources.push(source);
             }
         }
-        // 追问仅携带精简附件回读入口，不重复附入全文。
         let attachment_directory = formal.iter().rev().take(64).flat_map(|message| {
             message["Attachments"].as_array().into_iter().flatten().map(move |attachment|
                 json!({"messageId":message["Id"],"attachmentId":attachment["Id"],"name":attachment["Name"]}))

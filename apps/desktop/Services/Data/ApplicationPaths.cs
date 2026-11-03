@@ -50,7 +50,7 @@ public static class ApplicationPaths
     public static string WebViewDirectory => Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER") is string configured && !string.IsNullOrWhiteSpace(configured)
         ? Resolve(configured) : Path.Combine(DataRoot, "Desktop", "WebView2");
 
-    // 包载荷可能只读且会被更新替换；继续使用既有的可写数据与指针位置。
+    // 包载荷可能只读且会被更新替换；继续使用现有的可写数据与指针位置。
     public static void ConfigurePackagedStorage(string stateRoot, string pointerDirectory,
         string? legacyModelHome = null, string? legacyDesktopDirectory = null)
     {

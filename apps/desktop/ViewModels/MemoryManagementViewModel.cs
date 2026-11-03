@@ -362,7 +362,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _operationCancellation = source;
         IsBusy = true;
-        // 关闭编辑器可取消只读请求；写入则保留关闭保护，直到处理完成回执。
+        // 关闭编辑器可取消只读请求；写入则保留关闭保护，直到处理完成结果。
         IsBlockingOperation = blocksClose;
         return new(source, _operationGeneration);
     }

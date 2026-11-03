@@ -125,7 +125,7 @@ public sealed class WorkspacePreviewApiClient : IDisposable
 
     private async Task<(byte[] Bytes, string ContentType)> ReadContentAsync(Uri address, int maximumBytes, CancellationToken cancellationToken)
     {
-        // 原件上限与网关保持一致；各格式再单独核验解包容量，不沿用 DOCX 限额拦截演示稿和表格。
+        // 原件上限与网关保持一致；各格式再单独检查解包容量，不沿用 DOCX 限额拦截演示稿和表格。
         var root = _http.BaseAddress ?? ModelGatewayService.Address;
         string[] segments = address.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         bool attachment = segments is ["api", "conversations", var conversationId, "attachments", var attachmentId, "content"]

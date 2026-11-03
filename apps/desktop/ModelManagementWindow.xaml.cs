@@ -615,7 +615,6 @@ public sealed partial class ModelManagementWindow : Window
             var provider = await _api.SaveAsync(input, _lifetime.Token);
             if (_closed) return;
             SelectProvider(provider);
-            // 即使随后刷新列表失败，保存本身也已经成功。
             _providers = _providers.Where(candidateProvider => candidateProvider.ProviderId != provider.ProviderId).Append(provider).ToArray();
             RenderProviders();
             SetStatus(() => string.Format(UiText.Get("已保存 {0}。返回聊天页，选择模型即可使用。"), provider.DisplayName));

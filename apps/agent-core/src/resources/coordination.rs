@@ -32,7 +32,7 @@ fn bounded_put(
     }
 }
 
-/// 监控重启后保留隔离预约、反馈和准入顺序；系统与 IPC 回执由调用方提供。
+/// 监控重启后保留隔离预约、反馈和准入顺序；系统与 IPC 结果由调用方提供。
 pub struct CoordinationState {
     leases: BTreeMap<String, Value>,
     claims: BTreeMap<String, Value>,

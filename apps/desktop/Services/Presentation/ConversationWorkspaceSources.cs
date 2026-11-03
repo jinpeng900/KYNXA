@@ -80,7 +80,7 @@ public static class ConversationWorkspaceSources
             bool relative = !Path.IsPathRooted(target) && !target.Contains(':');
             var matches = files.Where(file => file.Target.Equals(target, StringComparison.OrdinalIgnoreCase) || relative &&
                 file.Target.EndsWith("\\" + target, StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
-            // 交付链接只提升已有真实回执，不能凭链接捏造文件，也不能猜测重名文件。
+            // 交付链接只提升已有真实结果，不能凭链接捏造文件，也不能猜测重名文件。
             if (matches.Length == 1) deliveredKeys.Add(matches[0].Tab.Key);
         }
         return resources.Select(tab => deliveredKeys.Contains(tab.Key) && tab.PresentationPriority < WorkspacePresentationPriority.Final

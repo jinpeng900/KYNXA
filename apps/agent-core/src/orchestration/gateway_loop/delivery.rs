@@ -77,7 +77,7 @@ fn current_public_reply(
                 .is_none_or(|count| count.as_u64() == Some(0))
     };
     if error.code == "TASK_COMPLETION_REVIEW_INVALID" {
-        // 内部核验可在公开回答之后继续，已公开的回答保持不变。
+        // 内部检查可在公开回答之后继续，已公开的回答保持不变。
         delivery
             .segments
             .iter()
@@ -111,7 +111,7 @@ fn current_public_reply(
     }
 }
 
-/// 取最后一轮写好的公开回答；内部核验、工具轮次和已经显示过的内容不算。
+/// 取最后一轮写好的公开回答；内部检查、工具轮次和已经显示过的内容不算。
 pub(super) fn unpublished_answer(rounds: &[Value], shown: &str) -> Option<String> {
     let round = rounds.iter().rev().find(|round| {
         round["reviewing"] != true
@@ -222,7 +222,7 @@ impl FinalDelivery<'_> {
                 state.publish_buffered_delivery(run, round, &new_id()).await;
             } else if let Some(index) = public_reply {
                 if index + 1 != state.delivery.segments.len() {
-                    // 只重发已选中的公开原文；已关闭核验段的身份和正文保持原样。
+                    // 只重发已选中的公开原文；已关闭检查段的身份和正文保持原样。
                     let text = state.delivery.segments[index]["content"]
                         .as_str()
                         .unwrap()
@@ -373,7 +373,7 @@ impl FinalDelivery<'_> {
             state.publish_final_segment(run).await;
         }
         if !continuing {
-            // 答复进入正式保存，已非继续生成；成功终态仍须等待持久化结算。
+            // 答复进入正式保存，已非继续生成；成功终态仍须等待保存结算。
             run.emit(json!({"type":"task_progress","phase":"saving","round":1}))
                 .await;
         }

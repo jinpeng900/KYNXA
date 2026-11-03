@@ -70,7 +70,6 @@ public sealed partial class ShellPage
         ConversationActionsButton.Margin = new Thickness(0, 8, canOpen && !visible ? 48 : 12, 0);
         ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 88 : 52, 0);
 
-        // 自动隐藏不改变用户明确选择的展开或关闭偏好。
         return Math.Max(0, available - (inline ? panelWidth + gap : 0));
     }
 

@@ -173,7 +173,7 @@ fn u32_at(bytes: &[u8], position: usize) -> Result<u32, ContractError> {
     Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 
-/// 调用库读取 XLSB 前核验二进制记录长度及共享字符串索引，避免畸形记录越界。
+/// 调用库读取 XLSB 前检查二进制记录长度及共享字符串索引，避免畸形记录越界。
 fn preflight_xlsb(
     package: &mut DocumentPackage<'_>,
     cancel: &Arc<AtomicBool>,

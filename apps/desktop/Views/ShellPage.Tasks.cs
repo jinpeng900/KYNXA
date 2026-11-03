@@ -234,7 +234,7 @@ public sealed partial class ShellPage
             if (receipt.Task.State is "paused" or "waiting-config" or "waiting-network" or "partial")
             {
                 if (prompt.TargetTaskId is null || !prompt.IsTaskGuidance || !CurrentScope()) return true;
-                // 只有本次明确续作才恢复暂停根，仍走既有核验入口，不能绕过未知副作用检查。
+                // 只有本次明确续作才恢复暂停根，仍走现有检查入口，不能绕过未知副作用检查。
                 receipt = await _tasksApiClient.ControlAsync(conversation, taskId.Value, receipt.Task.Version,
                     "resume", project?.Id, deadline.Token);
             }

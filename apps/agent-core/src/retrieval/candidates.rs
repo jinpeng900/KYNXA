@@ -183,7 +183,7 @@ struct Deduplicated {
     covered_count: usize,
 }
 
-/// 返回原始下标，保留来源对象、偏移、回执及授权边界。
+/// 返回原始下标，保留来源对象、偏移、结果及授权边界。
 fn deduplicate(args: &Value) -> Result<Deduplicated, String> {
     let items = args["items"]
         .as_array()

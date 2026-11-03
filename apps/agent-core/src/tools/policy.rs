@@ -37,7 +37,7 @@ pub(super) fn calculate(operation: &str, arguments: &Value) -> Result<Value, Str
     Ok(json!(!approved_without_prompt))
 }
 
-/// 只读恢复依据内置工具的明确业务语义；不依据名称后缀、模型说明或外部 MCP 注解放行。
+/// 只读恢复依据内置工具的明确业务含义；不依据名称后缀、模型说明或外部 MCP 注解放行。
 pub fn is_read_only(name: &str) -> bool {
     DESKTOP_OBSERVATIONS.contains(&name)
         || PARALLEL_READS.contains(&name)

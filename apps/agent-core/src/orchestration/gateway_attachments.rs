@@ -86,7 +86,6 @@ pub(crate) async fn list(
         .map_err(Into::into)
 }
 
-/// 分页读取本工作已保存附件的元信息，只读。
 pub(crate) async fn project_list(
     runtime: &GatewayRuntime,
     project: &str,
@@ -281,7 +280,7 @@ pub(crate) async fn preview(
     Ok(result)
 }
 
-/// 只有通过附件归属与版本核验的原件才能请求对应转换结果，仍不开放私有磁盘路径。
+/// 只有通过附件归属与版本检查的原件才能请求对应转换结果，仍不开放私有磁盘路径。
 pub(crate) async fn content_representation(
     runtime: &GatewayRuntime,
     conversation: &str,

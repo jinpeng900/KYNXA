@@ -1,4 +1,4 @@
-//! 解释模型回复、核验完成状态，再把已授权调用交给既有工具派发链。
+//! 解释模型回复、检查完成状态，再把已授权调用交给现有工具派发链。
 
 use super::*;
 
@@ -18,7 +18,7 @@ impl Execution {
             tools_closed,
             summarized_work_changed,
         } = model;
-        // 核验发现缺口时，正式调用仍走原授权与回执链，不当作无效核验丢弃。
+        // 检查发现缺口时，正式调用仍走原授权与结果链，不当作无效检查丢弃。
         if reviewing && !response.calls.is_empty() {
             reviewing = false;
             self.rounds.review_pending = false;
@@ -41,7 +41,6 @@ impl Execution {
                     .await;
             }
         }
-        // 成功步骤重置恢复次数，供后续故障继续使用。
         self.rounds.context_recoveries = 0;
         self.prepared.state.generated += response.usage["completion_tokens"]
             .as_u64()
@@ -115,7 +114,7 @@ impl Execution {
                     .or_else(|| response.usage["output_tokens"].as_u64())
                     .unwrap_or(0),
             );
-            // 跳过的提议仍配对协议结果，但不记为执行回执。
+            // 跳过的提议仍配对协议结果，但不记为执行结果。
             let skipped = response.calls.iter().map(|call| json!({"call":call,"result":{
                 "status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED",
                 "content":{"notice":"Not dispatched. First reply with the <kynxa_task> footer described in the next control notice to resolve the latest user instruction, then repeat this call if it still applies."}
@@ -218,7 +217,6 @@ impl Execution {
                         self.prepared.state.append(&brief, "", round, &segment);
                         self.prepared.state.delivery.last_progress_ms = active_ms;
                     } else {
-                        // 静默工具轮仍需同轮已完成的过程锚点。
                         self.prepared.state.append("", "", round, &segment);
                     }
                 }
@@ -359,7 +357,6 @@ impl Execution {
                 "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
             if self.rounds.history_echo_recoveries < 2 {
                 self.rounds.history_echo_recoveries += 1;
-                // 复述内容不进供应商历史，原输出仍留正式存储。
                 self.prepared.state.broker_note("Broker: the previous output repeated an internal historical tool-call record. Those calls ran earlier and were NOT executed now, and the record is not an answer. Discover and load the tools you need, check the current state, and perform the next real step of the original task, or answer truthfully in plain text.");
                 self.prepared
                     .state
@@ -402,7 +399,7 @@ impl Execution {
             && !has_replanned_action
             && missing_public_answer(&response.content, text, !response.calls.is_empty())
         {
-            // 仅有控制标记不算回答，保留回执并补一次正文请求。
+            // 仅有控制标记不算回答，保留结果并补一次正文请求。
             self.prepared
                 .state
                 .push_transcript_round(json!({"round":round,"text":"","calls":[],
@@ -473,7 +470,7 @@ impl Execution {
                 return Ok(PhaseOutcome::Continue);
             }
         }
-        // 独立核验或内联完成结算前，均须重核证据版本。
+        // 独立检查或内联完成结算前，均须重核证据版本。
         if !crate::orchestration::task::response_only_scope(&scope)
             && (reviewing || response.calls.is_empty() && self.rounds.task_status["state"] == "complete")
             && !self.prepared.state.progress.verification()["codeVersionCoverage"]["validatedSnapshot"].is_null() {
@@ -834,7 +831,6 @@ impl Execution {
                         json!({"taskIds":pending,"timeoutMs":30000}),
                     )
                     .await?;
-                // 本地等待条件变化，不用模型调用轮询。
                 let mut child_results = child_results;
                 while child_results["timedOut"] == true && !*self.prepared.cancellation.borrow() {
                     child_results = self
@@ -890,7 +886,6 @@ impl Execution {
                 cached["action"] == "resume" && cached["minimumActive"] != true
             })
         {
-            // 本地核对内联证据修正，旧验收不再触发新验收。
             let review = completion_review(&self.prepared.state);
             let inline = self
                 .prepared
@@ -912,7 +907,7 @@ impl Execution {
                     },
                 ))
                 .into_value();
-            // 修正引用即可缩小缺口，无需为了更新核验缓存而重做操作。
+            // 修正引用即可缩小缺口，无需为了更新检查缓存而重做操作。
             let revision = acceptance_revision(&self.prepared.state);
             cache_completion_review(
                 &mut self.prepared.state.completion.review_checkpoint,
@@ -1044,7 +1039,7 @@ impl Execution {
         if decision["action"] == "review" {
             self.rounds.review_pending = true;
             self.rounds.review_attempts = 0;
-            // 仅外部操作触发的核验要求证据，插话和续写沿用原规则。
+            // 仅外部操作触发的检查要求证据，插话和续写沿用原规则。
             self.rounds.review_evidence_required = current_effectful_work(&self.prepared.state)
                 || requires_task_verification(&self.prepared.state);
             let _ = self
@@ -1206,7 +1201,6 @@ impl Execution {
                 }
             }
         }
-        // 派发任何副作用前，先持久化已完成的模型步骤。
         self.prepared.state.push_transcript_round(json!({"round":round,"text":text,"calls":response.calls,"nativeContinuationRef":continuation_ref,
             "brokerPlannedCall":broker_planned_call,"prefixFingerprint":prefix_fingerprint}));
         self.prepared

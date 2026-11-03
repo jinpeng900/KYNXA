@@ -1,4 +1,4 @@
-//! 显式扩展安装复用宿主作业、正式回执、配置与 Skill 导入；启动时不下载依赖。
+//! 显式扩展安装复用宿主作业、正式结果、配置与 Skill 导入；启动时不下载依赖。
 
 use super::gateway::{self, GatewayToolContext, failure};
 use crate::gateway_contract::GatewayError;

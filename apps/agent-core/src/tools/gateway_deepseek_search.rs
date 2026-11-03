@@ -26,7 +26,7 @@ fn official_endpoint(base_url: &str) -> bool {
     })
 }
 
-/// 按需读取已保存密钥，工具配置、缓存键和回执都不持有密钥。
+/// 按需读取已保存密钥，工具配置、缓存键和结果都不持有密钥。
 async fn api_key(ctx: &GatewayToolContext) -> Option<String> {
     let store = ModelConfigStore::new(ctx.runtime.model_home.get()?);
     let providers = store.list().await.ok()?;

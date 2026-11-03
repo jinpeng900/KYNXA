@@ -35,9 +35,7 @@ fn model_tool_declarations_with_order(
     catalog: &[Value],
     stable: bool,
 ) -> Vec<Value> {
-    // 按相关性选择和裁剪工具，仅稳定发送顺序。
     let mut ordered: Vec<_> = catalog.iter().collect();
-    // 仅显式开发评测改变发送顺序，已加载能力不变。
     if stable {
         ordered.sort_by(|left, right| {
             left["wireName"]
@@ -71,7 +69,6 @@ fn model_tool_declarations_with_order(
         .collect()
 }
 
-/// 供应商请求失败时也保留真实派发状态和耗时。
 pub(crate) struct ModelRequestOutcome {
     pub(crate) result: Result<protocol::ModelResponse, model::ModelError>,
     pub(crate) dispatched: bool,
@@ -588,7 +585,6 @@ async fn acquire_model_resources(
     Ok(leases)
 }
 
-/// 下一次派发预约前，仅续接隐式执行预算段。
 fn renew_operational_budget(
     runtime: &GatewayRuntime,
     run: &RequestRun,
@@ -691,7 +687,7 @@ async fn dispatch_model(
     }
 }
 
-/// 仅结算供应商实际报告的用量，持久化失败仍保留派发未知状态。
+/// 仅结算供应商实际报告的用量，保存失败仍保留派发未知状态。
 fn settle_model_usage(
     run: &RequestRun,
     connection: &Value,

@@ -32,7 +32,7 @@ pub(crate) fn decode(
     }
 }
 
-/// CFB 流没有压缩；分配前核验实际容器、单流和总量，读取与建目录期间均支持取消。
+/// CFB 流没有压缩；分配前检查实际容器、单流和总量，读取与建目录期间均支持取消。
 pub(super) struct CompoundDocument<'a> {
     inner: cfb::CompoundFile<CancelReader<'a>>,
     maximum_stream_bytes: u64,

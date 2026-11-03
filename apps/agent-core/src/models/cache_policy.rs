@@ -281,7 +281,7 @@ pub(crate) fn apply(
         "stablePrefixBytes":prefix_bytes,"policyHash":&hash[..20]})
 }
 
-/// 仅向已核验协议请求流式计量，避免兼容服务拒绝额外字段。
+/// 仅向已检查协议请求流式计量，避免兼容服务拒绝额外字段。
 pub(crate) fn include_stream_usage(
     connection: &Value,
     model: &str,

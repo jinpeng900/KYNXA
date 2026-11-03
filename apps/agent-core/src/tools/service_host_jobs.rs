@@ -42,7 +42,7 @@ impl HostJob {
     }
 }
 
-/// 终端作业独立于请求完成，保留受限输出与正式回执。
+/// 终端作业独立于请求完成，保留受限输出与正式结果。
 #[derive(Default)]
 pub struct HostJobs {
     jobs: HashMap<String, HostJob>,

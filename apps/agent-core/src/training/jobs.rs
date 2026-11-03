@@ -293,7 +293,7 @@ pub(super) async fn start(
     if prior["state"] == "completed" {
         return read(input, ctx);
     }
-    // 暂停回执可能早于旧进程退出，续训等待其交还所有权，不把用户指令吞掉。
+    // 暂停结果可能早于旧进程退出，续训等待其交还所有权，不把用户指令吞掉。
     loop {
         let wait = {
             let rows = active().lock().map_err(|_| invalid("训练状态忙。"))?;

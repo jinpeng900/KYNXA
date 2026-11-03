@@ -228,7 +228,7 @@ pub fn inspect_path(
     })
 }
 
-/// SQLite 连接关闭可能在元信息与句柄检查之间移除并重建 WAL/SHM；限量重试仍执行完整路径及链接核验。
+/// SQLite 连接关闭可能在元信息与句柄检查之间移除并重建 WAL/SHM；限量重试仍执行完整路径及链接检查。
 pub(crate) fn inspect_sidecar(root: &Path, path: &Path) -> Result<bool, ContractError> {
     let mut previous = None;
     for _ in 0..4 {

@@ -102,7 +102,7 @@ fn temporary(directory: &Path, key: &str, value: &Value) -> Result<PathBuf, Cont
     Ok(directory.join(leaf))
 }
 
-/// 存储层核验并发布不透明图数据和清单，负责缓存清理。
+/// 存储层检查并发布不透明图数据和清单，负责缓存清理。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let _guard = CACHE_TRANSACTIONS.lock().map_err(|_| {
         failure(

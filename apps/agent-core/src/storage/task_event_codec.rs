@@ -20,7 +20,6 @@ pub(super) fn store(event: &TaskEvent, raw: String) -> String {
         return raw;
     }
     let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
-    // 压缩只是存储优化，编码失败时保存完整事件。
     if compressor.write_all(raw.as_bytes()).is_err() {
         return raw;
     }

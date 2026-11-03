@@ -7,7 +7,7 @@ namespace KYNXA_Desktop.Services;
 public sealed record TerminalRunIdentity(Guid ConversationId, Guid RequestId, string ToolCallId);
 
 /// <summary>
-/// 仅作为有容量上限的展示缓存；正式命令回执与输出仍归网关负责。
+/// 仅作为有容量上限的展示缓存；正式命令结果与输出仍归网关负责。
 /// </summary>
 public sealed class TerminalOutputState
 {
@@ -92,7 +92,7 @@ public sealed class TerminalOutputState
             run.Cwd = StringField(args, "cwd", 4096);
         }
         if (run.Cwd.Length == 0) run.Cwd = activity.WorkspaceRoot ?? "";
-        // 重开的中断回复没有可恢复的流；不能虚构完成回执。
+        // 重开的中断回复没有可恢复的流；不能虚构完成结果。
         run.Status = !requestActive && (activity.Status is "running" or "approval-required") ? "unknown" : activity.Status;
         run.Code = activity.Code;
         ReadReceipt(run, activity.Result);
@@ -177,7 +177,7 @@ public sealed class TerminalOutputState
         {
             using var document = JsonDocument.Parse(result, new JsonDocumentOptions { MaxDepth = 12 });
             var value = document.RootElement;
-            // 只读取已知回执封装，不检查 _meta 或任意参数对象。
+            // 只读取已知结果封装，不检查 _meta 或任意参数对象。
             for (int depth = 0; depth < 4 && value.ValueKind == JsonValueKind.Object; depth++)
             {
                 if (value.TryGetProperty("stdout", out _) || value.TryGetProperty("consoleText", out _)) break;

@@ -51,7 +51,6 @@ pub(super) async fn compact_child(
     if projected.audit["currentStepCheckpoint"] == true
         || projected.audit["reducedTokens"].as_u64().unwrap_or(0) > 0
     {
-        // 原生压缩成功也计次数，不以回退是否执行为准。
         state.compactions += 1;
         journal.repository().record_usage(
             journal.token(),
@@ -143,7 +142,7 @@ pub(super) async fn compact_child(
                     if error.code != "ABORT_ERR"
                         && error.details["contextRejection"].is_object() =>
                 {
-                    // 仅重试被拒摘要，保留分块两半和原回执，不重跑工具。
+                    // 仅重试被拒摘要，保留分块两半和原结果，不重跑工具。
                     let rejection = &error.details["contextRejection"];
                     if context_repairs < 2 {
                         if let Some(limit) = rejection["providerMaxOutputTokens"]

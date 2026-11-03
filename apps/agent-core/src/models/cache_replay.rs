@@ -74,7 +74,6 @@ fn declaration_name<'a>(field: &str, tool: &'a Value) -> Option<&'a str> {
 }
 
 impl StableToolOrder {
-    /// 仅重排当前声明；删除与定义变更立即生效。
     fn project(&mut self, body: &Value) -> Result<Value, &'static str> {
         let mut projected = body.clone();
         for field in ["tools", "functions"] {

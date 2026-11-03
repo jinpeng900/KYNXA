@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, watch};
 /// 网关崩溃或释放句柄时，Windows 自动关闭整个自有进程树。
 pub(crate) struct OwnedProcessJob(usize);
 
-/// 已核验的自有作业进程树时点采样，不代表资源预约或占用峰值。
+/// 已检查的自有作业进程树时点采样，不代表资源预约或占用峰值。
 pub(crate) struct OwnedProcessMemory {
     pub private_bytes: u64,
     pub working_set_bytes: u64,
@@ -99,7 +99,7 @@ unsafe extern "system" {
     ) -> i32;
 }
 impl OwnedProcessJob {
-    /// 采样本作业已核验句柄；私有提交和工作集分别返回，不代表峰值。
+    /// 采样本作业已检查句柄；私有提交和工作集分别返回，不代表峰值。
     pub(crate) fn memory_usage(&self) -> Result<OwnedProcessMemory, GatewayError> {
         #[cfg(windows)]
         unsafe {
@@ -331,7 +331,7 @@ impl Drop for OwnedProcessJob {
     }
 }
 
-/// 将后台终端的取消、回执和完成通知绑定到所属聊天。
+/// 将后台终端的取消、结果和完成通知绑定到所属聊天。
 #[derive(Clone)]
 pub(crate) struct HostJob {
     pub(crate) conversation_id: String,
@@ -431,7 +431,7 @@ async fn finish_helper_resources(
     Ok(())
 }
 
-/// 派发一个自有助手、保留流式事实，最后释放作业及资源租约；缺失最终回执保留未知状态。
+/// 派发一个自有助手、保留流式事实，最后释放作业及资源租约；缺失最终结果保留未知状态。
 async fn invoke(
     mut request: Value,
     timeout_ms: u64,
@@ -671,7 +671,7 @@ async fn invoke(
         terminate(&mut child).await;
     }
     diagnostic.abort();
-    // 核验整个作业退出后才释放准入；已批准的独立应用仍按例外处理。
+    // 检查整个作业退出后才释放准入；已批准的独立应用仍按例外处理。
     if let Err(error) = finish_helper_resources(&_owned, &mut lease, independent_launch).await {
         let value = receipt.get_or_insert_with(|| json!({"protocolVersion":1}));
         value["completed"] = json!(false);
@@ -706,7 +706,7 @@ async fn invoke(
     }))
 }
 
-/// 请求原生终端回执前核对宿主策略与工作目录身份。
+/// 请求原生终端结果前核对宿主策略与工作目录身份。
 async fn host_run(
     mut input: Value,
     ctx: &GatewayToolContext,
@@ -749,7 +749,7 @@ async fn host_run(
             400,
         ));
     }
-    // 派发前解析已批准目录，统一 Windows 长短路径，让回执身份一致。
+    // 派发前解析已批准目录，统一 Windows 长短路径，让结果身份一致。
     let resolved_cwd = super::service_filesystem::canonical(requested_cwd, false)
         .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
     input["cwd"] = json!(super::local_files::path_text(&resolved_cwd));
@@ -794,7 +794,7 @@ async fn host_run(
     host_receipt(&input, &plan["holdMs"], value, ctx).await
 }
 
-/// 保留终端输出与身份，仅合并执行器已核验的状态修正；后台完成记录使用同一完整回执。
+/// 保留终端输出与身份，仅合并执行器已检查的状态修正；后台完成记录使用同一完整结果。
 async fn host_receipt(
     parameters: &Value,
     hold_ms: &Value,
@@ -1040,7 +1040,6 @@ pub(crate) async fn execute(
             Value::Null
         };
         input["excludedRoots"] = json!([ctx.data_home, ctx.extension_root]);
-        // 只信任当前聊天的精确无链接工作范围。
         let own_sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
         let managed = uuid::Uuid::parse_str(&ctx.conversation_id).is_ok()
             && super::local_files::inspect(&ctx.workdir, false, true).is_ok()
@@ -1195,7 +1194,7 @@ pub(crate) async fn execute(
     Err(failure("TOOL_NOT_FOUND", "终端或桌面操作不存在。", 404))
 }
 
-/// 校验计划只控制映射，窗口和进程身份来自 ToolHost 的实际回执。
+/// 校验计划只控制映射，窗口和进程身份来自 ToolHost 的实际结果。
 async fn desktop_receipt(
     action: &str,
     parameters: &Value,
@@ -1291,7 +1290,7 @@ fn unknown_job(id: &str, message: &str) -> Value {
     })
 }
 
-/// 先取消自有后台任务，再清理已核验的沙箱阶段；已启动的独立 GUI 应用保持其自身生命周期。
+/// 先取消自有后台任务，再清理已检查的沙箱阶段；已启动的独立 GUI 应用保持其自身生命周期。
 pub async fn shutdown(ctx: &GatewayToolContext) {
     let _ = shutdown_checked(ctx).await;
 }
@@ -1671,7 +1670,7 @@ mod tests {
             std::fs::write(path, "retained").unwrap();
         }
 
-        // 先核验解析后的删除目标，仅限本次新建的临时夹具根，不接触真实归档或产品数据。
+        // 先检查解析后的删除目标，仅限本次新建的临时夹具根，不接触真实归档或产品数据。
         let resolved_target = std::fs::canonicalize(&target).unwrap();
         assert!(resolved_target.starts_with(std::fs::canonicalize(&root).unwrap()));
         assert!(!resolved_target.starts_with(std::fs::canonicalize(&ctx.workdir).unwrap()));
@@ -1825,7 +1824,7 @@ mod tests {
             Some("ready")
         );
         let sample = owned.memory_usage().unwrap();
-        // Windows 可能创建自有控制台辅助进程；采样边界是已核验的作业树，不固定为一个进程。
+        // Windows 可能创建自有控制台辅助进程；采样边界是已检查的作业树，不固定为一个进程。
         assert!(sample.processes >= 1);
         assert!(sample.private_bytes > 0 && sample.working_set_bytes > 0);
         finish_helper_resources(&owned, &mut None, false)

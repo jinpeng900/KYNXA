@@ -1,4 +1,4 @@
-//! 根任务与委派任务共用执行上下文和回执语义，正式操作仍由原任务日志持有。
+//! 根任务与委派任务共用执行上下文和结果含义，正式操作仍由原任务日志持有。
 
 use super::{
     gateway_runtime::{GatewayRuntime, RequestRun},
@@ -536,7 +536,7 @@ struct ToolExecutionReceipt {
     recovery_handle: Option<Value>,
     content: Value,
 }
-/// 复用旧回执时按当前错误语义判断，原始正文保持不变。
+/// 复用旧结果时按当前错误含义判断，原始正文保持不变。
 pub(super) fn normalize_reused_receipt(name: &str, receipt: &mut Value) {
     if receipt["status"] == "completed" && tools::explicit_tool_error(name, &receipt["content"]) {
         receipt["isError"] = json!(true);
@@ -728,7 +728,7 @@ pub(super) fn tool_failure_definition(call: &Value, catalog: &[Value], cached: &
         .unwrap_or_else(|| json!({"name":call["name"],"definitionAvailable":false}))
 }
 
-/// 根据真实回执结算操作状态，未知结果单独保留。
+/// 根据真实结果结算操作状态，未知结果单独保留。
 pub(crate) fn operation_outcome(receipt: &Value) -> OperationState {
     match ReceiptStatus::from_value(&receipt["status"]) {
         Some(ReceiptStatus::Completed) if receipt["isError"] != true => OperationState::Succeeded,
@@ -824,13 +824,13 @@ pub(super) async fn restore_completion_evidence(
                 let legacy = observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none()
                     || preview_proof_needs_upgrade(observation);
                 if !legacy {
-                    // 未核验的旧包装保留历史事实，暂不参与当前验收。
+                    // 未检查的旧包装保留历史事实，暂不参与当前验收。
                     observation["verifiedSuccess"] = json!(false);
                     observation["completionProofVerification"] = json!("pending");
                 }
                 let Some(id) = observation["ref"]["id"].as_str() else { continue; };
                 let Ok(archive) = data::load_private_tool_result(&root, &conversation, id) else { continue; };
-                // 存储不可读时保留重试入口，核验正文后才补证据。
+                // 存储不可读时保留重试入口，检查正文后才补证据。
                 if legacy {
                     observation["verifiedSuccess"] = json!(false);
                     observation["completionEvidence"] = json!([]);

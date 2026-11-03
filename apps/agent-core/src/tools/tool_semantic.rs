@@ -1,10 +1,9 @@
-//! 语义发现仅补充现有词法候选，不赋予工具执行权限。
+//! 含义发现仅补充现有词法候选，不赋予工具执行权限。
 
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-/// 仅嵌入当前有效请求，已排除的语句不进入候选。
 pub(super) fn query_text(query: &str) -> Option<String> {
     let projection = super::intent::analyze_clauses(query);
     let active = projection["activeText"].as_str().unwrap_or(query).trim();
@@ -77,7 +76,7 @@ pub(super) fn combine(
         .filter(|(index, score)| score.is_finite() && *score >= 0.55 && !rejected(*index))
         .collect::<Vec<_>>();
     semantic.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    // 此处仅限制新增语义提示的数量，不限制可发现或可加载能力；完整词法结果继续保留。
+    // 此处仅限制新增含义提示的数量，不限制可发现或可加载能力；完整词法结果继续保留。
     semantic.truncate(12);
     let semantic_ranks: HashMap<usize, (usize, f64)> = semantic
         .iter()
@@ -100,7 +99,7 @@ pub(super) fn combine(
         }
         let original = hit["score"].as_u64().unwrap_or(0);
         let score = if original >= 5000 {
-            // 完整工具名及既有明确路径、动作规则保留原先的优先级。
+            // 完整工具名及现有明确路径、动作规则保留原先的优先级。
             original
         } else {
             let fused = 0.9 / (40 + rank + 1) as f64

@@ -44,7 +44,6 @@ struct DocumentRef<'a> {
     entries: &'a BTreeMap<String, Entry>,
 }
 
-/// 工具声明缓存与汇总经验只作选择线索。
 pub(crate) struct ToolMemory {
     root: PathBuf,
     entries: BTreeMap<String, Entry>,
@@ -294,7 +293,7 @@ impl ToolMemory {
         self.disabled_tools = disabled_tools.clone();
         let previous_count = self.entries.len();
         self.entries.retain(|name, entry| {
-            // 内置指纹描述整份目录，不代表单个工具契约；随后 replace_catalog 按工具逐项重核验，也兼容旧目录指纹。
+            // 内置指纹描述整份目录，不代表单个工具契约；随后 replace_catalog 按工具逐项重检查，也兼容旧目录指纹。
             // MCP 指纹仍绑定明确受信任的服务与配置。
             sources.get(&entry.source).is_some_and(|current| {
                 valid_fingerprint(current)
@@ -389,7 +388,7 @@ impl ToolMemory {
         true
     }
 
-    /// 此小幅限量分数只用于语义相关性之后的次级排序。
+    /// 此小幅限量分数只用于含义相关性之后的次级排序。
     pub(crate) fn score(&self, name: &str) -> f64 {
         let Some(entry) = self.entries.get(name) else {
             return 0.0;

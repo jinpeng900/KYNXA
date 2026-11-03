@@ -88,7 +88,7 @@ impl StructureState {
                 if bytes > budget || arguments["parseStatus"] == "unavailable" {
                     return Ok(json!({"store":false,"evicted":[]}));
                 }
-                // 替换现有 Map 项保留插入顺序，只有读取刷新 LRU 位置，以兼容并发解析回执。
+                // 替换现有 Map 项保留插入顺序，只有读取刷新 LRU 位置，以兼容并发解析结果。
                 if let Some(index) = self.cache.iter().position(|(stored, _)| stored == key) {
                     self.cache_bytes -= self.cache[index].1;
                     self.cache[index].1 = bytes;

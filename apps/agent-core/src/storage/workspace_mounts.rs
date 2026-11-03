@@ -196,7 +196,7 @@ pub fn same_mount(previous: &Value, current: &Value) -> bool {
             .is_some_and(|(a, b)| path_key(a) == path_key(b))
 }
 
-/// 新增无关挂载不撤销旧任务；只复核该任务选定或默认的既有绑定，实际工具仍逐次检查所用根。
+/// 新增无关挂载不撤销旧任务；只复核该任务选定或默认的现有绑定，实际工具仍逐次检查所用根。
 pub fn validate_snapshot(previous: &Value, current: &Value) -> bool {
     if previous["projectId"] != current["projectId"] {
         return false;

@@ -10,7 +10,6 @@ pub(crate) const DEEPSEEK_TOOL_CHANGES_BETA: &str = "mid-conversation-tool-chang
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
-    /// 每次变化都重建声明，请求按原样发送。
     Rebuild,
     /// 新工具在历史中激活；撤权移除必须重新建立声明序列。
     AdditionOnly,

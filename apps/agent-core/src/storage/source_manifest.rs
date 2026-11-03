@@ -190,7 +190,7 @@ fn files(arguments: &Value) -> ContractResult {
     Ok(json!(normalized))
 }
 
-/// 原生存储核验限量清单及路径身份，来源权威不来自扫描元信息。
+/// 原生存储检查限量清单及路径身份，来源权威不来自扫描元信息。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.manifest.binding" {
         return binding(&arguments["value"], arguments);

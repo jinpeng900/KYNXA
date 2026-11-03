@@ -1,4 +1,4 @@
-//! 原文片段仅在当前 SQLite 快照重新核验范围与版本后复用，不替代权限或索引真值。
+//! 原文片段仅在当前 SQLite 快照重新检查范围与版本后复用，不替代权限或索引真值。
 
 use super::{
     cache::{ByteLru, retained_json_bytes},
@@ -131,7 +131,7 @@ fn key(identity: (u64, u64), row: &Value) -> String {
     let descriptor = json!({"version":"scoped-original-passages-v1", "databaseIdentity":identity,"versions":versions});
     format!("{:x}", Sha256::digest(descriptor.to_string().as_bytes()))
 }
-/// 查询前在当前事务核验元数据权限，缺失记录不查缓存。
+/// 查询前在当前事务检查元数据权限，缺失记录不查缓存。
 pub(crate) fn read<E>(
     identity: (u64, u64),
     row: &Value,

@@ -25,7 +25,7 @@ pub(crate) fn token_counts(protocol: &str, usage: &Value) -> TokenCounts {
             });
             (input, output)
         }
-        // 当前适配器已转换字段；同时兼容原生 Ollama 回执，缺失仍保持未知而非伪造零值。
+        // 当前适配器已转换字段；同时兼容原生 Ollama 结果，缺失仍保持未知而非伪造零值。
         "ollama" => (
             input.or_else(|| usage["prompt_eval_count"].as_u64()),
             output.or_else(|| usage["eval_count"].as_u64()),
@@ -45,7 +45,7 @@ fn cache_component(usage: &Value, name: &str) -> Option<u64> {
     }
 }
 
-/// 别名表示同一计数；回执冲突或数值无效时保持未知。
+/// 别名表示同一计数；结果冲突或数值无效时保持未知。
 fn consistent_cache_count(values: &[&Value]) -> Option<u64> {
     let mut observed = None;
     for value in values {
@@ -123,7 +123,7 @@ pub(crate) fn cache_breakdown(protocol: &str, usage: &Value) -> CacheBreakdown {
                 .and_then(|remaining| remaining.checked_sub(creation?))
         })
     };
-    // 部分供应商回执可能缺少总量；互相溢出的子集降为未知，任务结算照常进行。
+    // 部分供应商结果可能缺少总量；互相溢出的子集降为未知，任务结算照常进行。
     if [read, creation, uncached]
         .into_iter()
         .flatten()

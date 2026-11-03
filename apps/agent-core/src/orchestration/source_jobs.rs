@@ -63,7 +63,7 @@ struct JobOwner {
     acknowledged: usize,
 }
 
-/// 队列准入、持久取消和逐轮发布决策由统一原生拥有者维护；实际作业写入/回执及 AbortController 留给适配器。
+/// 队列准入、持久取消和逐轮发布决策由统一原生拥有者维护；实际作业写入/结果及 AbortController 留给适配器。
 #[derive(Default)]
 pub struct SourceJobState {
     closed: bool,

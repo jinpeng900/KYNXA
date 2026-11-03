@@ -368,7 +368,7 @@ struct AnnStore {
     batches: HashMap<u64, BackgroundBatch>,
 }
 
-/// 仅返回操作回执，运行时对象与向量缓冲由调用方持有。
+/// 仅返回操作结果，运行时对象与向量缓冲由调用方持有。
 #[derive(Default)]
 pub struct AnnSession {
     queue: BuildQueue,
@@ -1322,7 +1322,7 @@ impl AnnStore {
                 ))
             }
             "store.searchDispatch" => {
-                // 核验并更新本次请求的元信息映射，不在 JS 缓存跨查询业务记录。
+                // 检查并更新本次请求的元信息映射，不在 JS 缓存跨查询业务记录。
                 self.apply("store.assertBuild", arguments)?;
                 let limit = self.apply("store.searchCurrent", arguments)?;
                 let mut entry = arguments["entry"].clone();

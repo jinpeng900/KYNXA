@@ -62,7 +62,7 @@ fn output_budget(args: &Value) -> Result<Value, String> {
         return Err("CONTEXT_INPUT_TOO_LARGE".to_owned());
     }
     // 输出预留与供应商输入、输出硬上限是不同约定，都要落实到最终额度。
-    // 工具阶段为下一步定义及回执留出空间；正文阶段仍使用原有输出比例，不增加固定字数上限。
+    // 工具阶段为下一步定义及结果留出空间；正文阶段仍使用原有输出比例，不增加固定字数上限。
     let share = if args["phase"] == "tool" {
         0.2
     } else if window <= 32768.0 {

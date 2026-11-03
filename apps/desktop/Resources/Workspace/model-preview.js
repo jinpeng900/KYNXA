@@ -137,7 +137,6 @@ export async function open(options) {
       if (animating) { mixer.update(delta); updateTimeline(); if (now - progressSavedAt > 1200) { progressSavedAt = now; stateChanged(); } }
       if (selectionBox && selected) selectionBox.setFromObject(selected);
       renderer.render(scene, camera);
-      // 静止视图停止绘制，操作、阻尼和动画按需唤醒。
       if (moving || animating) startLoop(); else lastFrame = 0;
     } catch {
       renderFailed = true; cancelAnimationFrame(raf); raf = 0;

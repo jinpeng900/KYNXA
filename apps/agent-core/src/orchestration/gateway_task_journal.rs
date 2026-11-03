@@ -511,7 +511,7 @@ mod durability_tests {
         );
         assert_eq!(recovered.read_blob(&reference).await.unwrap(), raw);
 
-        // 子任务可读取已核验的父上下文，自存检查点仍使用自己的聊天身份。
+        // 子任务可读取已检查的父上下文，自存检查点仍使用自己的聊天身份。
         let mut child_input = input.clone();
         child_input.request_id = "child-image-fixture".into();
         child_input.parent_task_id = Some(recovered.task_id().into());
@@ -737,7 +737,7 @@ fn takeover_budget_extensions(
     Ok((Some(policy), extensions))
 }
 
-/// 尝试持有本接线，更换执行者后任务身份及回执仍由 TaskRepository 保留。
+/// 尝试持有本接线，更换执行者后任务身份及结果仍由 TaskRepository 保留。
 pub struct TaskJournal {
     repository: Arc<TaskRepository>,
     root: PathBuf,
@@ -1058,7 +1058,7 @@ impl TaskJournal {
                     retry_delay = Duration::from_millis(100);
                 }
                 Ok(Err(error)) if error.code() == "TASK_STORAGE_FAILED" => {
-                    // 临时存储失败继续尝试续租；仓储仍核验有效期与执行权，不续活过期或已取消尝试。
+                    // 临时存储失败继续尝试续租；仓储仍检查有效期与执行权，不续活过期或已取消尝试。
                     delay = retry_delay;
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
                 }
@@ -1407,7 +1407,7 @@ impl TaskJournal {
         }
         Ok(bytes)
     }
-    /// 仅还原已核验的模型上下文；回执读取仍使用不可变归档原文。
+    /// 仅还原已检查的模型上下文；结果读取仍使用不可变归档原文。
     pub async fn read_model_blob(&self, reference: &Value) -> Result<Vec<u8>> {
         let bytes = self.read_blob(reference).await?;
         let invalid = || {
@@ -1566,7 +1566,7 @@ impl TaskJournal {
         usage: &TaskUsage,
         provider_usage: Option<crate::storage::task_repository::ProviderTokenUsage>,
     ) -> Result<ModelRequestReservation> {
-        // 先保存 I/O 结果再结算，确保崩溃后仍可核验。
+        // 先保存 I/O 结果再结算，确保崩溃后仍可检查。
         let mut receipt = json!({"reservationId":id,"attemptId":self.token.attempt_id,"dispatched":dispatched,"usage":usage});
         if let Some(provider) = &provider_usage {
             receipt["providerUsage"] = json!(provider);
@@ -1684,7 +1684,7 @@ impl TaskJournal {
         {
             match self.reconcile_operation(&task, &operation, &events).await {
                 Ok(true) => resolved_operations += 1,
-                // 缺失读取回执不阻塞恢复。
+                // 缺失读取结果不阻塞恢复。
                 _ if operation.intent.effect == OperationEffect::Observation => {},
                 Ok(false) => unconfirmed.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
                     "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name})),

@@ -78,7 +78,6 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         body.Children.Add(new FontIcon { Glyph = iconGlyph, FontSize = 16,
             FontFamily = new FontFamily("Segoe Fluent Icons"), IsHitTestVisible = false, VerticalAlignment = VerticalAlignment.Center });
-        // 标签在侧栏剩余宽度内换行，避免长名称被截断。
         var label = new TextBlock { FontFamily = font, FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.Wrap };
         UiLocalization.Bind(label, TextBlock.TextProperty, labelKey);

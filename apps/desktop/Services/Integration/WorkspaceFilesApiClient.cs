@@ -6,7 +6,7 @@ public sealed record WorkspaceFileEntry(string Name, string Type);
 public sealed record WorkspaceDirectoryListing(string Path, WorkspaceFileEntry[] Entries, bool Truncated = false);
 
 /// <summary>
-/// 挂载根解析与授权归 Rust；桌面仅展示目录回执，不自行扩大文件访问范围。
+/// 挂载根解析与授权归 Rust；桌面仅展示目录结果，不自行扩大文件访问范围。
 /// </summary>
 public sealed class WorkspaceFilesApiClient : IDisposable
 {

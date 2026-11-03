@@ -62,7 +62,7 @@ fn visible_console(value: &Value, hold: u64) -> bool {
         && value["stderr"] == ""
 }
 
-/// 原生执行器拥有准入、请求与回执规则；实际 ToolHost 通信保留在运行时句柄边界。
+/// 原生执行器拥有准入、请求与结果规则；实际 ToolHost 通信保留在运行时句柄边界。
 #[derive(Default)]
 pub struct RunnerState {
     pending: usize,

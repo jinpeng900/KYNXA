@@ -45,7 +45,6 @@ mod system_prompt;
 
 use serde_json::Value;
 
-/// 共用的纯工具规则，不涉及宿主操作和权限。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     if operation.starts_with("tools.localPath.") {
         return Ok(service_error::envelope(local_files::path_operation(

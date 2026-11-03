@@ -17,7 +17,7 @@ struct NativeRequest {
     waiting: bool,
 }
 
-/// Worker 状态与已接纳原生工作独立于调用方 Promise；只有原生回执才能排空所有权。
+/// Worker 状态与已接纳原生工作独立于调用方 Promise；只有原生结果才能排空所有权。
 #[derive(Default)]
 pub struct InferenceLifecycleState {
     kind: String,

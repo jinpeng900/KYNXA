@@ -1,4 +1,4 @@
-//! 追加运行事实的原生角色取决于已核验端点、协议和模型，与显示名称和代理标签无关。
+//! 追加运行事实的原生角色取决于已检查端点、协议和模型，与显示名称和代理标签无关。
 
 use serde_json::Value;
 
@@ -54,7 +54,7 @@ fn openai_role(model: &str) -> &'static str {
 }
 
 /// 仅选择代理自身文本事实的角色。
-/// 权限与记忆撤销仍由当前顶层系统指导和执行核验负责。
+/// 权限与记忆撤销仍由当前顶层系统指导和执行检查负责。
 /// Messages 适配器要把原生 system 更新放在 user/工具结果轮之后，工具调用配对内部不插入。
 pub fn runtime_message_role(connection: &Value, model: &str) -> &'static str {
     let Some(endpoint) = verified_endpoint(connection) else {

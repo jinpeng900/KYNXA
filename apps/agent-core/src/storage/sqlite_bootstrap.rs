@@ -284,7 +284,7 @@ fn migration_batch(connection: &Connection, arguments: &Value) -> ContractResult
     finish(connection, result)
 }
 
-/// 启动、增量升级及撤销清理由原生 SQLite 执行，历史字节哈希通过显式回执确认。
+/// 启动、增量升级及撤销清理由原生 SQLite 执行，历史字节哈希通过显式结果确认。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let root = Path::new(arguments["root"].as_str().unwrap_or(""));
     let path = Path::new(arguments["path"].as_str().unwrap_or(""));

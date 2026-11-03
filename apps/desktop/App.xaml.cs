@@ -39,7 +39,6 @@ public partial class App : Application
         }
         catch (InvalidOperationException)
         {
-            // 未打包版本继续使用上游的便携目录行为。
             return;
         }
         // 开发注册的包把数据放在构建目录旁，无论通过什么方式启动都使用同一份。

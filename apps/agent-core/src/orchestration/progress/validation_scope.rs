@@ -1,10 +1,10 @@
-//! 按正式要求的目标映射核验状态，不改原验证记录。
+//! 按正式要求的目标映射检查状态，不改原验证记录。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// 程序推导的目标范围只是映射，执行历史仍只保存在原回执中。
+/// 程序推导的目标范围只是映射，执行历史仍只保存在原结果中。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::orchestration) struct ValidationScope {
@@ -76,7 +76,7 @@ impl ValidationScope {
         let Some(mut original) = Self::read_checkpoint(&receipt["acceptanceScope"]) else {
             return false;
         };
-        // 正式撤销的检查要求不再计入剩余产物，原失败回执保留。
+        // 正式撤销的检查要求不再计入剩余产物，原失败结果保留。
         let original_checks = original
             .requirements
             .iter()

@@ -1,4 +1,4 @@
-//! 原生推理执行复用既有预约策略，不建立第二套资源记录。
+//! 原生推理执行复用现有预约策略，不建立第二套资源记录。
 
 pub(crate) use super::gateway_cache::cache_memory_limit;
 use super::gateway_cache::{FlightCache, Lookup, memory_grant};
@@ -486,7 +486,7 @@ fn text_key(identity: &str, tag: &str, texts: &[String]) -> String {
     )
 }
 
-/// 固定 SHA 清单描述原生加载时已核验的模型；文件时间与长度戳额外隔离磁盘资源变更，无需每次重读大权重。
+/// 固定 SHA 清单描述原生加载时已检查的模型；文件时间与长度戳额外隔离磁盘资源变更，无需每次重读大权重。
 fn cache_identity(config: &GatewayConfig, scope: &Value, local: &Value) -> Option<String> {
     if !scope["scopeKeys"].is_array() || scope["scopeKeys"].as_array()?.is_empty() {
         return None;
@@ -1381,7 +1381,7 @@ pub fn retire_idle_models(config: &GatewayConfig) -> Result<Value, ContractError
     Ok(result)
 }
 
-/// 仅用既有后台租约预热选定嵌入模型；执行锁内再次核验就绪状态，不重复加载。
+/// 仅用现有后台租约预热选定嵌入模型；执行锁内再次检查就绪状态，不重复加载。
 pub fn warm(
     config: &GatewayConfig,
     local: &Value,

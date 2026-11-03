@@ -91,7 +91,6 @@ public sealed partial class ShellPage
         if (!_isCompactLayout) _temporarySidebarOpen = false;
         bool expanded = _isCompactLayout ? _temporarySidebarOpen : !_layout.SidebarCollapsed;
         double preferredWidth = Math.Clamp(_layout.SidebarWidth, ShellLayoutMetrics.SidebarMin, ShellLayoutMetrics.SidebarMax);
-        // 临时抽屉不改变用户保存的侧栏宽度或折叠偏好。
         SidebarColumn.Width = new GridLength(_isCompactLayout || !expanded ? ShellLayoutMetrics.SidebarCollapsed : preferredWidth);
         // 仅缩小额外预留的拖动留白，让底栏原有图标外侧边距等宽，不移动图标。
         SidebarGripColumn.Width = new GridLength(_isCompactLayout || !expanded ? 0 : ShellLayoutMetrics.SidebarGripGutter);
@@ -144,7 +143,7 @@ public sealed partial class ShellPage
     {
         if (_presentationDialogOpen) return true;
         if (XamlRoot is null) return false;
-        // 尊重此 XamlRoot 上的所有弹窗，包括既有审批和设置。
+        // 尊重此 XamlRoot 上的所有弹窗，包括现有审批和设置。
         static bool ContainsDialog(DependencyObject? element)
         {
             if (element is ContentDialog) return true;

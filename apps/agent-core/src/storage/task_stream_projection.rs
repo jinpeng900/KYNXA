@@ -51,7 +51,7 @@ fn take_text(value: &mut Value, field: &str) -> String {
     }
 }
 
-/// 重叠部分逐字节核对，只追加真正缺失的 UTF-8 后缀；水位以前缺字或有冲突时不恢复。
+/// 重叠部分逐字节核对，只追加真正缺失的 UTF-8 后缀；位置以前缺字或有冲突时不恢复。
 fn recover_delta(text: &mut String, offset: &mut usize, delta: &str, append: bool) -> bool {
     if *offset > text.len() {
         return false;
@@ -491,7 +491,7 @@ impl<'a> StreamProjection<'a> {
             }
             return;
         }
-        // 回放水位可跳过私有记录事件，但同一请求回复的 SSE 观察序号要连续递增。
+        // 回放位置可跳过私有记录事件，但同一请求回复的 SSE 观察序号要连续递增。
         if sequence <= self.stream_sequence {
             self.incomplete("non-monotonic-stream-observation");
             return;

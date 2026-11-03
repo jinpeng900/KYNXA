@@ -1,6 +1,6 @@
-//! 保留用户配置的 HTTP 代理，并把公共网页目的地绑定到已核验地址。
+//! 保留用户配置的 HTTP 代理，并把公共网页目的地绑定到已检查地址。
 //!
-//! 本传输模块拥有地址核验与单次请求的转接生命周期；gateway_web 拥有正文提取和分页。
+//! 本传输模块拥有地址检查与单次请求的转接生命周期；gateway_web 拥有正文提取和分页。
 
 use super::gateway::failure;
 use crate::gateway_contract::GatewayError;
@@ -24,7 +24,6 @@ pub(crate) struct PublicClient {
 
 impl Drop for PublicClient {
     fn drop(&mut self) {
-        // 取消抓取后清理内部转接监听和网络隧道。
         if let Some(relay) = self.relay.take() {
             relay.abort();
         }
@@ -220,7 +219,7 @@ async fn public_dns(
             return Ok(addresses.clone());
         }
     }
-    // 核验解析经过现有代理，只发送当前公共网页域名。
+    // 检查解析经过现有代理，只发送当前公共网页域名。
     let client = reqwest::Client::builder()
         .no_proxy()
         .proxy(
@@ -276,7 +275,7 @@ async fn public_dns(
         .min()
         .unwrap_or(0)
         .min(120);
-    // 连续分页只在 DNS TTL 内复用已核验地址；限量缓存不授予私网访问能力。
+    // 连续分页只在 DNS TTL 内复用已检查地址；限量缓存不授予私网访问能力。
     if ttl_seconds > 0 {
         if let Ok(mut cache) = cache.lock() {
             cache.retain(|_, (expires, _)| *expires > Instant::now());
@@ -386,7 +385,7 @@ async fn relay_public_request(
         proxy.port_or_known_default().unwrap_or(80),
     ))
     .await?;
-    // 上游代理只连接已核验公共 IP，防止第二次解析时把网页域名重绑到内网。
+    // 上游代理只连接已检查公共 IP，防止第二次解析时把网页域名重绑到内网。
     let target = destinations[0].to_string();
     let mut connect = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if !proxy.username().is_empty() || proxy.password().is_some() {

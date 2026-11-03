@@ -715,7 +715,6 @@ pub(crate) async fn workspace_open(
                 if value["navigationCommitted"] != true
                     && tokio::time::Instant::now() < committed_deadline =>
             {
-                // 等首页写入历史再导航，保留可返回的第一页。
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             Ok(value) => return Ok(value),
@@ -1574,7 +1573,7 @@ fn executable(input: &Value, ctx: &GatewayToolContext) -> Result<PathBuf, Gatewa
         })
 }
 
-/// 页面未提交时可能已有可嵌入窗口；展示路径可用请求地址，导航回执保持真实。
+/// 页面未提交时可能已有可嵌入窗口；展示路径可用请求地址，导航结果保持真实。
 fn workspace_presentation_path(state: &Value) -> Value {
     if state["url"].as_str().is_some_and(|text| {
         url::Url::parse(text).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
@@ -1966,7 +1965,7 @@ async fn stage_upload(
         .as_u64()
         .unwrap_or(2 * 1024 * 1024 * 1024)
         .clamp(1024 * 1024, 16 * 1024 * 1024 * 1024);
-    // 从已核验句柄复制一次；延迟提交表单时不重读已变化的源路径。
+    // 从已检查句柄复制一次；延迟提交表单时不重读已变化的源路径。
     let result = tokio::task::spawn_blocking(move || {
         use std::io::{Read, Write};
         super::local_files::inspect(&created, true, false)

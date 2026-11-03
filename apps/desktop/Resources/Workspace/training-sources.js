@@ -15,7 +15,6 @@ function parentLabel(source) {
   return parent;
 }
 
-// 输入时只保存来源信息，保留光标与展开状态。
 export function createTrainingSources(host, { getSources, onChange, control, request }) {
   const selected = new Set(), previews = new Map();
   let disposed = false, generation = 0, observer = null, queue = [], running = 0;

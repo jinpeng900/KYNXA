@@ -8,7 +8,6 @@ function area(value = '', placeholder = '') { const node = el('textarea', 'train
 function row(...nodes) { const host = el('div', 'training-actions workbench-row'); host.append(...nodes); return host; }
 function labelled(name, node) { node.setAttribute('aria-label', name); return field(name, node); }
 
-// 试用记录仅属于工作台卡片，不切换聊天模型。
 export function createTrainingTrial(parent, { item, request, onState, state = {}, notice }) {
   const jobId = item.id || item.jobId || item.config?.id;
   const host = el('details', 'training-details training-prediction training-trial'), body = el('div', 'training-trial-body');

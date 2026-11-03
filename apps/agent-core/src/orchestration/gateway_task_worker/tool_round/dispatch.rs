@@ -14,7 +14,7 @@ pub(super) struct PreparedCall {
     failure_correction: Option<Value>,
     protected: Value,
     previous: Option<Value>,
-    // 修改互斥持续到回执保存及执行后版本检查点结束。
+    // 修改互斥持续到结果保存及执行后版本检查点结束。
     _workspace_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 

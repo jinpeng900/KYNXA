@@ -202,7 +202,7 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
             // 模型会话直接共享已有伪终端及输出缓存；仅用户新建且尚无会话时才调用启动接口。
             if (view.SessionId is null)
             {
-                // Rust 正在启动伪终端时即使标签关闭，也等待真实接收回执后关闭对应会话。
+                // Rust 正在启动伪终端时即使标签关闭，也等待真实接收结果后关闭对应会话。
                 var session = await _api.OpenAsync(view.ConversationId, view.Cols, view.Rows, mountId: view.MountId);
                 view.SessionId = session.SessionId;
                 view.SentCols = session.Cols; view.SentRows = session.Rows;

@@ -323,7 +323,6 @@ fn observe_code_target(ctx: &GatewayToolContext, binding: &Value) -> Result<(), 
     Ok(())
 }
 
-/// 只核对当前请求实际获准访问的目标。
 pub async fn capture_code_version(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     check_cancelled(ctx)?;
     let state = version_state(ctx)?.unwrap_or_default();
@@ -1031,7 +1030,6 @@ async fn filesystem_bound(
         return Ok(result);
     }
     if name == "document.create" {
-        // 二进制写入只接收本层授权的规范路径绑定。
         let mut input = args;
         input["path"] = json!(super::local_files::path_text(&path));
         input["_pathBinding"] = binding;
@@ -1191,7 +1189,6 @@ async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, Gatew
     let Some(execute) = &ctx.external_execute else {
         return Err(failure("TOOL_NOT_IMPLEMENTED", "工作关联服务未接线。", 503));
     };
-    // 关联只改变持久关系，不扩大本轮授权根目录。
     let mut normalized = args;
     normalized["path"] = json!(path);
     execute("work.folder.bind".into(), normalized).await
@@ -1555,7 +1552,7 @@ async fn execute_inner(
             }
         }
         all.extend(super::gateway_mcp::servers(ctx).iter().map(|server|json!({"name":format!("mcp.{}",server["id"].as_str().unwrap_or("")),"description":format!("MCP service {}. Load this group to discover its actual enabled tools; configured does not imply ready.",server["name"].as_str().unwrap_or("")),"source":format!("mcp:{}",server["id"].as_str().unwrap_or("")),"serverId":server["id"]})));
-        // 别名与排序仍由既有原生规则负责；传输接线不重新实现另一套语义识别。
+        // 别名与排序仍由现有原生规则负责；传输接线不重新实现另一套含义识别。
         let indexes = super::discovery::calculate(
             "tools.searchTools",
             &json!({"descriptors":all,"query":args["query"],"includeScores":true}),
@@ -1622,7 +1619,7 @@ fn execution_environment(
         && result["tokenVerified"] == true
         && result["activeProcessesAfterExit"] == 0
     {
-        // runner.sandboxReceipt 已在返回前核验这些事实。
+        // runner.sandboxReceipt 已在返回前检查这些事实。
         json!({"available":true,"sandbox":"appcontainer","failClosed":true,"checksChildToken":true,"network":result["network"]})
     } else {
         result.clone()
@@ -1644,7 +1641,7 @@ pub(crate) async fn checked_configuration(
     checked.config["configurationGeneration"] = json!(generation);
     checked.config["mcpConfigurationGeneration"] =
         json!(super::gateway_mcp::configuration_generation(ctx));
-    // 未持久化的上下文用于内部发现或夹具；正式请求始终带有已保存的配置修订号。
+    // 未保存的上下文用于内部发现或夹具；正式请求始终带有已保存的配置修订号。
     if ctx.config["revision"].is_u64() {
         let current = get_config(ctx).await?;
         let original = super::gateway_mcp::servers(ctx);
@@ -1794,7 +1791,7 @@ pub async fn execute(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    // 错误读取分页在配置、发现和通用 schema 校验前返回可纠正回执，不扫描目录或改变读取游标。
+    // 错误读取分页在配置、发现和通用 schema 校验前返回可纠正结果，不扫描目录或改变读取游标。
     let pagination = match tool_name {
         "skill.list" => super::service_skill_discovery::list_page(&args).map(|_| ()),
         "skill.resource.read" => super::service_skills::resource_page(&args).map(|_| ()),
@@ -1821,7 +1818,7 @@ pub async fn execute(
     };
     let ctx = checked.as_ref().unwrap_or(ctx);
     let approval_arguments = args.clone();
-    // 等待时目标或配置变化使旧审批失效；执行前再次核验。
+    // 等待时目标或配置变化使旧审批失效；执行前再次检查。
     if ctx.approved && ctx.config["approvedInvocation"]["taskApproval"].is_object() {
         let binding = task_approval_binding(
             tool_name,
@@ -2746,7 +2743,7 @@ pub async fn recover_mcp_task_checkpoint(
     super::gateway_mcp::recover_checkpoint(handle, original_call_id, ctx).await
 }
 
-/// 迁移要取得核验清理结果，尽力退出应用还不够。
+/// 迁移要取得检查清理结果，尽力退出应用还不够。
 pub async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     crate::training::shutdown_checked(&ctx.data_home).await?;
     super::gateway_mcp_oauth::shutdown(ctx).await;
@@ -3109,7 +3106,7 @@ mod tests {
         {
             let file = root.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            // 夹具只核验发现路径；不运行模拟执行文件或依赖。
+            // 夹具只检查发现路径；不运行模拟执行文件或依赖。
             std::fs::write(file, "private dependency discovery fixture").unwrap();
         }
         let manifest = json!({"schemaVersion":1,

@@ -153,7 +153,7 @@ fn fingerprint(
     digest.update(salt);
     digest.update(domain);
     digest.update(previous);
-    // 直接计算 JSON 哈希，不复制大图片，也不将提示原文写入回执。
+    // 直接计算 JSON 哈希，不复制大图片，也不将提示原文写入结果。
     let _ = serde_json::to_writer(DigestWriter(&mut digest), &Canonical(value, shape));
     digest.finalize().into()
 }

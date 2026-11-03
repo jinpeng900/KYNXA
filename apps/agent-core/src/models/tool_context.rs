@@ -11,7 +11,7 @@ use super::{
 const MAX_CHECKPOINT_EVIDENCE: usize = 60;
 const MIN_CHECKPOINT_EXCERPT_UNITS: usize = 96;
 
-/// 保留真实回执正文，不让 JSON 包装的头尾元数据挤掉原文；这里只做摘录，不生成语义总结。
+/// 保留真实结果正文，不让 JSON 包装的头尾元数据挤掉原文；这里只做摘录，不生成含义总结。
 pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
     fn body(content: &Value, depth: usize) -> Option<String> {
         if depth > 4 {
@@ -38,7 +38,7 @@ pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
         }
         for field in ["text", "content"] {
             if let Some(value) = content.get(field).filter(|value| value.is_string()) {
-                // 真实 JSON 文件正文仍是原文；只有外层回执字符串作为包装解码，不二次吞掉 JSON 原文。
+                // 真实 JSON 文件正文仍是原文；只有外层结果字符串作为包装解码，不二次吞掉 JSON 原文。
                 return value.as_str().map(str::to_owned);
             }
         }
@@ -103,7 +103,7 @@ fn compact_failure_details(value: &Value) -> Value {
     Value::Object(details)
 }
 
-/// 提取真实回执定位字段；大正文、媒体和推理不混入来源元数据。
+/// 提取真实结果定位字段；大正文、媒体和推理不混入来源元数据。
 pub(crate) fn source_metadata(content: &Value) -> Value {
     let parsed;
     let content = if let Some(text) = content.as_str() {
@@ -1152,7 +1152,7 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
     Some(evidence)
 }
 
-/// 仅映射一份紧凑回执身份；完整带哈希回执保留在侧车和归档中。
+/// 仅映射一份紧凑结果身份；完整带哈希结果保留在侧车和归档中。
 fn compact_evidence(record: &Value) -> Value {
     let source = &record["source"];
     let arguments = &record["arguments"];
@@ -1234,13 +1234,13 @@ fn compact_evidence(record: &Value) -> Value {
     output
 }
 
-/// 完整公开工作事实与游标绑定真实核验归档；模型输入只是限量映射，不成为原始证据或权限。
+/// 完整公开工作事实与游标绑定真实检查归档；模型输入只是限量映射，不成为原始证据或权限。
 pub(crate) fn working_summary_payload(summary: &Value) -> Value {
     let payload_version = summary["archive"]["payloadVersion"].as_u64().unwrap_or(1);
     let mut payload = json!({"format":"kynxa-public-working-summary","version":payload_version,"instructionAuthority":false,"semanticCorrectnessCertified":false,
         "facts":summary["facts"],"sources":summary["sources"],"goalSignature":summary["goalSignature"],"preferredResultId":summary["preferredResultId"],
         "completedSources":summary["completedSources"],"partialSources":summary["partialSources"],"unprocessedSources":summary["unprocessedSources"]});
-    // 旧载荷保留原有核验哈希；新归档排除不增加工作证据的计数，避免仅统计变化造成重复回读。
+    // 旧载荷保留原有检查哈希；新归档排除不增加工作证据的计数，避免仅统计变化造成重复回读。
     if payload_version == 1 {
         payload["metadataOnlySources"] = summary["metadataOnlySources"].clone();
     } else {
@@ -1997,7 +1997,7 @@ impl ToolContextState {
                 evidence.push(source);
             }
         }
-        // 原始回执跨多次检查点保留；派生归档读取不替代原件身份。
+        // 原始结果跨多次检查点保留；派生归档读取不替代原件身份。
         evidence.sort_by(|left, right| {
             evidence_priority(left)
                 .cmp(&evidence_priority(right))
@@ -2096,7 +2096,7 @@ impl ToolContextState {
                                 .is_some_and(|(processed, total)| processed >= total)
                     });
                 if summarized {
-                    // 版本与范围仍由已核验侧车保存；模型已有事实时不重复塞入整份来源元数据。
+                    // 版本与范围仍由已检查侧车保存；模型已有事实时不重复塞入整份来源元数据。
                     projected = json!({"tool":record["tool"],"resultRef":{"id":record["resultRef"]["id"]},"summarized":true});
                     for field in ["path", "url", "sourceId"] {
                         if let Some(value) = record["source"].get(field).filter(|value| !value.is_null()) {
@@ -2193,7 +2193,7 @@ impl ToolContextState {
                     .unwrap()
                     .remove("workingFactsNotice");
             } else if content["workingSummaryArchive"].get("navigation").is_some() {
-                // 小窗口保留核验归档及读取参数，先移除重复说明；不裁掉引用、非指令标记或未知操作。
+                // 小窗口保留检查归档及读取参数，先移除重复说明；不裁掉引用、非指令标记或未知操作。
                 let archive = content["workingSummaryArchive"].as_object_mut().unwrap();
                 for field in ["kind", "offsetUnit", "navigation"] {
                     archive.remove(field);
@@ -2214,7 +2214,7 @@ impl ToolContextState {
                         .saturating_add(1)
                 );
             } else if !array(&content["workingFacts"]).is_empty() {
-                // 只有物理预算装不下时才裁剪语义事实；正式原件与已处理游标保留。
+                // 只有物理预算装不下时才裁剪含义事实；正式原件与已处理游标保留。
                 content["workingFacts"].as_array_mut().unwrap().pop();
                 content["workingFactsOmitted"] = json!(
                     content["workingFactsOmitted"]

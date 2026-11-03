@@ -33,7 +33,7 @@ pub struct ResourceService {
     next_id: Arc<AtomicU64>,
 }
 
-/// 调用方被丢弃或超时后仍须结算原准入回执，避免晚到的授予租约失去释放者。
+/// 调用方被丢弃或超时后仍须结算原准入结果，避免晚到的授予租约失去释放者。
 struct PendingAdmission {
     service: Arc<ResourceService>,
     request_id: u64,
@@ -296,7 +296,7 @@ impl ResourceService {
                 return Err(GatewayError::new("RESOURCE_CANCELLED", "资源等待已取消。", 499));
             }
         };
-        // 已选分支取得结算回执后，授予资源交由调用方持有；其余退出统一经过待准入保护清理。
+        // 已选分支取得结算结果后，授予资源交由调用方持有；其余退出统一经过待准入保护清理。
         admission.attempt.take();
         result
             .map_err(|_| GatewayError::new("RESOURCE_RUNTIME_EXITED", "资源等待任务退出。", 503))?
@@ -426,7 +426,7 @@ pub struct ResourceLease {
     pub allocation: Value,
 }
 impl ResourceLease {
-    /// 取消外部派发不证明任务已停止；停止续租后，资源服务到期仍保留隔离预约，核验完成才显式释放。
+    /// 取消外部派发不证明任务已停止；停止续租后，资源服务到期仍保留隔离预约，检查完成才显式释放。
     pub fn retain_unknown_on_drop(&mut self) {
         self.release_on_drop = false;
     }

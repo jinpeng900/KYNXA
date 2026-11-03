@@ -57,7 +57,6 @@ public sealed record BrowserConnectionSettings(string Engine, BrowserConnectionM
             string argument = previous[index], name = argument.Split('=', 2)[0];
             if (ValueOptions.Contains(name))
             {
-                // 同一模式下保留用户明确配置的独立浏览器目录。
                 if ((Mode == BrowserConnectionMode.Independent && (name is "--user-data-dir" or "--userDataDir")) ||
                     (name == "--profile-dir-name" && previousMode == Mode))
                 {

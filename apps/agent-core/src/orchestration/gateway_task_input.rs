@@ -90,7 +90,7 @@ pub(crate) fn read_resolved_limits(root: &Path, reference: &Value) -> Option<Val
         .cloned()
 }
 
-/// 完整验收项保存在哈希核验后的输入中，任务短标签不影响要求。
+/// 完整验收项保存在哈希检查后的输入中，任务短标签不影响要求。
 pub(crate) fn read_acceptance_requirements(root: &Path, reference: &Value) -> Option<Vec<String>> {
     let value = read_input_document(root, reference)?;
     value

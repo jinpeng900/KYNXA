@@ -1,7 +1,7 @@
 namespace KYNXA_Desktop.Layout;
 
 /// <summary>
-/// 主界面几何尺寸使用设备无关像素；不包含视图或持久化状态。
+/// 主界面几何尺寸使用设备无关像素；不包含视图或保存状态。
 /// </summary>
 public static class ShellLayoutMetrics
 {

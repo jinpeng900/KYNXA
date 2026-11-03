@@ -189,7 +189,7 @@ public sealed partial class ShellPage
                             or "assistant_segment" or "content_snapshot") continue;
                         if (pending.WaitingReplyAnchorId is Guid expectedReply && (update.Type is "completed" or "cancelled" or "failed")
                             && update.ReplyMessageId != expectedReply) continue;
-                        // 传输接受可能早于正式写入；收到模型输出后才确认用户消息已进入持久化执行流程。
+                        // 传输接受可能早于正式写入；收到模型输出后才确认用户消息已进入保存执行流程。
                         if (!pending.UserPersisted && update.Type is "reasoning_delta" or "text_delta" or "assistant_segment" or "completed")
                         {
                             _projectStore.AcceptSubmittedMessage(pending.ConversationId, pending.UserMessageId);
@@ -251,7 +251,7 @@ public sealed partial class ShellPage
                                 break;
                             case "terminal_output":
                                 continue; // Command output stays in the formal tool receipt; it has no sidebar projection.
-                                // 命令输出保留在正式工具回执中，不生成侧栏映射。
+                                // 命令输出保留在正式工具结果中，不生成侧栏映射。
                             case "workspace_terminal_open":
                                 AcceptWorkspaceTerminal(pending.ConversationId, update);
                                 continue;
@@ -512,7 +512,7 @@ public sealed partial class ShellPage
             if (_chatClosing || IsReplyInProgress(chat.Id) || FindChat(chat.Id).Chat != chat) return;
             if (detail is not null)
             {
-                // 重试续接原任务和回执，已有回复保留，不重发原问题或删除正文。
+                // 重试续接原任务和结果，已有回复保留，不重发原问题或删除正文。
                 var receipt = await _tasksApiClient.ControlAsync(chat.Id, detail.Task.TaskId, detail.Task.Version,
                     "resume", project?.Id, deadline.Token);
                 await ObserveResumedTaskAsync(receipt.Task, detail.Checkpoint, expectedReplyId: failed.Message.Id);

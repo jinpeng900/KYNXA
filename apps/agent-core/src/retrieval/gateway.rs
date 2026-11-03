@@ -194,7 +194,6 @@ pub(crate) fn enqueue_conversation_semantic(config: &GatewayConfig, conversation
     }
 }
 
-/// 保留原消息来源，不拼接不同来源正文。
 pub(crate) fn conversation_message_sources(chat: &str, messages: &[Value]) -> Vec<Value> {
     let users = messages
         .iter()
@@ -1962,7 +1961,7 @@ fn finish_semantic(
         if settings["local"]["semantic"] == "off" {
             continue;
         }
-        // 词法发布已核验版本且向量完整时，直接复用，不重复解析文档。
+        // 词法发布已检查版本且向量完整时，直接复用，不重复解析文档。
         let receipt =
             gateway_index::reuse_semantic(config, &source, &settings["local"]).and_then(|cached| {
                 match cached {

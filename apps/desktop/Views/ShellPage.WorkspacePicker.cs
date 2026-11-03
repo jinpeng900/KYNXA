@@ -71,7 +71,6 @@ public sealed partial class ShellPage
             button.Click += (_, _) =>
             {
                 menu.Hide();
-                // 先收起菜单，再在现有工作区右栏展开行内编辑。
                 DispatcherQueue.TryEnqueue(async () => await action());
             };
             actions.Children.Add(button);

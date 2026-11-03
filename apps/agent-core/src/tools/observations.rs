@@ -3,7 +3,6 @@ use sha2::{Digest, Sha256};
 
 const MAX_OBSERVATIONS: usize = 256;
 
-/// 代理与重复读取保护共用同一来源身份计算。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     match operation {
         "observations.fingerprint" => Ok(arguments
@@ -408,7 +407,7 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 && is_truthy(&value["resultRef"]["sha256"])
                 && value["text"].is_string() =>
         {
-            // 页身份使用原始不可变归档与实际范围，与回执 ID 和调用说明无关。
+            // 页身份使用原始不可变归档与实际范围，与结果 ID 和调用说明无关。
             json!([
                 value["resultRef"]["id"],
                 value["resultRef"]["sha256"],

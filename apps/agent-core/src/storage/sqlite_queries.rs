@@ -208,7 +208,7 @@ fn vector_status(connection: &Connection, scopes: &[Value]) -> ContractResult {
     )
 }
 
-/// 同一快照内核验范围与引用新鲜度，授权后才返回原文。
+/// 同一快照内检查范围与引用新鲜度，授权后才返回原文。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if [
         "storage.index.vectorCacheStats",

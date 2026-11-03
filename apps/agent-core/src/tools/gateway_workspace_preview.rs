@@ -352,7 +352,7 @@ fn office_package_fallback(bytes: &[u8], kind: &str) -> Result<Option<&'static s
             if entry.size() > xml_part_limit || expanded_xml > xml_budget {
                 fallback = Some("large-xml");
             }
-            // 此处检查总容量；幻灯片和表格按需核验部件后生成 DOM，不预解压后续页。
+            // 此处检查总容量；幻灯片和表格按需检查部件后生成 DOM，不预解压后续页。
             if kind == "docx" || name == main {
                 xml_parts.push(index);
             }
@@ -790,7 +790,7 @@ pub(crate) async fn office_pdf(
     let input_directory = temporary.join("input");
     tokio::fs::create_dir_all(&input_directory).await?;
     let input = input_directory.join(path.file_name().unwrap_or_default());
-    // 转换已核验的字节副本，保证缓存版本与实际转换内容一致。
+    // 转换已检查的字节副本，保证缓存版本与实际转换内容一致。
     tokio::fs::write(&input, source_bytes).await?;
     let profile = url::Url::from_directory_path(temporary.join("profile"))
         .map_err(|_| failure("PREVIEW_CONVERTER_FAILED", "转换缓存路径不可用。", 500))?;

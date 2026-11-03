@@ -28,7 +28,7 @@ public sealed partial class ShellPage
         {
             if (pending.Message.Status == "completed" || pending.PauseConfirmed)
             {
-                // 正式流结束或暂停回执只清除该根过期的活动映射，不改其他任务和正式记录。
+                // 正式流结束或暂停结果只清除该根过期的活动映射，不改其他任务和正式记录。
                 if (pending.TaskId is Guid taskId)
                 {
                     recovery.Tasks = recovery.Tasks?.Where(task => task.TaskId != taskId).ToArray();
@@ -128,7 +128,7 @@ public sealed partial class ShellPage
             {
                 if ((recovery.Tasks ?? []).Any(task => task.ParentTaskId is null && task.State is "queued" or "running"))
                 { recovery.Finished = true; return; }
-                // 等待既有历史加载回调；稳定聊天没有生成中的当前回复时，不额外读取终态详情或刷新。
+                // 等待现有历史加载回调；稳定聊天没有生成中的当前回复时，不额外读取终态详情或刷新。
                 if (!_historyPages.TryGetValue(recovery.Chat.Id, out var loadedHistory) ||
                     !loadedHistory.Initialized || loadedHistory.Loading) return;
                 if (!recovery.Chat.Messages.Any(message => message.Role == "assistant" &&
@@ -152,7 +152,7 @@ public sealed partial class ShellPage
                 if (Guid.TryParse(current.RequestId, out var requestId)
                     && FindTaskSteeringReply(recovery.Chat, requestId) is { Status: "streaming" } saved)
                 {
-                    // 已保存的等待任务没有生成；仅结束可重建的展示状态，原文和回执保持不变。
+                    // 已保存的等待任务没有生成；仅结束可重建的展示状态，原文和结果保持不变。
                     saved.Status = "interrupted"; saved.ExecutionPhase = string.Empty;
                     for (int i = 0; i < saved.AssistantSegments.Count; i++)
                         if (saved.AssistantSegments[i].Status == "streaming")

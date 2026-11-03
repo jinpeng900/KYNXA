@@ -1,4 +1,4 @@
-//! 在调用端给定的 token 预算内，根据已核验能力快照组装请求指引；不探测或执行工具。
+//! 在调用端给定的 token 预算内，根据已检查能力快照组装请求指引；不探测或执行工具。
 
 use serde_json::{Value, json};
 
@@ -306,7 +306,7 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
         "Honor user cancellation; preserve settled receipts and resume only when requested.".into(),
     );
     lines.push("User sources/scope bind; sources prepare automatically. Respect pause/off; work before vectors are ready.".into());
-    // 范围记忆存于应用 Data；查看既有记忆与确认新的长期事实是两个动作。
+    // 范围记忆存于应用 Data；查看现有记忆与确认新的长期事实是两个动作。
     if uses("memory.") {
         lines.push("Persistent memory: chat/project/user scopes in application Data, separate from work files and full history. For a memory inspection request, use authorized memory.search/read directly; do not ask again to read. Empty records mean no visible entries, not no memory capability.".into());
         lines.push("Global personal memory is for important durable cross-chat facts/preferences; project details stay in project scope. Ordinary chat, temporary execution results and software/tool usage manuals do not belong in global personal memory.".into());

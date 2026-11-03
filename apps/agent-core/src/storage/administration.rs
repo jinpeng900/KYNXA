@@ -159,7 +159,7 @@ fn hash(path: &Path) -> Result<String, ContractError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-/// 复制使用私有临时文件和流式哈希核验；永不删除原始数据。
+/// 复制使用私有临时文件和流式哈希检查；永不删除原始数据。
 fn copy_file(source: &Path, target: &Path, allow_existing: bool) -> Result<String, ContractError> {
     let digest = hash(source)?;
     if inspect(target, true, false)? {
@@ -649,7 +649,7 @@ fn calculate_storage_administration_model_home(arguments: &Value) -> ContractRes
         configured_path(&arguments["pointer"], &application)?
     };
     let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
-        // 包身份宿主将既有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
+        // 包身份宿主将现有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
         if !arguments["defaultModelHome"].is_null() {
             return Ok(json!(configured_path(
                 &arguments["defaultModelHome"],

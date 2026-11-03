@@ -8,7 +8,7 @@ struct HistoryMessage {
     units: Vec<u16>,
 }
 
-/// I/O 前后核验归属；原生历史服务负责过滤、匹配和 Unicode 分页。
+/// I/O 前后检查归属；原生历史服务负责过滤、匹配和 Unicode 分页。
 #[derive(Default)]
 pub struct HistoryState {
     messages: Vec<HistoryMessage>,

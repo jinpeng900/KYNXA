@@ -1,4 +1,4 @@
-//! 固定版本 GGUF 下载保留同目录断点，完整性核验后才发布正式模型文件。
+//! 固定版本 GGUF 下载保留同目录断点，完整性检查后才发布正式模型文件。
 
 use super::*;
 use futures_util::StreamExt;

@@ -78,7 +78,7 @@ async fn execute(
                 selected_project,
             )
             .await?;
-        // 用户显式选择整个工作时仍回传已核验的聊天身份，不允许借其他工作ID扩大查询范围。
+        // 用户显式选择整个工作时仍回传已检查的聊天身份，不允许借其他工作ID扩大查询范围。
         summary["conversationId"] = Value::String(conversation);
         summary["projectId"] = project
             .map(|id| Value::String(id.to_owned()))
@@ -105,7 +105,7 @@ async fn execute(
             .map(|value| (200, value));
     }
     if path == "/api/tasks/paused" && method == "GET" {
-        // 恢复始终限定当前正式聊天；普通侧栏可列整个工作的语义不被更改。
+        // 恢复始终限定当前正式聊天；普通侧栏可列整个工作的含义不被更改。
         if parameter(query, "projectId") != project {
             return Err(denied());
         }
@@ -145,7 +145,7 @@ async fn execute(
         "taskId",
     )?;
     if method == "GET" && parts.get(1).copied() == Some("stream") {
-        // 流入口只核验当前根任务范围；运行时随后核验执行者，不为重连读取完整诊断历史。
+        // 流入口只检查当前根任务范围；运行时随后检查执行者，不为重连读取完整诊断历史。
         let task = runtime.tasks.metadata(&task_id).await?;
         if task.scope.conversation_id != conversation || task.parent_task_id.is_some() {
             return Err(denied());

@@ -69,7 +69,7 @@ internal static class TranscriptMarkdown
         string stableHtml = append && !references ? previous!.StableHtml : string.Empty;
         int stableBlocks = append && !references ? previous!.StableBlocks : 0;
         string tail = source[stableLength..];
-        // 单个超长未完成块不能反复构建增长的 Markdown AST；先保留可选原文，结束后恢复完整语义。
+        // 单个超长未完成块不能反复构建增长的 Markdown AST；先保留可选原文，结束后恢复完整含义。
         if (tail.Length > MaximumStreamingTailCharacters)
             return new(stableHtml + "<div class=\"streaming-raw\" style=\"white-space:pre-wrap\">" + WebUtility.HtmlEncode(tail) + "</div>",
                 new(source, stableLength, stableHtml, 0, stableBlocks));

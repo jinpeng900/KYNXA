@@ -33,7 +33,7 @@ pub(crate) const MAX_PARALLEL_TOOL_CALLS: usize = 16;
 /// 每个额外并发读取预约的网关缓冲；第一个调用沿用原串行路径，不额外预约。
 const PARALLEL_READ_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
 
-/// 在有序结果循环之前执行的调用；回执仍在原调用位置写回模型历史与正式归档。
+/// 在有序结果循环之前执行的调用；结果仍在原调用位置写回模型历史与正式归档。
 pub(crate) struct Prefetched {
     pub started: Instant,
     pub dispatched: bool,
@@ -46,7 +46,6 @@ pub(crate) enum PrefetchOutcome {
     NotDispatched(Value),
     /// 工具要求审批；由有序循环走原审批路径，不在批次内等待用户。
     AwaitingApproval(Result<Value, GatewayError>),
-    /// 调用完成时已即时归档回执并结算操作日志。
     Archived { receipt: Value, reference: Value },
     /// 归档或日志结算失败；有序循环按串行路径同样上报。
     Failed(GatewayError),
@@ -84,7 +83,6 @@ pub(crate) fn parallel_resource(call: &Value) -> Option<String> {
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("call:{id}"))
         ),
-        // 同一文档的分页共享阅读进度，按请求顺序读取。
         "document.read" => format!(
             "document:{}:{}",
             arguments["mountId"].as_str().unwrap_or(""),
@@ -323,7 +321,7 @@ pub(crate) async fn admit_parallel_read(
     }
 }
 
-/// 续段轮次使用正式回复身份隔离，首条回复保留既有操作身份以兼容旧检查点。
+/// 续段轮次使用正式回复身份隔离，首条回复保留现有操作身份以兼容旧检查点。
 pub(crate) fn operation_id(context: &GatewayToolContext, call: &Value, round: u64) -> String {
     let prefix = context.config["operationNamespace"].as_str().unwrap_or("");
     if prefix.is_empty() {
@@ -336,7 +334,7 @@ pub(crate) fn operation_id(context: &GatewayToolContext, call: &Value, round: u6
     }
 }
 
-/// 在真实执行开始前记录并派发一次工具操作；未加载、复用和未派发的回执不进入此路径。
+/// 在真实执行开始前记录并派发一次工具操作；未加载、复用和未派发的结果不进入此路径。
 pub(crate) fn record_dispatch(
     journal: &TaskJournal,
     run: &RequestRun,
@@ -348,7 +346,7 @@ pub(crate) fn record_dispatch(
 ) -> Result<(), GatewayError> {
     use crate::storage::task_repository::{OperationEffect, OperationIntent, OperationState};
     let name = call["name"].as_str().unwrap_or("");
-    // 只有真实派发才推进操作状态；未加载与复用回执保留为观察，不伪造新执行。
+    // 只有真实派发才推进操作状态；未加载与复用结果保留为观察，不伪造新执行。
     let mut input_reference = json!({"kind":"conversation-tool-call","conversationId":run.conversation_id,"requestId":run.request_id,"toolCallId":call["id"],"round":round});
     if context.config["operationNamespace"].is_string() {
         input_reference["assistantMessageId"] = context.config["activeAssistantMessageId"].clone();
@@ -392,7 +390,7 @@ pub(crate) fn record_dispatch(
     Ok(())
 }
 
-/// 用已归档回执与实测工具耗时结算已派发操作。
+/// 用已归档结果与实测工具耗时结算已派发操作。
 pub(crate) fn finish_dispatch(
     journal: &TaskJournal,
     operation_id: &str,

@@ -40,7 +40,7 @@ internal static class DesktopRunner
             (error is TimeoutException || error is OperationCanceledException && deadline.IsCancellationRequested))
         {
             deadline.Cancel();
-            // 卡住的提供方无法在进程内取消；独立请求进程返回超时回执并退出后，其后台线程随之终止。
+            // 卡住的提供方无法在进程内取消；独立请求进程返回超时结果并退出后，其后台线程随之终止。
             throw new DesktopException("DESKTOP_READ_TIMEOUT", "The bounded UI Automation read timed out; no input was sent.");
         }
     }

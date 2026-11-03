@@ -680,7 +680,7 @@ pub(crate) async fn start(id: &str, ctx: &GatewayToolContext) -> Result<Value, G
             .await?;
             let gate = token_gate(&server, &owned).await;
             let guard = gate.lock().await;
-            // 持久化前重新核对配置身份，过期登录不覆盖另一服务配置。
+            // 保存前重新核对配置身份，过期登录不覆盖另一服务配置。
             let current = super::gateway::get_config(&owned).await?;
             if !current["mcpServers"]
                 .as_array()

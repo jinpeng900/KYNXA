@@ -253,7 +253,7 @@
     pendingCopies.delete(command?.requestId);
     if (!state || !state.block.isConnected || state.copyRequestId !== command.requestId) return;
     state.copyRequestId = null;
-    // 仅原生剪贴板回执能够报告成功，旧实例回执不能影响新的内容块。
+    // 仅原生剪贴板结果能够报告成功，旧实例结果不能影响新的内容块。
     showFeedback(state, command.success === true);
   }
   function resetCopies() {

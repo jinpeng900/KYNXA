@@ -706,7 +706,7 @@
       const width = scroll.clientWidth || 760, height = scroll.clientHeight || 440;
       const rows = sheet.rows.visible(scroll.scrollTop / zoom, (scroll.scrollTop + height - COLUMN_HEADER_HEIGHT) / zoom, MAX_VISIBLE_CELLS + 1);
       const columns = sheet.columns.visible(scroll.scrollLeft / zoom, (scroll.scrollLeft + width - ROW_HEADER_WIDTH) / zoom, MAX_VISIBLE_CELLS + 1);
-      // 仅当前视口超过十三万个格子时明确转入既有转换回退，常见大窗口及低缩放表格不再静默缺列。
+      // 仅当前视口超过十三万个格子时明确转入现有转换回退，常见大窗口及低缩放表格不再静默缺列。
       if (rows.length * columns.length > MAX_VISIBLE_CELLS) {
         finishViewport(); throw unsupported('XLSX visible area exceeds 131072 cells; Office page rendering is required');
       }

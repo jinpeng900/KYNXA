@@ -15,7 +15,6 @@ struct EffectReceipt {
     reusable: bool,
 }
 
-/// 请求级副作用保护，以真实派发结果为准。
 #[derive(Default)]
 pub struct EffectLedger {
     completed: Vec<(String, EffectReceipt)>,
@@ -55,7 +54,7 @@ impl EffectLedger {
                 }
                 self.receipts
                     .push(json!({"id": call["id"], "name": call["name"], "status": status}));
-                // 复用回执和未派发结果不产生新副作用，也不刷新旧状态。
+                // 复用结果和未派发结果不产生新副作用，也不刷新旧状态。
                 if result["reused"].as_bool().unwrap_or(false) || result["executed"] == false {
                     return Ok(Value::Null);
                 }
@@ -72,7 +71,7 @@ impl EffectLedger {
                 } else if !is_truthy(&result["isError"])
                     && (!is_truthy(&result["status"]) || result["status"] == "completed")
                 {
-                    // 已恢复的受保护文件状态归属于本次派发，后续修复绑定新回执。
+                    // 已恢复的受保护文件状态归属于本次派发，后续修复绑定新结果。
                     if receipt.mutable_target.is_some() {
                         if let Some(protected) = &mut self.protected_effects {
                             if protected
@@ -88,7 +87,7 @@ impl EffectLedger {
                 Ok(Value::Null)
             }
             "effects.protect" => {
-                // 冻结恢复前的回执集合；后续成功操作仅在明确检查点加入保护。
+                // 冻结恢复前的结果集合；后续成功操作仅在明确检查点加入保护。
                 let protected = self
                     .protected_effects
                     .get_or_insert_with(|| self.completed.clone());
@@ -150,8 +149,8 @@ impl EffectLedger {
     }
 
     fn invalidate_file_state(&mut self, target: Option<&str>) {
-        // 后续变更使旧文件状态回执失效；发送、提交或启动等一次性派发记录仍保留。
-        // 无法解析目标的副作用可能修改文件，只撤销文件状态回执的复用资格。
+        // 后续变更使旧文件状态结果失效；发送、提交或启动等一次性派发记录仍保留。
+        // 无法解析目标的副作用可能修改文件，只撤销文件状态结果的复用资格。
         let invalidate = |items: &mut Vec<(String, EffectReceipt)>| {
             for (_, receipt) in items {
                 if let Some(previous_target) = receipt.mutable_target.as_deref() {

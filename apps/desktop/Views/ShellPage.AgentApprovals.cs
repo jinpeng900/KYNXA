@@ -150,7 +150,7 @@ public sealed partial class ShellPage
         if (index < 0) activities.Add(tool);
         else activities[index] = tool;
         pending.Dirty = true;
-        // 实时展示回执先交给右栏，不等待流结束后才从历史中推断是否应该打开。
+        // 实时展示结果先交给右栏，不等待流结束后才从历史中推断是否应该打开。
         QueueWorkspaceResourceDiscovery(pending.ConversationId, pending.Message.Id, tool, liveReply: true);
     }
 }

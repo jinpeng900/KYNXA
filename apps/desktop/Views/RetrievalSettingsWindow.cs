@@ -296,7 +296,6 @@ public sealed partial class RetrievalSettingsWindow : Window
             }
             catch (GatewayApiException error) when (error.StatusCode == HttpStatusCode.Conflict)
             {
-                // 冲突时刷新；不把旧表单自动重放到并发更新上。
                 await LoadAsync();
                 ShowError("检索设置已在其他位置更新。已刷新，请重新选择。");
             }
@@ -448,7 +447,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         {
             var status = await _api.GetStatusAsync(observation.Token);
             if (_closed || _busy || !ReferenceEquals(_observation, observation)) return;
-            // 只观察模型驻留，不重载表单，也不以旧快照覆盖较新的索引任务回执。
+            // 只观察模型驻留，不重载表单，也不以旧快照覆盖较新的索引任务结果。
             _status = _status is { } previous ? previous with { Embedding = status.Embedding } : status;
             _statusObservationFailed = false;
             RenderEmbeddingStatus(status.Embedding);
@@ -456,7 +455,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         catch (OperationCanceledException) when (_closed || !ReferenceEquals(_observation, observation)) { }
         catch (Exception)
         {
-            // 短暂状态读取失败不能被当成模型加载失败；保留最后回执，并在下次计时重试。
+            // 短暂状态读取失败不能被当成模型加载失败；保留最后结果，并在下次计时重试。
             if (!_closed && ReferenceEquals(_observation, observation))
             {
                 _statusObservationFailed = true;
@@ -498,7 +497,7 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private static string PartialJobSummary(RetrievalIndexJob job)
     {
-        // 已处理来源不代表关键词或语义覆盖完整；有覆盖回执时分别显示真实数量。
+        // 已处理来源不代表关键词或含义覆盖完整；有覆盖结果时分别显示真实数量。
         if (job.Coverage is not { } coverage)
             return string.Format(UiText.Get("索引部分完成 · 已处理 {0}/{1} 个来源"), job.CompletedSources, job.TotalSources);
         return UiText.Get("索引部分完成") + "\n" + string.Format(

@@ -14,7 +14,7 @@ use super::{
     tool_context::ToolContextState,
 };
 
-/// 调用方复用既有准入及任务计量；模型领域不拥有另一份任务记录。
+/// 调用方复用现有准入及任务计量；模型领域不拥有另一份任务记录。
 pub type SummaryExecutor = Arc<
     dyn Fn(
             Value,
@@ -97,7 +97,7 @@ struct SummaryRequestPrefix<'a> {
     wire: Option<&'a Value>,
 }
 
-/// 仅在完整前缀装得下时复用；来源覆盖与工具调用／回执配对优先，不为缓存截断历史。
+/// 仅在完整前缀装得下时复用；来源覆盖与工具调用／结果配对优先，不为缓存截断历史。
 fn build_summary_with_prefix(
     connection: &Value,
     model: &str,
@@ -372,7 +372,7 @@ pub(crate) async fn verify_working_summary_archive(
     Ok(summary)
 }
 
-/// 已校验公开事实仅经已有仅创建、范围核验的 ToolResults 约定归档，保存后完整读回才开放省略映射。
+/// 已校验公开事实仅经已有仅创建、范围检查的 ToolResults 约定归档，保存后完整读回才开放省略映射。
 async fn archive_working_summary(
     root: &std::path::Path,
     conversation: &str,
@@ -383,7 +383,7 @@ async fn archive_working_summary(
     if uuid::Uuid::parse_str(request).is_err() {
         return Ok(None);
     }
-    // 直接保存 JSON，避免把工作笔记再包成转义字符串；旧归档仍可核验和回读。
+    // 直接保存 JSON，避免把工作笔记再包成转义字符串；旧归档仍可检查和回读。
     let mut candidate = summary.clone();
     candidate["archive"] = json!({"payloadVersion":2});
     let canonical = super::tool_context::working_summary_payload(&candidate);
@@ -405,7 +405,7 @@ async fn archive_working_summary(
     Ok((verified["archive"]["verified"] == true).then(|| verified["archive"].clone()))
 }
 
-/// 内容变化后重新保存并回读；未变时复用本轮已核验归档。
+/// 内容变化后重新保存并回读；未变时复用本轮已检查归档。
 async fn refresh_working_summary_archive(
     root: &std::path::Path,
     conversation: &str,
@@ -441,7 +441,7 @@ async fn refresh_working_summary_archive(
     Ok(())
 }
 
-/// 工作摘要复用调用方模型执行器及计量，只读取正式公开回执；不建立记忆、不读取模型私有推理。
+/// 工作摘要复用调用方模型执行器及计量，只读取正式公开结果；不建立记忆、不读取模型私有推理。
 async fn summarize_current_step_with_prefix(
     connection: &Value,
     model: &str,
@@ -671,7 +671,7 @@ async fn summarize_current_step_with_prefix(
             })
         })
         .count() as u64;
-    // 整理按待处理来源扩大并给继续执行及最终答复留调用；原执行器仍核验真实任务总额度。
+    // 整理按待处理来源扩大并给继续执行及最终答复留调用；原执行器仍检查真实任务总额度。
     let summary_call_limit = pending_sources
         .saturating_mul(2)
         .saturating_add(1)
@@ -768,7 +768,7 @@ async fn summarize_current_step_with_prefix(
                 .filter(|fact| fact["resultId"] == reference["id"])
                 .cloned()
                 .collect::<Vec<_>>();
-            // 摘要游标只切分归档摘录；原文件实际读取范围来自工具回执，不据摘要剩余量安排重读。
+            // 摘要游标只切分归档摘录；原文件实际读取范围来自工具结果，不据摘要剩余量安排重读。
             let mut payload = json!({"userGoals":user_goals,"priorFacts":source_prior_facts,"budgetTokens":source_content_budget.saturating_sub(32),"guidance":"Return content facts only for source.resultId. Other sources are already saved and will be merged unchanged by the program. Keep concrete final values, superseded-value distinctions and semantic gaps concise within budgetTokens. Summary window offsets are internal processing progress, not unread file ranges; exclude them and any inferred reread tasks from facts.","source":{"resultId":reference["id"],"identity":source["source"],"offset":offset,"endOffset":total,"totalCharacters":total,"offsetUnit":"utf16-code-units","windowScope":"archived-public-receipt-excerpt","originalReadRange":{"offset":source["source"]["offset"],"nextOffset":source["source"]["nextOffset"],"totalCharacters":source["source"]["totalCharacters"]},"text":""}});
             if refine_saved {
                 // 原件已分析完成时，只压缩现有成果以供交付，不重新读取或分析原文件。
@@ -868,7 +868,7 @@ async fn summarize_current_step_with_prefix(
                             return Err(ModelError::cancelled());
                         }
                         if repair_fallback.is_object() {
-                            // 可选精简失败时已核验候选及游标仍有效，完整事实可从真实归档回读。
+                            // 可选精简失败时已检查候选及游标仍有效，完整事实可从真实归档回读。
                             facts = protocol::array(&repair_fallback["facts"]).to_vec();
                             cursors = protocol::array(&repair_fallback["sources"]).to_vec();
                             summary_archive = repair_fallback["archive"].clone();
@@ -1287,7 +1287,6 @@ async fn summarize_with_prefix(
         ));
     };
     let mut plan = plan.clone();
-    // 按正文预算验收，思考/正文传输额度另行限额。
     plan["maxOutputTokens"] = output_allocation["summaryOutputBudgetTokens"].clone();
     let opened = summary_call(
         "open",
@@ -1573,7 +1572,7 @@ fn opaque(message: &Value) -> bool {
         })
 }
 
-/// 额度元信息来自当前运行：原历史来源及持久工具回执。
+/// 额度元信息来自当前运行：原历史来源及持久工具结果。
 pub async fn compact_request(
     connection: &Value,
     model: &str,
@@ -1717,7 +1716,7 @@ pub async fn compact_request_with_executor(
         &json!({"protocol":name,"conversationId":budget["conversationId"],"conversationIdValid":crate::storage::identity(&budget["conversationId"]).is_ok(),"items":descriptors(&items),"sources":sources}),
     )?;
     for source in budget["resultSources"].as_array().into_iter().flatten() {
-        // 根据实际协议身份匹配回执，避免上一轮压缩后的数组偏移改变所属工具。
+        // 根据实际协议身份匹配结果，避免上一轮压缩后的数组偏移改变所属工具。
         for (message, item) in &items {
             let id = source["callId"].as_str().unwrap_or("");
             let location = if message["tool_call_id"] == id || message["call_id"] == id {
@@ -1754,7 +1753,7 @@ pub async fn compact_request_with_executor(
             )?;
         }
     }
-    // 替换旧的重复回执仍会改写缓存前缀；可选观察去重只在实际压缩或已有公开检查点续写时进行。
+    // 替换旧的重复结果仍会改写缓存前缀；可选观察去重只在实际压缩或已有公开检查点续写时进行。
     if pressure || pending_public_sources {
         let actions = call(
             &mut state,
@@ -2648,7 +2647,7 @@ mod tests {
             second.history_sources.last().unwrap()["checkpointSemanticSummary"]["semanticCorrectnessCertified"],
             false
         );
-        // 同一已核验版本和读取范围复用摘要游标。
+        // 同一已检查版本和读取范围复用摘要游标。
         let duplicate_reference = data::save_tool_result(
             &root,
             &chat,
@@ -3452,7 +3451,7 @@ mod tests {
         .unwrap();
         assert_eq!(cached["modelCalls"], 0);
         assert_eq!(failure_calls.load(Ordering::Acquire), 2);
-        // 可选精简共享原派发上限；反馈失败仍复用已核验完整归档及处理游标，不反复分析原件。
+        // 可选精简共享原派发上限；反馈失败仍复用已检查完整归档及处理游标，不反复分析原件。
         let optional_calls = Arc::new(AtomicUsize::new(0));
         let count = optional_calls.clone();
         let archived_candidate = hard.clone();
@@ -4030,7 +4029,7 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-        // 输入额度改变但仍有余量时，不重新映射已经完成的操作及其回执。
+        // 输入额度改变但仍有余量时，不重新映射已经完成的操作及其结果。
         budget["inputBudgetTokens"] = json!(48000);
         budget["declarations"] = json!([{"type":"function","function":{"name":"additional_tool","parameters":{"type":"object"}}}]);
         let second = compact_request(

@@ -263,7 +263,6 @@ fn connection_contract(operation: &str, args: Value) -> Result<Value, ModelError
     Ok(value)
 }
 
-/// 经正式存储读取并原子替换连接配置。
 pub struct ModelConfigStore {
     home: PathBuf,
 }

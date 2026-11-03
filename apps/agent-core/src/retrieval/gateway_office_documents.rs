@@ -86,7 +86,7 @@ impl DocumentText {
     }
 }
 
-/// 在解析器按声明大小分配内存前核验所有 ZIP 成员；不解压到磁盘或跟随容器路径。
+/// 在解析器按声明大小分配内存前检查所有 ZIP 成员；不解压到磁盘或跟随容器路径。
 pub(crate) struct DocumentPackage<'a> {
     archive: zip::ZipArchive<Cursor<&'a [u8]>>,
     pub(crate) names: Vec<String>,

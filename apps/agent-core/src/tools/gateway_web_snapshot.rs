@@ -43,7 +43,6 @@ impl PageSnapshot {
             .as_str()
             .is_some_and(|hash| self.value["responseHash"].as_str() != Some(hash));
         let unanchored = !cached && requested > 0 && input["responseHash"].as_str().is_none();
-        // 快照过期后正文可能变化，从新版第一页恢复。
         let mut offset = if changed || unanchored {
             0
         } else {

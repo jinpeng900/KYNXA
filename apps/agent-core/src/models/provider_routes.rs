@@ -1,8 +1,8 @@
-//! 可选的请求路线：经核验的替代端点承载已配置连接；保存的连接配置、密钥与模型名不变。
+//! 可选的请求路线：经检查的替代端点承载已配置连接；保存的连接配置、密钥与模型名不变。
 
 use serde_json::{Value, json};
 
-/// 默认仅为已核验工具更新的 deepseek-flash 改用 Messages；"0" 关闭改道，"1" 不要求工具更新已核验。
+/// 默认仅为已检查工具更新的 deepseek-flash 改用 Messages；"0" 关闭改道，"1" 不要求工具更新已检查。
 const DEEPSEEK_MESSAGES_SWITCH: &str = "KYNXA_DEEPSEEK_MESSAGES_ROUTE";
 const DEEPSEEK_MESSAGES_BASE_URL: &str = "https://api.deepseek.com/anthropic";
 
@@ -24,7 +24,7 @@ pub(crate) fn project_connection(connection: &mut Value, model: &str) {
     let enabled = match std::env::var(DEEPSEEK_MESSAGES_SWITCH).as_deref() {
         Ok("0") => false,
         Ok("1") => true,
-        // 默认只改道已核验新增工具不断缓存的模型。
+        // 默认只改道已检查新增工具不断缓存的模型。
         _ => model == "deepseek-flash",
     };
     project_connection_with(connection, model, enabled);
@@ -43,7 +43,7 @@ fn project_connection_with(connection: &mut Value, model: &str, enabled: bool) {
     {
         return;
     }
-    // 中途新增工具目前只对 deepseek-flash 核验；其他模型仍按原方式重建声明。
+    // 中途新增工具目前只对 deepseek-flash 检查；其他模型仍按原方式重建声明。
     let tool_update = (model == "deepseek-flash").then_some("addition-only");
     connection["routeProjection"] = json!({"kind":"deepseek-messages","originalProtocol":"openai-completions",
         "originalBaseUrl":base_url,"toolUpdate":tool_update});

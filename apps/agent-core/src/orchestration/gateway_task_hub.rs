@@ -20,7 +20,7 @@ use tokio::sync::{Notify, OnceCell, watch};
 
 type Result<T> = std::result::Result<T, GatewayError>;
 
-/// 插话去重包含不可变附件身份；纯文本仍兼容原有回执。
+/// 插话去重包含不可变附件身份；纯文本仍兼容原有结果。
 pub(super) fn steering_content_hash(text: &str, attachments: &Value) -> String {
     if attachments
         .as_array()
@@ -187,7 +187,7 @@ impl TaskHub {
         })
         .await
     }
-    /// 只读取正式任务行；连接活动回复无需扫描子任务、回执或成果记录。
+    /// 只读取正式任务行；连接活动回复无需扫描子任务、结果或成果记录。
     pub(crate) async fn metadata(&self, id: &str) -> Result<TaskRecord> {
         let id = id.to_owned();
         self.store(move |repository| repository.load(&id)).await
@@ -354,7 +354,6 @@ impl TaskHub {
         Ok(json!({"task":changed,"affectedTaskIds":affected,"recovery":recovery}))
     }
 
-    /// 结算已有原始回执，缺失的证据记为未知。
     async fn reconcile_recovery_tree(&self, selected: &TaskRecord) -> Result<Value> {
         let _recovery = self.recovery_gate.lock().await;
         let repository = self.repository().await?;
@@ -648,7 +647,7 @@ impl TaskHub {
         runtime.signal_task_steering(id);
         self.changes.notify_waiters();
         if changed.state != TaskState::Paused {
-            // 取消过时模型生成；已经派发的工具继续结算真实回执，不重放成功操作。
+            // 取消过时模型生成；已经派发的工具继续结算真实结果，不重放成功操作。
             let reconnect = self.wake_queued_steering(&changed).await?;
             return Ok(
                 json!({"task":changed,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":reconnect,"resumeRequired":false}),
@@ -691,7 +690,7 @@ impl TaskHub {
         if task.state != TaskState::Queued || runtime.live_task_run(&task.task_id).is_some() {
             return Ok(false);
         }
-        // 仅退掉已结算的传输映射，租约及操作回执仍是正式依据。
+        // 仅退掉已结算的传输映射，租约及操作结果仍是正式依据。
         runtime.wait_task_delivery_boundary(&task.task_id).await;
         let current = self.repository().await?.load(&task.task_id)?;
         if current.state != TaskState::Queued || runtime.live_task_run(&task.task_id).is_some() {
@@ -1304,7 +1303,7 @@ impl TaskHub {
         context: GatewayToolContext,
         mut input: Value,
     ) -> Result<Value> {
-        // 替代执行先等待旧租约，有效 Worker 仍持有回执提交权。
+        // 替代执行先等待旧租约，有效 Worker 仍持有结果提交权。
         self.wait_existing_lease(&child.task_id, Some(context.cancellation.clone()))
             .await?;
         // 模型和工具 I/O 各自申请资源；整任务持有槽位会让嵌套委派等待形成死锁。
@@ -1439,7 +1438,7 @@ impl TaskHub {
                     .await?,
                 );
             }
-            // 新引导到达即交还父循环处理；子任务继续原执行，保留已派发操作及真实回执。
+            // 新引导到达即交还父循环处理；子任务继续原执行，保留已派发操作及真实结果。
             if *steering.borrow_and_update() != expected_steering {
                 let mut response = self
                     .wait_page_response(&parent, tasks, false, &args)

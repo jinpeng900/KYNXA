@@ -1,4 +1,4 @@
-//! 可过期图像载荷独立于不可变执行回执，只清理本模块创建的旁车。
+//! 可过期图像载荷独立于不可变执行结果，只清理本模块创建的旁车。
 
 use super::{ContractError, ContractResult, managed_files};
 use base64::Engine;

@@ -46,7 +46,7 @@ struct Embedding {
     length: usize,
 }
 
-/// 原生准备服务拥有限量指纹及回执决策；原始 SDK 正文与对象身份句柄留在外部。
+/// 原生准备服务拥有限量指纹及结果决策；原始 SDK 正文与对象身份句柄留在外部。
 #[derive(Default)]
 pub struct SourcePreparationState {
     sequence: u64,

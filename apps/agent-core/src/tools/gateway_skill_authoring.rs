@@ -1,4 +1,4 @@
-//! 沿用现有技能目录、工具回执与调用审批，实现项目编写、校验和经确认的全局复用。
+//! 沿用现有技能目录、工具结果与调用审批，实现项目编写、校验和经确认的全局复用。
 
 use super::{
     gateway::{self, GatewayToolContext, WorkerCancellation},
@@ -338,7 +338,7 @@ fn commit_package(
             }
         }
     })();
-    // 只清理已核验的自有暂存目录；不删除正式目标或回滚失败时保存的旧版目录。
+    // 只清理已检查的自有暂存目录；不删除正式目标或回滚失败时保存的旧版目录。
     let mut cleanup_warnings = Vec::new();
     for path in [&stage, &backup] {
         if *path == backup && result.is_err() && moved_previous {
@@ -364,7 +364,7 @@ fn commit_package(
             cleanup_warnings.push(json!({"path":path,"code":error.code,"message":error.message}));
         }
     }
-    // 原子替换后的清理问题不影响已提交回执，否则会诱发重复执行。
+    // 原子替换后的清理问题不影响已提交结果，否则会诱发重复执行。
     if let Ok(receipt) = &mut result {
         if !cleanup_warnings.is_empty() {
             receipt["cleanupWarnings"] = json!(cleanup_warnings);
@@ -421,7 +421,7 @@ fn successful(value: &Value) -> bool {
     true
 }
 
-/// 提升到全局前核验原始回执；模型自报和可编辑元数据不算证据。
+/// 提升到全局前检查原始结果；模型自报和可编辑元数据不算证据。
 fn promotion_evidence(
     ctx: &GatewayToolContext,
     args: &Value,
@@ -659,7 +659,7 @@ pub(crate) async fn execute(
         .await
         .map_err(io)??;
         let (package, evidence, mut files) = prepared;
-        // 统一正文为第一个文件，使提交回执保留正确的SKILL.md原文哈希。
+        // 统一正文为第一个文件，使提交结果保留正确的SKILL.md原文哈希。
         files.sort_by_key(|file| file.relative != "SKILL.md");
         let identity = json!({"scope":"global","name":args["name"],"packageHash":package["packageHash"],"targetExpectedHash":args["targetExpectedHash"],"verification":evidence});
         if let Some(pending) = authoring_approval(ctx, name, &args, &identity, true)? {

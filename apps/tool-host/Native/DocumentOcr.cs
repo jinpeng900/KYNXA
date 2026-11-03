@@ -139,7 +139,7 @@ internal static class DocumentOcr
         uint width = decoder.PixelWidth, height = decoder.PixelHeight;
         if (width == 0 || height == 0 || width > 65536 || height > 65536 || (ulong)width * height > MaximumImagePixels)
             throw new DocumentOcrException("OCR_IMAGE_PIXEL_LIMIT", "Decoded image dimensions exceed the budget. / 图像解码尺寸超过额度。");
-        // 先核验尺寸再分配像素；WIC 在解码时缩放到 OCR 接受的尺寸，避免展开整张超大图。
+        // 先检查尺寸再分配像素；WIC 在解码时缩放到 OCR 接受的尺寸，避免展开整张超大图。
         uint maximumDimension = Math.Min(4000, OcrEngine.MaxImageDimension);
         double scale = Math.Min(1, maximumDimension / (double)Math.Max(width, height));
         uint decodedWidth = (uint)Math.Max(1, Math.Floor(width * scale));

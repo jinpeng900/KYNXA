@@ -153,7 +153,7 @@ pub struct RequestRun {
     observed_context_limits: std::sync::Mutex<Value>,
     pub created: Instant,
     pub resource_wait_ms: AtomicU64,
-    /// 本次尝试前已持久化的有效墙钟，并行子任务只计一次。
+    /// 本次尝试前已保存的有效墙钟，并行子任务只计一次。
     pub active_duration_base_ms: u64,
     /// 后台恢复任务在新增模型准入时让出当前用户交互的优先位置。
     pub is_background_recovery: AtomicBool,
@@ -189,7 +189,6 @@ impl RequestRun {
         self.replay.lock().await.generation.elapsed()
     }
 
-    /// 仅在连接身份不变时跨模型步骤复用已学额度。
     pub(crate) fn observed_model_limits(&self, origin: &str) -> Value {
         let observed = self.observed_context_limits.lock().unwrap();
         if observed["origin"].as_str() == Some(origin) {
@@ -221,7 +220,6 @@ impl RequestRun {
             .saturating_add(self.active_elapsed(self.created).as_millis() as u64)
     }
 
-    /// 检查点只推进当前尝试的单调墙钟高水位。
     pub(crate) async fn checkpoint_active_duration(&self) -> Result<(), GatewayError> {
         let Some(journal) = &self.journal else {
             return Ok(());
@@ -395,7 +393,6 @@ impl RequestRun {
         if self.finished.load(Ordering::Acquire) {
             return;
         }
-        // 远端任务句柄是私有恢复证据，不进聊天流。
         if event["type"] == "mcp_task_checkpoint" {
             if let Some(journal) = &self.journal {
                 event["conversationId"] = json!(self.conversation_id);
@@ -463,7 +460,7 @@ impl RequestRun {
             replay.generation.project(&mut event);
         }
         drop(replay);
-        // 持久化小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
+        // 保存小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
         if let Some(journal) = &self.journal {
             if event["taskId"].is_null() {
                 event["taskId"] = json!(journal.task_id());
@@ -534,7 +531,7 @@ impl RequestRun {
     }
 
     async fn publish_event(&self, event: Value) {
-        // 持久化等待结束后才推进回放水位，新观察者才不会跳过未发布的事件。
+        // 保存等待结束后才推进回放位置，新观察者才不会跳过未发布的事件。
         let mut replay = self.replay.lock().await;
         let mut final_result = if terminal_event(&event) {
             Some(self.result.lock().await)
@@ -543,7 +540,7 @@ impl RequestRun {
         };
         replay.sequence = event["eventSequence"].as_u64().unwrap();
         if event["type"] == "reply_anchor" {
-            // 新回复仅切换回放与展示归属；正式任务日志继续保留此前调用回执。
+            // 新回复仅切换回放与展示归属；正式任务日志继续保留此前调用结果。
             replay.content.clear();
             replay.reasoning.clear();
             replay.active_segment = None;
@@ -1265,7 +1262,7 @@ impl GatewayRuntime {
             stream_owner: Default::default(),
             native_cancellation,
             cancellation_key,
-            // 记录水位覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
+            // 记录位置覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
             replay: Mutex::new(ReplayState {
                 sequence: task.event_sequence,
                 ..Default::default()
@@ -1581,7 +1578,7 @@ impl GatewayRuntime {
         let (events, _) = broadcast::channel(256);
         let run = Arc::new(RequestRun {
             conversation_id: task.scope.conversation_id.clone(),
-            // 子任务查重键可以带命名空间；正式工具回执使用稳定 task UUID，恢复时身份不变。
+            // 子任务查重键可以带命名空间；正式工具结果使用稳定 task UUID，恢复时身份不变。
             request_id: task.task_id.clone(),
             fingerprint: String::new(),
             original_message_raw: None,
@@ -1662,7 +1659,7 @@ impl GatewayRuntime {
         self.begin_with_priority(input, original, background).await
     }
 
-    /// 明确续作只退役已结算的内存映射，检查点和执行回执保持不变。
+    /// 明确续作只退役已结算的内存映射，检查点和执行结果保持不变。
     pub(crate) async fn retire_revised_projection(
         &self,
         task: &crate::storage::task_repository::TaskRecord,
@@ -2213,7 +2210,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    /// 请求取消，但不丢弃仍持有执行回执的 Worker。
+    /// 请求取消，但不丢弃仍持有执行结果的 Worker。
     pub(crate) async fn interrupt_for_shutdown(&self) {
         self.close_admission();
         self.tasks.shutdown().await;
@@ -3500,7 +3497,7 @@ mod approval_tests {
         )
         .unwrap();
         runtime.tasks.metadata(&task_id).await.unwrap();
-        // 无法读取的诊断成果不参与活动回复的核验，原记录仍保留。
+        // 无法读取的诊断成果不参与活动回复的检查，原记录仍保留。
         let connection =
             rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite"))
                 .unwrap();

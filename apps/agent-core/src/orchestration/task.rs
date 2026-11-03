@@ -1,4 +1,4 @@
-//! 纯任务续接状态与公开正文增量映射；执行、预算和持久化仍由编排调用端负责。
+//! 纯任务续接状态与公开正文增量映射；执行、预算和保存仍由编排调用端负责。
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -166,7 +166,6 @@ pub(crate) fn work_scope_instruction(scope: &Value) -> String {
     )
 }
 
-/// 内部任务登记不授予修改工作产物的权限。
 pub(crate) fn scope_allows_call(scope: &Value, name: &str, read_only: bool) -> bool {
     scope_allows_mutation(scope)
         || read_only
@@ -358,7 +357,7 @@ fn retain_user_control(status: &mut Value, footer: &Value) {
     }
 }
 
-/// 完成证据来自已结算的成功回执，排队、运行中、未知或失败的派发都不算。
+/// 完成证据来自已结算的成功结果，排队、运行中、未知或失败的派发都不算。
 pub(crate) fn successful_completion_receipt(receipt: &Value) -> bool {
     if receipt["status"] != "completed"
         || receipt["isError"] == true
@@ -399,7 +398,7 @@ pub(crate) fn successful_completion_receipt(receipt: &Value) -> bool {
         })
 }
 
-/// 只有写入工具真实提交内容的回执可证明输出路径。
+/// 只有写入工具真实提交内容的结果可证明输出路径。
 pub(crate) fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> {
     if !successful_completion_receipt(receipt)
         || !matches!(
@@ -424,7 +423,6 @@ pub(crate) fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> 
         .unwrap_or_default()
 }
 
-/// 发现目录与编排维护本身不算达成外部目标。
 pub(crate) fn is_completion_evidence_tool(name: &str) -> bool {
     !matches!(
         name,
@@ -455,7 +453,6 @@ pub(crate) fn native_task_control_receipt(call: &Value, requirements: &[String])
     )
 }
 
-/// 根任务和子任务共用验收范围与证据规则。
 pub(crate) const COMPLETION_REVIEW_CONTRACT: &str = "Assess only the user's current explicit requirements against saved results and real receipts. Return a standalone <kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"unmet\":[],\"met\":[{\"requirementId\":\"requirement-1\",\"item\":\"short label\",\"evidence\":[\"exact successful call ID\"]}]}</kynxa_task>; kynxa_task is not a native tool. Cover each listed requirement with evidence matching its action, target and current version. A write proves existence; use existing readback or visual evidence only when the requirement calls for that quality. Optional improvements and extra audits are not completion gates. If a required fact is missing, name that specific target or failed check and choose continue with a concrete next step; available native tools remain usable. Repair reference formatting from saved receipts without repeating successful work or searching for internal control names. For a real blocker, return a standalone <kynxa_task>{\"state\":\"blocked\",\"blocker\":\"authorization\",\"reason\":\"specific observed refusal and affected target\",\"next\":\"the required authorization condition changes\",\"unmet\":[\"unfinished current requirement\"]}</kynxa_task>. Put the category in the top-level blocker field: user-input, authorization, external or resource. Tie the reason to an actual receipt or clearly missing condition; a first failure or ordinary implementation difficulty is not an external blocker. Save the result and wait for user continuation when that condition prevents further work; do not issue more model requests to repeat the same blocked conclusion. If requirements are logically impossible or a necessary capability is confirmed unavailable, use blocker impossible or unsupported with feasibility {basis: specific facts or reasoning, alternatives: reasonable alternatives and their limits}. Ordinary difficulty or a first failed method does not establish impossibility. Complete feasible current requirements without optional work. Do not repeat the public delivery, pad time or add verification just because this is a review.";
 
 /// 明确外部动作与当下来源问题须有真实执行证据；问候、文案、解释和纯运算不额外触发工具验收。
@@ -564,7 +561,7 @@ pub(super) fn requires_code_validation(goal: &str) -> bool {
     execution || direct_test && !test_material || repair && !declined
 }
 
-/// 普通软件启动依成功回执确认，软件名称中的渲染、演示等词不额外触发视觉验收。
+/// 普通软件启动依成功结果确认，软件名称中的渲染、演示等词不额外触发视觉验收。
 fn plain_application_launch(goal: &str) -> bool {
     static LAUNCH: OnceLock<Regex> = OnceLock::new();
     static ADDITIONAL_ACTION: OnceLock<Regex> = OnceLock::new();
@@ -620,7 +617,6 @@ fn encoded_visual_hash(encoded: &str) -> Option<String> {
     (!bytes.is_empty()).then(|| format!("{:x}", Sha256::digest(&bytes)))
 }
 
-/// 比较实际解码的媒体字节，确认新图确实投递。
 pub(crate) fn receipt_visual_hashes(canonical: &Value) -> Vec<String> {
     let content = if canonical["sessionId"].is_string() && canonical["tabId"].is_string() {
         canonical["value"]["content"]
@@ -765,7 +761,7 @@ pub(super) fn attachment_read_has_content(content: &Value) -> bool {
             .all(|field| body[*field].is_null() || body[*field] == "")
 }
 
-/// 成功的回读工具返回可观察内容或状态，发现目录和修改回执不算回读。
+/// 成功的回读工具返回可观察内容或状态，发现目录和修改结果不算回读。
 pub(crate) fn receipt_is_readback(tool: &str, canonical: &Value) -> bool {
     if tool == "attachment.read" {
         return attachment_read_has_content(canonical);
@@ -914,7 +910,6 @@ impl TaskTextProjection {
     }
 
     fn end_line(&mut self) {
-        // 围栏状态跨分块延续，保留示例中的标记原文。
         if let Some((marker, count)) = self.fence_run {
             if count >= 3 {
                 match self.fence {
@@ -1067,7 +1062,7 @@ pub enum TaskReviewRepairMode {
     RebuildFromCheckpoint,
 }
 
-/// 执行仍由调用端负责；类型分支保留既有公开返回字段。
+/// 执行仍由调用端负责；类型分支保留现有公开返回字段。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "action",
@@ -1129,7 +1124,6 @@ pub struct TaskState {
 }
 
 impl TaskState {
-    /// 只有程序匹配到的成功回执能消除该项提醒。
     pub(crate) fn acceptance_gaps(
         &self,
         expected: &[String],
@@ -1402,7 +1396,7 @@ impl TaskState {
                     replan: None,
                 };
             }
-            // 必要检查的失败或待核验状态不会被无关成功回执覆盖。
+            // 必要检查的失败或待检查状态不会被无关成功结果覆盖。
             let assessing_result = matches!(state, "complete" | "continue");
             if assessing_result && input.verification["pendingValidation"] == true {
                 let next = match input.verification["state"].as_str() {
@@ -1452,7 +1446,6 @@ impl TaskState {
                     },
                 };
             }
-            // 模型提出的下一步不扩大已满足的验收范围。
             let current_requirements_proven = assessing_result
                 && requires_evidence
                 && !input.expected_requirements.is_empty()
@@ -1479,7 +1472,6 @@ impl TaskState {
                     replan: Some(self.no_progress_rounds >= 2),
                 };
             }
-            // 执行段用尽不清除用户要求的有效工作时长。
             if input.minimum_active_ms > 0 && input.active_elapsed_ms < input.minimum_active_ms {
                 return TaskDecision::Resume {
                     reviewed: true,
@@ -3900,7 +3892,7 @@ mod tests {
             )["action"],
             "resume"
         );
-        // 未发生真实外部操作时，核验沿用原验收规则。
+        // 未发生真实外部操作时，检查沿用原验收规则。
         assert_eq!(
             state.decide(&json!({"reply":bare,"isReview":true}))["action"],
             "final"

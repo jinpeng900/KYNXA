@@ -490,7 +490,7 @@ impl HistoryProjectionState {
         }
         for (round_index, round) in array(&record["rounds"]).iter().enumerate() {
             let start = messages.len();
-            // 核验来源后才在原模型轮前恢复程序上下文，不从正文猜测来源。
+            // 检查来源后才在原模型轮前恢复程序上下文，不从正文猜测来源。
             if round["runtimeReplayAllowed"] == true
                 && super::transcript::valid_context_before(&round["contextBefore"])
             {

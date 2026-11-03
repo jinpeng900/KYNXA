@@ -178,7 +178,7 @@ fn verify_fence(
     if lease.is_none_or(|(ended, expires)| ended != 0 || expires <= now_ms()) {
         return Err(stale());
     }
-    // 取消阻止后续工作，但仍允许当前尝试记录已经派发操作的真实回执。
+    // 取消阻止后续工作，但仍允许当前尝试记录已经派发操作的真实结果。
     if !allow_controlled_receipt && (task.state.is_terminal() || task.state == TaskState::Paused) {
         return Err(blocked("Task is paused or ended. / 任务已暂停或结束。"));
     }
@@ -266,7 +266,7 @@ pub struct TaskRepository {
 }
 
 impl TaskRepository {
-    /// 核验记录不建表或改行，损坏及未来版本文件保留原样并报错。
+    /// 检查记录不建表或改行，损坏及未来版本文件保留原样并报错。
     pub fn validate_existing(root: &Path) -> Result<()> {
         let path = root.join("Agent/tasks.sqlite");
         if !managed_files::inspect(root, &path, false, true, u64::MAX)? {
@@ -1113,7 +1113,7 @@ impl TaskRepository {
                 if event.payload != payload { return Err(conflict("Steering identity was reused. / 插话身份不能复用于其他内容。")); }
                 return Ok(task);
             }
-            // 保留旧回执；同一聊天的同条消息只绑定一个根任务。
+            // 保留旧结果；同一聊天的同条消息只绑定一个根任务。
             if !steering_roots(connection, &task.scope.conversation_id, message_id)?.is_empty() {
                 return Err(ContractError::new("Steering is already bound to another task. / 这条引导已关联其他任务，请重连原任务。", "TASK_STEERING_TARGET_CONFLICT", 409));
             }
@@ -1125,7 +1125,6 @@ impl TaskRepository {
             if task.state == TaskState::Paused { task.stop_reason = Some(event_id.clone()); }
             append(connection, &mut task, &event_id, "task.user-steering", &payload)?;
             if action == "update" && task.state == TaskState::Paused {
-                // 方案变更保留旧委派回执，未知操作不重启。
                 let mut query = connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;
                 let ids = query.query_map([task_id], |row|row.get::<_,String>(0)).map_err(|_|failure())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|_|failure())?;
                 drop(query);
@@ -1143,7 +1142,7 @@ impl TaskRepository {
             Ok(task)
         })
     }
-    /// 修改正式消息前查询原有引导归属，事务写入仍会再次核验。
+    /// 修改正式消息前查询原有引导归属，事务写入仍会再次检查。
     pub fn user_steering_roots(
         &self,
         conversation_id: &str,
@@ -1198,7 +1197,7 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
-    /// 从消息水位后读取已提交展示增量，不结算模型或重放工具。
+    /// 从消息位置后读取已提交展示增量，不结算模型或重放工具。
     pub fn stream_projection(
         &self,
         task_id: &str,
@@ -1235,7 +1234,7 @@ impl TaskRepository {
         Ok(projection.finish())
     }
 
-    /// 按任务键集分页读取已提交事件，调用方逐页核验并保存水位。
+    /// 按任务键集分页读取已提交事件，调用方逐页检查并保存位置。
     pub fn stream_projection_page(
         &self,
         task_id: &str,
@@ -1315,7 +1314,7 @@ impl TaskRepository {
         )
     }
 
-    /// 分页恢复须通过前缀及重叠核验，取消或冲突不推进水位。
+    /// 分页恢复须通过前缀及重叠检查，取消或冲突不推进位置。
     pub fn recover_stream(
         &self,
         task_id: &str,
@@ -1425,7 +1424,7 @@ impl TaskRepository {
             .transpose()
     }
 
-    /// 仅查派发及回执证据，不重放 token 事件。
+    /// 仅查派发及结果证据，不重放 token 事件。
     pub fn recovery_receipts(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         row_task(&connection, task_id)?;
@@ -1546,7 +1545,7 @@ impl TaskRepository {
         })
     }
 
-    /// 仅累计高水位以上新增有效墙钟，不叠加并行子任务耗时。
+    /// 仅累计最高点以上新增有效墙钟，不叠加并行子任务耗时。
     pub fn record_active_duration(
         &self,
         token: &AttemptToken,
@@ -1679,7 +1678,7 @@ impl TaskRepository {
             None,
         )
     }
-    /// 模型 I/O 结束但回执未写入磁盘时，派发及成本保持未知。
+    /// 模型 I/O 结束但结果未写入磁盘时，派发及成本保持未知。
     pub fn mark_model_request_unknown(
         &self,
         token: &AttemptToken,
@@ -1799,7 +1798,7 @@ impl TaskRepository {
                 ));
             }
         }
-        // 旧结算沿用原指纹，新供应商事实计入新回执身份。
+        // 旧结算沿用原指纹，新供应商事实计入新结果身份。
         let digest = fingerprint(&if provider_usage.is_some() {
             json!([dispatched, delta, provider_usage])
         } else {
@@ -1819,7 +1818,6 @@ impl TaskRepository {
             Ok(reservation)
         })
     }
-    /// 每个预约只统计一次，父任务总量已包含后代。
     pub fn usage_summary(
         &self,
         conversation_id: Option<&str>,
@@ -2060,7 +2058,6 @@ impl TaskRepository {
         document.map(decode).transpose()
     }
 
-    /// 从正式事件恢复修订要求，不依赖内存覆盖层。
     pub fn latest_child_return(&self, child_id: &str) -> Result<Option<TaskEvent>> {
         self.latest_event(child_id, "task.child.review-return")
     }

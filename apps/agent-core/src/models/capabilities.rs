@@ -188,7 +188,7 @@ fn official(host: &str, model: &str) -> Option<Value> {
     Some(value)
 }
 
-/// 精确快照能力声明不推测代理、未知别名或凭据拥有者的可用额度；保留现有已核验表。
+/// 精确快照能力声明不推测代理、未知别名或凭据拥有者的可用额度；保留现有已检查表。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     let endpoint = &args["endpoint"];
     if operation == "models.capabilities.summaryControls" {

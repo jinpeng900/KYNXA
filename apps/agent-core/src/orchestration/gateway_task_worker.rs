@@ -145,7 +145,6 @@ fn invalidate_child_memory_plan(state: &mut WorkerContext, status: &Value) {
     state.history.push(json!({"role":"user","content":format!("Broker: confirmed scoped memory changed while this step was pending. Follow only the current confirmed-memory block and current user request. Old interpretations and approvals cannot restore withdrawn memory. Replan undispatched work without replaying successful effects; preserve actual output and receipts. Affected identities: {}",status["invalidSources"])}));
 }
 
-/// 现有子任务检查点只保留未派发工具身份。
 fn retain_child_tool_intent(state: &mut WorkerContext, content: &str, catalog: &[Value]) -> bool {
     let requested = task::unexecuted_tool_names(content);
     if !task::retain_unexecuted_tool_intent(
@@ -637,7 +636,6 @@ pub async fn execute(
     journal
         .finish(status.clone(), blocked["code"].as_str())
         .await?;
-    // 界面仅传限量预览，完整报告保存在正式产物。
     let mut preview_units = 0usize;
     let preview: String = delivery
         .chars()

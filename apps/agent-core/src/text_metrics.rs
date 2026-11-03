@@ -1,4 +1,4 @@
-/// 保持既有按 Unicode 码点的保守估算；该算法不是供应商分词器。
+/// 保持现有按 Unicode 码点的保守估算；该算法不是供应商分词器。
 pub fn estimate_tokens(text: &str) -> u64 {
     let (mut tokens, mut ascii, mut whitespace) = (0_u64, 0_u64, 0_u64);
     let flush = |tokens: &mut u64, ascii: &mut u64, whitespace: &mut u64| {

@@ -52,7 +52,7 @@ pub(crate) fn runtime_identity_prompt(connection: &Value, model: &str) -> String
     )
 }
 
-/// 自管模型能力由已核验的运行时观测映射；API及外部本地连接仍沿用原约定。
+/// 自管模型能力由已检查的运行时观测映射；API及外部本地连接仍沿用原约定。
 pub fn supports_tools(connection: &Value) -> bool {
     !connection["providerId"]
         .as_str()
@@ -424,7 +424,7 @@ pub fn build_request(
     Ok(body)
 }
 
-/// 缓存映射使用已核验稳定范围及逐字前缀，不另存第二份请求历史。
+/// 缓存映射使用已检查稳定范围及逐字前缀，不另存第二份请求历史。
 pub fn apply_prompt_cache(
     connection: &Value,
     model: &str,
@@ -692,7 +692,7 @@ pub fn append_results(
             && pair["result"]["isError"] != true
             && canonical["isError"] != true
         {
-            // 原生浏览器回执用 value 包装图块；像素走多模态输入，不塞进工具文字。
+            // 原生浏览器结果用 value 包装图块；像素走多模态输入，不塞进工具文字。
             let image_content = canonical.get("content").or_else(|| {
                 (canonical["sessionId"].is_string() && canonical["tabId"].is_string())
                     .then(|| canonical["value"].get("content"))
@@ -932,7 +932,7 @@ fn restore_continuation(
     true
 }
 
-/// 签名仅在正式回执、原始请求前缀和拥有者均一致时恢复；失配时保留公开历史。
+/// 签名仅在正式结果、原始请求前缀和拥有者均一致时恢复；失配时保留公开历史。
 pub async fn history_projection_verified(
     connection: &Value,
     model: &str,
@@ -1033,7 +1033,7 @@ pub fn history_projection(
     history_projection_for_origin(name, formal_history, available_tools, None)
 }
 
-/// 运行时代理消息仅在已核验路由内回放，不经通用公开历史取得系统权威。
+/// 运行时代理消息仅在已检查路由内回放，不经通用公开历史取得系统权威。
 fn history_projection_for_origin(
     name: &str,
     formal_history: &[Value],

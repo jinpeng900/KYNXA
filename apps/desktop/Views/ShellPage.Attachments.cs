@@ -180,9 +180,9 @@ public sealed partial class ShellPage
     private async Task PrepareMessageAttachmentsAsync(Guid conversation, ChatMessageState user, CancellationToken cancellationToken)
     {
         if (!_messageAttachmentDrafts.TryGetValue(user.Id, out var files) || files.Length == 0) return;
-        // 历史描述符可能在导入前就默认为 ready；只有网关接收回执才能结束草稿生命周期。
+        // 历史描述符可能在导入前就默认为 ready；只有网关接收结果才能结束草稿生命周期。
         var accepted = await _attachmentsApiClient.ImportAsync(conversation, user.Id, files, cancellationToken);
-        // 用真实接收回执替换临时元信息，缩略图仅保留在本机展示状态中。
+        // 用真实接收结果替换临时元信息，缩略图仅保留在本机展示状态中。
         user.Attachments = accepted.Select(file => file with
             { ThumbnailDataUrl = user.Attachments.FirstOrDefault(previous => previous.Id == file.Id)?.ThumbnailDataUrl }).ToList();
         if (ActiveChatId == conversation) UpdateConversationPresentation(openAtBottom: false);

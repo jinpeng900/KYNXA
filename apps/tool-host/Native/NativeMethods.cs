@@ -211,7 +211,7 @@ internal static class NativeMethods
         uint length,
         IntPtr returnLength);
 
-    // 使用不同托管名称，避免既有 out var 作业记账调用出现重载歧义。
+    // 使用不同托管名称，避免现有 out var 作业记账调用出现重载歧义。
     [DllImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetJobCpuRateControlInformation(

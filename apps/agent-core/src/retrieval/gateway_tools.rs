@@ -1,4 +1,4 @@
-//! 证据工具复用范围、版本核验及记录，结果不授予执行权限。
+//! 证据工具复用范围、版本检查及记录，结果不授予执行权限。
 
 use super::{evidence::EvidenceLedger, gateway_index};
 use crate::{
@@ -88,7 +88,7 @@ pub fn release_task(conversation: &str, request: &str) {
         }
     }
 }
-/// 仅撤出已失效记忆的派生映射，保留正式归档、成功回执及其他来源的版本核验。
+/// 仅撤出已失效记忆的派生映射，保留正式归档、成功结果及其他来源的版本检查。
 pub(crate) fn retire_memory_sources(context: &Value, invalid_sources: &Value) -> ContractResult {
     let identities = invalid_sources
         .as_array()
@@ -147,7 +147,7 @@ pub(crate) fn retire_memory_sources(context: &Value, invalid_sources: &Value) ->
     }
     Ok(json!({"retired":retired.len()}))
 }
-/// 仅撤出该聊天的派生证据，活动调用仍须最终范围核验。
+/// 仅撤出该聊天的派生证据，活动调用仍须最终范围检查。
 pub(crate) fn release_conversation_tasks(conversation: &str) {
     if let Some(tasks) = TASKS.get() {
         if let Ok(mut tasks) = tasks.lock() {
@@ -179,7 +179,7 @@ pub fn final_validate(config: &GatewayConfig, context: &Value) -> ContractResult
     let mut original_readings_revalidated = 0;
     for (key, reference, fragments) in &references {
         if let Err(error) = read_current(config, context, reference, &scopes) {
-            // 语义 token 适配可替换分块而不改变原文；仅已读且逐范围回验相同的原文可保留，旧结构引用仍失效。
+            // 含义 token 适配可替换分块而不改变原文；仅已读且逐范围回验相同的原文可保留，旧结构引用仍失效。
             let recovered = if error.code() == "STALE_RETRIEVAL_SOURCE" && !fragments.is_empty() {
                 read_original_current(config, context, reference, &scopes).is_ok_and(
                     |(current, _)| {
@@ -546,7 +546,7 @@ fn read_current(
     Ok(json!({"text":text,"row":row,"chunk":receipt["chunk"],"locator":locator}))
 }
 
-/// 先核验归档 ID、哈希、大小及范围，再复核已读原文窗口。
+/// 先检查归档 ID、哈希、大小及范围，再复核已读原文窗口。
 pub(crate) fn verify_saved_read(
     config: &GatewayConfig,
     context: &Value,
@@ -1031,7 +1031,7 @@ fn handle_tool_attempt(
                     "scopeKeys":scopes,"conversationId":context["conversationId"],
                     "permissionMode":context["permissionMode"]
                 });
-                // 优先当前有效的精确证据；定位缺失或来源过期时，允许一次受限语义召回。
+                // 优先当前有效的精确证据；定位缺失或来源过期时，允许一次受限含义召回。
                 let targeted = ["path", "symbol"].iter().any(|field| {
                     input[*field]
                         .as_str()
@@ -1182,7 +1182,7 @@ fn handle_tool_attempt(
                 for item in result["items"].as_array_mut().unwrap() {
                     let mut reference =
                         resolve_reference(config, context, item["sourceRef"].as_str().unwrap())?;
-                    // 完整片段通过当前来源核验后可用，仅标题命中不代表已读正文。
+                    // 完整片段通过当前来源检查后可用，仅标题命中不代表已读正文。
                     let version = source_version(&reference);
                     if !current_sources.contains_key(&version) {
                         let mut source = reference.clone();
@@ -1357,7 +1357,7 @@ fn handle_tool_attempt(
                 let task = task(context)?;
                 let mut assessment = input.clone();
                 let mut checked = Vec::new();
-                // 先在任务锁外按正式目录核验引用和原文，再锁内匹配当前已读窗口，避免目录/任务锁逆序。
+                // 先在任务锁外按正式目录检查引用和原文，再锁内匹配当前已读窗口，避免目录/任务锁逆序。
                 for (claim_index, claim) in assessment["claims"]
                     .as_array_mut()
                     .ok_or_else(|| {
@@ -1603,7 +1603,7 @@ fn select_evidence(items: &Value, input: &Value, budget: &Value) -> ContractResu
     )
 }
 
-/// 仅在证据选入后分配短引用；引用依托已保存并有聊天回执的作用域归档。
+/// 仅在证据选入后分配短引用；引用依托已保存并有聊天结果的作用域归档。
 pub fn project_evidence_result(value: &Value, archive_id: &str) -> ContractResult {
     let structured = value.get("structuredContent").is_some();
     let payload = if structured {
@@ -1664,7 +1664,7 @@ pub fn project_evidence_result(value: &Value, archive_id: &str) -> ContractResul
         for field in fields.iter().filter_map(Value::as_str) {
             item.as_object_mut().unwrap().remove(field);
         }
-        // 合并片段身份只保留在私有回执，面向模型仅交付已映射的来源级短引用。
+        // 合并片段身份只保留在私有结果，面向模型仅交付已映射的来源级短引用。
         item.as_object_mut().unwrap().remove("mergedChunks");
         item["reference"] = json!(index + 1);
         item["sourceRef"] = plan["references"][index].clone();

@@ -1,4 +1,4 @@
-//! 请求内诊断、修改跟踪和绑定代码版本的验证回执；不负责执行工具或正式持久化。
+//! 请求内诊断、修改跟踪和绑定代码版本的验证结果；不负责执行工具或正式保存。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -15,7 +15,7 @@ const DIAGNOSTIC_ERROR: &str = "INVALID_TOOL_RUN_DIAGNOSTICS";
 const MAX_DOCUMENT_TARGETS: usize = 4096;
 const HOST_EFFECT_CLASSIFICATION_VERSION: u64 = 3;
 
-/// 文档产物依据完整且哈希一致的回读核验；代码修改仍须真实执行检查，回读不证明语义正确。
+/// 文档产物依据完整且哈希一致的回读检查；代码修改仍须真实执行检查，回读不证明含义正确。
 #[derive(Default)]
 struct DocumentValidation {
     sha256: String,
@@ -34,7 +34,7 @@ struct DocumentReadWindow {
     ranges: Vec<(u64, u64)>,
 }
 
-/// 请求内计量和执行证据只记录事实；计时及正式持久化由调用端负责。
+/// 请求内计量和执行证据只记录事实；计时及正式保存由调用端负责。
 pub struct RunProgress {
     mutation_revision: u64,
     checked_mutation_revision: u64,
@@ -90,7 +90,7 @@ impl Default for RunProgress {
 }
 
 impl RunProgress {
-    /// 普通会话快照不复制回执历史；仅在核对和汇报时按需取得完整视图。
+    /// 普通会话快照不复制结果历史；仅在核对和汇报时按需取得完整视图。
     pub fn summary(&self) -> Value {
         json!({
             "mutationRevision": self.mutation_revision,
@@ -378,7 +378,7 @@ impl RunProgress {
     }
 
     fn legacy_host_effects_have_no_code_targets(&self, legacy_calls: &Value) -> bool {
-        // 自有回执用于分类目标，不证明成功；原状态与计数全部保留。
+        // 自有结果用于分类目标，不证明成功；原状态与计数全部保留。
         if self.unclassified_terminal_effects == 0
             || !self.required_checks.is_empty()
             || observed_code_targets(&self.latest_code_version)
@@ -435,7 +435,7 @@ impl RunProgress {
             .values()
             .map(|receipt| {
                 let observed = &receipt["codeVersionCoverage"]["after"];
-                // 重启后的观察子集可能不同，只有程序明确记录工作区切换时才允许旧目标退出当前核验。
+                // 重启后的观察子集可能不同，只有程序明确记录工作区切换时才允许旧目标退出当前检查。
                 let workspace_changed = receipt["workspaceKnown"] == true
                     && latest_check["workspaceKnown"] == true
                     && receipt["workspaceId"] != latest_check["workspaceId"];
@@ -489,7 +489,6 @@ impl RunProgress {
         let total = checked_sum(&self.diagnostics["totalModelMs"], duration)?;
         let calls = checked_sum(&self.diagnostics["modelCalls"], 1)?;
         let maximum = safe_integer(&self.diagnostics["maxModelMs"])?.max(duration);
-        // 先验证全部计数，溢出时不发布半份计量状态。
         self.diagnostics["totalModelMs"] = json!(total);
         self.diagnostics["maxModelMs"] = json!(maximum);
         self.diagnostics["modelCalls"] = json!(calls);
@@ -502,7 +501,7 @@ impl RunProgress {
     }
 
     fn record_tool(&mut self, args: &Value) -> Result<Value, String> {
-        // 审批等待独立计量；复用回执或被阻止的调用不算真实派发。
+        // 审批等待独立计量；复用结果或被阻止的调用不算真实派发。
         let duration = safe_integer(&args["durationMs"])?;
         let approval = safe_integer(&args["approvalMs"])?;
         let round = metric_round(&args["round"])?;
@@ -569,7 +568,7 @@ impl RunProgress {
         let status = result["status"].as_str().unwrap_or("");
         let completed =
             !truthy(&result["isError"]) && !["unknown", "cancelled", "error"].contains(&status);
-        // 透明加载后原始模型调用仍可保留未加载标记；实际已派发回执优先，未执行调用继续不计完成覆盖。
+        // 透明加载后原始模型调用仍可保留未加载标记；实际已派发结果优先，未执行调用继续不计完成覆盖。
         if truthy(&result["reused"])
             || result["executed"] == false
             || truthy(&call["unavailable"]) && result["executed"] != true
@@ -636,7 +635,6 @@ impl RunProgress {
                 } else if self.artifact_revisions.len() < MAX_DOCUMENT_TARGETS {
                     self.artifact_revisions.insert(self.mutation_revision);
                 }
-                // 导出原件无需再次回读文档。
                 return;
             }
             if completed
@@ -647,7 +645,7 @@ impl RunProgress {
             {
                 self.observe_document_write(output);
             }
-            // 成功的目录回执核验结构操作，不代表修改了可执行代码；未知结果仍保留待核验状态。
+            // 成功的目录结果检查结构操作，不代表修改了可执行代码；未知结果仍保留待检查状态。
             if name == "filesystem.mkdir"
                 && completed
                 && output["path"].is_string()
@@ -687,7 +685,7 @@ impl RunProgress {
         if !host_effect_tool(name) {
             return;
         }
-        // 直接借用真实宿主回执，省去复制大输出；结构化 MCP 内容优先级最高。
+        // 直接借用真实宿主结果，省去复制大输出；结构化 MCP 内容优先级最高。
         let isolated = output["sandbox"] == "appcontainer"
             && output["tokenVerified"] == true
             && output["workspaceCopy"] == true;
@@ -704,7 +702,7 @@ impl RunProgress {
                 let same_observed_version = before["complete"] == true
                     && after["complete"] == true
                     && before["signature"] == after["signature"];
-                // 代码检查跟随实际代码目标，无关宿主操作未确认只记在原回执中。
+                // 代码检查跟随实际代码目标，无关宿主操作未确认只记在原结果中。
                 if targets_known && !same_observed_version {
                     self.code_mutation_revision = self.mutation_revision;
                 }
@@ -856,14 +854,14 @@ impl RunProgress {
         let Some(hash) = content_hash(&output["sha256"])
             .or_else(|| preview.then(|| content_hash(&output["version"])).flatten())
         else {
-            // 大文件属性回执可能不含哈希，此时转为未知版本，下一次原文读取再取真实版本。
+            // 大文件属性结果可能不含哈希，此时转为未知版本，下一次原文读取再取真实版本。
             if !preview && output["type"] == "file" && document.version_check_required {
                 *document = DocumentValidation::default();
             }
             return;
         };
         if !document.sha256.eq_ignore_ascii_case(hash) {
-            // 实际读取、属性或预览回执更新已跟踪产物版本；旧回执仍保留归档，只清当前版本的覆盖结论。
+            // 实际读取、属性或预览结果更新已跟踪产物版本；旧结果仍保留归档，只清当前版本的覆盖结论。
             *document = DocumentValidation {
                 sha256: hash.to_owned(),
                 ..Default::default()
@@ -1142,7 +1140,7 @@ impl RunProgress {
         // 有外部操作却没有核对状态时，任务属于尚未评估。
         let acceptance_unreviewed =
             arguments["requiresVerification"] == true && arguments["acceptanceReviewed"] != true;
-        // 程序已核验的完成结论，与保留的模型下一步提议分别记录。
+        // 程序已检查的完成结论，与保留的模型下一步提议分别记录。
         let broker_final =
             arguments["brokerDecision"] == "final" && arguments["acceptanceReviewed"] == true;
         let readback_missing = arguments["requiresReadback"] == true
@@ -1644,7 +1642,7 @@ fn execution_output(canonical: &Value) -> &Value {
         .unwrap_or(canonical)
 }
 
-/// 旧的无目标宿主债务只需凭自有回执迁移一次；当前分类不再扫描归档。
+/// 旧的无目标宿主债务只需凭自有结果迁移一次；当前分类不再扫描归档。
 pub(super) fn needs_host_effect_reclassification(state: &Value) -> bool {
     let mutation = state["mutationRevision"].as_u64().unwrap_or(0);
     let host_effects = state["unclassifiedTerminalEffects"].as_u64().unwrap_or(0);

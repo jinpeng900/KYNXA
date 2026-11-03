@@ -19,7 +19,6 @@ public sealed class LayoutState
     public List<Guid> RecentWorkChatIds { get; set; } = [];
     public double TopWorkspaceHeight { get; set; } = ShellLayoutMetrics.TopDefault;
     public bool PreviewVisible { get; set; } = true;
-    // 用户未调整宽度时，零表示右侧面板按比例布局。
     public double PreviewWidth { get; set; }
     // 零使用自适应默认值；保存的任务比例仍为下方文件视图保留空间。
     public double WorkTaskRatio { get; set; }

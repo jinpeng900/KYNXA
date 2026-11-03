@@ -153,7 +153,7 @@
         || owner !== match.messageId || !match.body.contains(range.startContainer) || !match.body.contains(range.endContainer)) return false;
     const firstElement = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
     const lastElement = range.endContainer.nodeType === Node.TEXT_NODE ? range.endContainer.parentElement : range.endContainer;
-    // 只排除语义上隐藏的控件和正文；裁切代码及关闭的源码详情仍可搜索。
+    // 只排除含义上隐藏的控件和正文；裁切代码及关闭的源码详情仍可搜索。
     if (!eligibleElement(firstElement, match.body, validation.elements) || !eligibleElement(lastElement, match.body, validation.elements)) return false;
     const selectedText = range.startContainer === range.endContainer && range.startContainer.nodeType === Node.TEXT_NODE
       ? range.startContainer.data.slice(range.startOffset, range.endOffset) : range.toString();

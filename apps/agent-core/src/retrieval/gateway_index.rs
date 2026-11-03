@@ -23,7 +23,7 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// 仅核验来源自身挂载，其他挂载变更不撤销证据或旧定位。
+/// 仅检查来源自身挂载，其他挂载变更不撤销证据或旧定位。
 pub(crate) fn mounted_root(relation: &Value, locator: &Value) -> Result<String, ContractError> {
     let mounts = relation["mounts"].as_array();
     let found = mounts.into_iter().flatten().find(|mount| {
@@ -459,7 +459,6 @@ fn source_matches_hash(state: &Value, source: &Value, digest: &str) -> bool {
         && state["chunker_version"] == super::gateway_structure::CHUNKER_VERSION
         && state["embedding_input_version"] == "source-context-v1"
 }
-/// 来源身份、版本和派生输入均匹配时才复用向量。
 pub(crate) fn reuse_semantic(
     config: &GatewayConfig,
     source: &Value,
@@ -1349,7 +1348,6 @@ fn ann_auto(
                 Err(error) => return Err(error),
             }
         }
-        // 只返回完整分片集合，缺图时报告覆盖不足。
         if complete {
             return Ok(rows);
         }
@@ -1701,7 +1699,7 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
             ""
         }
     });
-    // 描述符缓存使用稳定数据库 ID，仍核验文件身份、版本和范围。
+    // 描述符缓存使用稳定数据库 ID，仍检查文件身份、版本和范围。
     let descriptor_cache_id = format!("native-index:{}", hash(&database(config).to_string_lossy()));
     let options = storage::settings::apply(
         "storage.settings.ann",
@@ -2059,7 +2057,7 @@ mod native_query_route_tests {
             )
             .unwrap();
             let observed = scanned_sentinel.clone();
-            // 在真实 SQLite 上保留 lower() 的 ASCII 语义并计数；无关行被执行可直接证明发生全库子串扫描。
+            // 在真实 SQLite 上保留 lower() 的 ASCII 含义并计数；无关行被执行可直接证明发生全库子串扫描。
             connection
                 .create_scalar_function(
                     "lower",

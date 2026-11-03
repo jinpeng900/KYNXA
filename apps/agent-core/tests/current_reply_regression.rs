@@ -266,7 +266,7 @@ fn steering_syntax_improvement_repairs_without_treating_prose_changes_as_work() 
 #[test]
 fn extracted_control_source_matches_the_current_production_snapshot() {
     use sha2::{Digest, Sha256};
-    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/task.rs").as_bytes())), "6d1568e378e9c9b1d4b78972f0ff2e2eee6cfc66f523290ca4dc68f62a03c79b");
+    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/task.rs").as_bytes())), "baf911b19e6eda8b61c61b347dfc97934cd66a86271d14a226f2bd04a9016328");
 }
 
 mod delivery {
@@ -395,6 +395,6 @@ fn current_public_reply(error: &GatewayError, assessment: &Value, delivery: &Del
 #[test]
 fn extracted_delivery_source_matches_the_current_production_snapshot() {
     use sha2::{Digest, Sha256};
-    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop/delivery.rs").as_bytes())), "6b600392848659301a0c24655760cc68db5368d764318c813d018fffbf62c175");
-    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop.rs").as_bytes())), "b620f0f4241720cec69fd4eb25a87027b4273715546e3e9cbf33a6fcf620682d");
+    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop/delivery.rs").as_bytes())), "c0c5339d03e02bdb5e987d609469876ac0d7f7f5b171a35bf834cdd063ac4d2d");
+    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop.rs").as_bytes())), "d1f09be6f0673c5a2f06bee9359f2719f73848aed096a35e630ca9abf5cec063");
 }

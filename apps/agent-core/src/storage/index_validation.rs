@@ -13,7 +13,7 @@ fn original_text(value: &Value) -> Result<Vec<u16>, ContractError> {
 }
 
 fn original_hash(units: &[u16]) -> String {
-    // Node 的 UTF-8 编码修复孤立代理项；哈希继续采用既有编码身份。
+    // Node 的 UTF-8 编码修复孤立代理项；哈希继续采用现有编码身份。
     format!(
         "{:x}",
         Sha256::digest(String::from_utf16_lossy(units).as_bytes())
@@ -240,7 +240,7 @@ fn invalid(message: &str) -> ContractError {
     ContractError::new(message, "INVALID_RETRIEVAL_INPUT", 400)
 }
 
-/// 准入拥有有序分块覆盖及向量空间一致性；回执保留既有 SDK 的字符串与 Float32 编码。
+/// 准入拥有有序分块覆盖及向量空间一致性；结果保留现有 SDK 的字符串与 Float32 编码。
 pub fn validate(arguments: &Value) -> ContractResult {
     let source = raw_json::utf16_identity(arguments["sourceRaw"].as_str().unwrap_or(""))
         .ok_or_else(|| invalid("资料正文编码无效。"))?;

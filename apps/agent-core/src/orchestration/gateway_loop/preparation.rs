@@ -67,7 +67,6 @@ pub(super) async fn prepare(
         .chars()
         .take(80)
         .collect::<String>();
-    // 仅旧直连接口补建聊天，桌面提交已有正式归属。
     let formal = tokio::task::spawn_blocking(move || {
         match data::read_model_messages(&root, &conversation) {
             Err(error) if error.code() == "CONVERSATION_NOT_FOUND" => {
@@ -150,7 +149,6 @@ pub(super) async fn prepare(
         json!(preparation_stage_started.elapsed().as_millis() as u64);
     preparation_stage_started = Instant::now();
     if let Some(summary) = summary {
-        // 复用摘要前重核来源身份、覆盖范围和内容哈希。
         state.cache.previous_summary = summary;
     }
     let RestoredExecution {
@@ -337,9 +335,7 @@ async fn prepare_session(
 ) -> Result<PreparedSession, GatewayError> {
     let provider = input["provider"].as_str().unwrap_or("");
     let permission = input["permissionMode"].as_str().unwrap_or("smart");
-    // 并行准备独立读取，仍须正式接收和范围核验。
     let commit_user = async {
-        // 复用已核验的桌面提交，不重复存储事务。
         if !user_was_saved {
             let root = runtime.config.data_root.clone();
             let conversation = run.conversation_id.clone();
@@ -427,7 +423,6 @@ async fn prepare_session(
         )
         .await?;
     }
-    // 每次运行只选一次路线，摘要也沿用。
     let routed_model = input["model"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -533,7 +528,7 @@ fn resolve_identity(
     };
     // 明确续作须恢复检查点；旧答复传输完成不代表原任务已经完成。
     let is_recovery = is_recovery || continuing_settled;
-    // 持久化请求 ID 是旧执行证据，不授权重启后重放。
+    // 保存请求 ID 是旧执行证据，不授权重启后重放。
     let resumed = formal
         .iter()
         .rev()
@@ -638,7 +633,7 @@ async fn select_capabilities(
     formal: &[Value],
     supports_tools: bool,
 ) -> Result<SelectedCapabilities, GatewayError> {
-    // 已核验 MCP 定义仅作候选，不复用权限或活动句柄。
+    // 已检查 MCP 定义仅作候选，不复用权限或活动句柄。
     let mut available = tools::builtin_catalog();
     available.extend(tools::reusable_mcp_catalog(&ctx));
     let mut all = available
@@ -793,7 +788,7 @@ async fn restore_execution(
             })
             .flat_map(|message| message["ToolActivities"].as_array().into_iter().flatten())
         {
-            // 只恢复外部副作用，内部压缩不需要工具派发回执。
+            // 只恢复外部副作用，内部压缩不需要工具派发结果。
             if is_read_only_tool(activity["name"].as_str().unwrap_or("")) {
                 continue;
             }
@@ -1236,7 +1231,6 @@ async fn assemble_prompt(
 }
 
 async fn restore_initial_timeline(run: &Arc<RequestRun>, state: &mut LoopState) {
-    // 重连先恢复已有过程段身份，再开启新阶段。
     state.delivery.timeline_order = state
         .delivery
         .segments

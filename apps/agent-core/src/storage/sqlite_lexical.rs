@@ -157,7 +157,7 @@ pub fn apply(arguments: &Value) -> ContractResult {
     super::sqlite_store::finish(&connection, result)
 }
 
-/// 调用方持有的快照合并词法统计与其他通道，不再次借用连接或核验相同数据库身份。
+/// 调用方持有的快照合并词法统计与其他通道，不再次借用连接或检查相同数据库身份。
 pub(crate) fn query(
     connection: &mut super::sqlite_connections::SqliteConnectionLease,
     arguments: &Value,

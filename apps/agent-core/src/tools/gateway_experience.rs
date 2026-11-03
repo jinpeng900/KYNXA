@@ -1,4 +1,4 @@
-//! 已核验方案查询是既有任务记录的范围映射，只读。
+//! 已检查方案查询是现有任务记录的范围映射，只读。
 
 use super::gateway::{GatewayToolContext, check_configuration_generation, experience_identities};
 use crate::{gateway_contract::GatewayError, storage::gateway};
@@ -49,7 +49,7 @@ async fn procedures(arguments: Value, context: &GatewayToolContext) -> Result<Va
     }
     match result {
         Ok(Ok(value)) => Ok(value),
-        // 建议失败不中断任务或触发重试；执行仍以正式回执为准。
+        // 建议失败不中断任务或触发重试；执行仍以正式结果为准。
         _ => Ok(unavailable("verified-procedures-unavailable")),
     }
 }
@@ -75,7 +75,7 @@ async fn lookup(
     }
     value["limit"] = json!(limit);
     if legacy {
-        // 复用既有范围绑定的专用读取回调，只读取本聊天的旧导航文件，不另建范围或记录。
+        // 复用现有范围绑定的专用读取回调，只读取本聊天的旧导航文件，不另建范围或记录。
         let previous = if check_configuration_generation(context).is_ok() {
             if let Some(execute) = &context.external_execute {
                 execute("knowledge.experience".into(), forwarded).await.ok()

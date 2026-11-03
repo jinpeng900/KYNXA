@@ -247,7 +247,7 @@
     pendingCopies.delete(command?.requestId);
     if (!state || !state.block.isConnected || state.copyRequestId !== command.requestId) return;
     state.copyRequestId = null;
-    // 只有原生回执确认剪贴板写入成功，过期请求不能更新另一个界面。
+    // 只有原生结果确认剪贴板写入成功，过期请求不能更新另一个界面。
     showFeedback(state, command.success === true);
   }
   function resetCopies() {

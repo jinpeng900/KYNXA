@@ -180,7 +180,6 @@ impl ChildModelSession {
         state.memory_plan_invalidated = false;
         state.pending_review = state.review_pending;
         state.pending_results.clear();
-        // 派发前保存完整模型步骤和续传签名。
         checkpoint(run, journal, state, "model-received").await?;
         Ok(true)
     }

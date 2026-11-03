@@ -22,7 +22,6 @@ public static class MathFormulaRenderer
             int end = token.Index + token.Length;
             if (token.Value is @"\dfrac" or @"\tfrac")
             {
-                // 整体包裹分数，避免其样式泄漏到后续项。
                 int numeratorEnd = ArgumentEnd(latex, end);
                 int denominatorEnd = numeratorEnd < 0 ? -1 : ArgumentEnd(latex, numeratorEnd);
                 if (denominatorEnd < 0) continue;
@@ -38,7 +37,6 @@ public static class MathFormulaRenderer
             }
             else if (token.Value == @"\bmod")
             {
-                // 二元余数运算符使用直立文本与中等数学间距。
                 edits.Add((token.Index, token.Length, @"\:\mathrm{mod}\:"));
             }
             else if (token.Value is @"\pmod" or @"\pod" or @"\mod")
@@ -122,7 +120,6 @@ public static class MathFormulaRenderer
         for (int i = 0; i < edits.Count; i++)
         {
             var edit = edits[i];
-            // 无法配对的不可见定界符留给原解析器回退处理。
             replacements[i] = edit.Delimiter == "." ? latex.Substring(edit.Start, edit.Length) : edit.Delimiter;
             if (!pending.TryGetValue(edit.Scope, out var stack)) pending[edit.Scope] = stack = new();
             bool closes = edit.Role == 'r' || (edit.Role == 'b' && stack.Count > 0
