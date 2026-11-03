@@ -455,7 +455,7 @@ async fn prepare_session(
     ctx.config["renewOperationalExecutionBudget"] =
         json!(input["runLimits"]["maxDurationMs"].is_null());
     ctx.config["nativeCancellationId"] = json!(run.cancellation_key);
-    let _request_tools = RequestToolGuard(ctx.clone());
+    let _request_tools = RequestToolGuard::new(ctx.clone());
     ctx.external_execute = Some(specialist_executor(
         &runtime,
         &run,

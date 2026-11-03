@@ -610,9 +610,16 @@ pub(super) fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Val
 }
 
 /// 请求退出时统一释放其发现与工具状态，错误和取消路径同样生效。
-pub(crate) struct RequestToolGuard(pub(crate) tools::GatewayToolContext);
+pub(crate) struct RequestToolGuard(tools::GatewayToolContext);
+impl RequestToolGuard {
+    pub(crate) fn new(ctx: tools::GatewayToolContext) -> Self {
+        tools::enter_request(&ctx);
+        Self(ctx)
+    }
+}
 impl Drop for RequestToolGuard {
     fn drop(&mut self) {
+        tools::leave_request(&self.0);
         tools::release_request(&self.0);
     }
 }

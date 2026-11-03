@@ -230,7 +230,7 @@ async fn execute_loop(
     })?;
     let (mut ctx, input, mut work_scope) =
         preparation::prepare_context(runtime, run, child, ctx, input)?;
-    let _request_tools = gateway_tool_execution::RequestToolGuard(ctx.clone());
+    let _request_tools = gateway_tool_execution::RequestToolGuard::new(ctx.clone());
     let _foreground = tools::foreground(&runtime.tools);
     let preparation::PreparedWorker {
         mut model,

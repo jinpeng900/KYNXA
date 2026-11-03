@@ -214,6 +214,9 @@ async fn rpc(
         })
 }
 
+const BACKGROUND_IDLE_TICK: Duration = Duration::from_secs(15);
+const BACKGROUND_IDLE_CLOSE: Duration = Duration::from_secs(120);
+
 pub(crate) struct BrowserSession {
     child: Option<Child>,
     endpoint: String,
@@ -236,6 +239,8 @@ pub(crate) struct BrowserSession {
     workspace_browser: Option<Arc<Mutex<WorkspaceBrowser>>>,
     workspace_address: Option<String>,
     workspace_current_address: Option<String>,
+    presented: bool,
+    idle_watch: bool,
 }
 
 /// 应用自有的单个进程共享持久网站数据；页面操作权限仍按聊天隔离。
@@ -336,6 +341,8 @@ pub(crate) async fn attach_embedded(
         workspace_browser: None,
         workspace_address: None,
         workspace_current_address: None,
+        presented: false,
+        idle_watch: false,
     };
     let tabs = update_tabs(&mut session, ctx).await?;
     if !session.tabs.contains_key(target_id) {
@@ -684,6 +691,8 @@ pub(crate) async fn workspace_open(
         workspace_browser: Some(browser_handle.clone()),
         workspace_address: Some(url.as_str().to_owned()),
         workspace_current_address: None,
+        presented: false,
+        idle_watch: false,
     };
     drop(browser);
     // 易失败的页面初始化之前先登记归属，保证已创建窗口始终有准确的关闭入口。
@@ -1074,6 +1083,85 @@ async fn workspace_navigation_history(
             result => return result,
         }
     }
+}
+
+/// 右侧工作区打开的网页来自用户可见的标签，直接按已展示处理。
+pub(crate) async fn workspace_present(
+    input: &Value,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
+    let opened = workspace_open(input, ctx).await?;
+    mark_presented(&opened, ctx).await;
+    Ok(opened)
+}
+
+/// 用户要求展示过的页面归用户所有，此后只随用户关闭标签释放。
+pub(crate) async fn mark_presented(opened: &Value, ctx: &GatewayToolContext) {
+    let handle = match opened["sessionId"].as_str() {
+        Some(id) => ctx.runtime.browsers.lock().await.get(id).cloned(),
+        None => None,
+    };
+    if let Some(handle) = handle {
+        handle.lock().await.presented = true;
+    }
+}
+
+/// 模型后台页面在所属聊天没有请求后开始空闲计时，到期释放；计时内的追问仍可复用原页面。
+async fn watch_background_session(
+    opened: &Value,
+    ctx: &GatewayToolContext,
+    tick: Duration,
+    idle: Duration,
+) {
+    let Some(id) = opened["sessionId"].as_str().map(str::to_owned) else {
+        return;
+    };
+    let Some(handle) = ctx.runtime.browsers.lock().await.get(&id).cloned() else {
+        return;
+    };
+    {
+        let mut session = handle.lock().await;
+        if session.presented || session.idle_watch || session.workspace_browser.is_none() {
+            return;
+        }
+        session.idle_watch = true;
+    }
+    let (sender, cancellation) = tokio::sync::watch::channel(false);
+    let mut cleanup = ctx.clone();
+    cleanup.cancellation = cancellation;
+    tokio::spawn(async move {
+        let _sender = sender;
+        let mut quiet_since = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(tick).await;
+            if !cleanup.runtime.browsers.lock().await.contains_key(&id) {
+                return;
+            }
+            {
+                let session = handle.lock().await;
+                if session.closed || session.presented {
+                    return;
+                }
+            }
+            if super::gateway::request_active(&cleanup) {
+                quiet_since = tokio::time::Instant::now();
+            } else if quiet_since.elapsed() >= idle {
+                match close_workspace_session(&id, &handle, &cleanup).await {
+                    Ok(_) => return,
+                    Err(_) => quiet_since = tokio::time::Instant::now(),
+                }
+            }
+        }
+    });
+}
+
+async fn settle_presentation(opened: Value, presentation: &str, ctx: &GatewayToolContext) -> Value {
+    if presentation == "workspace" {
+        mark_presented(&opened, ctx).await;
+    } else {
+        watch_background_session(&opened, ctx, BACKGROUND_IDLE_TICK, BACKGROUND_IDLE_CLOSE).await;
+    }
+    browser_presentation(opened, presentation)
 }
 
 async fn close_workspace_session(
@@ -2185,6 +2273,8 @@ pub(crate) async fn execute(
                 workspace_browser: None,
                 workspace_address: None,
                 workspace_current_address: None,
+                presented: false,
+                idle_watch: false,
             };
             let version = http(&session, "/json/version").await?;
             let intent = super::intent::calculate("tools.browserIntent", &json!({"message":ctx.config["trustedUserText"],"previousUserMessages":ctx.config["previousUserMessages"]}))
@@ -2233,7 +2323,7 @@ pub(crate) async fn execute(
             && input["url"].is_string()
         {
             let opened = Box::pin(workspace_open(&input, ctx)).await?;
-            return Ok(browser_presentation(opened, "background"));
+            return Ok(settle_presentation(opened, "background", ctx).await);
         }
         // 不导航的连接保留真实会话；只有明确展示才进入右侧工作区。
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
@@ -2281,7 +2371,7 @@ pub(crate) async fn execute(
                         ctx,
                     )
                     .await?;
-                    return Ok(browser_presentation(opened, presentation));
+                    return Ok(settle_presentation(opened, presentation, ctx).await);
                 }
                 let tabs = update_tabs(&mut session, ctx).await?;
                 let tab = session.embedded_target.as_deref().unwrap_or("");
@@ -2303,7 +2393,7 @@ pub(crate) async fn execute(
         }
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
             let opened = Box::pin(workspace_open(&input, ctx)).await?;
-            return Ok(browser_presentation(opened, presentation));
+            return Ok(settle_presentation(opened, presentation, ctx).await);
         }
         let path = executable(&input, ctx)?;
         let forbidden=super::intent::calculate("tools.foregroundForbidden",&json!({"message":ctx.config["trustedUserText"],"target":{"kind":"browser","appPath":path}})).map_err(|message|failure("TOOL_INTENT_FAILED",&message,500))?;
@@ -2409,6 +2499,8 @@ pub(crate) async fn execute(
             workspace_browser: None,
             workspace_address: None,
             workspace_current_address: None,
+            presented: false,
+            idle_watch: false,
         };
         let mut tabs = update_tabs(&mut session, ctx).await?;
         if workspace_host {
@@ -2867,6 +2959,79 @@ mod tests {
         ctx.config["officialToolsRoot"] = json!(bundle.join("official-tools"));
         chrome_candidates(ctx).iter().any(|path| path.is_file())
     }
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_pages_close_after_requests_end_but_presented_pages_stay() {
+        use axum::{Router, response::Html, routing::get};
+        let (mut ctx, _sender) = super::super::gateway::test_context();
+        if !use_bundled_fixture(&mut ctx) {
+            eprintln!("Bundled Chromium fixture unavailable.");
+            let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap());
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/a", get(|| async { Html("<h1>a</h1>") }))
+                    .route("/b", get(|| async { Html("<h1>b</h1>") })),
+            )
+            .await
+            .unwrap();
+        });
+        let tick = Duration::from_millis(20);
+        let idle = Duration::from_millis(150);
+        let present = workspace_open(&json!({"url":format!("http://{address}/a")}), &ctx)
+            .await
+            .unwrap();
+        mark_presented(&present, &ctx).await;
+        watch_background_session(&present, &ctx, tick, idle).await;
+        let background = workspace_open(&json!({"url":format!("http://{address}/b")}), &ctx)
+            .await
+            .unwrap();
+        let background_id = background["sessionId"].as_str().unwrap().to_owned();
+
+        super::super::gateway::enter_request(&ctx);
+        watch_background_session(&background, &ctx, tick, idle).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            ctx.runtime
+                .browsers
+                .lock()
+                .await
+                .contains_key(&background_id),
+            "a running request keeps its page"
+        );
+
+        super::super::gateway::leave_request(&ctx);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while ctx
+            .runtime
+            .browsers
+            .lock()
+            .await
+            .contains_key(&background_id)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "idle page was not released"
+            );
+            tokio::time::sleep(tick).await;
+        }
+        let present_id = present["sessionId"].as_str().unwrap();
+        assert!(ctx.runtime.browsers.lock().await.contains_key(present_id));
+        assert!(ctx.runtime.workspace_browser.lock().await.is_some());
+
+        workspace_action(&json!({"sessionId":present_id,"action":"close"}), &ctx)
+            .await
+            .unwrap();
+        assert!(ctx.runtime.workspace_browser.lock().await.is_none());
+        server.abort();
+        let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap());
+    }
+
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_chrome_host_navigates_only_its_conversation_and_closes_process() {

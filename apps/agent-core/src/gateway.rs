@@ -951,7 +951,7 @@ async fn workspace_response(
             .map(|value| (200, value)),
         ),
         ("POST", "/agent/workspace/chrome") => response(
-            Box::pin(crate::tools::gateway_browser::workspace_open(
+            Box::pin(crate::tools::gateway_browser::workspace_present(
                 &arguments, &context,
             ))
             .await

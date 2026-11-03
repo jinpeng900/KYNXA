@@ -63,6 +63,7 @@ pub struct ToolRuntime {
     pub(crate) terminals: tokio::sync::Mutex<
         HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>,
     >,
+    active_requests: Mutex<HashMap<String, usize>>,
     configuration_updates: tokio::sync::RwLock<()>,
     configuration_generation: AtomicU64,
 }
@@ -93,6 +94,7 @@ impl Default for ToolRuntime {
             web_fetch: Default::default(),
             preview_grants: Default::default(),
             terminals: Default::default(),
+            active_requests: Default::default(),
             configuration_updates: Default::default(),
             configuration_generation: AtomicU64::new(0),
         }
@@ -381,6 +383,31 @@ pub fn release_request(ctx: &GatewayToolContext) {
             states.remove(&key);
         }
     }
+}
+
+/// 按聊天统计进行中的请求，后台网页只在所属聊天没有工作时才开始空闲计时。
+pub(crate) fn enter_request(ctx: &GatewayToolContext) {
+    if let Ok(mut active) = ctx.runtime.active_requests.lock() {
+        *active.entry(ctx.conversation_id.clone()).or_default() += 1;
+    }
+}
+
+pub(crate) fn leave_request(ctx: &GatewayToolContext) {
+    if let Ok(mut active) = ctx.runtime.active_requests.lock() {
+        if let Some(count) = active.get_mut(&ctx.conversation_id) {
+            *count -= 1;
+            if *count == 0 {
+                active.remove(&ctx.conversation_id);
+            }
+        }
+    }
+}
+
+pub(crate) fn request_active(ctx: &GatewayToolContext) -> bool {
+    ctx.runtime
+        .active_requests
+        .lock()
+        .map_or(true, |active| active.contains_key(&ctx.conversation_id))
 }
 
 /// 后续真实观察只能确认自有任务已派发，MCP 和文件操作是否成功另行判断。
@@ -1272,6 +1299,7 @@ async fn execute_inner(
     if tool_name == "computer.launch" {
         if let Some(target) = workspace_launch_target(&args, ctx)? {
             let mut opened = Box::pin(super::gateway_browser::workspace_open(&target, ctx)).await?;
+            super::gateway_browser::mark_presented(&opened, ctx).await;
             for (field, value) in target.as_object().unwrap() {
                 if !opened.get(field).is_some_and(|value| !value.is_null()) {
                     opened[field] = value.clone();
@@ -1346,6 +1374,7 @@ async fn execute_inner(
     if tool_name == "artifact.open" && args["url"].is_string() {
         let target = super::gateway_workspace_preview::web_target(&args)?;
         let mut opened = Box::pin(super::gateway_browser::workspace_open(&target, ctx)).await?;
+        super::gateway_browser::mark_presented(&opened, ctx).await;
         opened["currentUrl"] = opened["url"].clone();
         for (field, value) in target.as_object().unwrap() {
             if matches!(
