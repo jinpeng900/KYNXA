@@ -1,4 +1,4 @@
-//! 纯任务续接状态与公开正文增量投影；执行、预算和持久化仍由编排调用端负责。
+//! 纯任务续接状态与公开正文增量映射；执行、预算和持久化仍由编排调用端负责。
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// 引用元数据保持有界，不裁掉复合要求所需的真实证据。
+/// 引用元数据保持限量，不裁掉复合要求所需的真实证据。
 pub(super) const MAX_COMPLETION_REFERENCES_PER_ITEM: usize = 64;
 
 /// 明确的当前阶段约束执行，最终想要的产物仍保留为背景目标。
@@ -190,7 +190,7 @@ pub(super) struct SteeringRevision {
     pub deliver_existing: bool,
 }
 
-/// 模型解释须绑定最新真实用户消息；工具内容及旧尾部不能撤销用户要求。
+/// 模型解释要绑定最新真实用户消息。
 pub(super) fn steering_revision(
     value: &Value,
     latest_user_id: &str,
@@ -228,7 +228,7 @@ pub(super) fn steering_revision(
     let disposition = user_work_disposition(value).map_err(|_| invalid())?;
     let deliver_existing = disposition == Some("deliver-existing");
     let stop = matches!(disposition, Some("stop" | "deliver-existing"));
-    // 停止挂起全部旧要求；未使用的范围编辑或时长字段不能否决已绑定的用户控制。
+    // 停止会挂起全部旧要求，其他字段不影响已绑定的用户控制。
     if stop {
         return Ok(SteeringRevision {
             requirements: Vec::new(),
@@ -295,7 +295,7 @@ pub(super) fn steering_revision(
     }
     let additions = array("addRequirements")?
         .iter()
-        .map(text)
+        .map(|item| text(item.get("text").unwrap_or(item)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut requirements = current
         .iter()
@@ -343,7 +343,7 @@ fn user_work_disposition(value: &Value) -> Result<Option<&str>, ()> {
     }
 }
 
-/// 用户控制独立于完成声明；执行端仍须绑定最新真实消息，不能让坏验收吞掉停止或已有成果交付。
+/// 用户控制独立于完成声明；验收出错时停止和已有成果交付仍然生效。
 fn retain_user_control(status: &mut Value, footer: &Value) {
     if let Some(revision) = footer
         .get("steeringRevision")
@@ -358,7 +358,7 @@ fn retain_user_control(status: &mut Value, footer: &Value) {
     }
 }
 
-/// 完成证据须来自已结算的成功回执；排队、运行中、未知或失败的派发不能证明任务完成。
+/// 完成证据来自已结算的成功回执，排队、运行中、未知或失败的派发都不算。
 pub(crate) fn successful_completion_receipt(receipt: &Value) -> bool {
     if receipt["status"] != "completed"
         || receipt["isError"] == true
@@ -399,7 +399,7 @@ pub(crate) fn successful_completion_receipt(receipt: &Value) -> bool {
         })
 }
 
-/// 只有写入工具真实提交内容的回执可证明输出路径；输入路径及普通读取不能冒充产物。
+/// 只有写入工具真实提交内容的回执可证明输出路径。
 pub(crate) fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> {
     if !successful_completion_receipt(receipt)
         || !matches!(
@@ -424,7 +424,7 @@ pub(crate) fn completed_output_paths(name: &str, receipt: &Value) -> Vec<Value> 
         .unwrap_or_default()
 }
 
-/// 发现目录与编排维护本身不能证明外部目标已经达成。
+/// 发现目录与编排维护本身不算达成外部目标。
 pub(crate) fn is_completion_evidence_tool(name: &str) -> bool {
     !matches!(
         name,
@@ -438,7 +438,7 @@ pub(crate) fn is_completion_evidence_tool(name: &str) -> bool {
     )
 }
 
-/// 内部控制误发为原生工具时只纠正协议，不执行操作，也不猜测证据与要求的对应关系。
+/// 内部控制误发为原生工具时只纠正协议，不执行操作。
 pub(crate) fn native_task_control_receipt(call: &Value, requirements: &[String]) -> Option<Value> {
     if call["name"] != "kynxa_task" {
         return None;
@@ -518,7 +518,7 @@ fn negated_execution_clause(clause: &str) -> bool {
     )).expect("static negated execution task expression")).is_match(clause)
 }
 
-/// 修复代码及明确检查需要执行验证；普通制作产物不能凭空增加一套测试要求。
+/// 修复代码及明确检查需要执行验证，普通制作产物不额外要求测试。
 pub(super) fn requires_code_validation(goal: &str) -> bool {
     if response_only_scope(&resolve_work_scope(goal, &Value::Null)) {
         return false;
@@ -590,7 +590,6 @@ fn plain_application_launch(goal: &str) -> bool {
     )).expect("static plain application launch expression")).is_match(goal)
 }
 
-/// 质量要求须观察实际结果，不能只凭修改成功或保存路径完成验收。
 pub(crate) fn requires_result_readback(goal: &str) -> bool {
     static QUALITY: OnceLock<Regex> = OnceLock::new();
     !plain_application_launch(goal) && requires_execution_verification(goal) && QUALITY.get_or_init(|| Regex::new(concat!(
@@ -599,7 +598,6 @@ pub(crate) fn requires_result_readback(goal: &str) -> bool {
     )).expect("static observed quality task expression")).is_match(&positive_request_text(goal))
 }
 
-/// 视觉验收要求评估模型实际收到图像，不能拿渲染的文本描述或文件名代替。
 pub(crate) fn requires_visual_observation(goal: &str) -> bool {
     static VISUAL: OnceLock<Regex> = OnceLock::new();
     !plain_application_launch(goal) && requires_execution_verification(goal) && VISUAL.get_or_init(|| Regex::new(concat!(
@@ -622,9 +620,8 @@ fn encoded_visual_hash(encoded: &str) -> Option<String> {
     (!bytes.is_empty()).then(|| format!("{:x}", Sha256::digest(&bytes)))
 }
 
-/// 比较实际解码的媒体字节；不能因当前调用 ID 与旧图同时出现就认定新图已经投递。
+/// 比较实际解码的媒体字节，确认新图确实投递。
 pub(crate) fn receipt_visual_hashes(canonical: &Value) -> Vec<String> {
-    // 浏览器回执只多包装一层；无关嵌套 JSON 不能冒充图像证据。
     let content = if canonical["sessionId"].is_string() && canonical["tabId"].is_string() {
         canonical["value"]["content"]
             .as_array()
@@ -768,7 +765,7 @@ pub(super) fn attachment_read_has_content(content: &Value) -> bool {
             .all(|field| body[*field].is_null() || body[*field] == "")
 }
 
-/// 成功的回读工具返回可观察内容或状态，发现目录和修改回执不能冒充回读。
+/// 成功的回读工具返回可观察内容或状态，发现目录和修改回执不算回读。
 pub(crate) fn receipt_is_readback(tool: &str, canonical: &Value) -> bool {
     if tool == "attachment.read" {
         return attachment_read_has_content(canonical);
@@ -805,7 +802,7 @@ pub(crate) fn receipt_is_readback(tool: &str, canonical: &Value) -> bool {
     })
 }
 
-/// 增量投影公开正文，不缓存或重新扫描累计回复；仅暂存内部标记的有限前缀。
+/// 增量映射公开正文，不缓存或重新扫描累计回复；仅暂存内部标记的有限前缀。
 pub struct TaskTextProjection {
     line_start: bool,
     fence: Option<(char, usize)>,
@@ -846,7 +843,7 @@ impl TaskTextProjection {
         for character in text.chars() {
             let newline = matches!(character, '\n' | '\r' | '\u{2028}' | '\u{2029}');
             if self.hidden {
-                // 完整保留标记之后属于私有控制数据；JSON 非法也不能泄露或升级任务状态。
+                // 完整保留标记之后属于私有控制数据，JSON 非法时也不公开。
                 if !self.closed {
                     if character as u32 == Self::CLOSE[self.close_prefix] as u32 {
                         self.close_prefix += 1;
@@ -1120,7 +1117,6 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// 语义状态来自模型判断，不能增加授权，也不能证明任务或事实正确。
 #[derive(Default)]
 pub struct TaskState {
     fingerprints: HashSet<String>,
@@ -1133,7 +1129,7 @@ pub struct TaskState {
 }
 
 impl TaskState {
-    /// 仅程序匹配到的成功回执能消除该项提醒，模型自述不能消除提醒。
+    /// 只有程序匹配到的成功回执能消除该项提醒。
     pub(crate) fn acceptance_gaps(
         &self,
         expected: &[String],
@@ -1229,7 +1225,7 @@ impl TaskState {
         });
         let parsed_footer = footer.captures(content).and_then(|captures| {
             let prefix = &content[..captures.get(0)?.start()];
-            // 有界尾部只解析一次，再分别核对用户控制与完成元数据。
+            // 限量尾部只解析一次，再分别核对用户控制与完成元数据。
             if in_fence(prefix) || captures[1].chars().count() > 16384 {
                 return None;
             }
@@ -1273,7 +1269,7 @@ impl TaskState {
                 if status["state"] == "complete" && handoff(public_content) {
                     status["continuationCue"] = json!(true);
                 }
-                // 快照只保留控制元数据；正文仅由 inspect 返回，避免每次 IPC 重传长回复。
+                // 快照只保留控制元数据，正文由 inspect 返回，省去每次 IPC 重传长回复。
                 let mut metadata = status.clone();
                 metadata
                     .as_object_mut()
@@ -1364,7 +1360,7 @@ impl TaskState {
                 input.current_work_scope["stage"].as_str(),
                 Some("plan" | "explain")
             ) {
-                // 本轮方案或解释已交付；尾部声明不能把后续工作升级为当前执行要求。
+                // 本轮方案或解释已交付，尾部声明不会增加当前执行要求。
                 return TaskDecision::Final { reviewed: false };
             }
             if state == "blocked" && genuine_blocker(reply) {
@@ -1406,7 +1402,7 @@ impl TaskState {
                     replan: None,
                 };
             }
-            // 必要检查的失败或待核验状态不能被无关成功回执覆盖。
+            // 必要检查的失败或待核验状态不会被无关成功回执覆盖。
             let assessing_result = matches!(state, "complete" | "continue");
             if assessing_result && input.verification["pendingValidation"] == true {
                 let next = match input.verification["state"].as_str() {
@@ -1456,7 +1452,7 @@ impl TaskState {
                     },
                 };
             }
-            // 模型提出的下一步，不能扩大已被真实证据满足的当前验收范围。
+            // 模型提出的下一步不扩大已满足的验收范围。
             let current_requirements_proven = assessing_result
                 && requires_evidence
                 && !input.expected_requirements.is_empty()
@@ -1586,7 +1582,7 @@ mod decision_contract_tests {
             state.decide(&args),
             json!({"action":"final","reviewed":true})
         );
-        // 显式提供的空或无效证明目录不能退回旧版仅凭 ID 的证明规则。
+        // 显式提供的空或无效证明目录不退回旧版证明规则。
         for records in [Value::Null, json!([]), json!({"invalid":"proof directory"})] {
             args["evidenceRecords"] = records;
             let input = TaskDecisionInput::from_value(&args);
@@ -2105,7 +2101,6 @@ pub(crate) fn genuine_blocker(reply: &Value) -> bool {
         })
 }
 
-/// 已判断的真实限制不是内部重试信号。
 pub(crate) fn blocker_code(reply: &Value) -> &'static str {
     match string_field(reply, "blocker") {
         "user-input" => "TASK_INPUT_REQUIRED",
@@ -2118,7 +2113,7 @@ pub(crate) fn blocker_code(reply: &Value) -> &'static str {
     }
 }
 
-/// 将用户明确的请求分句保留为验收项；稳定要求 ID 避免尾部控制结构重复长篇正文。
+/// 将用户明确的请求分句保留为验收项；用稳定要求 ID 减少尾部重复正文。
 pub(crate) fn acceptance_requirements(message: &str) -> Vec<String> {
     let mut requirements = Vec::new();
     for clause in message.split(['\n', '\r', ';', '；', '。']) {
@@ -2149,7 +2144,6 @@ pub(crate) fn is_explicit_continuation(message: &str) -> bool {
     )).expect("static explicit continuation expression")).is_match(message)
 }
 
-/// 识别模型复述的内部历史调用记录；它既不是答复，也不能证明本轮执行了操作。
 pub(crate) fn contains_history_record(text: &str) -> bool {
     static RECORD: OnceLock<Regex> = OnceLock::new();
     RECORD
@@ -2160,7 +2154,7 @@ pub(crate) fn contains_history_record(text: &str) -> bool {
         .is_match(text)
 }
 
-/// 仅识别字面 DSML 调用封套，不解析参数，也不将普通文字转换为调用。
+/// 仅识别字面 DSML 调用封套，不解析参数。
 pub(super) fn unexecuted_tool_names(text: &str) -> Vec<String> {
     static OPEN: OnceLock<Regex> = OnceLock::new();
     static CLOSE: OnceLock<Regex> = OnceLock::new();
@@ -2214,7 +2208,6 @@ pub(super) enum ToolIntentPolicy {
     PreserveUnknown,
 }
 
-/// 仅合并工具身份；文本参数和模型自述都不能派发操作。
 pub(super) fn retain_unexecuted_tool_intent(
     checkpoint: &mut Value,
     requested: &[String],
@@ -2326,7 +2319,7 @@ impl HistoryEchoFilter {
                         }
                         return public;
                     }
-                    // 格式损坏的记录仍属内部数据，丢弃而不是公开。
+                    // 格式损坏的记录属于内部数据，丢弃。
                     _ => {
                         self.pending.clear();
                         self.hiding = false;
@@ -2547,7 +2540,7 @@ fn review_format_diagnostics(text: &str) -> (u64, Vec<String>, u64) {
     let state = string_field(&value, "state");
     let valid_state = matches!(state, "complete" | "continue" | "blocked");
     if !valid_footer(&value) {
-        // 逐字段复用真实格式校验；改写正文不能制造格式修复进展。
+        // 逐字段复用真实格式校验，只改写正文不算修复进展。
         for key in [
             "state",
             "steeringRevision",
@@ -2604,7 +2597,7 @@ fn valid_footer(value: &Value) -> bool {
     };
     let state = string_field(value, "state");
     matches!(state, "continue" | "complete" | "blocked")
-        // 扩展字段不能让已识别的控制失效，执行端只消费已知字段。
+        // 扩展字段不影响已识别的控制，执行端只读已知字段。
         && user_work_disposition(value).is_ok()
         && object.get("steeringRevision").is_none_or(Value::is_object)
         && object.get("action").is_none_or(|action| {
@@ -2693,7 +2686,7 @@ fn known_completion_evidence(entry: &str, valid_evidence: &[Value]) -> bool {
     if entry.is_empty() {
         return false;
     }
-    // 调用 ID 是必须精确匹配的不透明身份；仅 Windows 文件路径按不区分大小写处理。
+    // 调用 ID 要精确匹配；仅 Windows 文件路径不区分大小写。
     if valid_evidence
         .iter()
         .filter_map(Value::as_str)
@@ -2708,7 +2701,7 @@ fn known_completion_evidence(entry: &str, valid_evidence: &[Value]) -> bool {
     if entry.contains('/') || entry.contains('\\') {
         return false;
     }
-    // 旧格式的文件名引用仅在能唯一定位已证明产物时兼容，不能匹配任意调用 ID。
+    // 旧格式的文件名引用仅在能唯一定位已证明产物时兼容。
     valid_evidence
         .iter()
         .filter_map(Value::as_str)
@@ -4227,5 +4220,21 @@ mod text_tool_call_tests {
             .is_empty(),
             "fenced syntax is not a call"
         );
+    }
+}
+
+#[cfg(test)]
+mod steering_revision_shape_tests {
+    use super::steering_revision;
+    use serde_json::json;
+
+    #[test]
+    fn added_requirements_may_be_text_or_carry_their_own_id() {
+        let current = vec!["write numbers.py".to_owned()];
+        for addition in [json!("also write squares.txt"), json!({"requirementId":"requirement-2","text":"also write squares.txt"})] {
+            let revision = json!({"userMessageId":"user","quote":"squares.txt","disposition":"continue","addRequirements":[addition]});
+            let updated = steering_revision(&revision, "user", "also write squares.txt", &current, 0).unwrap();
+            assert_eq!(updated.requirements, ["write numbers.py", "also write squares.txt"]);
+        }
     }
 }

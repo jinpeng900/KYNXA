@@ -27,7 +27,7 @@ fn split_pair(units: &[u16], offset: usize) -> bool {
         && (0xdc00..=0xdfff).contains(&units[offset])
 }
 
-/// 有界词法批次仅调用一次原生接口，避免每块单独跨语言往返。
+/// 限量词法批次仅调用一次原生接口，避免每块单独跨语言往返。
 pub fn lexical_batch(arguments: &Value) -> ContractResult {
     let texts = arguments["texts"]
         .as_array()

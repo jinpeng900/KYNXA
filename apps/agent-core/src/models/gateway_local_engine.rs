@@ -156,7 +156,7 @@ fn listener_owned(base: &str, process_id: u32) -> Result<bool, ModelError> {
             return Ok(false);
         }
         let mut size = 0u32;
-        // 原生查询 IPv4 监听表并取得真实PID；不启动netstat/PowerShell，也不把HTTP别名作为进程所有权证据。
+        // 原生查询 IPv4 监听表并取得真实 PID，进程所有权不看 HTTP 别名。
         let first = unsafe { GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, 2, 3, 0) };
         if first != 0 && first != 122 {
             return Err(io_error(std::io::Error::from_raw_os_error(first as i32)));
@@ -379,7 +379,7 @@ pub fn status(root: &Path, id: &str) -> Value {
             "modelIdentityVerified":false,"supportsTools":null,"toolCallingMode":"unknown","toolCapabilityState":"unknown"}))
 }
 
-/// 保护跨越真实 HTTP 请求；设置页切换、禁用或删除不能切断正在生成的模型。
+/// 保护跨越真实 HTTP 请求；设置页切换、禁用或删除不影响正在生成的模型。
 pub struct GenerationGuard(Arc<Engine>);
 impl Drop for GenerationGuard {
     fn drop(&mut self) {
@@ -736,7 +736,7 @@ fn context_sufficient(model: &Value, observed: &Value) -> bool {
 fn residency_plan(bytes: u64, requested: u64, gpu_capacity: u64) -> (u64, u64, u64) {
     // 已卸载到显卡的权重和KV计入实际显存，主存保留缓冲，不将全部权重在两处重复计量。
     let host_buffers = 512 * MIB;
-    // 按配置窗口申请资源；内存紧张时正常排队，不把模型静默缩成无法承载请求的小窗口。
+    // 按配置窗口申请资源；内存紧张时正常排队，不把模型缩成放不下请求的小窗口。
     let context = requested;
     let total = bytes.saturating_add(context * 65536);
     let gpu = total.min(gpu_capacity);
@@ -878,7 +878,7 @@ pub async fn count_request_tokens(
         .as_str()
         .unwrap_or("")
         .trim_end_matches('/');
-    // 同时匹配已核验的服务地址和模型标识；其他数据根目录允许存在相同模型名，不能只按别名计数。
+    // 同时匹配已核验的服务地址和模型标识；其他数据根目录可能有同名模型。
     let owners = ENGINES
         .get()
         .and_then(|engines| engines.lock().ok())
@@ -1115,7 +1115,7 @@ fn binding_checked<T>(owner: &Engine, checked: Result<T, ModelError>) -> Result<
     checked.inspect_err(|failure| binding_failure(owner, failure))
 }
 
-/// 仅使用已观测的受管进程能力；目录可安装、HTTP连通或alias相同都不能代替运行时工具支持。
+/// 只使用已观测的受管进程能力；目录可安装、HTTP 连通或 alias 相同都不算支持工具。
 pub fn request_capabilities(metadata: &Value, observed: &Value) -> Value {
     let mut capabilities = metadata["capabilities"]
         .as_array()
@@ -1197,7 +1197,7 @@ pub fn preparation_status(observed: &Value) -> Value {
     prepared
 }
 async fn wake(base: &str, mut token: watch::Receiver<bool>) -> Result<(), ModelError> {
-    // 空文本分词任务唤醒休眠权重，不生成内容，也不注入任何业务提示词。
+    // 空文本分词任务用来唤醒休眠权重，不生成内容。
     let request = local_client()?
         .post(format!("{base}/tokenize"))
         .json(&json!({"content":"","add_special":false}))
@@ -1681,7 +1681,7 @@ impl Drop for MutationGuard {
         self.0.suspended.store(false, Ordering::Release);
     }
 }
-/// 注册表变更提交前保持启动准入关闭，不能在停止与删除之间重新装载旧权重。
+/// 注册表变更提交前保持启动准入关闭，防止在停止与删除之间重新装载旧权重。
 pub async fn suspend(root: &Path, id: &str) -> Result<MutationGuard, ModelError> {
     let owner = engine(root, id);
     if owner.suspended.swap(true, Ordering::AcqRel) {
@@ -1730,7 +1730,7 @@ pub async fn shutdown() {
     shutdown_matching(None).await;
 }
 async fn shutdown_matching(root: Option<&Path>) {
-    // 存储运行时只停止自己的模型根目录，不能取消其他隔离运行时的模型等待和装载。
+    // 存储运行时只停止自己的模型根目录。
     if let Some(root) = root {
         *STOPPING_ROOTS
             .get_or_init(Default::default)
@@ -1762,7 +1762,7 @@ async fn shutdown_matching(root: Option<&Path>) {
         let _gate = owner.gate.lock().await;
         let _ = terminate(&owner).await;
     }
-    // 存储迁移排空旧生命周期后会在同进程创建新运行时；停机围栏不能永久阻止新根目录启动。
+    // 存储迁移排空旧生命周期后会在同进程创建新运行时，停机围栏只针对旧根目录。
     if let Some(root) = root {
         let mut roots = STOPPING_ROOTS.get().unwrap().lock().unwrap();
         if let Some(count) = roots.get_mut(root) {

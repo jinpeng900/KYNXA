@@ -4,15 +4,15 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 const LIMITS: [(&str, u64, u64, u64); 4] = [
-    ("maxRounds", 64, 1, 128),
-    ("maxToolCalls", 256, 1, 512),
+    ("maxRounds", 128, 1, 128),
+    ("maxToolCalls", 512, 1, 512),
     ("maxGeneratedTokens", 1_048_576, 1024, 4_194_304),
-    ("maxDurationMs", 1_800_000, 1000, MAX_DURATION_MS),
+    ("maxDurationMs", 3_600_000, 1000, MAX_DURATION_MS),
 ];
 
 /// 传输覆盖值约束普通执行段；用户明确要求的有意义工作预算可以超过该段上限。
 const MAX_DURATION_MS: u64 = 21_600_000;
-/// 保证时长与四执行器树预算都能在共享 JSON 合同中精确表示。
+/// 保证时长与四执行器树预算都能在共享 JSON 约定中精确表示。
 const MAX_EXPLICIT_DURATION_MS: u64 = 9_007_199_254_740_991 / 4;
 /// 用户要求的最低时长之后预留的收尾余量，保证核验与交付仍在额度内。
 const MINIMUM_ACTIVE_MARGIN_MS: u64 = 1_800_000;
@@ -26,7 +26,7 @@ pub(super) fn review_output_limit(requirements: usize, attempts: u64, available:
         .min(available)
 }
 
-/// 工具提议被截断后恢复执行额度，不能原样重试短核验。
+/// 工具提议被截断时恢复执行额度，再重试短核验也没有意义。
 pub(super) const TRUNCATED_REVIEW_EXECUTION_NOTICE: &str = "The review proposed an operation but its arguments were cut off before dispatch. Return to execution with the normal negotiated output budget. Generate only the missing complete call; split large payloads into smaller valid steps when needed. No truncated operation ran. Preserve successful receipts and follow the latest user instruction; do not add work or repeat completed effects.";
 
 pub(super) fn resume_execution_after_truncated_review(
@@ -118,7 +118,7 @@ fn allocation_maximum(values: &[f64]) -> f64 {
     }
 }
 
-/// 分配上限不是实际用量；仍须预留必要输入和安全余量。
+/// 分配上限不是实际用量，还要预留必要输入和安全余量。
 fn context_allocation(args: &Value) -> Value {
     let input = allocation_maximum(&[0.0, projected_number(args, "inputBudgetTokens").floor()]);
     let research = args["taskType"] == "research" || args["taskType"] == "complex";
@@ -242,7 +242,7 @@ fn limits(input: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
-/// 接受前归一化额度；异常值不能改变目标或中断已接受任务。
+/// 接受前归一化额度，已接受的任务不受异常值影响。
 pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     let object = input.as_object();
     let mut resolved = json!({});
@@ -514,7 +514,7 @@ fn remove_overlap<'a>(previous: &str, text: &'a str) -> &'a str {
     if previous.is_empty() || text.is_empty() {
         return text;
     }
-    // 按完整 Unicode 边界比较精确后缀；最大重叠长度仍遵循现有 UTF-16 单位合同。
+    // 按完整 Unicode 边界比较精确后缀；最大重叠长度仍遵循现有 UTF-16 单位约定。
     let mut prefix_boundaries = Vec::new();
     let mut utf16_length = 0;
     for (offset, character) in text.char_indices() {
@@ -750,7 +750,7 @@ mod tests {
     fn execution_limits_reject_unknown_fields_and_keep_exact_boundary() {
         assert_eq!(
             apply("budget.limits", &json!({})).unwrap()["maxDurationMs"],
-            1_800_000
+            3_600_000
         );
         assert_eq!(
             apply("budget.limits", &json!({"maxRounds":1})).unwrap()["maxRounds"],
@@ -770,17 +770,17 @@ mod tests {
         assert_eq!(
             apply(
                 "budget.check",
-                &json!({"rounds":64,"toolCalls":256,"generatedTokens":1_048_576})
+                &json!({"rounds":128,"toolCalls":512,"generatedTokens":1_048_576})
             )
             .unwrap(),
             Value::Null
         );
         assert_eq!(
-            apply("budget.check", &json!({"rounds":65})).unwrap_err(),
+            apply("budget.check", &json!({"rounds":129})).unwrap_err(),
             "TOOL_RUN_ROUND_LIMIT"
         );
         assert_eq!(
-            apply("budget.check", &json!({"toolCalls":257})).unwrap_err(),
+            apply("budget.check", &json!({"toolCalls":513})).unwrap_err(),
             "TOOL_RUN_CALL_LIMIT"
         );
     }

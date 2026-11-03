@@ -28,7 +28,7 @@ public sealed partial class ShellPage
         {
             if (pending.Message.Status == "completed" || pending.PauseConfirmed)
             {
-                // 正式流结束或暂停回执只清除该根过期的活动投影，不改其他任务和正式记录。
+                // 正式流结束或暂停回执只清除该根过期的活动映射，不改其他任务和正式记录。
                 if (pending.TaskId is Guid taskId)
                 {
                     recovery.Tasks = recovery.Tasks?.Where(task => task.TaskId != taskId).ToArray();

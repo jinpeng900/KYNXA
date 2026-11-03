@@ -1,4 +1,4 @@
-//! 小型进程共享缓存仅保存可重建的值和有界计量，不承担正式数据或权限真值。
+//! 小型进程共享缓存仅保存可重建的值和限量计量，不承担正式数据或权限真值。
 
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};

@@ -29,7 +29,7 @@ pub(super) fn progress_interruption(plan: &WorkProgressPlan) -> Option<GatewayEr
     })
 }
 
-/// 派发成功不等于产物变化；文件原生前置版本和实际哈希才是依据。
+/// 派发成功不代表产物变化，要看文件原生前置版本和实际哈希。
 pub(super) fn artifact_version_changed(
     call: &Value,
     receipt: &Value,
@@ -580,7 +580,7 @@ pub(super) fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Val
                 || error.details["outcome"] == "unknown";
             let parameter_error =
                 error.code == "INVALID_TOOL_ARGUMENTS" || error.code.starts_with("INVALID_SKILL_");
-            // 只有可信的派发前校验能证明无副作用，错误码不能覆盖未知结果。
+            // 只有可信的派发前校验能证明无副作用。
             let not_dispatched = !unknown
                 && parameter_error
                 && error.details["executed"] == false
@@ -631,7 +631,7 @@ pub(crate) fn specialist_executor(
     let mut tool_context = ctx.clone();
     tool_context.external_execute = None;
     let key = run.cancellation_key.clone();
-    // project_id 和绑定快照取自正式归属，模型参数不能扩大范围。
+    // project_id 和绑定快照取自正式归属。
     let context = json!({
         "conversationId": run.conversation_id,
         "projectId": ctx.project_id,
@@ -691,7 +691,6 @@ pub(crate) fn specialist_executor(
                     if archive["canonical"]["isError"] == true || !super::task::receipt_has_visual_observation(&archive["canonical"]) {
                         return Err(GatewayError::new("IMAGE_RESULT_REQUIRED", "该回执没有可展示的真实图像。", 400));
                     }
-                    // 展示只引用原回执，不复制图像，也不代表模型已经看过。
                     return Ok(json!({"kind":"screenshot","presentation":"workspace","title":args["title"],
                         "sourceResultRef":{"id":archive["id"],"bytes":archive["bytes"],"sha256":archive["sha256"]},
                         "sourceToolName":archive["toolName"],"sourceToolCallId":archive["toolCallId"]}));
@@ -729,7 +728,7 @@ pub(super) fn tool_failure_definition(call: &Value, catalog: &[Value], cached: &
         .unwrap_or_else(|| json!({"name":call["name"],"definitionAvailable":false}))
 }
 
-/// 根据真实回执结算操作状态，未知结果不能按错误或成功处理。
+/// 根据真实回执结算操作状态，未知结果单独保留。
 pub(crate) fn operation_outcome(receipt: &Value) -> OperationState {
     match ReceiptStatus::from_value(&receipt["status"]) {
         Some(ReceiptStatus::Completed) if receipt["isError"] != true => OperationState::Succeeded,
@@ -861,7 +860,6 @@ pub(super) async fn restore_completion_evidence(
                 let mut proof = super::completion_evidence::from_receipt(&call, &receipt);
                 if proof.is_object() {
                     proof["mutationSequence"] = observation["mutationSequence"].clone();
-                    // 只升级回执推导字段，不复活已失效的观察，也不重新执行操作。
                     for field in ["mutationSequence", "mutating", "current", "observationCurrent", "visualObserved", "validation"] {
                         if let Some(value) = observation["completionProof"].get(field) { proof[field] = value.clone(); }
                     }

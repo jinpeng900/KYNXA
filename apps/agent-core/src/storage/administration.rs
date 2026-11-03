@@ -469,159 +469,8 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
                         .any(|alias| within(Path::new(alias), &path))
             ))
         }
-        "storage.administration.workspaceEnsure" | "storage.administration.workspaceVerify" => {
-            let _guard = WORKSPACE_INITIALIZATION
-                .lock()
-                .map_err(|_| failure("Workspace initialization lock failed."))?;
-            let root = absolute(&arguments["root"])?;
-            let folder = root.join("Workspaces");
-            let identity = apply("storage.administration.workspaceIdentity", arguments)?;
-            let path = folder.join(identity["folderId"].as_str().unwrap());
-            if operation.ends_with("workspaceVerify") {
-                absolute(&arguments["path"])?;
-            }
-            let mismatch =
-                |message: &str, code: &'static str| ContractError::new(message, code, 409);
-            if operation.ends_with("workspaceEnsure") {
-                ensure(&path)?;
-                let marker = path.join(".workspace-owner.json");
-                if !inspect(&marker, true, false)? {
-                    if fs::read_dir(&path).map_err(io_error)?.next().is_some() {
-                        return Err(mismatch(
-                            "已有工具工作文件缺少归属记录，未接管此目录。",
-                            "SANDBOX_WORKSPACE_OWNER_MISMATCH",
-                        ));
-                    }
-                    let raw = format!(
-                        "{}\n",
-                        serde_json::to_string(
-                            &json!({"schemaVersion":1,"conversationId":identity["id"]})
-                        )
-                        .unwrap()
-                    );
-                    let mut handle = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&marker)
-                        .map_err(io_error)?;
-                    handle.write_all(raw.as_bytes()).map_err(io_error)?;
-                    handle.sync_all().map_err(io_error)?;
-                }
-            }
-            if !inspect(&path, false, false)? {
-                return Err(mismatch(
-                    "聊天工具工作区不存在或已更改。",
-                    "SANDBOX_WORKSPACE_CHANGED",
-                ));
-            }
-            let canonical = fs::canonicalize(&path).map_err(io_error)?;
-            let canonical_folder = fs::canonicalize(&folder).map_err(io_error)?;
-            let public_path = canonical
-                .to_string_lossy()
-                .strip_prefix(r"\\?\")
-                .unwrap_or(&canonical.to_string_lossy())
-                .to_owned();
-            let public_folder = canonical_folder
-                .to_string_lossy()
-                .strip_prefix(r"\\?\")
-                .unwrap_or(&canonical_folder.to_string_lossy())
-                .to_owned();
-            let canonical_expected =
-                Path::new(&public_folder).join(identity["folderId"].as_str().unwrap());
-            if !within(&canonical_expected, Path::new(&public_path))
-                || !within(Path::new(&public_path), &canonical_expected)
-            {
-                return Err(ContractError::new(
-                    "聊天工具工作区解析到其他目录。",
-                    "UNSAFE_TOOL_PATH",
-                    403,
-                ));
-            }
-            inspect(Path::new(&public_path), false, false)?;
-            if let Some(candidate) = arguments["path"].as_str() {
-                let candidate = Path::new(candidate);
-                if !(within(candidate, &path) && within(&path, candidate)
-                    || within(candidate, Path::new(&public_path))
-                        && within(Path::new(&public_path), candidate))
-                {
-                    return Err(ContractError::new(
-                        "聊天工具工作区身份不匹配。",
-                        "SANDBOX_WORKSPACE_MISMATCH",
-                        403,
-                    ));
-                }
-            }
-            let marker = Path::new(&public_path).join(".workspace-owner.json");
-            let bytes =
-                managed_files::read(&self::root(&marker), &marker, 1024)?.ok_or_else(|| {
-                    mismatch(
-                        "聊天工具工作区缺少有效的归属记录。",
-                        "SANDBOX_WORKSPACE_OWNER_MISMATCH",
-                    )
-                })?;
-            let owner: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                mismatch(
-                    "聊天工具工作区归属记录损坏。",
-                    "SANDBOX_WORKSPACE_OWNER_MISMATCH",
-                )
-            })?;
-            if owner["schemaVersion"] != 1 || owner["conversationId"] != identity["id"] {
-                return Err(mismatch(
-                    "聊天工具工作区属于其他聊天或版本不受支持。",
-                    "SANDBOX_WORKSPACE_OWNER_MISMATCH",
-                ));
-            }
-            Ok(json!({"path":public_path,"folder":public_folder}))
-        }
-        "storage.administration.modelHome" => {
-            let application = absolute(&arguments["applicationRoot"])?;
-            if let Some(path) = arguments["modelHome"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-            {
-                return Ok(json!(configured_path(&json!(path), &application)?));
-            }
-            if let Some(path) = arguments["dataHome"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-            {
-                return Ok(json!(
-                    configured_path(&json!(path), &application)?.join("Models")
-                ));
-            }
-            let pointer = if arguments["pointer"].is_null() {
-                application.join("storage.json")
-            } else {
-                configured_path(&arguments["pointer"], &application)?
-            };
-            let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
-                // 包身份宿主将既有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
-                if !arguments["defaultModelHome"].is_null() {
-                    return Ok(json!(configured_path(
-                        &arguments["defaultModelHome"],
-                        &application
-                    )?));
-                }
-                let data = if arguments["defaultDataRoot"].is_null() {
-                    application.join("Data")
-                } else {
-                    configured_path(&arguments["defaultDataRoot"], &application)?
-                };
-                return Ok(json!(data.join("Models")));
-            };
-            let source = std::str::from_utf8(&bytes)
-                .map_err(|_| failure("Invalid storage pointer UTF-8."))?;
-            let document: Value = serde_json::from_str(&raw_json::scalar_projection(
-                source.strip_prefix('\u{feff}').unwrap_or(source),
-            ))
-            .map_err(|_| failure("Invalid storage pointer JSON."))?;
-            if document["version"].as_u64() != Some(1) {
-                return Err(failure("KYNXA 存储目录配置版本不受支持。"));
-            }
-            Ok(json!(
-                configured_path(&document["dataRoot"], pointer.parent().unwrap())?.join("Models")
-            ))
-        }
+        "storage.administration.workspaceEnsure" | "storage.administration.workspaceVerify" => calculate_storage_administration_workspace_ensure(operation, arguments),
+        "storage.administration.modelHome" => calculate_storage_administration_model_home(arguments),
         "storage.administration.migrationLock" => {
             let path = absolute(&arguments["path"])?;
             match optional(&path) {
@@ -648,50 +497,7 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
             let (conversations, roots) = roots(arguments)?;
             Ok(json!({"conversationRoot":conversations,"roots":roots}))
         }
-        "storage.administration.copyMigration" => {
-            let (_, entries) = roots(arguments)?;
-            let target = absolute(&arguments["target"])?;
-            let pointer = absolute(&arguments["pointer"])?;
-            let snapshots = entries
-                .iter()
-                .map(snapshot)
-                .collect::<Result<Vec<_>, _>>()?;
-            let old_pointer = optional(&pointer)?;
-            ensure(&target)?;
-            let mut verified = Vec::new();
-            for (index, entry) in entries.iter().enumerate() {
-                let source = absolute(&entry["source"])?;
-                let destination = target.join(entry["name"].as_str().unwrap());
-                ensure(&destination)?;
-                for directory in snapshots[index]["directories"].as_array().unwrap() {
-                    ensure(&destination.join(directory.as_str().unwrap()))?;
-                }
-                for file in snapshots[index]["files"].as_array().unwrap() {
-                    let source = source.join(file.as_str().unwrap());
-                    let digest =
-                        copy_file(&source, &destination.join(file.as_str().unwrap()), false)?;
-                    verified.push(json!({"source":source,"digest":digest}));
-                }
-            }
-            let mut documents = vec![
-                target.join("Desktop").join("projects.json"),
-                target.join("catalog.json"),
-                target.join(".catalog-transaction.json"),
-            ];
-            let projects = target.join("Projects");
-            if inspect(&projects, false, false)? {
-                for entry in fs::read_dir(projects).map_err(io_error)? {
-                    let entry = entry.map_err(io_error)?;
-                    if entry.file_type().map_err(io_error)?.is_dir() {
-                        documents.push(entry.path().join("project.json"));
-                    }
-                }
-            }
-            documents.push(target.join("Models").join("local-server.json"));
-            Ok(
-                json!({"roots":entries,"snapshots":snapshots,"verified":verified,"pointerHash":old_pointer.as_ref().map(|bytes|managed_files::digest(bytes)),"documents":documents}),
-            )
-        }
+        "storage.administration.copyMigration" => calculate_storage_administration_copy_migration(arguments),
         "storage.administration.verifyMigration" => {
             verify(&arguments["plan"])?;
             Ok(Value::Null)
@@ -711,51 +517,253 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
             );
             Ok(json!(assignments))
         }
-        "storage.administration.finishMigration" => {
-            let target = absolute(&arguments["target"])?;
-            let pointer = absolute(&arguments["pointer"])?;
-            let previous = optional(&pointer)?;
-            if previous
-                .as_ref()
-                .map(|bytes| managed_files::digest(bytes))
-                .as_deref()
-                != arguments["pointerHash"].as_str()
-            {
-                return Err(failure("Storage pointer changed during migration."));
-            }
-            if let Some(bytes) = previous {
-                let path = target.join("storage-pointer.previous.json");
-                if inspect(&path, true, false)? {
-                    return Err(failure("Previous pointer backup already exists."));
-                }
-                managed_files::atomic_write(&target, &path, &bytes, u64::MAX)?;
-            }
-            let info = arguments["rawInfo"]
-                .as_str()
-                .ok_or_else(|| failure("Invalid migration information."))?;
-            managed_files::atomic_write(
-                &target,
-                &target.join("migration-info.json"),
-                info.as_bytes(),
-                1024 * 1024,
-            )?;
-            let raw = arguments["rawPointer"]
-                .as_str()
-                .ok_or_else(|| failure("Invalid storage pointer."))?;
-            ensure(pointer.parent().unwrap())?;
-            if optional(&pointer)?
-                .as_ref()
-                .map(|bytes| managed_files::digest(bytes))
-                .as_deref()
-                != arguments["pointerHash"].as_str()
-            {
-                return Err(failure("Storage pointer changed during migration."));
-            }
-            managed_files::atomic_write(&root(&pointer), &pointer, raw.as_bytes(), 1024 * 1024)?;
-            Ok(Value::Null)
-        }
+        "storage.administration.finishMigration" => calculate_storage_administration_finish_migration(arguments),
         _ => Err(failure("Unknown storage administration operation.")),
     }
+}
+
+fn calculate_storage_administration_workspace_ensure(operation: &str, arguments: &Value) -> ContractResult {
+    let _guard = WORKSPACE_INITIALIZATION
+        .lock()
+        .map_err(|_| failure("Workspace initialization lock failed."))?;
+    let root = absolute(&arguments["root"])?;
+    let folder = root.join("Workspaces");
+    let identity = apply("storage.administration.workspaceIdentity", arguments)?;
+    let path = folder.join(identity["folderId"].as_str().unwrap());
+    if operation.ends_with("workspaceVerify") {
+        absolute(&arguments["path"])?;
+    }
+    let mismatch =
+        |message: &str, code: &'static str| ContractError::new(message, code, 409);
+    if operation.ends_with("workspaceEnsure") {
+        ensure(&path)?;
+        let marker = path.join(".workspace-owner.json");
+        if !inspect(&marker, true, false)? {
+            if fs::read_dir(&path).map_err(io_error)?.next().is_some() {
+                return Err(mismatch(
+                    "已有工具工作文件缺少归属记录，未接管此目录。",
+                    "SANDBOX_WORKSPACE_OWNER_MISMATCH",
+                ));
+            }
+            let raw = format!(
+                "{}\n",
+                serde_json::to_string(
+                    &json!({"schemaVersion":1,"conversationId":identity["id"]})
+                )
+                .unwrap()
+            );
+            let mut handle = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+                .map_err(io_error)?;
+            handle.write_all(raw.as_bytes()).map_err(io_error)?;
+            handle.sync_all().map_err(io_error)?;
+        }
+    }
+    if !inspect(&path, false, false)? {
+        return Err(mismatch(
+            "聊天工具工作区不存在或已更改。",
+            "SANDBOX_WORKSPACE_CHANGED",
+        ));
+    }
+    let canonical = fs::canonicalize(&path).map_err(io_error)?;
+    let canonical_folder = fs::canonicalize(&folder).map_err(io_error)?;
+    let public_path = canonical
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical.to_string_lossy())
+        .to_owned();
+    let public_folder = canonical_folder
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical_folder.to_string_lossy())
+        .to_owned();
+    let canonical_expected =
+        Path::new(&public_folder).join(identity["folderId"].as_str().unwrap());
+    if !within(&canonical_expected, Path::new(&public_path))
+        || !within(Path::new(&public_path), &canonical_expected)
+    {
+        return Err(ContractError::new(
+            "聊天工具工作区解析到其他目录。",
+            "UNSAFE_TOOL_PATH",
+            403,
+        ));
+    }
+    inspect(Path::new(&public_path), false, false)?;
+    if let Some(candidate) = arguments["path"].as_str() {
+        let candidate = Path::new(candidate);
+        if !(within(candidate, &path) && within(&path, candidate)
+            || within(candidate, Path::new(&public_path))
+                && within(Path::new(&public_path), candidate))
+        {
+            return Err(ContractError::new(
+                "聊天工具工作区身份不匹配。",
+                "SANDBOX_WORKSPACE_MISMATCH",
+                403,
+            ));
+        }
+    }
+    let marker = Path::new(&public_path).join(".workspace-owner.json");
+    let bytes =
+        managed_files::read(&self::root(&marker), &marker, 1024)?.ok_or_else(|| {
+            mismatch(
+                "聊天工具工作区缺少有效的归属记录。",
+                "SANDBOX_WORKSPACE_OWNER_MISMATCH",
+            )
+        })?;
+    let owner: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        mismatch(
+            "聊天工具工作区归属记录损坏。",
+            "SANDBOX_WORKSPACE_OWNER_MISMATCH",
+        )
+    })?;
+    if owner["schemaVersion"] != 1 || owner["conversationId"] != identity["id"] {
+        return Err(mismatch(
+            "聊天工具工作区属于其他聊天或版本不受支持。",
+            "SANDBOX_WORKSPACE_OWNER_MISMATCH",
+        ));
+    }
+    Ok(json!({"path":public_path,"folder":public_folder}))
+}
+
+fn calculate_storage_administration_model_home(arguments: &Value) -> ContractResult {
+    let application = absolute(&arguments["applicationRoot"])?;
+    if let Some(path) = arguments["modelHome"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(json!(configured_path(&json!(path), &application)?));
+    }
+    if let Some(path) = arguments["dataHome"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(json!(
+            configured_path(&json!(path), &application)?.join("Models")
+        ));
+    }
+    let pointer = if arguments["pointer"].is_null() {
+        application.join("storage.json")
+    } else {
+        configured_path(&arguments["pointer"], &application)?
+    };
+    let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
+        // 包身份宿主将既有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
+        if !arguments["defaultModelHome"].is_null() {
+            return Ok(json!(configured_path(
+                &arguments["defaultModelHome"],
+                &application
+            )?));
+        }
+        let data = if arguments["defaultDataRoot"].is_null() {
+            application.join("Data")
+        } else {
+            configured_path(&arguments["defaultDataRoot"], &application)?
+        };
+        return Ok(json!(data.join("Models")));
+    };
+    let source = std::str::from_utf8(&bytes)
+        .map_err(|_| failure("Invalid storage pointer UTF-8."))?;
+    let document: Value = serde_json::from_str(&raw_json::scalar_projection(
+        source.strip_prefix('\u{feff}').unwrap_or(source),
+    ))
+    .map_err(|_| failure("Invalid storage pointer JSON."))?;
+    if document["version"].as_u64() != Some(1) {
+        return Err(failure("KYNXA 存储目录配置版本不受支持。"));
+    }
+    Ok(json!(
+        configured_path(&document["dataRoot"], pointer.parent().unwrap())?.join("Models")
+    ))
+}
+
+fn calculate_storage_administration_copy_migration(arguments: &Value) -> ContractResult {
+    let (_, entries) = roots(arguments)?;
+    let target = absolute(&arguments["target"])?;
+    let pointer = absolute(&arguments["pointer"])?;
+    let snapshots = entries
+        .iter()
+        .map(snapshot)
+        .collect::<Result<Vec<_>, _>>()?;
+    let old_pointer = optional(&pointer)?;
+    ensure(&target)?;
+    let mut verified = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let source = absolute(&entry["source"])?;
+        let destination = target.join(entry["name"].as_str().unwrap());
+        ensure(&destination)?;
+        for directory in snapshots[index]["directories"].as_array().unwrap() {
+            ensure(&destination.join(directory.as_str().unwrap()))?;
+        }
+        for file in snapshots[index]["files"].as_array().unwrap() {
+            let source = source.join(file.as_str().unwrap());
+            let digest =
+                copy_file(&source, &destination.join(file.as_str().unwrap()), false)?;
+            verified.push(json!({"source":source,"digest":digest}));
+        }
+    }
+    let mut documents = vec![
+        target.join("Desktop").join("projects.json"),
+        target.join("catalog.json"),
+        target.join(".catalog-transaction.json"),
+    ];
+    let projects = target.join("Projects");
+    if inspect(&projects, false, false)? {
+        for entry in fs::read_dir(projects).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            if entry.file_type().map_err(io_error)?.is_dir() {
+                documents.push(entry.path().join("project.json"));
+            }
+        }
+    }
+    documents.push(target.join("Models").join("local-server.json"));
+    Ok(
+        json!({"roots":entries,"snapshots":snapshots,"verified":verified,"pointerHash":old_pointer.as_ref().map(|bytes|managed_files::digest(bytes)),"documents":documents}),
+    )
+}
+
+fn calculate_storage_administration_finish_migration(arguments: &Value) -> ContractResult {
+    let target = absolute(&arguments["target"])?;
+    let pointer = absolute(&arguments["pointer"])?;
+    let previous = optional(&pointer)?;
+    if previous
+        .as_ref()
+        .map(|bytes| managed_files::digest(bytes))
+        .as_deref()
+        != arguments["pointerHash"].as_str()
+    {
+        return Err(failure("Storage pointer changed during migration."));
+    }
+    if let Some(bytes) = previous {
+        let path = target.join("storage-pointer.previous.json");
+        if inspect(&path, true, false)? {
+            return Err(failure("Previous pointer backup already exists."));
+        }
+        managed_files::atomic_write(&target, &path, &bytes, u64::MAX)?;
+    }
+    let info = arguments["rawInfo"]
+        .as_str()
+        .ok_or_else(|| failure("Invalid migration information."))?;
+    managed_files::atomic_write(
+        &target,
+        &target.join("migration-info.json"),
+        info.as_bytes(),
+        1024 * 1024,
+    )?;
+    let raw = arguments["rawPointer"]
+        .as_str()
+        .ok_or_else(|| failure("Invalid storage pointer."))?;
+    ensure(pointer.parent().unwrap())?;
+    if optional(&pointer)?
+        .as_ref()
+        .map(|bytes| managed_files::digest(bytes))
+        .as_deref()
+        != arguments["pointerHash"].as_str()
+    {
+        return Err(failure("Storage pointer changed during migration."));
+    }
+    managed_files::atomic_write(&root(&pointer), &pointer, raw.as_bytes(), 1024 * 1024)?;
+    Ok(Value::Null)
 }
 
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {

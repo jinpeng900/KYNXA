@@ -235,7 +235,7 @@ fn sandbox(arguments: &Value) -> ServiceResult<Value> {
     Ok(json!({"verifiedSandbox":true,"command":command,"skill":skill}))
 }
 
-/// 宿主及路径效应仅提供已观测事实；原生准入拥有顺序一致的拒绝合同。
+/// 宿主及路径效应仅提供已观测事实；原生准入拥有顺序一致的拒绝约定。
 pub(super) fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> {
     match operation {
         "broker.preflight.call" => {

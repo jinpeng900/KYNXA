@@ -1,4 +1,4 @@
-//! 仅归一化供应商报告的 token 数量，不执行传输，也不建立第二份用量账本。
+//! 只归一化供应商报告的 token 数量。
 
 use serde_json::Value;
 
@@ -17,7 +17,7 @@ pub(crate) fn token_counts(protocol: &str, usage: &Value) -> TokenCounts {
         .or_else(|| usage["output_tokens"].as_u64());
     let (input_tokens, output_tokens) = match protocol {
         "anthropic-messages" => {
-            // Anthropic 输入数不含缓存读取/创建；其他协议的输入总数已包含缓存，不能重复加算。
+            // Anthropic 输入数不含缓存读取/创建；其他协议的输入总数已包含缓存，不再加算。
             let input = input.and_then(|input| {
                 input
                     .checked_add(cache_component(usage, "cache_read_input_tokens")?)?
@@ -45,7 +45,7 @@ fn cache_component(usage: &Value, name: &str) -> Option<u64> {
     }
 }
 
-/// 别名表示同一计数；回执冲突或数值无效时保持未知，不能按字段顺序挑值。
+/// 别名表示同一计数；回执冲突或数值无效时保持未知。
 fn consistent_cache_count(values: &[&Value]) -> Option<u64> {
     let mut observed = None;
     for value in values {
@@ -68,7 +68,7 @@ pub(crate) struct CacheBreakdown {
     pub(crate) uncached_input_tokens: Option<u64>,
 }
 
-/// 保留已报告的缓存事实；缺失的写入或读取字段不能冒充实测零值。
+/// 保留已报告的缓存事实，缺失的字段记为未知而不是零。
 pub(crate) fn cache_breakdown(protocol: &str, usage: &Value) -> CacheBreakdown {
     let read = if protocol == "anthropic-messages" {
         usage["cache_read_input_tokens"].as_u64()
@@ -123,7 +123,7 @@ pub(crate) fn cache_breakdown(protocol: &str, usage: &Value) -> CacheBreakdown {
                 .and_then(|remaining| remaining.checked_sub(creation?))
         })
     };
-    // 部分供应商回执可能缺少总量；互相溢出的子集降为未知，不能因统计异常阻断任务结算。
+    // 部分供应商回执可能缺少总量；互相溢出的子集降为未知，任务结算照常进行。
     if [read, creation, uncached]
         .into_iter()
         .flatten()
@@ -139,7 +139,7 @@ pub(crate) fn cache_breakdown(protocol: &str, usage: &Value) -> CacheBreakdown {
     }
 }
 
-/// 旧调用端保留读取/写入二元合同；更完整的投影复用同一归一化来源。
+/// 旧调用端保留读取/写入二元约定；更完整的映射复用同一归一化来源。
 #[cfg(test)]
 pub(crate) fn cache_counts(protocol: &str, usage: &Value) -> (Option<u64>, Option<u64>) {
     let counts = cache_breakdown(protocol, usage);

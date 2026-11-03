@@ -114,7 +114,7 @@ pub(crate) fn extract(
     Ok(extracted)
 }
 
-/// UTF-16 偏移与桌面及现有 document.read 分页合同一致，续读不会切断代理对。
+/// UTF-16 偏移与桌面及现有 document.read 分页约定一致，续读不会切断代理对。
 pub(crate) fn page(extracted: &Value, offset: usize, max_chars: usize) -> Value {
     let text = extracted["text"].as_str().unwrap_or("");
     let mut start = 0;

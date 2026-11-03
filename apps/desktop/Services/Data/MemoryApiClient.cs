@@ -185,7 +185,7 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
             !quote.Text.Contains('\0')) && quotes.Select(quote => quote.MessageId).Distinct().Count() == quotes.Length &&
         quotes.Any(quote => quote.MessageId == sourceMessageId);
 
-    // 展示确认操作前，同时核验原始来源字段和编辑器的强类型合同。
+    // 展示确认操作前，同时核验原始来源字段和编辑器的强类型约定。
     private static void ValidateRawProvenance(MemoryEntry entry, JsonElement rawEntry)
     {
         var candidate = Field(rawEntry, "candidate");

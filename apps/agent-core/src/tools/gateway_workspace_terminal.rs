@@ -229,10 +229,10 @@ impl TerminalOutput {
             return;
         }
         if let Ok(mut state) = self.state.lock() {
-            // 协议标记在编码脚本运行时生成；不把 PS>/>> 文本或输入回显当作执行证明。
+            // 协议标记在编码脚本运行时生成，PS>/>> 文本和输入回显都不算执行证明。
             let mut pending = std::mem::take(&mut state.pending_protocol);
             pending.push_str(&text);
-            // 取嵌套标题/光标转义之外的首个 BEL 作为帧尾，再核验标记身份，避免截断。
+            // 取嵌套标题/光标转义之外的首个 BEL 作为帧尾，再核验标记身份。
             let identity = &self.marker_prefix[PROTOCOL_OPENER.len()..];
             loop {
                 if let Some(start) = pending.find(PROTOCOL_OPENER) {
@@ -308,7 +308,7 @@ impl TerminalOutput {
                     })
             })
             .transpose()?;
-        // 回执及其字节窗口在同一锁内观测；后续命令的输出不能混入旧命令结果。
+        // 回执及其字节窗口在同一锁内观测，后续命令的输出不会混入。
         let after = after.max(selected.map_or(0, |command| command.after));
         let limit = selected
             .and_then(|command| command.end_cursor)
@@ -434,7 +434,7 @@ fn encoded_script(script: &str) -> String {
 }
 
 fn shell_bootstrap(prefix: &str) -> String {
-    // OSC shell 集成元数据不参与屏幕文字绘制，避免回绕、重绘破坏回执身份。
+    // OSC shell 集成元数据不参与屏幕文字绘制，回绕和重绘不影响回执身份。
     format!(
         "function global:prompt {{ [Console]::Write('{prefix}READY:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)) + '\u{7}'); 'PS ' + (Get-Location).Path + '> ' }}"
     )
@@ -786,7 +786,7 @@ async fn action_with_cancellation(
                 404,
             )
         })?;
-    // 关闭只释放此聊天自有进程，移动或删除聊天后仍应能清理；读取及输入则必须核对当前正式归属。
+    // 关闭只释放此聊天自有进程，移动或删除聊天后也能清理；读取及输入要核对当前正式归属。
     if operation != "close" {
         if let Err(error) = verify_scope(&session, data_root).await {
             return Err(error);
@@ -854,7 +854,7 @@ async fn action_with_cancellation(
             }
             let wait_ms = arguments["waitMs"].as_u64().unwrap_or(1000).min(15000);
             let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            // 新终端可等待第一次自有提示标记；绝不能通过试输命令探测正在运行的程序。
+            // 新终端可等待第一次自有提示标记，不通过试输命令探测正在运行的程序。
             loop {
                 let changed = session.output.changed.notified();
                 tokio::pin!(changed);
@@ -1120,7 +1120,7 @@ pub(crate) async fn shutdown(context: &GatewayToolContext) {
     let _ = shutdown_checked(context).await;
 }
 
-/// 迁移等待每个自有终端进程树退出后，再释放控制台及登记，不把清空列表当作结算成功。
+/// 迁移等每个自有终端进程树退出后，再释放控制台及登记。
 pub(crate) async fn shutdown_checked(context: &GatewayToolContext) -> Result<(), GatewayError> {
     let sessions = context
         .runtime
@@ -1204,7 +1204,6 @@ mod command_contract_tests {
             !page["output"].as_str().unwrap().contains("DONE:"),
             "{page}"
         );
-        // 其他终端的帧只算普通输出，不能结算当前命令。
         let foreign = TerminalOutput::default();
         ready(&foreign);
         foreign
@@ -1372,7 +1371,7 @@ mod tests {
             .unwrap();
         let id = opened["sessionId"].clone();
         let script = "Set-Location -LiteralPath '中文 folder'\nAdd-Content -LiteralPath 'once.txt' -Value '中文 ''single'' \"double\"' -Encoding UTF8\nWrite-Output 'ACTUAL_STRUCTURED_COMMAND'";
-        // PowerShell 冷启动时默认一秒观察可合法返回 running；此处等待真实完成，不能把接收回执当完成。
+        // PowerShell 冷启动时默认一秒观察可能返回 running，这里等待真实完成。
         let arguments = json!({"sessionId":id,"commandId":"once","command":script,"waitMs":15000,
             "reason":"Verify a whole multiline command in the visible terminal"});
         context.permission_mode = "ask".into();
@@ -1498,7 +1497,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed["sessions"][0]["mountId"], first_id);
-        // 通过相对写入验证真实目录，避免 Windows 长短路径的不同拼写导致误判。
+        // 通过相对写入验证真实目录，消除 Windows 长短路径拼写差异。
         let script = "Set-Content -LiteralPath '.cwd-verification.txt' -Value 'owned-terminal-fixture'; Write-Output ('KYNXA_' + 'CWD_READY')\r";
         let result = super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":script,"reason":"Verify the existing terminal's actual working directory"}),&context).await.unwrap();
         assert_eq!(result["inputAccepted"], true);
@@ -1876,7 +1875,7 @@ mod windows {
                 _input: input_read,
                 _output: output_write,
             };
-            // 在独立线程持续排空 VT 输出，避免关闭伪控制台时等待管道而阻塞 HTTP 或退出。
+            // 在独立线程持续排空 VT 输出，关闭伪控制台时才不会因等待管道而阻塞 HTTP 或退出。
             let reader_output = output.clone();
             std::thread::Builder::new()
                 .name("kynxa-terminal-output".into())
@@ -2013,7 +2012,7 @@ mod windows {
                     if let Ok(mut state) = output.state.lock() {
                         state.exit_code = Some(code);
                     }
-                    // 退出时关闭 ConPTY，读取线程排空尾部后再标记 EOF，避免末行输出被提前截走。
+                    // 退出时关闭 ConPTY，读取线程排空尾部后再标记 EOF，保住末行输出。
                     if let Ok(mut console) = ended_console.lock() {
                         console.take();
                     }

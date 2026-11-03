@@ -382,7 +382,7 @@ pub(super) fn effect_receipt(receipt: &Value) -> Value {
     projected
 }
 
-/// 批量执行已授权独立读取，逐个结算后按序投影。
+/// 批量执行已授权独立读取，逐个结算后按序映射。
 async fn prefetch_child_reads(
     runtime: &Arc<GatewayRuntime>,
     parent: &Arc<RequestRun>,
@@ -454,7 +454,7 @@ async fn prefetch_child_reads(
                     || !task::scope_allows_call(&context.config["currentWorkScope"], name, read_only) || changed && !read_only {
                     return Err(failure("TASK_PARENT_SCOPE_CHANGED", "Parent instructions changed before child dispatch. / 子派发前父级要求已变化，旧调用未执行。"));
                 }
-                // 并发提示不改变副作用分类，也不授权重放。
+                // 并发提示不改变副作用分类。
                 let mut intent = operation_intent(&call,crate::tools::policy::is_read_only_call(call["name"].as_str().unwrap_or(""),&call["arguments"]),round);
                 let name = call["name"].as_str().unwrap_or("");
                 if tools::workspace_path_tool(name,&call["arguments"]) {

@@ -1,4 +1,4 @@
-//! 子模型会话集中管理请求预算、缓存投影、流读取与有限协议修复。
+//! 子模型会话集中管理请求预算、缓存映射、流读取与有限协议修复。
 
 use super::*;
 
@@ -280,7 +280,7 @@ impl ChildModelSession {
                 2
             }
         });
-        // 分配输出前保留目标及最新指令，旧历史仍可正常压缩，不能整段当作不可缩减输入。
+        // 分配输出前保留目标及最新指令，旧历史仍可正常压缩。
         let mut mandatory_messages = vec![json!({"role":"user","content":child.goal})];
         if let Some(message) = state
             .history
@@ -633,7 +633,7 @@ async fn collect_stream(
     mut receiver: tokio::sync::mpsc::Receiver<Value>,
 ) -> String {
     let mut projection = task::TaskTextProjection::default();
-    // 子任务与根任务使用相同的公开投影；原始模型响应继续保存在检查点中。
+    // 子任务与根任务使用相同的公开映射；原始模型响应继续保存在检查点中。
     let mut history_filter = task::HistoryEchoFilter::default();
     let mut text = String::new();
     while let Some(mut event) = receiver.recv().await {

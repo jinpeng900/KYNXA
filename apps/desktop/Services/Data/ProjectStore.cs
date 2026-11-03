@@ -12,7 +12,7 @@ public sealed record ConversationHistoryPage(Guid ConversationId, List<ChatMessa
     string? NewerCursor = null, bool HasNewer = false, int StartIndex = 0, int EndIndex = 0);
 
 /// <summary>
-/// 网关拥有正式聊天持久化；桌面只保留当前展示投影。
+/// 网关拥有正式聊天持久化；桌面只保留当前展示映射。
 /// </summary>
 public sealed class ProjectStore(string dataDirectory) : IDisposable
 {

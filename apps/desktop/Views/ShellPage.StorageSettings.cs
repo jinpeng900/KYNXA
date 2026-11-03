@@ -340,7 +340,7 @@ public sealed partial class ShellPage
                 maintenance.SetLength(0);
                 await maintenance.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(new { pid = Environment.ProcessId }));
                 maintenance.Flush(true);
-                // 维护状态异步结算后台写入；有界等待，不强制取消用户任务。
+                // 维护状态异步结算后台写入；限量等待，不强制取消用户任务。
                 var maintenanceDeadline = DateTime.UtcNow.AddSeconds(30);
                 do
                 {

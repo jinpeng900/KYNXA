@@ -1,4 +1,4 @@
-//! 原生推理执行复用既有预约策略，不建立第二套资源账本。
+//! 原生推理执行复用既有预约策略，不建立第二套资源记录。
 
 pub(crate) use super::gateway_cache::cache_memory_limit;
 use super::gateway_cache::{FlightCache, Lookup, memory_grant};
@@ -212,7 +212,7 @@ fn acquire(
     if request.is_null() {
         return Ok(());
     }
-    // 策略数值保留历史 Number 合同，原生资源 DTO 使用经校验的整数传输。
+    // 策略数值保留历史 Number 约定，原生资源 DTO 使用经校验的整数传输。
     for field in [
         "cpuThreads",
         "memoryBytes",
@@ -879,7 +879,7 @@ fn run_embedding_group(
             }
         }
         Err(error) if active.len() > 1 && error.code() == "EMBEDDING_CONTEXT_TOO_LONG" => {
-            // 一个超长输入不能使同批其他请求失败；只对这类纯输入失败拆分重试。
+            // 一个超长输入不影响同批其他请求，只对这类纯输入失败拆分重试。
             let mut offset = 0;
             for (job, length) in active.into_iter().zip(lengths) {
                 let result = execute(
@@ -910,7 +910,7 @@ struct PassageWork {
     slices: usize,
 }
 
-/// 派生向量按原顺序汇合且仅整批交付；批间设备/空间改变时不能把不同向量空间混写进索引。
+/// 派生向量按原顺序汇合且仅整批交付；批间设备或空间改变时不混写进索引。
 fn run_passage_slice(
     work: &mut PassageWork,
     execute: &mut impl FnMut(
@@ -996,7 +996,7 @@ fn run_passage_slice(
     true
 }
 
-/// 查询使用独立有界入口；后台长文每小批让出同一模型，连续四轮查询后也给文档一批，避免饥饿。
+/// 查询使用独立限量入口；后台长文每小批让出同一模型，连续四轮查询后也给文档一批，避免饥饿。
 fn run_embedding_queues(
     queries: std::sync::mpsc::Receiver<EmbeddingJob>,
     passages: std::sync::mpsc::Receiver<EmbeddingJob>,
@@ -1136,7 +1136,7 @@ fn embedding_queue(config: &GatewayConfig, local: &Value) -> Option<(String, Emb
     Some((key, queue))
 }
 
-/// E5 忙碌时请求排队并按二/四请求微批处理，不复制权重，也不因并发槽占满而中断任务。
+/// E5 忙碌时请求排队并按二/四请求微批处理，不复制权重，并发槽满时不中断任务。
 pub fn embed(
     config: &GatewayConfig,
     texts: &[String],
@@ -1924,7 +1924,7 @@ mod tests {
         assert_eq!(unloaded["loaded"], false);
         assert!(unloaded["inferenceBackend"].is_null());
 
-        // auto 所有者可能实际使用 CPU；状态查询不能用实际设备替换所有者的请求策略。
+        // auto 所有者可能实际使用 CPU；状态查询保留所有者的请求策略。
         OWNERS
             .get_or_init(Default::default)
             .lock()

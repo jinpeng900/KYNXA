@@ -1,4 +1,4 @@
-//! 原生语法适配器接入既有有界结构选择与关系规则，不把词法候选升级为已解析调用。
+//! 原生语法适配器接入既有限量结构选择与关系规则，词法候选不算已解析调用。
 
 use crate::storage::{ContractError, gateway};
 use serde_json::{Value, json};
@@ -208,7 +208,7 @@ pub fn chunks(text: &str, structure: &Value, maximum: usize) -> Result<Vec<Value
     let units: Vec<u16> = text.encode_utf16().collect();
     let mut spans = structure["units"].as_array().cloned().unwrap_or_default();
     spans.sort_by_key(|span| span["startOffset"].as_u64().unwrap_or(0));
-    // 未覆盖文本作为明确上下文保留，不能静默遗漏导入、注释或解析缺口。
+    // 未覆盖文本作为明确上下文保留，导入、注释和解析缺口都不遗漏。
     let mut ranges = Vec::new();
     let mut position = 0;
     for span in spans {
@@ -261,7 +261,7 @@ pub fn chunks(text: &str, structure: &Value, maximum: usize) -> Result<Vec<Value
 fn merge_boundary_matches(previous: &Value, next: &Value) -> bool {
     let left = &previous["structure"];
     let right = &next["structure"];
-    // 发布始终逐来源调用；适配器显式提供身份时仍核对，不能把跨范围内容拼成同一证据。
+    // 发布始终逐来源调用；适配器显式提供身份时仍核对，跨范围内容不拼成同一证据。
     for field in [
         "sourceId",
         "scopeKey",

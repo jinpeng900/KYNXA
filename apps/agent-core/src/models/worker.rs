@@ -73,7 +73,7 @@ mod tests {
     }
 }
 
-/// 隔离 SDK 进程报告真实事实；原生状态拥有取消、执行形状和资格规则，不能以关闭请求冒充 SDK 释放。
+/// 隔离 SDK 进程报告真实事实；取消、执行形状和资格规则由原生状态负责。
 #[derive(Default)]
 pub struct WorkerState {
     kind: String,

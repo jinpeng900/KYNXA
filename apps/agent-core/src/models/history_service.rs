@@ -109,7 +109,7 @@ fn strip_reference(value: &mut Value, invalid_id: &str) {
     }
 }
 
-/// 正式历史规则独立于 Data 的公开输出投影回调及原始 JSON 字节；业务输出不能覆盖 broker 事实。
+/// 正式历史规则独立于 Data 的公开输出映射回调及原始 JSON 字节。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.history.extractCheckpoint" => {

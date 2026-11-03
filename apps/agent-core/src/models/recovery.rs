@@ -15,7 +15,7 @@ fn valid_limit(value: &Value) -> Option<u64> {
         .filter(|value| (512..=2_000_000).contains(value))
 }
 
-/// 仅保留有界数值观察，各项额度只收紧；不复制供应商正文、凭据或其他请求字段。
+/// 仅保留限量数值观察，各项额度只收紧；不复制供应商正文、凭据或其他请求字段。
 pub(crate) fn retain_numeric_limits(previous: &Value, observed: &Value) -> Value {
     let mut retained = serde_json::Map::new();
     for field in [
@@ -46,7 +46,7 @@ pub(crate) fn retain_numeric_limits(previous: &Value, observed: &Value) -> Value
 }
 
 fn expression(pattern: &str) -> Regex {
-    // JavaScript 空白字符排除 NEL、包含 BOM；供应商错误消息解析保持相同合同。
+    // JavaScript 空白字符排除 NEL、包含 BOM；供应商错误消息解析保持相同约定。
     Regex::new(&pattern.replace(r"\s", r"[\t\n\r\x0B\x0C \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]")).unwrap()
 }
 
@@ -78,7 +78,7 @@ fn context_rejection(body: &Value) -> Value {
             .captures(message)
             .and_then(|captures| captures[1].replace(',', "").parse::<u64>().ok())
     };
-    // llama.cpp 报告的是完整模板输入计数；仅保留可信数值与额度，不把上游正文带入诊断。
+    // llama.cpp 报告的是完整模板输入计数；只保留可信数值与额度，上游正文不进诊断。
     if let Some(captures) = llama_context.captures(message) {
         let request_tokens = captures[1].replace(',', "").parse::<u64>().ok();
         let maximum = captures[2].replace(',', "").parse::<u64>().ok();
@@ -189,7 +189,7 @@ fn recovery_limits(args: &Value) -> Value {
                             .as_u64()
                             .unwrap_or(maximum),
                     );
-                // 窗口相同仍可能低估模板输入；按实际计数收紧估算预算，不能提高实际窗口或重发相同请求。
+                // 窗口相同仍可能低估模板输入，按实际计数收紧估算预算，窗口本身不提高。
                 let input_limit = ((u128::from(estimated_input) * u128::from(allowed_input) * 9)
                     / u128::from(request_tokens)
                     / 10) as u64;

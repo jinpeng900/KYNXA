@@ -52,7 +52,7 @@ fn units(value: &Value) -> Result<Vec<u16>, ContractError> {
         .ok_or_else(|| invalid("记忆字符串编码无效。"))
 }
 
-/// 记忆来源权威、私人出处、词法选择与投影新鲜度共用同一策略，确认和权限不能由相似度替代。
+/// 记忆来源权威、私人出处、词法选择与映射新鲜度共用同一策略；相似度只影响排序。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     match operation {
         "storage.memoryService.queryInput" => {

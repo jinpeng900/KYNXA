@@ -40,7 +40,6 @@ fn hex(value: &Value) -> bool {
     })
 }
 
-/// 运行快照只承载有界程序资料，不能夹带待执行调用或变成另一套工具授权。
 pub(crate) fn valid_context_before(value: &Value) -> bool {
     if value.is_null() {
         return true;
@@ -112,7 +111,7 @@ pub(crate) fn valid_context_before(value: &Value) -> bool {
 fn invalid() -> String {
     "INVALID_MODEL_TRANSCRIPT".into()
 }
-/// 实时解码与持久轮次在派发前共用同一个有界调用合同，不能执行后才发现无法保存。
+/// 实时解码与持久轮次在派发前共用同一个限量调用约定，提前发现无法保存的调用。
 pub(crate) fn validate_calls(calls: &[Value]) -> Result<(), String> {
     if calls.len() > MAX_TURN_CALLS {
         return Err(invalid());
@@ -316,7 +315,7 @@ mod tests {
     }
 }
 
-/// 校验 UTF-16 元信息并规划投影；私有续传留在归档适配层，保留原哈希表示。
+/// 校验 UTF-16 元信息并规划映射；私有续传留在归档适配层，保留原哈希表示。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.transcript.hash" => Ok(json!(format!(

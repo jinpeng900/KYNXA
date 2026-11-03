@@ -24,7 +24,7 @@ fn identifier(value: &Value) -> Option<String> {
     if value.is_null() {
         None
     } else if let Some(number) = value.as_f64().filter(|_| value.is_number()) {
-        // JavaScript 的 String(5.0) 为 "5"；注入的页面 ID 必须保留已观察标签页身份。
+        // JavaScript 的 String(5.0) 为 "5"，注入的页面 ID 要保留已观察标签页身份。
         Some(if number.fract() == 0.0 && number.abs() < 1e21 {
             format!("{number:.0}")
         } else {

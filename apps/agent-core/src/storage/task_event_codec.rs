@@ -1,4 +1,4 @@
-//! 在现有任务账本内无损编码流事件；公开事件、逻辑序号和旧记录格式均保持不变。
+//! 在现有任务记录内无损编码流事件；公开事件、逻辑序号和旧记录格式均保持不变。
 
 use super::TaskEvent;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -20,7 +20,7 @@ pub(super) fn store(event: &TaskEvent, raw: String) -> String {
         return raw;
     }
     let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
-    // 压缩仅是存储优化；编码失败不能拒绝原本有效的完整事件。
+    // 压缩只是存储优化，编码失败时保存完整事件。
     if compressor.write_all(raw.as_bytes()).is_err() {
         return raw;
     }
@@ -62,7 +62,7 @@ pub(super) fn expand(raw: &str, maximum_bytes: usize) -> Option<Cow<'_, str>> {
         .filter(|encoded| encoded.len() <= maximum_bytes.saturating_mul(2))?;
     let bytes = STANDARD.decode(encoded).ok()?;
     let mut original = Vec::with_capacity(length);
-    // 按原记录合同限制解压容量，不信任压缩数据自报长度；损坏记录保留并明确失败。
+    // 按原记录约定限制解压容量，不信任压缩数据自报长度；损坏记录保留并明确失败。
     ZlibDecoder::new(bytes.as_slice())
         .take(maximum_bytes as u64 + 1)
         .read_to_end(&mut original)

@@ -1,4 +1,4 @@
-//! 将已保存附件投影到当前模型轮次，保留用户原文；附件正文始终作为资料而非指令。
+//! 将已保存附件映射到当前模型轮次，保留用户原文；附件正文始终作为资料而非指令。
 
 use std::sync::OnceLock;
 
@@ -114,7 +114,7 @@ pub(crate) fn remove_images(history: &mut [Value]) -> bool {
     removed
 }
 
-/// 仅按已核验本地能力调整请求；保留 API 合同、正式附件和历史。
+/// 仅按已核验本地能力调整请求；保留 API 约定、正式附件和历史。
 pub(crate) fn project_text_only_model(connection: &Value, history: &mut [Value]) -> bool {
     let managed = connection["providerId"]
         .as_str()
@@ -169,7 +169,7 @@ pub(crate) fn classify_image_rejection(status: u16, body: &Value) -> Value {
 }
 
 pub(crate) fn image_rejection(status: u16, _message: &str, details: &Value) -> bool {
-    // 网关公开的502与供应商实际拒绝不同；只有已核验的图片分类允许文字回退。
+    // 网关公开的 502 与供应商实际拒不同，只有已核验的图片分类才走文字回退。
     let upstream_status = details["upstreamStatus"]
         .as_u64()
         .and_then(|value| u16::try_from(value).ok())

@@ -41,7 +41,7 @@ fn indexing_gate(root: &Path) -> Result<Arc<IndexingGate>, ContractError> {
     Ok(gates.entry(root.to_path_buf()).or_default().clone())
 }
 
-/// 首次创建新作业前结算旧作业，延迟启动不能把本次运行的作业判为中断。
+/// 首次创建新作业前结算旧作业，延迟启动的本次作业不算中断。
 fn ensure_jobs_recovered(config: &GatewayConfig) -> Result<(), ContractError> {
     let gate = indexing_gate(&config.data_root)?;
     let mut recovered = gate
@@ -390,7 +390,7 @@ fn maintain_memory(config: &GatewayConfig, cancel: &Arc<AtomicBool>) -> Result<(
             }
         };
         if let Err(error) = result {
-            // 暂时性工作有界重试，删除或失败不影响其他范围。
+            // 暂时性工作限量重试，删除或失败不影响其他范围。
             if temporary_index_failure(error.code()) && !cancel.load(Ordering::Acquire) {
                 item.ready_at = std::time::Instant::now() + retry_delay(item.attempt);
                 item.attempt = item.attempt.saturating_add(1).min(10);
@@ -419,7 +419,7 @@ fn maintain_deleted_chats(
         *cursor = 0;
         return Ok(());
     }
-    // 有界轮转清理删除记录，避免遗漏后续项或阻塞前台。
+    // 限量轮转清理删除记录，避免遗漏后续项或阻塞前台。
     let count = deleted.len().min(16);
     let start = *cursor % deleted.len();
     let mut failure = None;
@@ -501,7 +501,7 @@ fn maintain_conversation_scope(
     if settings["local"]["enabled"] == false || settings["local"]["semantic"] == "off" {
         return Ok(());
     }
-    // 维护分次有界执行，复用已有向量，剩余来源回原队列。
+    // 维护分次限量执行，复用已有向量，剩余来源回原队列。
     let mut generated = 0;
     for source in &sources {
         if cancel.load(Ordering::Acquire) {
@@ -514,7 +514,7 @@ fn maintain_conversation_scope(
             enqueue_conversation_semantic(config, conversation);
             break;
         }
-        // 发布事务重新检查当前聊天目录；后台推理期间删除的聊天不能重新写回索引。
+        // 发布事务重新检查当前聊天目录，后台推理期间删除的聊天不写回索引。
         gateway_index::publish_semantic(config, source, &settings["local"], cancel)?;
         generated += 1;
     }
@@ -1024,7 +1024,7 @@ pub fn stop_background(config: &GatewayConfig) -> Value {
     storage::gateway_memory::stop_candidates(&config.data_root);
     json!({"stopping":true,"cancelRequested":true})
 }
-/// 维护状态在桌面复制正式文件前等待所有写入者退出；仅请求取消不能表示迁移就绪。
+/// 维护状态在桌面复制正式文件前等待所有写入者退出，仅请求取消还不算迁移就绪。
 pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
     stop_background(config);
     let owner = BACKGROUND
@@ -1348,7 +1348,7 @@ pub fn import(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         })?;
         Ok(receipt)
     })();
-    // 仅清理本次尚未发布的快照；去重可能选择已有资料，不能留下新建但未登记的文件。
+    // 只清理本次尚未发布的快照；去重可能选择已有资料，新建但未登记的文件要删除。
     let retained = result
         .as_ref()
         .ok()

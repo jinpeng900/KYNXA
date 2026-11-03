@@ -1,4 +1,4 @@
-//! 有界展开压缩包成员，经现有快照与索引链路发布，不执行成员或创建归档声明的路径。
+//! 限量展开压缩包成员，经现有快照与索引链路发布，不执行成员或创建归档声明的路径。
 
 use crate::{
     document_formats::{self, ParserFamily},
@@ -461,7 +461,7 @@ impl<F: FnMut(Value) -> Result<(), ContractError>> Expansion<'_, F> {
     }
 }
 
-/// TAR 中跳过的记录同样受展开字节与时间额度约束，不能按其声明正文大小分配内存。
+/// TAR 中跳过的记录同样受展开字节与时间额度约束，内存不按声明的正文大小分配。
 struct CappedStream<R> {
     inner: R,
     remaining: u64,

@@ -38,7 +38,7 @@ impl Drop for SearchWaiter {
     }
 }
 
-/// 冷却与查询合并归运行时所有；缓存有界并按聊天和授权快照隔离。
+/// 冷却与查询合并归运行时所有；缓存限量并按聊天和授权快照隔离。
 #[derive(Default)]
 pub(crate) struct SearchState {
     cooldowns: Mutex<HashMap<String, (Instant, Duration, GatewayError)>>,
@@ -51,7 +51,7 @@ impl SearchState {
     }
 
     fn provider_key(server: &Value) -> String {
-        // 名称、别名和超时设置变化不能产生新的远端配额身份。
+        // 名称、别名和超时设置变化不产生新的远端配额身份。
         Self::key(
             &json!({"url":server["url"],"command":server["command"],"args":server["args"],
             "env":server["env"],"envRefs":server["envRefs"],"headers":server["headers"],"headerEnv":server["headerEnv"],"auth":server["auth"]}),
@@ -92,7 +92,7 @@ impl SearchState {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         cooldowns.retain(|_, (started, duration, _)| started.elapsed() < *duration);
-        // 未到期的限流记录不能为腾缓存而删除，再次请求会重新收到并保留真实限制。
+        // 未到期的限流记录要保留，否则再次请求还会被限流。
         if cooldowns.len() < 128 || cooldowns.contains_key(&Self::provider_key(server)) {
             cooldowns.insert(
                 Self::provider_key(server),
@@ -164,7 +164,7 @@ impl SearchState {
             }
         }
         requests.clear();
-        // 配置变化撤销共享查询，但不能清除远端限流的真实冷却记录。
+        // 配置变化撤销共享查询，远端限流的冷却记录保留。
     }
 }
 
@@ -310,7 +310,6 @@ fn cacheable(value: &Value) -> bool {
             Ok(())
         }
     }
-    // 计算序列化大小，不复制完整结果。
     serde_json::to_writer(LimitedSize(0), value).is_ok()
 }
 
@@ -423,7 +422,7 @@ async fn search_provider(
             ).map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))?,
         }));
     }
-    // 工具目录允许单个扩展不可用；选定搜索必须保留真实握手失败及冷却，而不是误报不存在。
+    // 工具目录允许单个扩展不可用；选定搜索要报告真实的握手失败及冷却。
     super::gateway_mcp::connection(server, ctx).await?;
     let descriptors = super::gateway_mcp::catalog_selected(ctx, vec![server.clone()]).await?;
     let plan = super::gateway::native(
@@ -516,7 +515,7 @@ async fn search_sources_for(selected: &str, ctx: &GatewayToolContext) -> Vec<Val
     let mut servers = super::gateway_mcp::servers(ctx)
         .into_iter()
         .filter_map(|server| {
-            // 发现目录仅用于筛选能力，不能混入连接配置身份，否则执行时会无故重新握手。
+            // 发现目录只用于筛选能力，不混入连接配置身份，否则执行时会无故重新握手。
             let mut discovery = server.clone();
             discovery["tools"] = json!(
                 loaded
@@ -591,7 +590,7 @@ async fn search_shared(
         let pending = pending.clone();
         let mut operation_ctx = ctx.clone();
         operation_ctx.cancellation = pending.cancel.subscribe();
-        // 共享原生事务不能继续使用首位调用者可独立取消的请求令牌。
+        // 共享原生事务不再使用首位调用者可独立取消的请求令牌。
         operation_ctx.config["nativeCancellationId"] = json!(uuid::Uuid::new_v4().to_string());
         tokio::spawn(async move {
             let mut cancelled = operation_ctx.cancellation.clone();
@@ -614,7 +613,7 @@ async fn search_shared(
                 }
                 state.pending = None;
             }
-            // 保留完成结果，避免 HTTP 先返回、等待者稍后订阅时错过通知。
+            // 保留完成结果，HTTP 先返回、等待者稍后订阅时也能取到。
             pending.reply.send_replace(Some(result));
         });
     }
@@ -700,7 +699,7 @@ async fn search_sources(
             }
         }
     }
-    // 先尝试允许的备用来源；最多重试一次短暂故障，限流或认证失败不重放。
+    // 先尝试允许的备用来源；最多重试一次短暂故障，限流或确认失败不重放。
     if let Some(index) = retries.first() {
         let server = &servers[*index];
         let delay = ctx

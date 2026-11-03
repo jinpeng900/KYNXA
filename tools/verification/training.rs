@@ -215,7 +215,7 @@ async fn workbench_environment_prepares_offline_reuses_inflight_and_cancels_with
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }}).await.expect("small training did not complete");
     let binding_path=config_path.parent().unwrap().join("runtime.json");let binding=std::fs::read(&binding_path).unwrap();
-    let runtime:Value=serde_json::from_slice(&binding).unwrap();assert_eq!(runtime["pythonPath"],json!(selected));
+    let runtime:Value=serde_json::from_slice(&binding).unwrap();assert_eq!(PathBuf::from(runtime["pythonPath"].as_str().unwrap()),selected);
     // Installing a new scope environment must not alter an existing trained job.
     api.ok("training.environment.prepare",json!({"backend":"builtin"})).await;
     let newer=tokio::time::timeout(std::time::Duration::from_secs(30),async{loop{

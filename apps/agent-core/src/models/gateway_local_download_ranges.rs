@@ -1,4 +1,4 @@
-//! 有界分段下载按序合入原连续断点，不把稀疏文件长度误当下载进度。
+//! 限量分段下载按序合入原连续断点，下载进度不按稀疏文件长度计算。
 use super::*;
 use status::{Counters, TransferMeter};
 use std::sync::atomic::Ordering;
@@ -163,7 +163,7 @@ async fn chunk(
             if received != end - start + 1 { return Err(error("LOCAL_MODEL_DOWNLOAD_INTERRUPTED", "分段响应提前结束，断点已保留。", 502)); }
             Ok(true)
         }.await;
-        // 暂停或失败也先结算缓冲写入，下一次尝试不能与旧写入重叠。
+        // 暂停或失败时也先结算缓冲写入，防止下一次尝试与旧写入重叠。
         output.flush().await.map_err(io_error)?;
         if transfer.as_ref().is_ok_and(|complete| *complete) { output.get_ref().sync_all().await.map_err(io_error)?; }
         Ok(transfer?.then_some(Chunk { start, end, path }))
@@ -328,7 +328,7 @@ pub(super) async fn transfer(
                         super::super::super::gateway_download_network::foreground_active());
                     meter.counters.target.store(controller.target, Ordering::Relaxed);
                     *meter.counters.adjustment.lock().unwrap_or_else(|e|e.into_inner()) = controller.reason;
-                    // 缩并发先暂停远段，原写入退出并落盘后才能续传。
+                    // 缩并发先暂停远段，原写入退出并写入磁盘后才能续传。
                     for (_, (_, _, cancel)) in workers.iter().rev().take(workers.len().saturating_sub(controller.target)) {
                         cancel.send_replace(DownloadAction::Paused);
                     }

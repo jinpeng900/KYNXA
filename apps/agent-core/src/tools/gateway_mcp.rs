@@ -135,7 +135,7 @@ impl Drop for BudgetRefresh<'_> {
     }
 }
 
-/// 复用资源服务已调整的余量；MCP 常驻占用已体现在系统空闲量中，不能再次按整棵树预约。
+/// 复用资源服务已调整的余量；MCP 常驻占用已体现在系统空闲量中，不再按整棵树预约。
 async fn refresh_budget(ctx: &GatewayToolContext) {
     let lifecycle = &ctx.runtime.mcp_lifecycle;
     {
@@ -165,7 +165,7 @@ async fn refresh_budget(ctx: &GatewayToolContext) {
     } else {
         let mut previous = lifecycle.budget();
         if previous.observed || previous.sampled_at.is_some() {
-            // 暂时缺失观测时不能借 fallback 扩大此前因压力收紧的额度。
+            // 暂时缺失观测时保持此前因压力收紧的额度。
             previous.observed = false;
             previous.reason = "resource-observation-unavailable";
             lifecycle.apply_budget(previous);
@@ -550,7 +550,7 @@ async fn headers(server: &Value, ctx: &GatewayToolContext) -> Result<HeaderMap, 
 }
 
 fn sse_frames(buffer: &mut String) -> Vec<(String, String)> {
-    // 合并网络块后再统一换行，避免 CR/LF 跨包时无法识别事件边界。
+    // 合并网络块后再统一换行，CR/LF 跨包时才能识别事件边界。
     if buffer.contains('\r') {
         *buffer = buffer.replace("\r\n", "\n");
     }
@@ -575,7 +575,7 @@ fn sse_frames(buffer: &mut String) -> Vec<(String, String)> {
     frames
 }
 
-/// 两种 MCP SSE 传输共用同一有界增量解码器，保留跨分包 UTF-8 与 CRLF 状态。
+/// 两种 MCP SSE 传输共用同一限量增量解码器，保留跨分包 UTF-8 与 CRLF 状态。
 #[derive(Default)]
 struct SseBuffer {
     bytes: Vec<u8>,
@@ -681,7 +681,7 @@ fn check_http_status(
     .with_details(json!({"failureOrigin":"provider-http","httpStatus":response.status().as_u16()})))
 }
 
-/// 仅检查有界协议字段；错误正文不能作为余额或配额判断依据。
+/// 仅检查限量协议字段，不从错误正文判断余额或配额。
 pub(crate) fn provider_failure_details(value: &Value, origin: &str) -> Value {
     let candidates = [
         &value["structuredContent"]["error"],
@@ -1395,7 +1395,7 @@ pub(crate) fn transient_connection_failure(code: &str) -> bool {
     )
 }
 
-/// 按当前配置、代次和资源规则有界重试搜索读取；保留用户停止，不重放调用。
+/// 按当前配置、代次和资源规则限量重试搜索读取；保留用户停止，不重放调用。
 pub(crate) async fn prepare_read_retry(
     server: &Value,
     ctx: &GatewayToolContext,
@@ -1422,7 +1422,7 @@ pub(crate) async fn prepare_read_retry(
     }
     let configuration = server.to_string();
     let mut failures = lifecycle.failures.lock().await;
-    // 调用方已遵守短冷却；认证、额度以及其他配置的失败记录保留，不通过重试旁路清除。
+    // 调用方已遵守短冷却；确认、额度以及其他配置的失败记录保留，不通过重试旁路清除。
     if failures.get(id).is_some_and(|(saved, _, error)| {
         saved == &configuration && transient_connection_failure(&error.code)
     }) {
@@ -1477,7 +1477,7 @@ async fn admit_buffers(
     let request = json!({"taskId":uuid::Uuid::new_v4().to_string(),"workspaceId":if workspace.is_empty(){"mcp"}else{workspace},
         "kind":if background{"background"}else{"foreground"},"workload":"compute","cpuThreads":1,
         "memoryBytes":MAX_RPC_BYTES,"gpuMemoryBytes":0,"waitMs":if background{5000}else{30000},"ttlMs":30000});
-    // 调用方取消后仍结算晚到授额，再释放准入任务。
+    // 调用方取消后仍结算晚到额度，再释放准入任务。
     let attempt = tokio::spawn(async move { service.acquire_waiting(request, cancellation).await });
     let lease = attempt
         .await
@@ -1577,7 +1577,7 @@ async fn connection_with_priority(
     };
     refresh_budget(ctx).await;
     lifecycle.check(id, generation)?;
-    // 向前台让路时释放服务锁，避免互相等待。
+    // 向前台让路时释放服务锁，防止互相等待。
     let gate = lifecycle.gate(id).await;
     let (_singleflight, background_permit) = if background {
         loop {
@@ -1651,7 +1651,7 @@ async fn connection_with_priority(
     };
     lifecycle.check(id, generation)?;
     let _buffers = admit_buffers(ctx, id, generation, background).await?;
-    // 连接诊断复用原生账本；读取设置不能为展示状态而发起新握手。
+    // 连接诊断复用原生记录，读取设置不发起新握手。
     let diagnostic_id = native(
         ctx,
         "mcp.diagnosis.begin",
@@ -1904,7 +1904,7 @@ async fn reap_idle(ctx: &GatewayToolContext, timeout: Duration) {
 
 /// 按观测额度预热受信任的已安装服务；不安装依赖或继承聊天授权。
 pub(crate) fn prewarm(ctx: &GatewayToolContext) -> Value {
-    // 排队前绑定配置代次；重置后的新代次不能为旧预热任务重新赋予启动权限。
+    // 排队前绑定配置代次，重置后旧预热任务不再启动。
     let generation = ctx.runtime.mcp_lifecycle.generation.load(Ordering::Acquire);
     if ctx
         .runtime
@@ -2016,7 +2016,7 @@ pub(crate) fn prewarm(ctx: &GatewayToolContext) -> Value {
     background.approved = false;
     background.authorized_roots.clear();
     tokio::spawn(async move {
-        // 配置请求结束不等于用户取消预热；停止标记和生命周期代次仍负责取消后台服务准备。
+        // 配置请求结束不代表用户取消预热，后台服务准备由停止标记和生命周期代次控制。
         let (_prewarm_owner, prewarm_cancellation) = tokio::sync::watch::channel(false);
         background.cancellation = prewarm_cancellation;
         refresh_budget(&background).await;
@@ -2236,7 +2236,7 @@ fn normalize_tool_result(name: &str, mut result: Value) -> Value {
     result
 }
 
-/// 崩溃恢复只查询正式事件日志中的远端身份，绝不再次派发原工具。
+/// 崩溃恢复只查询正式事件日志中的远端身份，原工具不再派发。
 pub(crate) async fn recover_checkpoint(
     handle: &Value,
     original_call_id: &str,
@@ -2324,7 +2324,7 @@ async fn task_rpc(
                     && method != "tasks/cancel"
                     && transient_connection_failure(&error.code) =>
             {
-                // 仅身份查询可短重试；不会为了重试读取而杀掉健康的 stdio 任务宿主。
+                // 仅身份查询可短重试，健康的 stdio 任务宿主不受影响。
                 prepare_read_retry(server, ctx).await?;
                 let mut cancellation = ctx.cancellation.clone();
                 tokio::select! {_=tokio::time::sleep(Duration::from_millis(100))=>{},_=super::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("TOOL_CANCELLED","任务状态查询已取消，远端身份已保留。",409))}
@@ -2353,7 +2353,7 @@ async fn poll_task(
     };
     let handle = task_handle(server, &task, name, ctx);
     let task_id = task["taskId"].as_str().unwrap().to_owned();
-    // 远端身份先进入现有运行事件日志，再等待延迟结果；断线或重启后可据此查询，不能重派动作。
+    // 远端身份先进入运行事件日志，再等待延迟结果；断线或重启后据此查询，动作不重派。
     emit(ctx,json!({"type":"mcp_task_checkpoint","toolCallId":ctx.config["activeToolCallId"],"operationId":ctx.config["activeOperationId"],"recoveryHandle":handle})).await;
     loop {
         if matches!(
@@ -2608,7 +2608,7 @@ pub(crate) async fn execute(
                 .lock()
                 .await
                 .insert(id.to_owned(), failure_diagnostic(&error));
-            // 独立 HTTP 读取失败不能连带取消同一会话中其它健康交换。
+            // 独立 HTTP 读取失败不影响同一会话中其他健康交换。
             if !was_independent {
                 let _ = disconnect(id, ctx).await;
             }

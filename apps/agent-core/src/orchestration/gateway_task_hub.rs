@@ -141,7 +141,7 @@ impl TaskHub {
             .iter()
             .map(|task| {
                 let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
-                // 回复恢复记录不等于用户待办，耗时、重试及暂停都不能自行升级为可见任务。
+                // 回复恢复记录不是用户待办，耗时、重试和暂停都不会让它变成可见任务。
                 value["displayInTaskList"] = json!(task.display_in_task_list == Some(true));
                 value
             })
@@ -354,7 +354,7 @@ impl TaskHub {
         Ok(json!({"task":changed,"affectedTaskIds":affected,"recovery":recovery}))
     }
 
-    /// 结算已有原始回执；缺失证据保留为未知事实，不阻塞整个任务，也不重放操作。
+    /// 结算已有原始回执，缺失的证据记为未知。
     async fn reconcile_recovery_tree(&self, selected: &TaskRecord) -> Result<Value> {
         let _recovery = self.recovery_gate.lock().await;
         let repository = self.repository().await?;
@@ -630,7 +630,7 @@ impl TaskHub {
         })
         .await
         .map_err(|_| failure("TASK_STEERING_MESSAGE_FAILED"))??;
-        // 先保存用户新指令，再重开部分完成任务，不能抢先执行旧方案。
+        // 先保存用户新指令，再重开部分完成的任务。
         let steering_version = if task.state == TaskState::Partial {
             repository
                 .control(id, task.version, TaskControl::Resume)?
@@ -669,7 +669,7 @@ impl TaskHub {
             }
         }
         let current = repository.load(id)?;
-        // 后到的用户控制优先，不能静默撤销再次暂停或取消。
+        // 后到的用户控制优先。
         if current.state != TaskState::Paused || current.stop_reason != changed.stop_reason {
             return Ok(
                 json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":true}),
@@ -691,7 +691,7 @@ impl TaskHub {
         if task.state != TaskState::Queued || runtime.live_task_run(&task.task_id).is_some() {
             return Ok(false);
         }
-        // 仅退掉已结算的传输投影，租约及操作回执仍是正式依据。
+        // 仅退掉已结算的传输映射，租约及操作回执仍是正式依据。
         runtime.wait_task_delivery_boundary(&task.task_id).await;
         let current = self.repository().await?.load(&task.task_id)?;
         if current.state != TaskState::Queued || runtime.live_task_run(&task.task_id).is_some() {
@@ -885,7 +885,7 @@ impl TaskHub {
             .map_err(|_| failure("INVALID_TASK_INPUT"))?;
             input["parentRevision"] = json!({"reason":reason,"reviewedOutputRef":output.reference,"reviewedVersion":version});
             if child.state == TaskState::Queued {
-                // 刚结束的执行器可能仍在发送末次界面事件；等它退出，避免覆盖替代执行器的排队记录。
+                // 刚结束的执行器可能还在发送末次界面事件，等它退出后再写排队记录。
                 loop {
                     let changed = self.changes.notified();
                     tokio::pin!(changed);
@@ -954,7 +954,7 @@ impl TaskHub {
         };
         let namespace =
             crate::retrieval::gateway_index::hash(&json!([owner.task_id, source]).to_string());
-        // 旧批次没有派发命名空间，只在能核对原归属时复用，不能串到别的父任务或独立委派。
+        // 旧批次没有派发命名空间，只在能核对原归属时复用。
         let legacy_allowed = explicit.is_some()
             || operation.is_none() && call.is_none()
             || if let Some(operation) = operation {
@@ -1081,7 +1081,7 @@ impl TaskHub {
             .unwrap_or_else(|| {
                 crate::retrieval::gateway_index::hash(&json!([root_task.task_id, args]).to_string())
             });
-        // 沿真实祖先读取根输入；子任务私有输入不能误作根会话记录读取。
+        // 沿真实祖先读取根输入，子任务的私有输入不算根会话记录。
         let repository = self.repository().await?;
         let mut origin = root_task.clone();
         let mut depth = 0;
@@ -1276,7 +1276,7 @@ impl TaskHub {
         }
         Ok(())
     }
-    /// 完成前核对每个当前直属子交付的父验收；不把子自验当成父接纳。
+    /// 完成前核对每个直属子交付的父验收。
     pub(crate) async fn children_acceptance(&self, task_id: &str) -> Result<Value> {
         let repository = self.repository().await?;
         let children = repository.children(task_id)?;
@@ -1304,7 +1304,7 @@ impl TaskHub {
         context: GatewayToolContext,
         mut input: Value,
     ) -> Result<Value> {
-        // 替代执行先等待旧租约，不能抢占仍有效 Worker 的回执提交权。
+        // 替代执行先等待旧租约，有效 Worker 仍持有回执提交权。
         self.wait_existing_lease(&child.task_id, Some(context.cancellation.clone()))
             .await?;
         // 模型和工具 I/O 各自申请资源；整任务持有槽位会让嵌套委派等待形成死锁。
@@ -1372,7 +1372,7 @@ impl TaskHub {
         if task.state.is_terminal() || task.state == TaskState::Paused {
             return Ok(());
         }
-        // 尝试由 Worker 自己释放；排队失败不得撤销另一个仍有效执行者的尝试。
+        // 尝试由 Worker 自己释放；排队失败不影响另一个有效执行者。
         let task = repository.load(id)?;
         let stopping = self.stopping.load(std::sync::atomic::Ordering::Acquire);
         let state = if !stopping && super::gateway_runtime::automatic_network_recovery(&error.code)
@@ -1705,7 +1705,7 @@ impl TaskHub {
                         parent.cancellation.subscribe(),
                     )
                     .await?;
-                // 已接受的子任务保持稳定身份及原始上下文引用，重启不能只恢复父任务后永久等待。
+                // 已接受的子任务保持稳定身份及原始上下文引用，重启后才能一起恢复。
                 for child in repository.children(&task.task_id)? {
                     if child.state.is_terminal() || child.state == TaskState::Paused {
                         continue;
@@ -1806,7 +1806,7 @@ impl TaskHub {
         Ok(())
     }
 
-    /// 永久删除与目录回收站分开，绝不删除用户工作目录里生成的文件。
+    /// 永久删除与目录回收站分开，用户工作目录里生成的文件不删除。
     pub async fn purge_conversation(self: &Arc<Self>, conversation_id: &str) -> Result<Value> {
         let conversation = conversation_id.to_owned();
         let targets = self
@@ -1878,13 +1878,13 @@ impl TaskHub {
         }
     }
     pub async fn recover(self: &Arc<Self>) -> Result<Value> {
-        // 恢复扫描须在迁移退池前结束；已停止的旧运行时不得重新打开任务库。
+        // 恢复扫描要在迁移退池前结束。
         let _recovery = self.recovery_gate.lock().await;
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(json!({"scheduled":0,"source":"persistent-task-index"}));
         }
         let repository = self.repository().await?;
-        // 元数据删除后的文件清理标记仍存活；恢复先重试它们，不能丢失待清理路径。
+        // 元数据删除后文件清理标记仍在，恢复时先重试它们。
         let pending = repository.pending_cleanups(512)?;
         for plan in pending {
             let id = plan.cleanup_id;
@@ -1938,7 +1938,7 @@ impl TaskHub {
         Ok(json!({"scheduled":scheduled,"source":"persistent-task-index"}))
     }
 
-    /// 长时间断网后仍可恢复；按有界退避检查持久等待，不为轮询调用模型。
+    /// 长时间断网后仍可恢复；按限量退避检查持久等待，不为轮询调用模型。
     fn schedule_network_retries(self: &Arc<Self>) {
         let hub = self.clone();
         tokio::spawn(async move {
@@ -1997,7 +1997,7 @@ impl TaskHub {
         Ok(runners + restoring)
     }
 
-    /// 迁移等待自有 Worker 实际结算日志，不能把发送取消信号当作完成。
+    /// 迁移要等自有 Worker 实际结算日志，发出取消信号还不够。
     pub async fn quiesce(self: &Arc<Self>) -> Result<()> {
         self.shutdown().await;
         let _recovery = self.recovery_gate.lock().await;
@@ -2018,7 +2018,6 @@ impl TaskHub {
         self.changes.notify_waiters();
     }
 }
-/// 父接纳绑定交付引用与版本；不能仅凭子任务结束状态推定已经验收。
 fn child_accepted(repository: &TaskRepository, task: &TaskRecord) -> Result<bool> {
     let Some(parent) = task.parent_task_id.as_deref() else {
         return Ok(true);

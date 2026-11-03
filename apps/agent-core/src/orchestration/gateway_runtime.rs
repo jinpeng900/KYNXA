@@ -1,4 +1,4 @@
-//! 原生请求生命周期与绑定调用的审批；不另建正式存储或工具账本。
+//! 原生请求生命周期与绑定调用的审批；不另建正式存储或工具记录。
 
 use crate::tools::approval_grant::{ApprovalScope, TaskApprovalGrants};
 use crate::{
@@ -153,13 +153,13 @@ pub struct RequestRun {
     observed_context_limits: std::sync::Mutex<Value>,
     pub created: Instant,
     pub resource_wait_ms: AtomicU64,
-    /// 本次尝试前已持久化的有效墙钟；并行子任务不会重复计入此时钟。
+    /// 本次尝试前已持久化的有效墙钟，并行子任务只计一次。
     pub active_duration_base_ms: u64,
     /// 后台恢复任务在新增模型准入时让出当前用户交互的优先位置。
     pub is_background_recovery: AtomicBool,
 }
 impl RequestRun {
-    /// 复用现有回放投影恢复计时；离线与暂停等待不计入已生成用时。
+    /// 复用现有回放映射恢复计时；离线与暂停等待不计入已生成用时。
     pub(crate) async fn restore_generation_timing(&self, saved: Option<u64>) -> Option<u64> {
         let _emission = self.emission.lock().await;
         let mut replay = self.replay.lock().await;
@@ -173,7 +173,7 @@ impl RequestRun {
         elapsed
     }
 
-    /// 执行让出时冻结现有计时投影，不依赖是否发布了可见文字分段。
+    /// 执行让出时冻结现有计时映射，不依赖是否发布了可见文字分段。
     pub(crate) async fn freeze_generation_timing(&self, settled: Option<u64>) {
         let elapsed = settled.or(self.replay.lock().await.generation.elapsed());
         if let Some(elapsed) = elapsed {
@@ -189,7 +189,7 @@ impl RequestRun {
         self.replay.lock().await.generation.elapsed()
     }
 
-    /// 仅在核验连接身份不变时跨模型步骤复用已学额度；请求重建不能恢复已被拒绝的预算。
+    /// 仅在连接身份不变时跨模型步骤复用已学额度。
     pub(crate) fn observed_model_limits(&self, origin: &str) -> Value {
         let observed = self.observed_context_limits.lock().unwrap();
         if observed["origin"].as_str() == Some(origin) {
@@ -221,7 +221,7 @@ impl RequestRun {
             .saturating_add(self.active_elapsed(self.created).as_millis() as u64)
     }
 
-    /// 检查点只推进当前尝试的单调墙钟高水位；重复保存不会重复计时。
+    /// 检查点只推进当前尝试的单调墙钟高水位。
     pub(crate) async fn checkpoint_active_duration(&self) -> Result<(), GatewayError> {
         let Some(journal) = &self.journal else {
             return Ok(());
@@ -257,7 +257,7 @@ impl RequestRun {
         let mut delay = Duration::from_millis(100);
         let mut waiting_since = None;
         let result = loop {
-            // 可见正文增量同样承诺可恢复；仅入内存队列不能作为提交确认或推进回放水位。
+            // 可见正文增量也要可恢复；只入内存队列不算提交确认。
             match journal.flush().await {
                 Ok(()) => break Ok(()),
                 Err(error)
@@ -329,7 +329,6 @@ impl RequestRun {
             return false;
         };
         emission.scheduled = true;
-        // 持有本次有界排空任务直到结束；不靠异步 Drop，也不逐 token 创建写入者。
         tokio::spawn(async move {
             let mut cancellation = owner.cancellation.subscribe();
             if !*cancellation.borrow() {
@@ -350,7 +349,7 @@ impl RequestRun {
     }
 
     pub async fn emit(&self, event: Value) {
-        // 供应商大块正文按UTF-8边界拆分；已发布的任何字符都不能被空归档标记替代。
+        // 供应商大块正文按 UTF-8 边界拆分，已发布字符都保留。
         if matches!(
             event["type"].as_str(),
             Some("text_delta" | "reasoning_delta")
@@ -396,7 +395,7 @@ impl RequestRun {
         if self.finished.load(Ordering::Acquire) {
             return;
         }
-        // 远端任务句柄属于私有恢复证据，不能作为桌面无法识别的新事件进入聊天流。
+        // 远端任务句柄是私有恢复证据，不进聊天流。
         if event["type"] == "mcp_task_checkpoint" {
             if let Some(journal) = &self.journal {
                 event["conversationId"] = json!(self.conversation_id);
@@ -492,7 +491,7 @@ impl RequestRun {
             } else {
                 json!({"type":event["type"],"conversationId":self.conversation_id,"requestId":self.request_id,"toolCallId":event["tool"]["toolCallId"],"resultRef":event["tool"]["resultRef"],"archived":true})
             };
-            // 控制正文采用精简引用时也保留原请求、回复与流序号；恢复不得猜归属或从零复用序号。
+            // 控制正文采用精简引用时也保留原请求、回复与流序号。
             for field in [
                 "conversationId",
                 "requestId",
@@ -512,7 +511,7 @@ impl RequestRun {
                 {
                     // 执行权或不变量错误继续保留诊断，不伪装成用户取消；后续派发仍须通过正式日志围栏。
                     journal.remember_persistence_error(error);
-                    // 未提交事件不能发布；取消或执行权恢复保留原日志，不伪造已交付内容或终态。
+                    // 未提交的事件不发布；取消或执行权恢复时保留原日志。
                     return;
                 }
             }
@@ -535,7 +534,7 @@ impl RequestRun {
     }
 
     async fn publish_event(&self, event: Value) {
-        // 持久化等待结束后才推进回放水位，避免新观察者提前终结或跳过尚未发布的事件。
+        // 持久化等待结束后才推进回放水位，新观察者才不会跳过未发布的事件。
         let mut replay = self.replay.lock().await;
         let mut final_result = if terminal_event(&event) {
             Some(self.result.lock().await)
@@ -589,7 +588,7 @@ impl RequestRun {
                     };
                 }
                 Some("content_snapshot") => {
-                    // 恢复可在新增量前替换回复投影；后续观察者必须取得相同的正文基线。
+                    // 恢复可在新增量前替换回复映射，后续观察者要取得相同的正文基线。
                     replay.content = event["content"].as_str().unwrap_or("").to_owned();
                     replay.reasoning = event["reasoning"].as_str().unwrap_or("").to_owned();
                 }
@@ -626,7 +625,7 @@ impl RequestRun {
                 replay.active_segment = None;
             }
         }
-        // 唤醒 HTTP 读取者前发布最终结果；emit/finish 之间不能出现漏唤醒窗口。
+        // 唤醒 HTTP 读取者前发布最终结果，emit 和 finish 之间才不会漏唤醒。
         if let Some(result) = final_result.as_mut() {
             **result = Some(event.clone());
             *self.finished_at.lock().unwrap() = Some(Instant::now());
@@ -834,7 +833,7 @@ impl GatewayRuntime {
             .and_then(|runs| runs.get(task_id).and_then(Weak::upgrade))
             .filter(|run| !run.finished.load(Ordering::Acquire))
     }
-    /// 复用仍有效的祖先尝试续展运行预算，不改变明确的费用/token上限，也不创建新账本。
+    /// 复用仍有效的祖先尝试续展运行预算，费用和 token 上限不变。
     pub(crate) fn budget_journals(
         &self,
         run: &RequestRun,
@@ -898,7 +897,6 @@ impl GatewayRuntime {
         runtime
     }
 
-    /// 清理仅接管可过期的模型图像副本，不延长网关生命周期，也不阻塞启动。
     fn schedule_image_cleanup(self: &Arc<Self>) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
@@ -942,7 +940,7 @@ impl GatewayRuntime {
         gate
     }
 
-    /// 先交付健康就绪；可选本地扩展延后启动，不加入软件启动等待，也不继承工作目录权限。
+    /// 先交付健康就绪，可选本地扩展延后启动。
     pub fn schedule_extension_prewarm(self: &Arc<Self>) {
         if self
             .extension_prewarm_scheduled
@@ -1132,7 +1130,7 @@ impl GatewayRuntime {
                     409,
                 ));
             }
-            // 正式任务已排队续作时，旧传输完成缓存不能代替新的执行。
+            // 正式任务已排队续作时，以新的执行为准。
             let continued = if existing.finished.load(Ordering::Acquire) {
                 existing
                     .journal
@@ -1170,7 +1168,7 @@ impl GatewayRuntime {
                 403,
             ));
         }
-        // 持久接受任务前预留活动名额；并发新请求不能越过准入，完成缓存不占执行名额。
+        // 持久接受任务前预留活动名额；完成缓存不占执行名额。
         let queue_full = || {
             GatewayError::new(
                 "CHAT_QUEUE_FULL",
@@ -1267,7 +1265,7 @@ impl GatewayRuntime {
             stream_owner: Default::default(),
             native_cancellation,
             cancellation_key,
-            // 账本水位覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
+            // 记录水位覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
             replay: Mutex::new(ReplayState {
                 sequence: task.event_sequence,
                 ..Default::default()
@@ -1420,7 +1418,7 @@ impl GatewayRuntime {
     ) -> Result<Value, GatewayError> {
         use crate::storage::task_repository::TaskControl;
         for attempt in 0..2 {
-            // 已结算回复无需改写状态；重复退出通知也不重开任务或重复执行。
+            // 已结算回复无需改写状态，重复退出通知直接忽略。
             if task.state == TaskState::Paused || task.state.is_terminal() {
                 return Ok(
                     json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":task.state}),
@@ -1487,7 +1485,7 @@ impl GatewayRuntime {
         replay.generation.project(&mut status);
         Some(status)
     }
-    /// 仅重新连接当前聊天中已接受的原请求；观察不创建任务，也不重复发送用户消息。
+    /// 仅重新连接当前聊天中已接受的原请求，只观察。
     pub async fn observe_request(
         &self,
         conversation: &str,
@@ -1501,7 +1499,7 @@ impl GatewayRuntime {
             .cloned()
             .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404))
     }
-    /// 连接已有任务执行，观察事件流不启动模型，也不重放操作；等待恢复执行者登记有界。
+    /// 连接已有任务执行，只观察事件流；等待恢复执行者登记有上限。
     pub async fn observe_task(
         &self,
         task_id: &str,
@@ -1583,7 +1581,7 @@ impl GatewayRuntime {
         let (events, _) = broadcast::channel(256);
         let run = Arc::new(RequestRun {
             conversation_id: task.scope.conversation_id.clone(),
-            // 子任务查重键可以带命名空间；正式工具回执使用稳定 task UUID，恢复时不换身份，也不伪造主聊天消息。
+            // 子任务查重键可以带命名空间；正式工具回执使用稳定 task UUID，恢复时身份不变。
             request_id: task.task_id.clone(),
             fingerprint: String::new(),
             original_message_raw: None,
@@ -1664,7 +1662,7 @@ impl GatewayRuntime {
         self.begin_with_priority(input, original, background).await
     }
 
-    /// 明确续作只退役已结算的内存投影，检查点和执行回执保持不变。
+    /// 明确续作只退役已结算的内存映射，检查点和执行回执保持不变。
     pub(crate) async fn retire_revised_projection(
         &self,
         task: &crate::storage::task_repository::TaskRecord,
@@ -2116,7 +2114,7 @@ impl GatewayRuntime {
             .saturating_add(self.tasks.active_workers().unwrap_or(usize::MAX))
     }
 
-    /// 路由必须先关闭维护入口；根目录结算期间不得进入新请求。
+    /// 路由先关闭维护入口，根目录结算期间不进新请求。
     pub async fn quiesce_storage(&self) -> Result<(), GatewayError> {
         if self.active_requests().await != 0 {
             return Err(GatewayError::new(
@@ -3502,7 +3500,7 @@ mod approval_tests {
         )
         .unwrap();
         runtime.tasks.metadata(&task_id).await.unwrap();
-        // 无法读取的诊断成果不应参与活动回复的范围与执行者核验；原记录仍保留供独立诊断。
+        // 无法读取的诊断成果不参与活动回复的核验，原记录仍保留。
         let connection =
             rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite"))
                 .unwrap();

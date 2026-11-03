@@ -47,7 +47,7 @@ impl Execution {
             .as_u64()
             .or_else(|| response.usage["output_tokens"].as_u64())
             .unwrap_or_else(|| crate::models::protocol::estimate_tokens(&response.content));
-        // 新引导到达前生成的回复，不能确认该引导或继续派发旧计划。
+        // 新引导到达前生成的回复，不算确认了该引导。
         let steering_arrived = steering_pending(&self.run, &self.prepared.ctx)
             && apply_user_steering(
                 &self.runtime,
@@ -101,7 +101,7 @@ impl Execution {
                 "userStopped":true,"unexecutedCallCount":response.calls.len()}));
             self.rounds.task_status =
                 json!({"state":"blocked","source":"user-steering","reason":"user-requested-stop"});
-            // 用户停止已完成本次答复，不应误报轮次耗尽再恢复执行。
+            // 用户停止即本次答复已完成，这里不报轮次耗尽。
             self.rounds.final_received = true;
             return Ok(PhaseOutcome::Stop);
         }
@@ -115,7 +115,7 @@ impl Execution {
                     .or_else(|| response.usage["output_tokens"].as_u64())
                     .unwrap_or(0),
             );
-            // 跳过的提议仍配对协议结果，但不能记为执行回执。
+            // 跳过的提议仍配对协议结果，但不记为执行回执。
             let skipped = response.calls.iter().map(|call| json!({"call":call,"result":{
                 "status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED",
                 "content":{"notice":"Not dispatched. First reply with the <kynxa_task> footer described in the next control notice to resolve the latest user instruction, then repeat this call if it still applies."}
@@ -132,7 +132,7 @@ impl Execution {
                 "outputTruncated":response.output_truncated,"reviewing":reviewing,
                 "taskState":inspected["state"],"taskStateSource":inspected["source"]}),
             );
-            // 缺少控制字段不能抹掉正常回复，也不计作执行空转。
+            // 缺少控制字段时保留正常回复，也不计作空转。
             let public_text = if !reviewing && !buffered_delivery && response.calls.is_empty() {
                 inspected["content"].as_str().unwrap_or("")
             } else {
@@ -151,6 +151,26 @@ impl Execution {
                 .state
                 .save(&self.runtime, &self.run, "streaming", None)
                 .await?;
+            if !response.output_truncated
+                && repair["action"] == "wait"
+                && !steering_means_stop(
+                    self.prepared.state.assistant["LatestUserSteering"]["text"]
+                        .as_str()
+                        .unwrap_or(""),
+                )
+            {
+                adopt_unacknowledged_steering(
+                    &mut self.prepared.state,
+                    self.rounds.minimum_active_ms,
+                );
+                self.rounds.review_pending = false;
+                append_control_notice(&mut self.prepared.state, "completionReviewNotice", None);
+                self.prepared
+                    .state
+                    .save(&self.runtime, &self.run, "streaming", None)
+                    .await?;
+                return Ok(PhaseOutcome::Continue);
+            }
             if !response.output_truncated && repair["action"] == "wait" {
                 self.rounds.stopped = Some(GatewayError::new(
                     "TASK_COMPLETION_REVIEW_INVALID",
@@ -165,7 +185,6 @@ impl Execution {
             return Ok(PhaseOutcome::Continue);
         }
         let text = inspected["content"].as_str().unwrap_or(&response.content);
-        // 内部历史复述从公开正文移除，不能据此结算任务。
         let echo_stripped = (!reviewing
             && crate::orchestration::task::contains_history_record(text))
         .then(|| crate::orchestration::task::strip_history_records(text));
@@ -242,7 +261,7 @@ impl Execution {
         })
         .await
         .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "模型续接回执保存失败。", 500))??;
-        // 保留流式正文，失效记忆相关调用不得派发副作用或交付。
+        // 保留流式正文；失效记忆相关的调用不派发也不交付。
         if let Some(status) = self
             .prepared
             .live_memory

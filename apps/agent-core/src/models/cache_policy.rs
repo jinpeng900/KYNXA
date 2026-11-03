@@ -1,4 +1,4 @@
-//! 供应商缓存控制仅投影请求，不接管模型执行，也不创建缓存账本。
+//! 供应商缓存控制只映射请求。
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -90,7 +90,7 @@ fn provider(connection: &Value, model: &str, protocol: &str) -> (ProviderCache, 
 }
 
 fn scope_key(connection: &Value, model: &str, protocol: &str, scope: &str) -> String {
-    // 保持计量范围稳定，不能把盘符路径、用户标识、查询或凭据直接发送给供应商。
+    // 保持计量范围稳定，盘符路径、用户标识、查询和凭据都不发给供应商。
     let domain = json!([
         "kynxa.prompt-cache.v1",
         scope,
@@ -209,7 +209,7 @@ fn anthropic(body: &mut Value, stable_system: &str) -> (usize, usize) {
     (written, prefix_bytes)
 }
 
-/// 仅应用已确认的供应商控制；不能改变指令优先级、历史角色或续传生命周期。
+/// 只应用已确认的供应商控制，指令优先级、历史角色和续传生命周期不变。
 pub(crate) fn apply(
     connection: &Value,
     model: &str,
@@ -231,7 +231,7 @@ pub(crate) fn apply(
                 mode = "implicit";
                 reason = "official-automatic-cache";
                 if policy == ProviderCache::OpenAiModern {
-                    // Responses instructions 替换旧指导；缓存不能把它转成会被继承和累积的输入项。
+                    // Responses instructions 会替换旧指导，缓存不把它转成会被继承和累积的输入项。
                     if body.get("prompt_cache_options").is_none() {
                         body["prompt_cache_options"] = json!({"mode":"implicit","ttl":"30m"});
                         reason = "official-implicit-cache-preserves-instructions";

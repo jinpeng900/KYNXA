@@ -165,7 +165,7 @@ fn merge_local(base: &Value, patch: &Value) -> Value {
             result[name] = merge_values(&base[name], &patch[name]);
         }
     }
-    // 接受旧持久设置与客户端字段，但不能重新启用已移除的交叉编码器。
+    // 接受旧持久设置与客户端字段，已移除的交叉编码器保持关闭。
     if let Some(fields) = result.as_object_mut() {
         for name in ["rerankProfileId", "rerankDevicePolicy", "rerankCandidates"] {
             fields.remove(name);
@@ -397,7 +397,7 @@ fn document(value: &Value, project_id: &Value) -> ContractResult {
         MAX_SAFE_INTEGER,
         "bindingRevision",
     )?;
-    // 工作资料自动准备；旧版选择加入配置不能关闭当前目录绑定。
+    // 工作资料自动准备，旧版选择加入配置不影响当前目录绑定。
     clean["mountedFolder"]["enabled"] = json!(true);
     result["indexingSources"] = clean;
     Ok(result)

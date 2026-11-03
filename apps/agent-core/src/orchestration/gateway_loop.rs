@@ -1,4 +1,4 @@
-//! 模型选择动作，原生账本维护执行回执。
+//! 模型选择动作，原生记录维护执行回执。
 
 mod acceptance;
 mod context;
@@ -8,6 +8,7 @@ mod preparation;
 mod tool_round;
 
 use acceptance::{
+    adopt_unacknowledged_steering, steering_means_stop,
     CompletionState, acceptance_revision, apply_steering_revision, cache_completion_review,
     cached_completion_review, checkpoint_completion_review, completion_progress_plan,
     completion_review, completion_review_instruction, completion_transcript,
@@ -54,7 +55,7 @@ use std::{
 };
 use tokio::sync::{Mutex, mpsc};
 
-/// 转录与分段合同限制每条回复最多 512 个模型轮次。
+/// 转录与分段约定限制每条回复最多 512 个模型轮次。
 const MAX_MESSAGE_ROUNDS: u64 = crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64;
 // 派发前为工具轮、压缩和交付预留保存空间。
 const MESSAGE_SEGMENT_RESERVE: usize = 2;
@@ -83,7 +84,7 @@ fn native(result: Result<Value, String>) -> Result<Value, GatewayError> {
     })
 }
 
-/// 只把本轮新增停滞写入现有诊断计数；等待不增长，有进展时也不倒扣累计数。
+/// 只把本轮新增停滞写入诊断计数；等待时不增长，有进展时也不减少。
 fn observe_work_progress(
     work: &mut WorkProgress,
     progress: &mut RunProgress,
@@ -364,7 +365,7 @@ async fn reconcile_live_recovery(
     )?;
     journal.reconcile_remote_tasks(&context).await?;
     journal.reconcile_receipts().await?;
-    // 全部本地I/O已返回；缺少回执只能保持未知，不能假定成功。
+    // 本地 I/O 已全部返回；缺少回执时状态保持未知。
     for operation in journal
         .repository()
         .operations(journal.task_id())?
@@ -452,7 +453,7 @@ struct TranscriptState {
     pending_context_before: Vec<Value>,
 }
 
-/// 按阶段组合状态，正式检查点字段保持原合同。
+/// 按阶段组合状态，正式检查点字段保持原约定。
 struct LoopState {
     assistant: Value,
     progress: RunProgress,
@@ -936,7 +937,7 @@ async fn prefetch_tool_batch(
                 &environment,
             ))
         {
-            // 此调用改回串行结算；不能在同批并发里耗尽或绕过单动作纠正机会。
+            // 此调用改回串行结算，确保单动作纠正机会不被同批并发耗尽。
             break;
         }
         admitted.push((index, call.clone(), context));
@@ -1135,14 +1136,13 @@ fn document_notice(state: &LoopState) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
-    // 事实已存检查点后，仅附目录状态和读取入口，避免重复占用上下文。
+    // 事实已存检查点，这里只附目录状态和读取入口。
     if state.context.history_sources.iter().any(|source| {
         source["checkpointSemanticSummary"]["archive"]["verified"] == true
             && source["checkpointSemanticSummary"]["facts"]
                 .as_array()
                 .is_some_and(|facts| !facts.is_empty())
     }) {
-        // 读取覆盖以当前版本回执为准，旧摘要文字不能撤销。
         let source_labels = entries
             .iter()
             .map(|entry| {
@@ -1471,7 +1471,7 @@ impl LoopState {
         )
     }
 
-    /// 仅更换回复投影，保留本次运行的历史、证据和任务身份。
+    /// 仅更换回复映射，保留本次运行的历史、证据和任务身份。
     fn continue_reply_projection(&mut self, reply_id: &str) -> Value {
         let previous_reply = self.assistant["Id"].clone();
         for observation in self
@@ -1494,7 +1494,7 @@ impl LoopState {
         let prior_calls = count_tool_attempts(&self.assistant);
         self.assistant["Id"] = json!(reply_id);
         self.assistant["PreviousReplyMessageId"] = previous_reply.clone();
-        // 新轮次使用独立命名空间，避免旧操作 ID 冲突，回执身份不变。
+        // 新轮次使用独立命名空间，防止旧操作 ID 冲突，回执身份不变。
         self.assistant["OperationNamespace"] = json!(reply_id);
         self.assistant["CreatedAt"] = json!(now_iso8601());
         for field in ["TaskContinues", "ContinuedByReplyMessageId", "ToolRun"] {
@@ -1561,7 +1561,7 @@ impl LoopState {
             .await
             .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "回复保存失败。", 500))??;
         if let Some(journal) = &run.journal {
-            // 保存已观测工作仅结算回执，不授权派发，也不允许过期尝试写入。
+            // 保存已观测工作只结算回执，过期尝试不能写入。
             if journal
                 .repository()
                 .check_receipt_attempt(journal.token())
@@ -1715,7 +1715,7 @@ fn settle_failed_reply(
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        // 时间线顺序包含工具；最终分段后也不能再增加分段，均须遵守正式存储合同。
+        // 时间线顺序包含工具；最终分段之后不再增加分段。
         let append_to_last = segments
             .last()
             .is_some_and(|segment| segment["phase"] == "final_answer")
@@ -1735,7 +1735,7 @@ fn settle_failed_reply(
                 "phase":"final_answer","status":"completed","content":notice,"reasoning":"","reasoningDurationMs":0}));
         }
     }
-    // 原 ToolRun 账本保留；普通失败正常交付答复，不认证任务完成。
+    // 原 ToolRun 记录保留；普通失败正常交付答复，不确认任务完成。
     if !settled["ToolRun"].is_object() {
         settled["ToolRun"] = json!({});
     }
@@ -1904,7 +1904,7 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
                     break;
                 }
                 _ => {
-                    // 用户停止取消执行，不取消状态落盘；结算后才公布终态。
+                    // 用户停止取消执行，不取消状态写入磁盘；结算后才公布终态。
                     run.emit(json!({"type":"task_progress","phase":"saving","round":1}))
                         .await;
                     tokio::time::sleep(retry_delay).await;
@@ -2015,7 +2015,7 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
                         value["error"] = json!("任务已停止，已有进度保留。");
                         break;
                     }
-                    // 最终落盘未成功时继续等待，不报成功或断开请求。
+                    // 最终写入磁盘未成功时继续等待，不报成功或断开请求。
                     run.emit(json!({"type":"task_progress","phase":"saving","round":1,
                         "recoveryAttempt":persistence_attempt+1}))
                         .await;
@@ -2725,7 +2725,7 @@ mod preparation_tests {
         assert_eq!(data::read_model_messages(&root, &chat).unwrap(), before);
         gateway_memory::stop_candidates(&root);
         std::fs::remove_dir_all(&root).unwrap();
-        // 空投影无需读取存储或调用供应商，夹具删除后仍能直接继续。
+        // 空映射无需读取存储或调用供应商，夹具删除后仍能直接继续。
         assert!(
             projection
                 .refresh(&root, &chat, &new_id(), &mut system)
@@ -3058,7 +3058,7 @@ mod preparation_tests {
             "TASK_CAPABILITY_UNAVAILABLE",
             "INVALID_MODEL_CONNECTION",
             "MODEL_ENDPOINT_NOT_FOUND",
-            // 重试无法改变这类结果，直接结算，避免空转。
+            // 重试改变不了这类结果，直接结算。
             "TASK_BUDGET_EXHAUSTED",
             "CHAT_REQUEST_CONFLICT",
         ] {

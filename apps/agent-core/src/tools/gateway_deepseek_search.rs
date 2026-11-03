@@ -12,7 +12,7 @@ const SEARCH_ENDPOINT: &str = "https://api.deepseek.com/v1/tools/search";
 const MAX_QUERY_CHARACTERS: usize = 128;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
-/// 只有官方端点的模型密钥可用于搜索；兼容网关或自建代理的密钥不会发往 DeepSeek 搜索。
+/// 只有官方端点的模型密钥可用于搜索，兼容网关或自建代理的密钥不发往 DeepSeek 搜索。
 fn official_endpoint(base_url: &str) -> bool {
     url::Url::parse(base_url).is_ok_and(|url| {
         url.scheme() == "https"
@@ -55,7 +55,7 @@ pub(super) async fn source(ctx: &GatewayToolContext) -> Option<Value> {
     Some(json!({"id":SOURCE_ID,"name":"DeepSeek Search","builtin":SOURCE_ID,"url":SEARCH_ENDPOINT}))
 }
 
-/// 将 DeepSeek 结果投影为统一来源格式，保留来源自带日期，不把检索时间当作发布时间。
+/// 将 DeepSeek 结果映射为统一来源格式，日期用来源自带的，不用检索时间。
 fn sources(value: &Value, count: usize) -> Vec<Value> {
     value["results"]
         .as_array()

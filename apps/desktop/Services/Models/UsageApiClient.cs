@@ -5,7 +5,7 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// 仅读取范围化用量投影，不打开日志，也不建立第二份统计存储。
+/// 仅读取范围化用量映射，不打开日志，也不建立第二份统计存储。
 /// </summary>
 public sealed class UsageApiClient : IDisposable
 {

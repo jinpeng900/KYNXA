@@ -188,7 +188,7 @@ fn relationship_from_catalog(document: &Value, id: &str) -> ContractResult {
         "storage.catalog.relationship",
         &json!({"current":document,"id":id}),
     )?;
-    // 从范围身份对应的同一正式目录快照读取工作路径；不能因缺少路径字段误用聊天沙箱。
+    // 从范围身份对应的同一正式目录快照读取工作路径。
     let project = document["Projects"]
         .as_array()
         .into_iter()
@@ -698,7 +698,6 @@ pub(crate) fn commit_catalog(
         "rawTransaction":transaction,"rawCatalog":encoded}),
     )?;
     ensure_layout(root, &next)?;
-    // 回传真实提交后的正式挂载版本，不能让调用方继续持有提交前的旧版本。
     receipt["catalog"] = next;
     Ok(receipt)
 }
@@ -782,7 +781,7 @@ pub fn encode_preserving(value: &Value, originals: &[&str]) -> String {
                                                         .and_then(Value::as_str)
                                                         .zip(id.as_str())
                                                         .is_some_and(|(left, right)| {
-                                                            // 正式 UUID 可规范化大小写；任意字符串标识仍须精确匹配，避免串用原文。
+                                                            // 正式 UUID 可规范化大小写，任意字符串标识要精确匹配。
                                                             left.len() == 36
                                                                 && right.len() == 36
                                                                 && uuid::Uuid::parse_str(left)
@@ -934,7 +933,7 @@ fn initialize(root: &Path) -> Result<(Value, Option<String>), ContractError> {
         64 * 1024 * 1024,
     )?;
     if journal.is_some() {
-        // 恢复使用原始日志编码，不将修复后的标量投影重新写入消息。
+        // 恢复使用原始日志编码，不将修复后的标量映射重新写入消息。
         let raw = managed_files::read(
             root,
             &root.join(".catalog-transaction.json"),
@@ -1335,7 +1334,7 @@ pub fn ensure_conversation(root: &Path, id: &str, title: &str) -> ContractResult
     })
 }
 pub fn read_model_messages(root: &Path, id: &str) -> Result<Vec<Value>, ContractError> {
-    // 历史投影与正式写入共用所有者锁；外部文件身份与版本核验仍然生效。
+    // 历史映射与正式写入共用所有者锁；外部文件身份与版本核验仍然生效。
     with_conversation_catalog(root, id, |catalog, _| {
         #[cfg(test)]
         let observer = MODEL_READ_OBSERVERS
@@ -1494,7 +1493,7 @@ fn upsert_message_internal(
                 id,
                 input["Id"].as_str().unwrap_or(""),
             );
-            // 记忆失败不影响已保存消息，也不能声称记忆已生效。
+            // 记忆失败不影响已保存消息，只是记忆未生效。
             result["memoryInstruction"] = match receipt {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -1673,7 +1672,7 @@ fn load_result_at(
     let raw = receipt["raw"].as_str().unwrap();
     let document: Value = serde_json::from_str(&raw_json::scalar_projection(raw))
         .map_err(|_| error("工具结果归档已损坏。", "CORRUPT_TOOL_RESULT", 500))?;
-    // 原始字段保留旧归档哈希；校验不依赖可能修复孤立 UTF-16 单元的标量投影。
+    // 原始字段保留旧归档哈希；校验不依赖可能修复孤立 UTF-16 单元的标量映射。
     #[derive(serde::Deserialize)]
     struct Original<'a> {
         #[serde(borrow)]
@@ -1716,7 +1715,7 @@ pub(crate) fn public_archive(document: &Value) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// 私有归档读取仅供内部使用，始终核对所属会话及完整性，HTTP 接口不得直接返回此结构。
+/// 私有归档读取仅供内部使用，始终核对所属会话及完整性，HTTP 接口不直接返回此结构。
 pub fn load_private_tool_result(root: &Path, conversation_id: &str, id: &str) -> ContractResult {
     with_catalog(root, |document, _| {
         load_result_at(root, document, conversation_id, id, false)
@@ -2945,7 +2944,7 @@ mod gateway_tests {
         let path = format!("/api/conversations/{target}/messages");
         let query = [("limit".into(), "4".into())];
 
-        // 历史页核验自身来源；完整目录操作仍检查全部布局，无关聊天异常不能阻塞目标聊天显示。
+        // 历史页核验自身来源；完整目录操作仍检查全部布局，无关聊天异常不影响目标聊天显示。
         let page = handle_text("GET", &path, &query, &root).unwrap().unwrap();
         let page: Value = serde_json::from_str(&page.1).unwrap();
         assert_eq!(page["messages"][0]["Id"], message["Id"]);
@@ -2954,7 +2953,7 @@ mod gateway_tests {
             "INVALID_DATA_LAYOUT"
         );
 
-        // 外部替换目录后，目标删除或移动必须使先前范围快照失效，不能沿用缓存归属。
+        // 外部替换目录后，目标删除或移动要使先前范围快照失效。
         let mut removed = catalog.clone();
         removed["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
         removed["Chats"]
@@ -3018,7 +3017,7 @@ mod gateway_tests {
             let old_log = conversation_logs::directory(&root, &old_location)
                 .unwrap()
                 .join("events.jsonl");
-            // 保存其他聊天时不解析无关的不可读历史；显式读取该历史仍必须报告损坏。
+            // 保存其他聊天时不解析无关的不可读历史；显式读取该历史时才报告损坏。
             let original = b"{\"version\":1,\"type\":\"message.upsert\",\"message\":broken}\n";
             std::fs::write(&old_log, original).unwrap();
             let user = json!({"Id":new_id(),"Role":"user","Status":"completed","CreatedAt":now(),"Content":"hello"});
@@ -3247,7 +3246,7 @@ pub fn handle(
         let id = parts[2];
         if parts.len() == 5 && parts[3] == "tool-results" && method == "GET" {
             if query_value(query, "offset").is_some() || query_value(query, "limit").is_some() {
-                // 既有分页读取器拥有目录锁；不得在已经持有同一所有者锁时再次进入。
+                // 既有分页读取器拥有目录锁，已持有同一所有者锁时不再进入。
                 return Some((|| {
                     let read_unsigned_page_argument =
                         |field: &str, default: u64| -> Result<u64, ContractError> {

@@ -95,7 +95,7 @@ impl CdpClient {
         let (sender, mut commands) = mpsc::channel::<CdpCommand>(64);
         let events = Arc::new(Mutex::new(EventBuffer::default()));
         let observed = events.clone();
-        // 事件、对话框、跟踪共享自有长连接；有界缓冲不能随闲置页面无限增长。
+        // 事件、对话框、跟踪共享自有长连接，缓冲有上限。
         let task = tokio::spawn(async move {
             let mut pending = HashMap::<u64, CdpReply>::new();
             loop {
@@ -386,7 +386,7 @@ pub(crate) async fn attach_embedded(
     )
 }
 
-/// 分离视图只释放自动化状态，绝不关闭桌面拥有的 WebView 进程。
+/// 分离视图只释放自动化状态，桌面拥有的 WebView 进程继续运行。
 pub(crate) async fn detach_embedded(
     id: &str,
     ctx: &GatewayToolContext,
@@ -440,7 +440,7 @@ async fn start_workspace_browser(
         })?;
     let profile = ctx.data_home.join("Browser/Workspace");
     tokio::fs::create_dir_all(&profile).await?;
-    // 上次异常退出可能遗留端口文件；启动前移除，绝不复用不属于当前作业的调试端点。
+    // 上次异常退出可能遗留端口文件，启动前移除，只用当前作业的调试端点。
     match tokio::fs::remove_file(profile.join("DevToolsActivePort")).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -449,7 +449,7 @@ async fn start_workspace_browser(
     super::gateway_browser_permissions::prepare(ctx, &browser).await?;
     let mut command = Command::new(browser);
     hide(&mut command);
-    // 关闭顶层遮挡处理，避免软件失去焦点时嵌入页面停止显示。
+    // 关闭顶层遮挡处理，软件失去焦点时嵌入页面才能继续显示。
     command
         .args([
             "--remote-debugging-port=0",
@@ -521,7 +521,7 @@ async fn start_workspace_browser(
         })?
         .to_owned();
     let client = Box::pin(CdpClient::connect(&socket)).await?;
-    // DevTools 可能先于首页就绪；等待并接管首页，避免多开窗口。
+    // DevTools 可能先于首页就绪，等待并接管首页，防止多开窗口。
     let initial_target = loop {
         check_cancelled(ctx)?;
         let targets = client.call("Target.getTargets", json!({}), ctx).await?;
@@ -598,7 +598,7 @@ pub(crate) async fn workspace_open(
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
     let url = allowed_url(input["url"].as_str().unwrap_or("about:blank"))?;
-    // 注册锁串行化同一配置的首次启动、页面分配与末页关闭，避免重复进程抢占目录。
+    // 注册锁串行化同一配置的首次启动、页面分配与末页关闭，防止重复进程抢占目录。
     let mut registry = ctx.runtime.workspace_browser.lock().await;
     let handles = ctx
         .runtime
@@ -726,7 +726,7 @@ pub(crate) async fn workspace_open(
     }
 }
 
-/// 关闭不能继承已取消的打开请求信号，同时保留原始初始化错误供界面准确报告。
+/// 关闭时不继承已取消的打开请求信号，并保留原始初始化错误供界面报告。
 async fn cleanup_failed_workspace_open(
     id: &str,
     handle: &Arc<Mutex<BrowserSession>>,
@@ -738,7 +738,7 @@ async fn cleanup_failed_workspace_open(
     cleanup.cancellation = cancellation;
     let cleanup_result = close_workspace_session(id, handle, &cleanup).await;
     if let Err(cleanup_error) = cleanup_result {
-        // CDP 断开也不能遗留最后一个共享进程；存在其他活跃网页时不能连带终止。
+        // CDP 断开时也要清理最后一个共享进程；还有其他活跃网页时保留。
         let registry = ctx.runtime.workspace_browser.lock().await;
         let browser = handle
             .lock()
@@ -1279,7 +1279,7 @@ impl BrowserSession {
         let Some(job) = &self._owned else {
             return Ok(());
         };
-        // 仅在整个自有作业已确认退出后，重试 Windows 临时文件锁；不能把等待进程隐藏为文件清理。
+        // 仅在整个自有作业已确认退出后，重试 Windows 临时文件锁。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             if job.has_running_processes()? {
@@ -1501,7 +1501,7 @@ pub(crate) fn descriptors() -> Vec<Value> {
 }
 
 fn excluded_executable(path: &Path, intent: &Value) -> bool {
-    // Windows 大小写别名不会改变应用身份，也不能改变用户的明确禁令。
+    // Windows 大小写别名不改变应用身份，用户的明确禁令继续生效。
     let basename = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1574,7 +1574,7 @@ fn executable(input: &Value, ctx: &GatewayToolContext) -> Result<PathBuf, Gatewa
         })
 }
 
-/// 页面未提交时仍可能已有可嵌入窗口；展示路径可用请求地址，不能改写真实导航回执。
+/// 页面未提交时可能已有可嵌入窗口；展示路径可用请求地址，导航回执保持真实。
 fn workspace_presentation_path(state: &Value) -> Value {
     if state["url"].as_str().is_some_and(|text| {
         url::Url::parse(text).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
@@ -2063,7 +2063,7 @@ async fn stage_upload(
     }
 }
 
-/// 运行时身份只提供当前聊天的导航线索，不进入长期记忆，也不冒充页面内容观测。
+/// 运行时身份只提供当前聊天的导航线索，不进入长期记忆。
 async fn known_sessions(ctx: &GatewayToolContext) -> Value {
     let handles = ctx
         .runtime
@@ -2696,7 +2696,7 @@ pub(crate) async fn execute(
         }
         "browser.snapshot" => {
             let maximum = input["maxChars"].as_u64().unwrap_or(32000).clamp(1, 64000);
-            // 正文提取仅在浏览器内处理文档副本，不增加 Node 宿主，也不改变用户页面。
+            // 正文提取只在浏览器内处理文档副本，不增加 Node 宿主，用户页面保持不变。
             let expression = format!("(() => {{ const module = undefined; const exports = undefined; {} const snapshot = ({})({maximum}); return Object.assign(snapshot, {}); }})()",
                 include_str!("../../../official-tools/Browser/readability/Readability.js"),
                 include_str!("browser_snapshot.js"),

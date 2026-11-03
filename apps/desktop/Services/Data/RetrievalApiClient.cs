@@ -34,7 +34,7 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
     public RetrievalApiClient() : this(GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromSeconds(60)),
         ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true)
     {
-        // 链接解析使用独立有界传输；普通状态读取继续使用原有截止时间。
+        // 链接解析使用独立限量传输；普通状态读取继续使用原有截止时间。
         _urlImportHttpClient = GatewayHttpClient.Create(ModelGatewayService.Address, TimeSpan.FromMinutes(5));
     }
 

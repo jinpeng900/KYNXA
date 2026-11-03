@@ -172,7 +172,7 @@ mod identity_tests {
     }
 }
 
-/// 有界读取持有已校验文件对象，窗口读取结束后再核验身份，避免绕过既有路径与版本保护。
+/// 限量读取持有已校验文件对象，窗口读取结束后再核验身份，避免绕过既有路径与版本保护。
 pub struct StableReader {
     pub file: std::fs::File,
     root: PathBuf,
@@ -349,7 +349,7 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// 独占创建同目录临时文件并同步落盘，再替换正式文件，返回实际提交回执。
+/// 独占创建同目录临时文件并同步写入磁盘，再替换正式文件，返回实际提交回执。
 pub fn atomic_write(
     root: &Path,
     path: &Path,

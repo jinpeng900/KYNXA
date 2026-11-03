@@ -46,7 +46,7 @@ struct Embedding {
     length: usize,
 }
 
-/// 原生准备服务拥有有界指纹及回执决策；原始 SDK 正文与对象身份句柄留在外部。
+/// 原生准备服务拥有限量指纹及回执决策；原始 SDK 正文与对象身份句柄留在外部。
 #[derive(Default)]
 pub struct SourcePreparationState {
     sequence: u64,
@@ -126,67 +126,7 @@ impl SourcePreparationState {
                     json!(count(&self.fields["preparationFailures"]) + 1);
                 Ok(Value::Null)
             }
-            "map" => {
-                let key = string(&args["key"]);
-                match string(&args["action"]) {
-                    "get" => Ok(self
-                        .cache
-                        .get(key)
-                        .map(|entry| json!({"id": entry.id, "facts": entry.facts}))
-                        .unwrap_or(Value::Null)),
-                    "has" => Ok(json!(self.cache.contains_key(key))),
-                    "size" => Ok(json!(self.cache.len())),
-                    "set" => {
-                        let id = self.next_id();
-                        let mut released = Vec::new();
-                        if let Some(old) = self.cache.insert(
-                            key.into(),
-                            CacheEntry {
-                                id,
-                                facts: args["facts"].clone(),
-                            },
-                        ) {
-                            released.push(old.id);
-                        } else {
-                            self.order.push_back(key.into());
-                        }
-                        while self.cache.len() > 64000 {
-                            if let Some(key) = self.order.pop_front() {
-                                if let Some(old) = self.cache.remove(&key) {
-                                    released.push(old.id);
-                                }
-                            }
-                        }
-                        Ok(json!({"id": id, "released": released}))
-                    }
-                    "delete" => {
-                        let old = self.cache.remove(key);
-                        self.order.retain(|item| item != key);
-                        Ok(json!({"deleted": old.is_some(), "released": old.map(|entry| entry.id)}))
-                    }
-                    "clear" => {
-                        let released = self
-                            .cache
-                            .values()
-                            .map(|entry| entry.id)
-                            .collect::<Vec<_>>();
-                        self.cache.clear();
-                        self.order.clear();
-                        Ok(json!({"released": released}))
-                    }
-                    "page" => Ok(json!(
-                        self.order
-                            .iter()
-                            .skip(count(&args["cursor"]))
-                            .take(64)
-                            .filter_map(|key| self.cache.get(key).map(
-                                |entry| json!({"key": key, "id": entry.id, "facts": entry.facts})
-                            ))
-                            .collect::<Vec<_>>()
-                    )),
-                    _ => Err("UNKNOWN_SOURCE_PREPARATION_MAP_OPERATION".into()),
-                }
-            }
+            "map" => self.apply_map(args),
             "sameEntry" => Ok(json!(
                 self.cache
                     .get(string(&args["key"]))
@@ -562,6 +502,68 @@ impl SourcePreparationState {
                 Ok(Value::Null)
             }
             _ => Err("UNKNOWN_SOURCE_PREPARATION_OPERATION".into()),
+        }
+    }
+
+    fn apply_map(&mut self, args: &Value) -> Result<Value, String> {
+        let key = string(&args["key"]);
+        match string(&args["action"]) {
+            "get" => Ok(self
+                .cache
+                .get(key)
+                .map(|entry| json!({"id": entry.id, "facts": entry.facts}))
+                .unwrap_or(Value::Null)),
+            "has" => Ok(json!(self.cache.contains_key(key))),
+            "size" => Ok(json!(self.cache.len())),
+            "set" => {
+                let id = self.next_id();
+                let mut released = Vec::new();
+                if let Some(old) = self.cache.insert(
+                    key.into(),
+                    CacheEntry {
+                        id,
+                        facts: args["facts"].clone(),
+                    },
+                ) {
+                    released.push(old.id);
+                } else {
+                    self.order.push_back(key.into());
+                }
+                while self.cache.len() > 64000 {
+                    if let Some(key) = self.order.pop_front() {
+                        if let Some(old) = self.cache.remove(&key) {
+                            released.push(old.id);
+                        }
+                    }
+                }
+                Ok(json!({"id": id, "released": released}))
+            }
+            "delete" => {
+                let old = self.cache.remove(key);
+                self.order.retain(|item| item != key);
+                Ok(json!({"deleted": old.is_some(), "released": old.map(|entry| entry.id)}))
+            }
+            "clear" => {
+                let released = self
+                    .cache
+                    .values()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>();
+                self.cache.clear();
+                self.order.clear();
+                Ok(json!({"released": released}))
+            }
+            "page" => Ok(json!(
+                self.order
+                    .iter()
+                    .skip(count(&args["cursor"]))
+                    .take(64)
+                    .filter_map(|key| self.cache.get(key).map(
+                        |entry| json!({"key": key, "id": entry.id, "facts": entry.facts})
+                    ))
+                    .collect::<Vec<_>>()
+            )),
+            _ => Err("UNKNOWN_SOURCE_PREPARATION_MAP_OPERATION".into()),
         }
     }
 }

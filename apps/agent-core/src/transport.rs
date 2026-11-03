@@ -9,7 +9,7 @@ pub struct FrameLimits {
     pub response_bytes: usize,
 }
 
-/// 适配器和执行器共用额度表；扩大的传输帧不扩大来源权限或正文合同。
+/// 适配器和执行器共用额度表；扩大的传输帧不扩大来源权限或正文约定。
 pub fn frame_limits(operation: &str, kind: &str) -> FrameLimits {
     let input_bytes = match kind {
         "calculation" if operation == "storage.manifest.files" => 288 * MIB,

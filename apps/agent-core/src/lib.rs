@@ -1,4 +1,4 @@
-//! 网关适配器复用的原生操作合同与范围状态会话；HTTP/SSE 入口由 gateway 模块负责。
+//! 网关适配器复用的原生操作约定与范围状态会话；HTTP/SSE 入口由 gateway 模块负责。
 
 use std::collections::HashMap;
 

@@ -283,7 +283,7 @@ impl DocumentExtractionState {
                 let format = args["format"].as_str().unwrap_or("pdf");
                 if !["pdf", "png", "jpeg", "bmp", "gif", "tiff", "webp"].contains(&format) || format != "pdf" && pages != &[json!(1)] { return Err(failure("DOCUMENT_INVALID_INPUT")); }
                 self.sequence += 1; let id = self.sequence; self.ocr_outputs.insert(id, json!({"pages": pages, "maximum": args["maximumOutputBytes"], "bytes": 0, "format":format}));
-                // 栅格租约覆盖有界原图解码、缩放位图及辅助进程开销，不能只按压缩字节预约。
+                // 栅格租约覆盖限量原图解码、缩放位图及辅助进程开销。
                 let decode_memory = if format == "pdf" {384} else {512} * 1024 * 1024;
                 Ok(json!({"id": id, "timeoutMs": number(&args["timeoutMs"], 20000).clamp(1000, 30000), "killWaitMs": 2000, "resource": {"kind": "background", "cpuThreads": 1, "memoryBytes": decode_memory + number(&args["byteLength"], 0) * 4 + number(&args["maximumOutputBytes"], 0) * 6, "waitMs": args["timeoutMs"]}})) }
             "ocrChunk" => { let output = self.ocr_outputs.get_mut(&id).ok_or_else(|| failure("OCR_INVALID_RESULT"))?; let bytes = number(&output["bytes"], 0).saturating_add(number(&args["bytes"], 0)); output["bytes"] = json!(bytes); Ok(json!(bytes <= number(&output["maximum"], 0).saturating_mul(6) + 64 * 1024)) }

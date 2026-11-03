@@ -211,7 +211,7 @@ impl Execution {
         &mut self,
         round: u64,
     ) -> Result<PhaseOutcome<RequestPreparation>, GatewayError> {
-        // 压缩前预留当前验收要求，不能把它当作旧对话删掉。
+        // 压缩前预留当前验收要求。
         let pending_tool_intent = !crate::orchestration::task::response_only_scope(
             &self.prepared.state.assistant["CurrentWorkScope"],
         ) && crate::orchestration::task::has_unexecuted_tool_intent(
@@ -277,7 +277,7 @@ impl Execution {
             self.rounds.synthesized_version = Some(delivery_version);
         }
         // 工具限额只停止派发，答复保留上下文和已协商输出额度。
-        // 一次未声明后关闭工具一轮，让模型先回应插话，而不是继续重试旧计划。
+        // 一次未声明后关闭工具一轮，让模型先回应插话。
         let steering_repair = unresolved_user_steering(&self.prepared.state)
             && self.prepared.state.completion.review_checkpoint["reviewFormatRepair"].is_object();
         let tools_closed = delivery.tools_exhausted || steering_repair;
@@ -336,7 +336,7 @@ impl Execution {
         if let Some(snapshot) = &self.prepared.state.context.runtime_snapshot {
             mandatory_messages.push(snapshot["message"].clone());
         }
-        // 声明授额和压缩前限制重复指导，保留目标与工作事实空间。
+        // 声明额度和压缩前限制重复指导，保留目标与工作事实空间。
         let mut essential_tools = if declarations_disabled {
             vec![]
         } else {
@@ -350,7 +350,7 @@ impl Execution {
             ))
             .to_string(),
         );
-        // 先保留不可缩减的输入，再分配输出，避免小窗口把本来放得下的目标判为无法压缩。
+        // 先保留不可缩减的输入，再分配输出，小窗口也能放下本来放得下的目标。
         let required_input_tokens = crate::models::protocol::tool_message_tokens(
             &mandatory_messages,
             &self.prepared.system,
@@ -364,10 +364,18 @@ impl Execution {
         if let Some(limit) = self.rounds.provider_input_limit {
             output_args["providerMaxInputTokens"] = json!(limit);
         }
-        let output = native(crate::models::output::calculate(
-            "context.outputBudget",
-            &output_args,
-        ))?;
+        // 小窗口放不下时先去掉可选工具再试，和下面的压缩路径一致。
+        let output = match crate::models::output::calculate("context.outputBudget", &output_args) {
+            Err(code)
+                if code == "CONTEXT_INPUT_TOO_LARGE"
+                    && !declarations_disabled
+                    && trim_optional_tool(&mut self.prepared.state.tools.selected) =>
+            {
+                self.prepared.state.cache.tool_series.reset();
+                return Ok(PhaseOutcome::Continue);
+            }
+            result => native(result)?,
+        };
         let input_budget = output["inputBudgetTokens"]
             .as_u64()
             .unwrap_or(4096)
@@ -412,7 +420,7 @@ impl Execution {
             "Repeated work added no progress. Reuse saved findings; perform the next unfinished step or deliver the final answer.",
             advisory_budget / 8,
         );
-        // 工具声明按必要指导授额，旧历史随后压缩。
+        // 工具声明按必要指导额度，旧历史随后压缩。
         // 声明准入计入实际发送的全部必需消息，不只计算 system。
         for notice in [
             &document_progress_notice,
@@ -473,7 +481,7 @@ impl Execution {
                 self.prepared.state.tools.selected.push(tool.clone());
             }
         }
-        // 交付建议不能挤掉模型刚加载的能力。
+        // 交付建议要给模型刚加载的能力让路。
         let mut declared_tools = self.prepared.state.tools.selected.clone();
         let mut pinned_tool_names = self
             .prepared
@@ -515,7 +523,7 @@ impl Execution {
         }
         // 缩小已声明目录以回收上下文，保留完整能力发现入口。
         loop {
-            // 核验及无工具交付轮次即使声明预算为零，也不能在裁剪时重新装回工具。
+            // 核验及无工具交付轮次的声明预算为零时，裁剪不重新装回工具。
             if declarations_disabled {
                 break;
             }
@@ -823,7 +831,6 @@ impl Execution {
         )
         .await?;
         if projected_input_tokens > input_budget {
-            // 保留已核验上下文，先裁可选声明，避免重载执行器或重复操作。
             if !declarations_disabled && trim_optional_tool(&mut declared_tools) {
                 self.prepared.state.cache.tool_series.reset();
                 self.prepared.state.tools.selected = declared_tools;
@@ -883,7 +890,7 @@ impl Execution {
     }
 }
 
-/// 发送端由压缩操作持有；应用上下文投影前先收齐已接收事件。
+/// 发送端由压缩操作持有；应用上下文映射前先收齐已接收事件。
 struct CompactionEvents {
     relay: tokio::task::JoinHandle<(u64, Vec<Value>)>,
 }
@@ -953,7 +960,7 @@ impl CompactionEvents {
     }
 }
 
-/// 这里只应用已接受的内存投影；存储和等待后的核对仍由调用方协调。
+/// 这里只应用已接受的内存映射；存储和等待后的核对仍由调用方协调。
 fn apply_compacted_context(
     state: &mut LoopState,
     system: &mut String,

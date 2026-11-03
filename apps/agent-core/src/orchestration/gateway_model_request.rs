@@ -21,7 +21,7 @@ pub(crate) fn descriptor(tool: &Value, name: &str) -> Value {
     json!({"name":name,"wireName":wire,"description":tool["description"],"inputSchema":tool["inputSchema"],
         "annotations":tool["annotations"],"execution":tool["execution"]})
 }
-/// 将已加载工具投影为供应商声明，保留身份和参数合同。
+/// 将已加载工具映射为供应商声明，保留身份和参数约定。
 pub(crate) fn model_tool_declarations(protocol_name: &str, catalog: &[Value]) -> Vec<Value> {
     model_tool_declarations_with_order(
         protocol_name,
@@ -141,7 +141,7 @@ pub(crate) fn summary_executor(
     (executor, SummaryDispatches { durations_ms })
 }
 
-/// 准入等待单独计时，取消或提前返回也不遗漏。
+/// 准入等待单独计时，取消或提前返回也会记录。
 struct ModelAdmissionWait<'a> {
     run: &'a RequestRun,
     started: Instant,
@@ -299,7 +299,7 @@ pub(crate) async fn request_model(
             };
         }
     };
-    // 长排队可能跨过 Ollama 驻留观测有效期；按原缓存时效刷新，避免重复预约旧的装载增量。
+    // 长排队可能跨过 Ollama 驻留观测有效期，按原缓存时效刷新，防止重复预约旧的装载增量。
     let observed = if observed.as_ref().is_some_and(|snapshot| {
         snapshot["backend"] == "ollama"
             && snapshot["observedAt"]
@@ -493,7 +493,7 @@ async fn ensure_model_ready(
 }
 
 fn transport_resource_request(request_id: &str, workspace: &str) -> Value {
-    // 模型槽负责前后台优先级；传输使用轻量 I/O 准入合同。
+    // 模型槽负责前后台优先级；传输使用轻量 I/O 准入约定。
     json!({"taskId":request_id,"workspaceId":workspace,"kind":"foreground","workload":"model-transport",
         "cpuThreads":1,"memoryBytes":16777216,"gpuMemoryBytes":0,"waitMs":30000,"ttlMs":30000})
 }

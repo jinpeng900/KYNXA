@@ -1,4 +1,4 @@
-//! 原生资源服务传输；硬件授额仍由唯一资源服务进程负责。
+//! 原生资源服务传输；硬件额度仍由唯一资源服务进程负责。
 
 use crate::gateway_contract::GatewayError;
 use serde_json::{Value, json};
@@ -104,7 +104,7 @@ impl ResourceService {
         tokio::spawn(async move {
             loop {
                 let mut frame = Vec::new();
-                // 辅助进程响应异常时，有界帧读取不能无限分配内存。
+                // 辅助进程响应异常时，限量帧读取不能无限分配内存。
                 let mut complete = false;
                 while frame.len() <= 65536 {
                     let available = match output.fill_buf().await {
@@ -588,7 +588,7 @@ mod tests {
                 .request("snapshot", json!({}), Duration::from_secs(2))
                 .await
                 .unwrap();
-            // 恢复精确的自有 CPU 预约，使夹具不受宿主压力下的自适应授额影响。
+            // 恢复精确的自有 CPU 预约，使夹具不受宿主压力下的自适应额度影响。
             let restored = service.request("restore", json!({"leases":[{
                 "leaseId":"drop-owner","taskId":"drop-owner",
                 "expiresAt":chrono::Utc::now().timestamp_millis() + 30000,

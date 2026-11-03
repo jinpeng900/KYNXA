@@ -265,7 +265,7 @@ pub fn normalize_server(server: &Value) -> ServiceResult<Value> {
     } else {
         protocol.as_str().unwrap_or("")
     };
-    // 配置保留合法协议日期；连接时再判断实现能力，单个不兼容服务不能使整份配置损坏。
+    // 配置保留合法协议日期，连接时再判断实现能力，单个不兼容服务不影响整份配置。
     if !matches(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", protocol) {
         return Err(invalid("MCP 协议版本须为 YYYY-MM-DD 日期格式。"));
     }

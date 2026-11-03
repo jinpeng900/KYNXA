@@ -230,7 +230,7 @@ fn scope(arguments: &Value) -> Value {
     json!({"aliases":aliases.iter().map(|path|path_text(path)).collect::<Vec<_>>(),"denied":denied})
 }
 
-/// 发现服务拥有有界遍历与来源优先级；YAML 解析保留为 SDK 边界。
+/// 发现服务拥有限量遍历与来源优先级；YAML 解析保留为 SDK 边界。
 #[derive(Default)]
 pub struct SkillDiscovery {
     arguments: Value,

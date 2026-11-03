@@ -22,7 +22,7 @@ pub(crate) fn snapshot(role: &str, dynamic: &str, authority_hash: &str) -> Optio
     }}))
 }
 
-/// 先撤出已失效投影，仅在完整轮次边界追加变化或已被压缩移除的事实。
+/// 先撤出已失效映射，仅在完整轮次边界追加变化或已被压缩移除的事实。
 pub(crate) fn append_snapshot(
     messages: &mut Vec<Value>,
     sources: &mut Vec<Value>,

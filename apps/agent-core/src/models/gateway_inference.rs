@@ -1,4 +1,4 @@
-//! 原生离线推理保留固定分词器、投影和向量空间合同，不启动 Node 或下载模型。
+//! 原生离线推理保留固定分词器、映射和向量空间约定，不启动 Node 或下载模型。
 
 use std::{
     collections::HashMap,
@@ -143,7 +143,7 @@ struct LoadedModel {
     batch_state: super::worker::WorkerState,
 }
 
-/// 额外 CPU 审计图复用现有资源估计，必须持有单独批准的 RAM 授额。
+/// 额外 CPU 审计图复用现有资源估计，并持有单独批准的 RAM 额度。
 pub fn qualification_request(cpu_threads: usize) -> Result<Value, ModelError> {
     let assets = EMBEDDING_ASSETS;
     crate::resources::calculate("resources.inferenceRequest",&json!({"profile":{"dtype":"q8","dimensions":384,"hiddenSize":384,"attentionHeads":12,"maxInputTokens":512,
@@ -162,7 +162,7 @@ fn check_cancelled(cancel: &AtomicBool) -> Result<(), ModelError> {
     }
 }
 
-/// 从随包 DLL 初始化一次；运行库不兼容或缺失时不能静默回退到另一运行路径。
+/// 从随包 DLL 初始化一次；运行库不兼容或缺失时直接报错，不回退到另一运行路径。
 pub fn initialize_runtime(dll_path: &Path) -> Result<(), ModelError> {
     let _gate = INITIALIZE_GATE
         .lock()
@@ -262,7 +262,7 @@ fn loaded(
     if let Some(model) = cache.get(&key) {
         return Ok(model.clone());
     }
-    // 每种模型/设备最多保留一个会话；线程授额变更时淘汰旧缓存，活动请求仍持有自身句柄。
+    // 每种模型/设备最多保留一个会话；线程额度变更时淘汰旧缓存，活动请求仍持有自身句柄。
     let prefix = format!("{}:{}:{}:", root.display(), false, options.device);
     if cache
         .iter()

@@ -25,7 +25,7 @@ const MAX_PAGE_FILES: usize = 1000;
 const MAX_PAGE_ENTRIES: usize = 2000;
 const MAX_PAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-// 为路径、覆盖说明与游标元数据预留空间，不能只计结果数组。
+// 为路径、覆盖说明与游标元数据预留空间。
 const MAX_RESULT_BYTES: usize = MAX_RESPONSE_BYTES - 256 * 1024;
 const MAX_PAGE_DURATION: Duration = Duration::from_secs(30);
 const MAX_MATCHES: u64 = 1000;

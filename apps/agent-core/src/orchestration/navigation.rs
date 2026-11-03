@@ -6,7 +6,6 @@ fn valid_text(value: &Value, maximum: usize) -> bool {
     })
 }
 
-/// 模型计划是可修正状态，不授予权限，也不认证任务完成。
 #[derive(Default)]
 pub struct NavigationState {
     revision: u64,

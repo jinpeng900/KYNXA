@@ -167,7 +167,7 @@ public static class ChatStreamReader
                         case "task_tool_result":
                         case "task_finished":
                         case "task_approval_closed":
-                            // 子任务诊断不加入主代理工具账本，也不结束主回复；正式回执通过任务 API 读取。
+                            // 子任务诊断不加入主代理工具记录，也不结束主回复；正式回执通过任务 API 读取。
                             if (streamEvent.TaskId is not Guid task || task == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty
                                 || (rootTaskId is Guid root && streamEvent.RootRequestTaskId is Guid actual && root != actual))
                                 throw new InvalidDataException(UiText.Get("任务事件无效。"));

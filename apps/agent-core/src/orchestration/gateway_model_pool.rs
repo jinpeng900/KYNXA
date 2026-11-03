@@ -238,7 +238,7 @@ impl ModelSlots {
         };
         self.changed.notify_waiters();
         loop {
-            // 先注册唤醒再检查计数，避免释放槽位后的漏唤醒。
+            // 先注册唤醒再检查计数，否则可能漏掉释放槽位后的唤醒。
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -284,7 +284,7 @@ impl ModelSlots {
                 let background_turn = oldest.is_some_and(|(_, since)| {
                     since.elapsed() >= BACKGROUND_AGING || streak >= FOREGROUND_BURST
                 }) && !(last_background && foreground_eligible);
-                // 后台老化后取得一次对称准入机会；前台此时也让出一次，绝不抢占在途请求。
+                // 后台老化后取得一次对称准入机会，前台让出一次；在途请求不受影响。
                 let priority_allowed = if foreground {
                     !background_turn
                 } else {

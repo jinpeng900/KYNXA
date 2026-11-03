@@ -167,7 +167,7 @@ enum GeneratedContent {
     ConvertedPdf(PathBuf),
 }
 
-/// 网关先执行普通写入权限检查，再传入真实目标及绑定；生成器不能自行扩大文件权限。
+/// 网关先执行普通写入权限检查，再传入真实目标及绑定。
 pub(super) async fn create(
     context: &GatewayToolContext,
     arguments: Value,

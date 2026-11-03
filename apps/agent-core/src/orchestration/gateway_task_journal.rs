@@ -1,4 +1,4 @@
-//! 请求循环复用唯一任务仓储，不复制账本。
+//! 请求循环复用唯一任务仓储，不复制记录。
 
 use crate::gateway_contract::GatewayError;
 use crate::storage::{managed_files, task_repository::*};
@@ -613,7 +613,7 @@ mod durability_tests {
             60_000,
         )
         .unwrap();
-        // 仅在夹具中关闭定时泵，使取消准确作用于前台flush，而不是由时间竞争决定测试结果。
+        // 仅在夹具中关闭定时泵，让取消准确作用于前台 flush。
         journal.scheduled.store(true, Ordering::Release);
         journal
             .emit_control(
@@ -1048,7 +1048,7 @@ impl TaskJournal {
             }
             let repository = journal.repository.clone();
             let token = journal.token.clone();
-            // 租约续期不调用模型，也不让暂停、取消的任务复活。
+            // 租约续期不调用模型，已暂停或取消的任务保持原状。
             let renewed =
                 tokio::task::spawn_blocking(move || repository.renew_attempt(&token, lease_ms))
                     .await;
@@ -1071,7 +1071,7 @@ impl TaskJournal {
         }
     }
 
-    /// 控制事件入队后批量落盘，不逐 token 同步写 SQLite。
+    /// 控制事件入队后批量写入磁盘，不逐 token 同步写 SQLite。
     pub fn emit_control(self: &Arc<Self>, kind: &str, payload: &Value) -> Result<()> {
         if self.is_released() {
             return Err(GatewayError::new(
@@ -1141,7 +1141,7 @@ impl TaskJournal {
         loop {
             tokio::select! {_=tokio::time::sleep(Duration::from_millis(100))=>{},_=self.wake_flush.notified()=>{}}
             let succeeded = self.flush().await.is_ok();
-            // 缓存锁内复位调度，避免遗漏晚到事件。
+            // 缓存锁内复位调度，防止遗漏晚到事件。
             let Ok(pending) = self.pending.lock() else {
                 self.scheduled.store(false, Ordering::Release);
                 break;
@@ -1278,7 +1278,7 @@ impl TaskJournal {
         let owned_kind = kind.to_owned();
         let mut write = bytes.to_vec();
         let (digest, relative, size_bytes) = tokio::task::spawn_blocking(move || -> Result<_> {
-            // 对最终引用正文限长及哈希；磁盘读写和图像投影不占异步执行线程。
+            // 对最终引用正文限长及哈希；磁盘读写和图像映射不占异步执行线程。
             if matches!(
                 owned_kind.as_str(),
                 "task-checkpoint" | "worker-log" | "task-output" | "child-context"
@@ -1684,7 +1684,7 @@ impl TaskJournal {
         {
             match self.reconcile_operation(&task, &operation, &events).await {
                 Ok(true) => resolved_operations += 1,
-                // 缺失读取回执不是未知写入，不阻塞恢复。
+                // 缺失读取回执不阻塞恢复。
                 _ if operation.intent.effect == OperationEffect::Observation => {},
                 Ok(false) => unconfirmed.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
                     "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name})),
@@ -2126,7 +2126,7 @@ impl TaskJournal {
         Ok(())
     }
 
-    /// 已释放日志不能继续持有即将迁移根目录上的写入者或心跳。
+    /// 已释放的日志要放开迁移根目录上的写入者和心跳。
     pub async fn drain_background(&self) -> Result<()> {
         if !self.is_released() {
             return Err(GatewayError::new(

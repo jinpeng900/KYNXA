@@ -858,7 +858,7 @@ public sealed partial class ToolManagementWindow : Window
             string? cwd = string.IsNullOrWhiteSpace(AgentServerCwdBox.Text) ? null : AgentServerCwdBox.Text.Trim();
             if (!http && cwd is not null && (!Path.IsPathFullyQualified(cwd) || cwd.Contains('\0'))) throw new JsonException();
             string? url = http ? AgentServerUrlBox.Text.Trim() : null;
-            // 界面以秒填写，合同保存毫秒；留空使用网关默认执行期限。
+            // 界面以秒填写，约定保存毫秒；留空使用网关默认执行期限。
             int? timeoutMs = null;
             if (!string.IsNullOrWhiteSpace(AgentServerTimeoutBox.Text))
             {

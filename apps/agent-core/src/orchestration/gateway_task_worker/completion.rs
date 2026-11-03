@@ -352,7 +352,7 @@ async fn observe_unexecuted_response(
     Ok(())
 }
 
-/// 子任务沿用根任务的成功回执合同，工具参数不作证明。
+/// 子任务沿用根任务的成功回执约定，工具参数不作证明。
 pub(super) fn verified_completion_receipt(saved: &Value) -> bool {
     saved["verifiedSuccess"] != false
         && saved["completionProofVerification"] != "pending"
@@ -482,7 +482,6 @@ pub(super) async fn restore_completion_proofs(
         return;
     }
     let mut rounds = vec![json!({"observations":observations})];
-    // 复用归档归属核验，元数据缺失不能作为重做操作的依据。
     gateway_tool_execution::restore_completion_evidence(root, conversation, request, &mut rounds)
         .await;
     for observation in rounds[0]["observations"].as_array().into_iter().flatten() {

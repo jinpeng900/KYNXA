@@ -1,4 +1,4 @@
-//! 子回执投影保留原文，只更新本次执行涉及的证据。
+//! 子回执映射保留原文，只更新本次执行涉及的证据。
 
 use super::dispatch::PreparedCall;
 use super::*;
@@ -155,7 +155,7 @@ pub(super) async fn settle(
     }
     let result = json!({"call":call,"result":model_receipt,"observation":observation});
     state.pending_results.push(result);
-    // 检查点保留有界投影与引用，原始媒体和正文保留在工具归档。
+    // 检查点保留限量映射与引用，原始媒体和正文保留在工具归档。
     let acceptance_scope = if crate::orchestration::progress::validation_call(call) {
         let mut records = state
             .receipts

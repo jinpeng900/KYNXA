@@ -1,4 +1,4 @@
-//! 逐文档公开工作结果复用既有任务产物存储；不再建立第二份状态账本或复制原文。
+//! 逐文档公开工作结果复用既有任务产物存储；不再建立第二份状态记录或复制原文。
 
 use super::gateway_task_journal::TaskJournal;
 use crate::gateway_contract::GatewayError;
@@ -17,7 +17,7 @@ pub struct DocumentWorkRecords {
 }
 
 impl DocumentWorkRecords {
-    /// 仅在实际读取成功且原回执已正式归档后调用；元数据不会被当成完成的语义分析。
+    /// 仅在读取成功且原回执已归档后调用；这里只记元数据，不算语义分析完成。
     pub async fn observe_read(
         &mut self,
         journal: &TaskJournal,
@@ -121,7 +121,7 @@ impl DocumentWorkRecords {
         Ok(entry)
     }
 
-    /// 已接受的压缩事实补入逐文档记录；不能覆盖主模型显式保存的完整分析结果。
+    /// 已接受的压缩事实补入逐文档记录，主模型显式保存的分析优先。
     pub async fn update_from_summary(
         &mut self,
         journal: &TaskJournal,
@@ -140,7 +140,7 @@ impl DocumentWorkRecords {
             }
             let mut record = self.observed_record(text(&cursor["tool"]), &source, result_ref)?;
             let key = text(&record["sourceIdentity"]).to_owned();
-            // 旧归档摘要不能让当前文档版本回退；只有真实新读取可以切换活动版本。
+            // 只有真实的新读取才能切换活动版本，旧归档摘要不会让版本回退。
             if record["active"] != true
                 || self.records.iter().any(|(existing_key, existing)| {
                     existing_key != &key
@@ -193,7 +193,7 @@ impl DocumentWorkRecords {
         )
     }
 
-    /// 仅恢复当前任务树登记过的产物；调用方继续核对实时来源版本，不能把旧快照当新证据。
+    /// 只恢复当前任务树登记过的产物；调用方再核对实时来源版本。
     pub async fn restore(journal: &TaskJournal, directory: &Value) -> Result<Self> {
         let mut restored = Self::default();
         for entry in array(&directory["documents"]) {
@@ -436,7 +436,7 @@ fn document_identity(source: &Value, result_ref: &Value) -> Result<(Value, Value
             version.insert(field.into(), value.clone());
         }
     }
-    // 未取得真实内容版本时按原回执隔离，不能悄悄复用另一次读取的分析。
+    // 取不到内容版本时按原回执隔离，不复用其他读取的分析。
     if !version.contains_key("sha256")
         && !version.contains_key("contentHash")
         && !version.contains_key("sourceRevision")
@@ -479,7 +479,7 @@ fn source_range(source: &Value) -> Value {
     }
 }
 
-/// 在同一文档版本中按最后一次读取的工具和真实返回范围计数；意图说明不参与，不把回执重放当新读取。
+/// 同一文档版本按最后一次读取的工具和实际返回范围计数，回执重放不算新读取。
 fn matching_read_count(record: &Value) -> usize {
     let observations = array(&record["observations"]);
     let Some(latest) = observations.last() else {

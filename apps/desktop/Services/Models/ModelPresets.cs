@@ -17,7 +17,7 @@ public sealed record ModelPreset(string Id, string Name, string BaseUrl, string[
 
 public static class ModelPresets
 {
-    // 官方 API 来源记录于 UI-COMPONENTS.md；此处绝不保存密钥。
+    // 官方 API 来源记录于 UI-COMPONENTS.md；此处不保存密钥。
     public static IReadOnlyList<ModelPreset> All { get; } = new ModelPreset[]
     {
         new("deepseek", "DeepSeek", "https://api.deepseek.com",

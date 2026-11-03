@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-/// 仅投影已保存的任务结果，不重新裁决，也不暴露私有诊断正文。
+/// 只映射已保存的任务结果，不暴露私有诊断正文。
 pub fn task_completion(value: &Value) -> Value {
     if !matches!(
         string(&value["completionState"]),
@@ -619,7 +619,7 @@ fn project_round(args: &Value) -> Value {
     json!(entries)
 }
 
-/// 仅保留已配对的完整轮次或有执行记录的中断轮次，不能根据缺失回执猜测执行结果。
+/// 只保留已配对的完整轮次或有执行记录的中断轮次。
 fn history_turn_plan(args: &Value) -> Value {
     let before = string(&args["beforeUserId"]).to_lowercase();
     let completed: HashSet<_> = array(&args["completedAssistantIds"])

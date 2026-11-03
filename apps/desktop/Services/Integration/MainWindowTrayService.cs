@@ -49,7 +49,7 @@ internal sealed class MainWindowTrayService : IDisposable
     public void Restore()
     {
         if (_isDisposed || _exitRequested) return;
-        // 恢复原有界面，保留草稿、流式回复及工作区实例，不重新创建窗口。
+        // 恢复原限量面，保留草稿、流式回复及工作区实例，不重新创建窗口。
         ShowWindow(_windowHandle, IsIconic(_windowHandle) ? 9 : 5);
         _window.Activate();
         SetForegroundWindow(_windowHandle);

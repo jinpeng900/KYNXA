@@ -256,7 +256,7 @@ fn spreadsheet_xml_fallback(xml: &[u8]) -> Result<Option<&'static str>, GatewayE
     }
 }
 
-/// 有界检查包目录和 XML，不解压媒体或创建成员路径；普通 Office 布局直接展示。
+/// 限量检查包目录和 XML，不解压媒体或创建成员路径；普通 Office 布局直接展示。
 fn office_package_fallback(bytes: &[u8], kind: &str) -> Result<Option<&'static str>, GatewayError> {
     let (directory, main, unsupported): (&str, &str, &[&str]) = match kind {
         "docx" => (
@@ -525,7 +525,7 @@ fn preview_text(bytes: &[u8]) -> Result<String, GatewayError> {
         }
     }
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    // 旧编码复用现有解码器；二进制不能被当成似是而非的乱码正文。
+    // 旧编码复用现有解码器，二进制内容不当正文显示。
     if bytes
         .iter()
         .any(|byte| *byte == 0 || (*byte < 0x20 && !matches!(*byte, 9..=13)))
@@ -748,7 +748,7 @@ fn converted_path(context: &GatewayToolContext, version: &str) -> PathBuf {
         .join(format!("{version}.pdf"))
 }
 
-/// 转换使用自有进程树、独立用户配置与有界并发，取消时不会遗留 Office 后台进程。
+/// 转换使用自有进程树、独立用户配置与限量并发，取消时一并清理 Office 后台进程。
 pub(crate) async fn office_pdf(
     path: &Path,
     version: &str,
@@ -790,7 +790,7 @@ pub(crate) async fn office_pdf(
     let input_directory = temporary.join("input");
     tokio::fs::create_dir_all(&input_directory).await?;
     let input = input_directory.join(path.file_name().unwrap_or_default());
-    // 转换已核验的字节副本，避免外部修改让缓存版本与实际转换内容错配。
+    // 转换已核验的字节副本，保证缓存版本与实际转换内容一致。
     tokio::fs::write(&input, source_bytes).await?;
     let profile = url::Url::from_directory_path(temporary.join("profile"))
         .map_err(|_| failure("PREVIEW_CONVERTER_FAILED", "转换缓存路径不可用。", 500))?;
@@ -996,7 +996,7 @@ pub(super) async fn open(
     Ok(result)
 }
 
-/// 文件选择器授权仅绑定本会话、此文件和版本；模型工具不会继承这一临时读取许可。
+/// 文件选择器授权只绑定本会话、此文件和版本，模型工具不继承。
 pub(crate) async fn preview(
     arguments: Value,
     context: &GatewayToolContext,
@@ -1101,7 +1101,6 @@ async fn convert_image(
         _ = super::gateway::wait_for_cancellation(&mut cancellation) =>
             return Err(failure("TOOL_CANCELLED", "图片预览已取消。", 409)),
     };
-    // 阻塞解码器退出前一直持有名额，调用方取消不能提前释放实际占用。
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         image_png(&bytes)
@@ -1110,7 +1109,7 @@ async fn convert_image(
     .map_err(|_| failure("PREVIEW_WORKER_FAILED", "图片转换未完成。", 500))?
 }
 
-/// 文内网络图片复用公共下载策略，不携带页面凭据，也不成为任意网关代理。
+/// 文内网络图片复用公共下载策略，不携带页面凭据。
 async fn remote_image(
     address: &str,
     context: &GatewayToolContext,

@@ -10,7 +10,7 @@ fn string(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
 
-/// 后台迁移尚未完成时仍须精确匹配向量空间身份，不能通过改标签假装兼容。
+/// 后台迁移期间仍按向量空间身份精确匹配。
 #[derive(Default)]
 pub struct EmbeddingPolicyState {
     hardware: Option<Value>,

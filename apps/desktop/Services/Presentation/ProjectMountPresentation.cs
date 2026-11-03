@@ -3,7 +3,7 @@ using KYNXA_Desktop.Models.UI;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// 纯展示投影；旧版应用托管目录不算用户挂载的外部文件夹。
+/// 纯展示映射；旧版应用托管目录不算用户挂载的外部文件夹。
 /// </summary>
 public static class ProjectMountPresentation
 {

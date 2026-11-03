@@ -9,7 +9,7 @@ struct DiagnosticRecord {
     revision: u64,
 }
 
-/// 诊断修订号防止晚到 SDK 成功清除新故障，或恢复已替换连接。
+/// 诊断修订号防止晚到的 SDK 成功清除新故障，或恢复已替换的连接。
 #[derive(Default)]
 pub struct McpDiagnostics {
     records: HashMap<u64, DiagnosticRecord>,
@@ -117,7 +117,7 @@ impl McpDiagnostics {
                         .unwrap_or(Value::Null))
                 }
             }
-            // 查询仅返回所需事实，不克隆完整诊断记录，状态仍由原生账本拥有。
+            // 查询仅返回所需事实，不克隆完整诊断记录，状态仍由原生记录拥有。
             "mcp.diagnosis.has" => Ok(json!(if arguments["kind"] == "state" {
                 self.states.iter().any(|(key, _)| key == server_id)
             } else {

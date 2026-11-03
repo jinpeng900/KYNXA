@@ -41,7 +41,7 @@ internal static class GatewayResponseReader
         }
         catch (JsonException)
         {
-            // HTML 或文本错误按状态码展示；绝不显示未经信任的原始响应体。
+            // HTML 或文本错误按状态码展示；不显示未经信任的原始响应体。
         }
         throw new GatewayApiException(message ?? string.Format(httpErrorFormat, (int)response.StatusCode),
             response.StatusCode, errorCode);

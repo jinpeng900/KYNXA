@@ -54,7 +54,7 @@ public static class StorageMigrationService
             new CopyRoot(models, "Models", Exclude: standardModelsDirectory ? null : ["Conversations"]),
             new CopyRoot(conversationRoot, "", Include: migrateExtensions ? ConversationEntries : ConversationEntries.Except(["Agent", "Skills", "MCP", "extension-layout.json", "extension-migration-info.json", "extensions-pointer.previous.json"]).ToArray())
         };
-        // 扩展配置使用独立根目录时，任务账本和任务产物仍属于 Data，必须随数据迁移。
+        // 扩展配置使用独立根目录时，任务记录和任务产物仍属于 Data，必须随数据迁移。
         if (!migrateExtensions && TaskStorageEntries.Any(name => File.Exists(Path.Combine(conversationRoot, "Agent", name)) || Directory.Exists(Path.Combine(conversationRoot, "Agent", name))))
             roots.Add(new CopyRoot(Path.Combine(conversationRoot, "Agent"), "Agent", Include: TaskStorageEntries));
         var snapshots = roots.Select(root => (Root: root, Existed: Directory.Exists(root.Source), Files: ListFiles(root), Directories: ListFiles(root, true))).ToArray();
@@ -111,7 +111,7 @@ public static class StorageMigrationService
             RelocateProjectFolders(document, desktop, target);
             await File.WriteAllTextAsync(path, document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
         }
-        // 这些清单由正式目录派生；网关再次重建前，复制后的投影仍需保持同步。
+        // 这些清单由正式目录派生；网关再次重建前，复制后的映射仍需保持同步。
         string projectDirectory = Path.Combine(target, "Projects");
         if (Directory.Exists(projectDirectory))
             foreach (string directory in Directory.EnumerateDirectories(projectDirectory))
@@ -141,7 +141,7 @@ public static class StorageMigrationService
             ExtensionPaths.EnsureLayout(target);
         }
         await ValidateLayoutSettingsAsync(target, cancellationToken);
-        // 离线正式初始化可能重建投影并追加恢复事件；凭据、扩展包、附件与备份的原始字节不变。
+        // 离线正式初始化可能重建映射并追加恢复事件；凭据、扩展包、附件与备份的原始字节不变。
         var preservedFiles = new List<(string Path, byte[] Hash)>();
         foreach (var file in verified)
         {

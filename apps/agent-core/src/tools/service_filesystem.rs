@@ -19,7 +19,7 @@ use super::local_files::{
 use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::string;
 
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_READ_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_BINARY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 static FILE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -249,7 +249,7 @@ fn read_page(
     if first != handle_version(&file, &file.metadata().map_err(ServiceError::io)?)? {
         return Err(conflict("文件在读取前已变化，请重新搜索或读取。"));
     }
-    // 全文件流式核验版本，只保留一页输出及一个解码块；长行不会变成整行内存副本。
+    // 全文件流式核验版本，只保留一页输出及一个解码块，长行也不占整行内存。
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut pending = Vec::new();
@@ -502,7 +502,7 @@ fn file_lock(path: &Path) -> Arc<Mutex<()>> {
     lock
 }
 
-/// 生成文档字节复用文本写入的逐文件事务；独立额度不扩大公开文本工具的 1 MiB 合同。
+/// 生成文档字节复用文本写入的逐文件事务；独立额度不扩大公开文本工具的 1 MiB 约定。
 pub(super) fn commit_binary(
     path: &Path,
     bytes: &[u8],
@@ -538,7 +538,7 @@ pub(super) fn commit_binary(
     )
 }
 
-/// 附件原件使用独立的 256 MiB 合同；原子发布不能覆盖其他内容的现有文件。
+/// 附件原件使用独立的 256 MiB 约定，原子发布不覆盖已有文件。
 pub(super) fn commit_binary_new(
     path: &Path,
     bytes: &[u8],
@@ -630,7 +630,7 @@ pub(super) fn commit_binary_new(
         inspect(parent, false, false)?;
         revalidate(binding)?;
         cancelled(cancellation)?;
-        // 复用现有硬链接发布方式，目标即使在最后核验后出现也不会被覆盖。
+        // 复用现有硬链接发布方式，目标在最后核验后才出现也不会被覆盖。
         match fs::hard_link(&temporary, path) {
             Ok(()) => Ok(receipt(false)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -643,7 +643,7 @@ pub(super) fn commit_binary_new(
         if let Err(error) = fs::remove_file(&temporary) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 if let Ok(committed) = &mut result {
-                    // 已实际发布的文件仍返回成功回执，不能因暂存名称清理失败诱发重复执行。
+                    // 已发布的文件仍返回成功回执，暂存名称清理失败不影响结果。
                     committed["temporaryCleanupPending"] = json!(true);
                 }
             }
@@ -680,9 +680,9 @@ mod read_window_tests {
     fn large_search_match_reads_current_line_without_raising_write_limits() {
         let fixture = Fixture::new();
         let path = fixture.path();
-        let mut text = "ordinary log line\n".repeat(128 * 1024);
+        let mut text = "ordinary log line\n".repeat(512 * 1024);
         text.push_str("unique-needle 🔬\nlast line\n");
-        assert!(text.len() > 2 * 1024 * 1024);
+        assert!(text.len() > 8 * 1024 * 1024);
         fs::write(&path, &text).unwrap();
         let mut search = super::super::service_search::SearchService::default();
         search
@@ -891,7 +891,7 @@ mod binary_commit_tests {
         let root = canonical(&root, false).unwrap();
         let path = root.join("document.docx");
         let binding = json!({"requestedPath":path_text(&path),"path":path_text(&path),"allowMissing":true,"allowHardLinks":false});
-        let first = vec![1; 2 * 1024 * 1024];
+        let first = vec![1; 9 * 1024 * 1024];
         let created = commit_binary(&path, &first, &Value::Null, &binding, &None).unwrap();
         assert_eq!(created["bytes"], first.len());
         assert_eq!(created["sha256"], sha256(&first));
@@ -1039,7 +1039,7 @@ pub fn apply(
             if content.len() as u64 > MAX_FILE_BYTES {
                 return Err(ServiceError::new(
                     "TOOL_FILE_TOO_LARGE",
-                    "文件内容超过工具的 1 MiB 上限。",
+                    "文件内容超过工具的 8 MiB 上限。",
                     400,
                 ));
             }

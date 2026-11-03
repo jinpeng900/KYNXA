@@ -175,7 +175,7 @@ fn merge_adjacent(left: &mut Value, right: &Value) -> bool {
     true
 }
 
-/// 前十条同一文档最多三条；其余来源保留原排序，不能因缺少其他文档而回填第四条。
+/// 前十条同一文档最多三条；其余来源保留原排序，缺少其他文档时也不回填第四条。
 pub fn diversify(items: &mut Vec<Value>) {
     let mut counts = HashMap::new();
     let mut selected = Vec::new();
@@ -202,7 +202,7 @@ pub fn diversify(items: &mut Vec<Value>) {
 pub fn lightweight(items: &mut Vec<Value>, input: &Value) -> Value {
     let k = rrf_k(input) as f64;
     let query = normalized(input["query"].as_str().unwrap_or(""));
-    // 索引合同将约束放在 retrievalIntent 中，同时兼容直接调用的顶层字段。
+    // 索引约定将约束放在 retrievalIntent 中，同时兼容直接调用的顶层字段。
     let requested_path = input["retrievalIntent"]["path"]
         .as_str()
         .or_else(|| input["path"].as_str())

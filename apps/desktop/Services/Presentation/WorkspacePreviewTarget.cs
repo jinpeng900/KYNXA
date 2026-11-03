@@ -16,7 +16,7 @@ public sealed record WorkspacePreviewDependency
 }
 
 /// <summary>
-/// 网关授权后的预览投影，不建立第二份文件或产物存储。
+/// 网关授权后的预览映射，不建立第二份文件或产物存储。
 /// </summary>
 public sealed record WorkspacePreviewTarget
 {

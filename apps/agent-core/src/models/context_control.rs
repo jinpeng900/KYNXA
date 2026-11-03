@@ -242,9 +242,9 @@ mod tests {
 
     #[test]
     fn tool_schemas_leave_working_capacity_and_respect_small_and_large_input_limits() {
-        // 16K 窗口实际约 10.6K 输入授额时，工具定义不能挤占必需提示后的工作证据空间。
+        // 16K 窗口实际约 10.6K 输入额度时，工具定义要给必需提示后的工作证据留出空间。
         assert_eq!(tool_declaration_budget(10_649, 2_600), 3_790);
-        // 调用端须把原始目标及实时指引与系统提示一起授额，不能仅按系统文字给工具目录分配空间。
+        // 调用端要把原始目标及实时指引与系统提示一起额度。
         let mandatory_tokens = 2_600 + 600 + 874;
         let schema_tokens = tool_declaration_budget(10_649, mandatory_tokens);
         assert_eq!(schema_tokens, 2_316);

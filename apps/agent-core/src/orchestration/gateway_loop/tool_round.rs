@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// 只借用本轮所需状态，不复制任务状态或账本。
+/// 只借用本轮所需状态，不复制任务状态或记录。
 pub(super) struct ToolRound<'a> {
     pub runtime: &'a Arc<GatewayRuntime>,
     pub run: &'a Arc<RequestRun>,
@@ -340,7 +340,7 @@ impl ToolRound<'_> {
                 ctx.config["acceptanceRequirements"] =
                     json!(state.completion.acceptance_requirements);
                 if name.starts_with("task.") || name.starts_with("knowledge.") {
-                    // 捕获本次实际派发身份，不能沿用请求开始时的旧上下文。
+                    // 捕获本次实际派发身份，请求开始时的上下文可能已过期。
                     ctx.external_execute = Some(specialist_executor(
                         &runtime,
                         &run,
@@ -580,7 +580,7 @@ impl ToolRound<'_> {
             if name == "task.document" && receipt["content"]["informationAdded"] == true {
                 round_progress.artifact_updated = true;
             }
-            // 重复投影缩短时，侧车仍保留真实归档来源身份。
+            // 重复映射缩短时，侧车仍保留真实归档来源身份。
             state.context.result_sources.push(json!({"callId":call["id"],"name":call["name"],"arguments":call["arguments"],"sourceMetadata":source_metadata,"originalResultRef":if call["name"]=="tool.result.read" {source_metadata["resultRef"].clone()} else {Value::Null},"observation":is_observation,"executed":receipt["executed"]!=false,"originalExcerpt":crate::models::tool_context::source_excerpt(&canonical,512),"round":round,"status":receipt["status"],"resultRef":reference,"archiveOwner":{"requestId":run.request_id,"toolCallId":call["id"],"toolName":call["name"]}}));
             let _=state.tools.effects.apply("effects.observe",&json!({"call":call,"result":receipt,"observation":is_observation,"workspaceRoot":version_context.workdir}));
             if is_observation && receipt["isError"] != true {
@@ -663,7 +663,7 @@ impl ToolRound<'_> {
                         &after_version,
                     );
             }
-            // 完成覆盖按已结算原文计算，不用缩短的读取投影。
+            // 完成覆盖按已结算原文计算，不用缩短的读取映射。
             let acceptance_scope = if super::super::progress::validation_call(call) {
                 let mut records = completion_review(state).records;
                 records.push(completion_proof.clone());

@@ -7,7 +7,7 @@ use super::intent::{matches, utf16_length};
 use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::{array, string, truthy};
 
-const RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 fn blocked() -> ServiceError {
     ServiceError::new(
         "WEB_URL_BLOCKED",
@@ -23,7 +23,7 @@ fn unsupported() -> ServiceError {
     )
 }
 fn too_large() -> ServiceError {
-    ServiceError::new("WEB_RESPONSE_TOO_LARGE", "网页响应超过 2 MiB 限制。", 413)
+    ServiceError::new("WEB_RESPONSE_TOO_LARGE", "网页响应超过 16 MiB 限制。", 413)
 }
 
 pub fn public_address(address: &str) -> bool {
@@ -105,7 +105,7 @@ pub fn public_url(value: &Value) -> ServiceResult<Url> {
         || authority.contains('@')
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.port().is_some_and(|port| ![80, 443].contains(&port))
+        || url.port().is_some_and(|port| port < 1024 && ![80, 443].contains(&port))
         || matches(
             r"(?i)(?:^|\.)(?:localhost|local|internal|home|lan|onion|arpa)$",
             hostname,

@@ -364,7 +364,7 @@ fn commit_package(
             cleanup_warnings.push(json!({"path":path,"code":error.code,"message":error.message}));
         }
     }
-    // 原子替换后的清理问题不能抹去已提交回执，否则会诱发重复执行。
+    // 原子替换后的清理问题不影响已提交回执，否则会诱发重复执行。
     if let Ok(receipt) = &mut result {
         if !cleanup_warnings.is_empty() {
             receipt["cleanupWarnings"] = json!(cleanup_warnings);

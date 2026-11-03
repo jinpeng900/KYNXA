@@ -1,4 +1,4 @@
-//! 离线文档提取保留有界解码、精确来源身份与页面覆盖，不通过浏览器或 Node SDK。
+//! 离线文档提取保留限量解码、精确来源身份与页面覆盖，不通过浏览器或 Node SDK。
 
 use crate::storage::{ContractError, gateway};
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ fn cancelled(token: &Arc<AtomicBool>) -> Result<(), ContractError> {
     }
 }
 
-/// 相同识别文字不能证明原文件字节或解码身份未变化；回源与发布共用这一检查。
+/// 识别文字相同不代表原文件字节或解码身份未变，回源与发布共用这一检查。
 pub(crate) fn verify_extraction(expected: &Value, current: &Value) -> Result<(), ContractError> {
     if expected.is_object() && expected != current {
         Err(gateway::error(
@@ -327,7 +327,7 @@ fn recognize(
     result
 }
 
-/// 栅格 OCR 发布识别文字并保留原图哈希，不把文字识别冒充图像语义理解。
+/// 栅格 OCR 发布识别文字并保留原图哈希，只提供文字，不作图像语义理解。
 fn image(
     config: Option<&crate::gateway_contract::GatewayConfig>,
     encoding: &str,

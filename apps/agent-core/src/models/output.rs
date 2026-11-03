@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 const DEFAULT_OUTPUT_TOKENS: f64 = 262_144.0;
 
-/// 同一模型合同拥有输出硬限及输入预留；编排只调用该服务，不复制预算规则。
+/// 同一模型约定拥有输出硬限及输入预留；编排只调用该服务，不复制预算规则。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "context.outputDefaults" => Ok(json!({"defaultOutputTokens": DEFAULT_OUTPUT_TOKENS as u64,
@@ -61,7 +61,7 @@ fn output_budget(args: &Value) -> Result<Value, String> {
     if required > provider_input_budget {
         return Err("CONTEXT_INPUT_TOO_LARGE".to_owned());
     }
-    // 输出预留与供应商输入、输出硬上限是不同合同，均必须落实到最终额度。
+    // 输出预留与供应商输入、输出硬上限是不同约定，都要落实到最终额度。
     // 工具阶段为下一步定义及回执留出空间；正文阶段仍使用原有输出比例，不增加固定字数上限。
     let share = if args["phase"] == "tool" {
         0.2
@@ -70,7 +70,7 @@ fn output_budget(args: &Value) -> Result<Value, String> {
     } else {
         0.3
     };
-    // 实测极小窗口可容纳短答复，但不可缩减的必要输入仍必须真正放得下。
+    // 实测极小窗口可容纳短答复，前提是不可缩减的必要输入放得下。
     let minimum_output = if window < 2048.0 { 32.0 } else { 256.0 };
     let context_output = (usable * share)
         .floor()

@@ -1,4 +1,4 @@
-//! 按路径读取文档复用原生解析器，先通过现有文件权限门，不要求入库或向量准备完成。
+//! 按路径读取文档复用原生解析器，先过文件权限门，不要求入库或向量准备完成。
 
 use super::gateway::{GatewayToolContext, WorkerCancellation, check_cancelled, failure};
 use crate::gateway_contract::{GatewayConfig, GatewayError};
@@ -84,7 +84,7 @@ pub(super) async fn read(
     result?
 }
 
-/// 字符偏移属于当前选定页窗口；PDF 的其他页面通过 nextPage 续读，不能伪装为整文件已读。
+/// 字符偏移属于当前选定页窗口，PDF 的其他页面通过 nextPage 续读。
 fn page_result(
     path: &std::path::Path,
     arguments: &Value,

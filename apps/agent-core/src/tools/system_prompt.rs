@@ -32,7 +32,7 @@ fn workspace_guidance(context: &Value) -> Option<String> {
     ))
 }
 fn ordered(fields: Vec<(&str, Value)>) -> String {
-    // 保留提示文本的字段顺序；改动投影会改变 token 与缓存身份。
+    // 保留提示文本的字段顺序；改动映射会改变 token 与缓存身份。
     format!(
         "{{{}}}",
         fields
@@ -62,7 +62,7 @@ fn short_text(text: &str, characters: usize, budget: u64) -> String {
     format!("{}…", chars[..low].iter().collect::<String>())
 }
 fn catalog_lines(catalog: &Value, maximum: f64) -> Vec<String> {
-    // 有界发现头只描述能力状态，不代表已加载完整定义或已获执行授权。
+    // 限量发现头只描述能力状态，不代表已加载完整定义或已获执行授权。
     if catalog.is_null() {
         return vec![];
     }
@@ -151,7 +151,7 @@ fn catalog_lines(catalog: &Value, maximum: f64) -> Vec<String> {
     lines
 }
 
-/// 为相关技能头保留独立小额预算，避免详细运行指引把全部相关技能挤掉；正文仍只能按需读取。
+/// 为相关技能头保留独立小额预算，详细运行指引才不会挤掉全部相关技能；正文按需读取。
 fn skill_header_lines(args: &Value, maximum: f64, compact: bool) -> Vec<String> {
     let budget = if compact {
         (maximum * 0.2).clamp(0.0, 320.0)
@@ -228,7 +228,7 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
     }
     let catalog = &args["catalogState"];
     let device = &args["deviceCapabilities"];
-    // 已选能力只决定详细指引的投影；未展示工具仍可发现，实际执行权限不会因此改变。
+    // 已选能力只决定详细指引的映射，未展示工具仍可发现，权限不变。
     let selected_names = catalog["selectedNames"].as_array();
     let uses = |prefix: &str| {
         selected_names.is_none_or(|names| names.iter().any(|name| string(name).starts_with(prefix)))
@@ -252,7 +252,6 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
     if uses("document.create") {
         lines.push("Generate genuine DOCX/PDF/PPTX/XLSX with document.create: content/blocks for Word/PDF, slides for PPTX, sheets/typed rows for XLSX; existing targets need current expectedHash. PDF export needs the installed converter. Formula expressions are not calculated results. Read back saved contents; package validation is not visual QA. Text/HTML/SVG/Mermaid use filesystem.write, never a renamed Office suffix.".into());
     }
-    // 变化元信息置于固定行为之后；不能为命中缓存冻结已撤销的范围事实。
     let mut dynamic = skill_header_lines(args, maximum, false);
     dynamic.extend(catalog_lines(catalog, maximum));
     let mode = string(&context["permissionMode"]);
@@ -307,13 +306,13 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
         "Honor user cancellation; preserve settled receipts and resume only when requested.".into(),
     );
     lines.push("User sources/scope bind; sources prepare automatically. Respect pause/off; work before vectors are ready.".into());
-    // 范围记忆存于应用 Data；查看既有记忆与确认新的长期事实是不同动作，不能由工作目录是否有文件推断。
+    // 范围记忆存于应用 Data；查看既有记忆与确认新的长期事实是两个动作。
     if uses("memory.") {
         lines.push("Persistent memory: chat/project/user scopes in application Data, separate from work files and full history. For a memory inspection request, use authorized memory.search/read directly; do not ask again to read. Empty records mean no visible entries, not no memory capability.".into());
         lines.push("Global personal memory is for important durable cross-chat facts/preferences; project details stay in project scope. Ordinary chat, temporary execution results and software/tool usage manuals do not belong in global personal memory.".into());
         lines.push("Explicit remember commands already authorize their stated content/scope; verify saved records before claiming success, without another confirmation. Propose cited drafts for durable preferences, corrections or decisions when useful; inferred drafts need confirmation, are not established facts, and must not silently become global.".into());
     }
-    // 精简提示也保留历史证据边界；文件与记忆不能证明用户曾经说过某句话。
+    // 精简提示也保留历史证据边界：文件与记忆只记录已保存内容。
     if uses("conversation.history.") {
         lines.push("Past user questions require matching user messages, not assistant text or work files. Empty memory, failed searches or partial coverage prove no absence. Report source chat/message IDs and limits.".into());
         lines.push("conversation.history.search defaults to scope=chat; use scope=work for an explicit request about this work's chats, role=user for past user questions. Read matches with sourceConversationId/sourceVersion; no automatic sibling history injection or other-work access.".into());
@@ -327,7 +326,7 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
     dynamic.push(if truthy(&context["workspaceDiagnostic"]) { format!("Work folder unavailable ({}); independent authorized paths remain usable.", string(&context["workspaceDiagnostic"])) }
         else if truthy(&context["isolatedWorkspace"]) { format!("Isolated conversation work directory: {}. Files persist per chat; sandbox snapshots have no write-back.{}", string(&context["workspaceRoot"]), if truthy(&context["linkedWorkspaceRoot"]) { " Legacy linked folder: old files are preserved, not migrated here." } else { "" }) }
         else { format!("Work folder: {}", string(&context["workspaceRoot"])) });
-    // 缺少观测表示尚未探测，不能据此把已安装能力判成不可用或扩大执行权限。
+    // 缺少观测表示尚未探测，已安装能力和执行权限不变。
     if uses("computer.") {
         dynamic.push(match context["desktopCapabilities"]["available"].as_bool() {
         Some(true) => "Desktop: background default; foreground within user limits. Successful launch receipts suffice for ordinary launch; inspect DOM/UIA only for a requested or genuinely unresolved state. Password input allowed, never read back.",
@@ -400,7 +399,7 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
         lines.push("App/development skills differ. skill.read/inspect/resource.read inspect workflows; skill.run supports verified JS/MJS/CJS packages in the Windows sandbox using bundled private Node. Package integrity, supported-runtime checks, policy approval and cancellation still apply. No implicit dependency downloads, host fallback or sandbox write-back.".into());
     }
     lines.extend(["MCP: {arguments: business fields, policy:{reason}}. Originals: tool.result.read, conversation.history.search/read.", "More tools/skills: tool.search, skill.list/read; omitted headers remain discoverable."].into_iter().map(str::to_owned));
-    // 工具目录属于绑定配置与版本的运行时状态，不写入用户个人记忆，也不增加权限。
+    // 工具目录属于绑定配置与版本的运行时状态，不写入个人记忆。
     lines.push("Tool/Skill/MCP catalogs are runtime configuration, not user memory; reuse them until availability or versions change. Parallelize independent supported operations.".into());
     let available = array(&catalog["availableNames"]);
     for (name, text) in [

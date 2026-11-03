@@ -300,7 +300,7 @@ public sealed partial class ShellPage
     {
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
         if (chat is null || chat.Messages.Count == 0 || _chatClosing) return;
-        // 在文件选择器等待前捕获展示投影，随后切换聊天不会导出另一段会话。
+        // 在文件选择器等待前捕获展示映射，随后切换聊天不会导出另一段会话。
         string content = CurrentConversationMarkdown();
         Guid conversationId = chat.Id;
         try

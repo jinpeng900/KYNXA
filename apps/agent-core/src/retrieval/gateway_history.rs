@@ -25,7 +25,7 @@ struct OriginalContent<'a> {
 
 #[derive(Default, Serialize, Deserialize)]
 struct SearchCursor {
-    // 字段会序列化为续查游标；改名必须经过兼容迁移，不能当作局部变量整理。
+    // 字段会序列化为续查游标，改名要经过兼容迁移。
     identity: String,
     conversation: usize,
     page: Option<String>,
@@ -205,7 +205,7 @@ fn scope_identity(
     )
 }
 
-/// 公开消息版本允许无关消息追加，但拒绝被引用正文或归属变化；工具进展不能使旧用户原文自失效。
+/// 公开消息版本允许无关消息追加，但拒绝被引用正文或归属变化；工具进展不影响旧用户原文。
 fn message_version(
     location: &Value,
     message: &Value,
@@ -213,7 +213,7 @@ fn message_version(
     include_tools: bool,
     raw: &str,
 ) -> String {
-    // 展示用标量修复不能合并不同原始 UTF-16 正文的版本身份。
+    // 展示用标量修复不合并不同原始 UTF-16 正文的版本身份。
     let original = serde_json::from_str::<OriginalContent<'_>>(raw)
         .map(|fields| storage::managed_files::digest(fields.content.get().as_bytes()))
         .unwrap_or_default();
@@ -414,7 +414,7 @@ fn search(config: &GatewayConfig, input: &Value, context: &Value) -> ContractRes
         versions.push((location.clone(), snapshot));
         bytes += page["returnedBytes"].as_u64().unwrap_or(0) as usize;
         let raw_messages = page["rawMessages"].as_array().unwrap();
-        // 有界调用按最近消息优先继续；归档、私有续接与未完成流不作为用户提问证据。
+        // 限量调用按最近消息优先继续；归档、私有续接与未完成流不作为用户提问证据。
         for (position, raw) in raw_messages.iter().rev().enumerate().skip(cursor.skip) {
             let message = load_message(raw.as_str().unwrap())?;
             cursor.examined += 1;

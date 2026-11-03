@@ -44,7 +44,7 @@ struct DocumentRef<'a> {
     entries: &'a BTreeMap<String, Entry>,
 }
 
-/// 工具声明缓存与汇总经验只作选择线索，不授予权限，也不代替正式执行账本。
+/// 工具声明缓存与汇总经验只作选择线索。
 pub(crate) struct ToolMemory {
     root: PathBuf,
     entries: BTreeMap<String, Entry>,
@@ -123,7 +123,7 @@ fn schema_map_contract(value: &Value) -> Value {
     }
 }
 
-/// 仅在 JSON Schema 位置忽略说明字段；参数名称以及 enum、const、default 的真实值不能被当作文案剔除。
+/// 仅在 JSON Schema 位置忽略说明字段；参数名称以及 enum、const、default 的值保留。
 fn schema_contract(value: &Value) -> Value {
     let Some(fields) = value.as_object() else {
         return value.clone();
@@ -295,7 +295,7 @@ impl ToolMemory {
         let previous_count = self.entries.len();
         self.entries.retain(|name, entry| {
             // 内置指纹描述整份目录，不代表单个工具契约；随后 replace_catalog 按工具逐项重核验，也兼容旧目录指纹。
-            // MCP 指纹仍绑定明确受信任的服务与配置，不因说明或内置工具更新放松来源身份边界。
+            // MCP 指纹仍绑定明确受信任的服务与配置。
             sources.get(&entry.source).is_some_and(|current| {
                 valid_fingerprint(current)
                     && (entry.source == "builtin" || current == &entry.fingerprint)
@@ -389,7 +389,7 @@ impl ToolMemory {
         true
     }
 
-    /// 此小幅有界分数仅用于语义相关性之后的次级排序，不能让使用次数压过相关性。
+    /// 此小幅限量分数只用于语义相关性之后的次级排序。
     pub(crate) fn score(&self, name: &str) -> f64 {
         let Some(entry) = self.entries.get(name) else {
             return 0.0;

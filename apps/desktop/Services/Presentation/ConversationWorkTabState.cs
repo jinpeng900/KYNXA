@@ -61,7 +61,7 @@ public sealed class ConversationWorkTabState
         var added = next.Where(item => !previousKeys.Contains(item.Key) && !tabs.Closed.ContainsKey(item.Key)).ToArray();
         foreach (var item in next.Where(item => item.UserSelected)) tabs.ExplicitlyOpened[item.Key] = ++_version;
         tabs.Items = next;
-        // 晚到或空的 UI 投影不证明正式资源已删除；保留近期关闭键，避免重新加载后悄悄打开。
+        // 晚到或空的 UI 映射不证明正式资源已删除；保留近期关闭键，避免重新加载后悄悄打开。
         var absentClosed = tabs.Closed.Where(pair => !keys.Contains(pair.Key)).OrderByDescending(pair => pair.Value).ToArray();
         foreach (var pair in absentClosed.Skip(MaximumAbsentClosedTabs)) tabs.Closed.Remove(pair.Key);
         foreach (var pair in tabs.ExplicitlyOpened.Where(pair => !keys.Contains(pair.Key)).OrderByDescending(pair => pair.Value).Skip(MaximumAbsentClosedTabs).ToArray())

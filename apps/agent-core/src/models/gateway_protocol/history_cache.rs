@@ -1,4 +1,4 @@
-//! 可重建的协议投影缓存；正式历史与私有续传核验仍是权威来源。
+//! 可重建的协议映射缓存；正式历史与私有续传核验仍是权威来源。
 
 use std::{
     collections::VecDeque,
@@ -172,7 +172,7 @@ fn version(
     available_tools: &[String],
     runtime_origin: Option<&Value>,
 ) -> Option<Version> {
-    // 投影按集合判断工具可用性；仅规范缓存键，不改请求声明、原始消息或私有转录。
+    // 映射按集合判断工具可用性；仅规范缓存键，不改请求声明、原始消息或私有转录。
     let mut available_tools = available_tools.iter().collect::<Vec<_>>();
     available_tools.sort_unstable();
     available_tools.dedup();

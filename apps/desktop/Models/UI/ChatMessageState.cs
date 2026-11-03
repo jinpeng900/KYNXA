@@ -28,7 +28,7 @@ public sealed class ChatMessageState
     public Guid? SupersededByUserMessageId { get; set; }
     public Guid? InReplyToUserMessageId { get; set; }
     public Guid? OriginUserMessageId { get; set; }
-    // 分开展示任务结果和传输状态；界面投影不能决定正式结果。
+    // 分开展示任务结果和传输状态；界面映射不能决定正式结果。
     [JsonIgnore]
     public string TaskCompletionState { get; set; } = string.Empty;
     [JsonIgnore]

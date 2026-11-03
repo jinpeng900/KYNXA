@@ -45,7 +45,7 @@ async fn configure(args: &Value, ctx: &GatewayToolContext) -> Result<Value, Gate
             json!({"status":"installed","kind":"skill","verification":result,"runtimeVerified":false}),
         );
     }
-    // 保存前核对已安装运行时；npm/npx 引导安装不能成为启动命令。
+    // 保存前核对已安装运行时，npm/npx 引导安装不作为启动命令。
     if server["transport"] == "stdio" {
         super::gateway_mcp::validate_runtime(&server)?;
     }

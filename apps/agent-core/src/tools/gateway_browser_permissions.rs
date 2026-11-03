@@ -38,7 +38,7 @@ pub(crate) async fn prepare(
             }
             let tool = PathBuf::from(String::from_utf16_lossy(&system[..length as usize]))
                 .join("icacls.exe");
-            // 固定实参只向 AppContainer 组授予 RX，不经 shell、不授写权限，也不关闭沙箱。
+            // 固定实参只向 AppContainer 组授予 RX，不经 shell、不授写权限，沙箱保持开启。
             let status = tokio::process::Command::new(tool)
                 .arg(directory)
                 .args([

@@ -3,7 +3,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::intent::{analyze_clauses, file_references, js_trim, matches, pattern, task_relation};
 
-// 原生计算保留描述符索引；按需附带相关性分数，经验排序不能改变原 schema 或 wire 身份。
+// 原生计算保留描述符索引，按需附带相关性分数，schema 和 wire 身份不变。
 fn normalized(value: &Value, maximum: usize) -> String {
     let Some(text) = value.as_str() else {
         return String::new();
@@ -19,7 +19,7 @@ fn workspace_terminal_topic(text: &str) -> bool {
     )
 }
 
-/// 同时匹配创作意图与格式，代码文档查询或读取文件不会被误判为生成 Office 文档。
+/// 同时匹配创作意图与格式，代码文档查询和读取文件不算生成 Office 文档。
 pub(super) fn authoring_topics(query: &str) -> Vec<&'static str> {
     let text = query.to_lowercase();
     if !matches(
@@ -344,7 +344,7 @@ fn search_tools(arguments: &Value) -> Value {
         } {
             score += 20_000usize.saturating_sub(action.start());
         }
-        // 右侧命令优先保留可见会话，不能被通用本机诊断排序改成隐藏的宿主终端。
+        // 右侧命令优先保留可见会话。
         if workspace_terminal && name.starts_with("terminal.workspace.") {
             score += 6000;
         }
@@ -808,7 +808,7 @@ fn device_state_topic(text: &str) -> Option<&'static str> {
     if !topic {
         return None;
     }
-    // “我的”不能把关系网络或神经网络变为设备诊断；真实连接与设备术语仍可提示候选。
+    // “我的”本身不指向设备诊断；真实连接与设备术语仍可提示候选。
     let non_device_network = matches(
         "人际|关系网络|社交网络|人脉|神经网络|\\b(?:social|professional|personal|neural|relationship)\\s+networks?\\b|\\bnetwork\\s+of\\s+(?:mentors|friends|contacts|colleagues|people)\\b",
         text,

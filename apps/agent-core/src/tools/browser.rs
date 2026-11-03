@@ -109,7 +109,7 @@ fn prepare_options(arguments: &Value) -> Value {
     json!({"background":background,"patch":patch,"injectPageId":page_id,"requiresScriptCheck":!foreground && ["evaluate_script","browser_evaluate","browser_run_code"].contains(&name)})
 }
 
-// 只传当前标签页和相关引用的成员事实，不复制整个标签页档案；模型说明不能制造快照身份。
+// 只传当前标签页和相关引用的成员事实，不复制整个标签页档案。
 fn target_guard(arguments: &Value) -> Value {
     let selecting = arguments["selecting"] == true;
     if !selecting

@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use regex::Regex;
 use serde_json::{Value, json};
 
-// 模式沿用已有网关合同；显式保留 JavaScript 的 ASCII 词边界，避免中文相邻字符改变匹配。
+// 模式沿用已有网关约定；显式保留 JavaScript 的 ASCII 词边界，中文相邻字符不影响匹配。
 pub(super) fn pattern(source: &str) -> Regex {
     static PATTERNS: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
     let mut patterns = PATTERNS
@@ -754,7 +754,7 @@ fn forbidden_executables(clause: &str) -> Vec<String> {
                 matches(WINDOW_OBJECT, suffix),
             ));
         }
-        // 末尾共享窗口限定整组；前面品牌的独立窗口不能取消后续品牌的应用禁令。
+        // 末尾共享窗口限定整组，后续品牌的应用禁令继续生效。
         let shared_window = objects.len() > 1
             && objects.last().unwrap().1
             && objects[..objects.len() - 1].iter().all(|object| !object.1);
@@ -856,7 +856,7 @@ fn requests_browser_operation(clause: &str) -> bool {
     )
 }
 
-/// 展示线索仅选择既有界面，不授予浏览器或桌面操作权限。
+/// 展示线索仅选择既限量面，不授予浏览器或桌面操作权限。
 pub(super) fn browser_presentation(active: &str) -> &'static str {
     let in_workspace = matches(r"右侧|侧栏|工作区|\b(?:sidebar|workspace)\b", active);
     let external = matches(

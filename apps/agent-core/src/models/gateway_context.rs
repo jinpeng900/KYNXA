@@ -1,4 +1,4 @@
-//! 请求投影执行现有原生压缩计划，不修改正式历史或重新派发已执行工具。
+//! 请求映射执行现有原生压缩计划，不修改正式历史或重新派发已执行工具。
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,7 +14,7 @@ use super::{
     tool_context::ToolContextState,
 };
 
-/// 调用方复用既有准入及任务计量；模型领域不拥有另一份任务账本。
+/// 调用方复用既有准入及任务计量；模型领域不拥有另一份任务记录。
 pub type SummaryExecutor = Arc<
     dyn Fn(
             Value,
@@ -50,7 +50,7 @@ fn prefix_fingerprint(
     )
 }
 
-/// 从序列副本生成协议前缀，不修改活动历史或重复投影。
+/// 从序列副本生成协议前缀，不修改活动历史或重复映射。
 pub(crate) fn summary_prefix(
     connection: &Value,
     model: &str,
@@ -88,7 +88,7 @@ fn matching_summary_prefix<'a>(
     .then_some(&candidate["request"])
 }
 
-/// 仅借用本次已授权投影，不从旧缓存恢复系统提示或工具目录。
+/// 仅借用本次已授权映射，不从旧缓存恢复系统提示或工具目录。
 #[derive(Clone, Copy)]
 struct SummaryRequestPrefix<'a> {
     messages: &'a [Value],
@@ -326,7 +326,6 @@ fn summary_output_allocation(
     )
 }
 
-/// 缓存命中和恢复时仍核验公开归档；保存的标记不能证明可读。
 pub(crate) async fn verify_working_summary_archive(
     data_root: &std::path::Path,
     conversation: &str,
@@ -373,7 +372,7 @@ pub(crate) async fn verify_working_summary_archive(
     Ok(summary)
 }
 
-/// 已校验公开事实仅经已有仅创建、范围核验的 ToolResults 合同归档，保存后完整读回才开放省略投影。
+/// 已校验公开事实仅经已有仅创建、范围核验的 ToolResults 约定归档，保存后完整读回才开放省略映射。
 async fn archive_working_summary(
     root: &std::path::Path,
     conversation: &str,
@@ -471,7 +470,7 @@ async fn summarize_current_step_with_prefix(
             previous["archive"]["verified"] = json!(false);
         }
     }
-    // 工作正文按实际检查点余量授额，不固定压到 2K；其余空间保留引用与执行状态。
+    // 工作正文按实际检查点余量额度，不固定压到 2K；其余空间保留引用与执行状态。
     let content_budget = (u128::from(checkpoint_budget) * 3 / 4) as u64;
     // 正文目标与思考/正文传输额度分开，均遵守统一硬上限。
     let requested_output = requested_summary_output(content_budget);
@@ -691,7 +690,7 @@ async fn summarize_current_step_with_prefix(
     } else {
         Value::Null
     };
-    // 相同来源、目标和真实额度下已尝试过的交付精简不能反复触发计费调用；额度或来源改变会使签名失效。
+    // 相同来源、目标和真实额度下已尝试过的交付精简不再触发计费调用；额度或来源改变会使签名失效。
     let saved_refinement = saved_fit["omittedFacts"]
         .as_u64()
         .is_some_and(|count| count > 0)
@@ -869,7 +868,7 @@ async fn summarize_current_step_with_prefix(
                             return Err(ModelError::cancelled());
                         }
                         if repair_fallback.is_object() {
-                            // 可选精简失败不能作废已核验候选及游标；完整事实仍可从真实归档回读。
+                            // 可选精简失败时已核验候选及游标仍有效，完整事实可从真实归档回读。
                             facts = protocol::array(&repair_fallback["facts"]).to_vec();
                             cursors = protocol::array(&repair_fallback["sources"]).to_vec();
                             summary_archive = repair_fallback["archive"].clone();
@@ -1048,7 +1047,7 @@ async fn summarize_current_step_with_prefix(
                         });
                         trial_summary["archive"] = accepted_archive.clone();
                     }
-                    // 归档缺失或失败时保留原有全事实要求与有界修正路径，不仅凭一个 verified 布尔值省略事实。
+                    // 归档缺失或失败时保留原有全事实要求与限量修正路径，不仅凭一个 verified 布尔值省略事实。
                     if rejection == Some("over-content-budget")
                         || repair_required_sources.is_some()
                         || projection["resultRef"].is_object()
@@ -1574,7 +1573,7 @@ fn opaque(message: &Value) -> bool {
         })
 }
 
-/// 授额元信息来自当前运行：原历史来源及持久工具回执；压缩不能依据正文猜测执行状态。
+/// 额度元信息来自当前运行：原历史来源及持久工具回执。
 pub async fn compact_request(
     connection: &Value,
     model: &str,
@@ -1597,7 +1596,7 @@ pub async fn compact_request(
     .await
 }
 
-/// 摘要也是一次真实供应商请求，必须遵守调用方共用的额度与取消状态。
+/// 摘要也是一次真实供应商请求，遵守调用方共用的额度与取消状态。
 pub async fn compact_request_with_executor(
     connection: &Value,
     model: &str,
@@ -1797,7 +1796,7 @@ pub async fn compact_request_with_executor(
     if !summary_audit.is_null() {
         audit["semanticSummary"] = summary_audit.clone();
     }
-    // 已读公开来源尚待摘要时仍续接一次有界处理；输入重新装得下不能冻结剩余来源。
+    // 已读公开来源尚待摘要时再续接一次限量处理，处理完剩余来源。
     if after > input || pending_public_sources {
         let plan = call(
             &mut state,
@@ -2963,7 +2962,7 @@ mod tests {
         assert_eq!(retry["modelCalls"], 1);
         assert_eq!(calls.load(Ordering::Acquire), 2);
         assert!(retry_plan["checkpointSemanticSummary"]["failedInputSignature"].is_null());
-        // 旧版仅投影失败不能阻止一次有界精简恢复。
+        // 旧版仅映射失败时，仍可进行一次限量精简恢复。
         use sha2::{Digest, Sha256};
         let old_signature = format!(
             "{:x}",
@@ -3047,7 +3046,7 @@ mod tests {
                 })
             })
         });
-        // 下一次有界请求直接续接同一原件，不要求改动来源或重新调用文件读取。
+        // 下一次限量请求直接续接同一原件，不要求改动来源或重新调用文件读取。
         let (recovered, recovered_audit) = summarize_current_step(
             &connection,
             "fixture",
@@ -3738,7 +3737,7 @@ mod tests {
         .unwrap();
         let summary = summary.unwrap();
         assert!(audit["reason"].is_null(), "{audit}");
-        // 长原文可能分成多个有界窗口；每次真实派发仍须恰好计量一次，不能假定每份文档只需一轮。
+        // 长原文可能分成多个限量窗口，每次真实派发恰好计量一次。
         let actual_calls = calls.load(Ordering::Acquire);
         assert!((2..=4).contains(&actual_calls));
         assert_eq!(audit["modelCalls"], actual_calls);
@@ -3855,7 +3854,7 @@ mod tests {
         assert_eq!(cached["archive"]["resultRef"], *archive_ref);
         assert_eq!(cached_audit["workingArchive"]["saveAttempts"], 0);
 
-        // 统计保留在检查点；事实与游标未变时复用归档，不能让模型反复读取新的元信息版本。
+        // 统计保留在检查点；事实与游标未变时复用归档，省去模型反复读取新的元信息版本。
         let metadata = json!({"path":"/work/source-0.md","bytes":old_body.len(),"sha256":format!("{:x}",Sha256::digest(old_body.as_bytes()))});
         let metadata_ref = data::save_tool_result(
             &root,
@@ -4031,7 +4030,7 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-        // 输入授额改变但仍有余量时，不重新投影已经完成的操作及其回执。
+        // 输入额度改变但仍有余量时，不重新映射已经完成的操作及其回执。
         budget["inputBudgetTokens"] = json!(48000);
         budget["declarations"] = json!([{"type":"function","function":{"name":"additional_tool","parameters":{"type":"object"}}}]);
         let second = compact_request(

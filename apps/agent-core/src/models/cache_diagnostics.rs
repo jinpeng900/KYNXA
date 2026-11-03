@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 const MAXIMUM_MESSAGE_FINGERPRINTS: usize = 8192;
 
-/// 每个活动循环仅保存上一份摘要链；私有盐和指纹均不实现序列化，也不进入检查点。
+/// 每个活动循环只保存上一份摘要链；私有盐和指纹不序列化，也不进检查点。
 pub struct PrefixDiagnostics {
     salt: [u8; 32],
     previous: Option<Fingerprint>,
@@ -85,7 +85,7 @@ fn ephemeral_marker(value: &Value) -> bool {
 struct Canonical<'a>(&'a Value, CacheShape);
 impl Serialize for Canonical<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // 缓存标记移动不等于提示正文改写；只归一化协议规定的块位置，保留工具参数里的同名字段。
+        // 缓存标记移动不算正文改写；只归一化协议规定的块位置，工具参数里的同名字段不动。
         if self.1 == CacheShape::Blocks {
             if let Some(block) = self
                 .0
@@ -331,7 +331,7 @@ impl PrefixDiagnostics {
             } else if previous.system != next.system {
                 "system"
             }
-            // 新增工具也可能使后续历史失效，不能宣称只损失新声明的缓存。
+            // 新增工具也可能使后续历史失效，损失不止于新声明的缓存。
             else if previous.tools != next.tools {
                 "tools"
             } else {

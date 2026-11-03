@@ -53,7 +53,7 @@ fn public_provider(provider: &Value) -> Value {
         .cloned()
         .unwrap_or(json!("openai-completions"));
     result["contextWindowMode"] = json!("automatic");
-    // 公共旧字段默认值保持桌面整数合同；运行时额度仍由自动能力与观察决定，不改写原配置。
+    // 公共旧字段默认值保持桌面整数约定；运行时额度仍由自动能力与观察决定，不改写原配置。
     result["contextWindowTokens"] = provider
         .get("contextWindowTokens")
         .filter(|value| !value.is_null())

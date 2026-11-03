@@ -1,4 +1,4 @@
-//! 离线结构化文档解码共用有界容器与稳定来源身份，不执行宏、脚本或外部资源。
+//! 离线结构化文档解码共用限量容器与稳定来源身份，不执行宏、脚本或外部资源。
 
 use crate::storage::{ContractError, gateway};
 use quick_xml::{Reader, events::Event};
@@ -397,7 +397,7 @@ fn relationships(
     Ok(result)
 }
 
-/// 相对关系可在容器内部移动，不能逃出根目录、引用盘符或变成远程 URL。
+/// 相对关系可在容器内部移动，但不能逃出根目录、引用盘符或变成远程 URL。
 fn package_target(base: &str, target: &str) -> Result<String, ContractError> {
     if target.contains('\\')
         || target.contains(':')
@@ -896,7 +896,7 @@ fn flush_unicode(unicode: &mut Vec<u16>, output: &mut DocumentText) -> Result<()
     Ok(())
 }
 
-/// 解析返回完成正文或类型化错误，不把额度截断的前缀静默发布到索引。
+/// 解析返回完成正文或类型化错误，额度截断的前缀不发布到索引。
 pub(crate) fn decode(
     format: &str,
     bytes: &[u8],

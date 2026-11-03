@@ -23,7 +23,7 @@ pub fn compact(raw: &str) -> String {
     output
 }
 
-/// 仅在标量校验投影中修复孤立 UTF-16 转义，哈希和正式写入保留原始字节。
+/// 仅在标量校验映射中修复孤立 UTF-16 转义，哈希和正式写入保留原始字节。
 pub fn scalar_projection(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut projected = Vec::with_capacity(bytes.len());
@@ -66,7 +66,7 @@ pub fn scalar_projection(raw: &str) -> String {
     String::from_utf8(projected).unwrap()
 }
 
-/// 两个字符串即使标量修复投影相同，也按原始 UTF-16 保持不同身份。
+/// 两个字符串即使标量修复映射相同，也按原始 UTF-16 保持不同身份。
 pub fn utf16_identity(raw: &str) -> Option<Vec<u16>> {
     let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
     let mut characters = inner.chars();

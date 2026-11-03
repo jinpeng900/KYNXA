@@ -251,7 +251,7 @@ public sealed partial class ShellPage
                                 break;
                             case "terminal_output":
                                 continue; // Command output stays in the formal tool receipt; it has no sidebar projection.
-                                // 命令输出保留在正式工具回执中，不生成侧栏投影。
+                                // 命令输出保留在正式工具回执中，不生成侧栏映射。
                             case "workspace_terminal_open":
                                 AcceptWorkspaceTerminal(pending.ConversationId, update);
                                 continue;
@@ -285,7 +285,7 @@ public sealed partial class ShellPage
                                 }
                                 break;
                             case "content_snapshot":
-                                // 重附事件流给出绝对快照；当前回复为空也应覆盖旧投影，避免重复文字或遗留上一段内容。
+                                // 重附事件流给出绝对快照；当前回复为空也应覆盖旧映射，避免重复文字或遗留上一段内容。
                                 AcceptReplyTextSnapshot(pending, update.Content, update.Reasoning);
                                 break;
                             case "completed":

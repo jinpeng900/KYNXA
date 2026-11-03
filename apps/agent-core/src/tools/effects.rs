@@ -15,7 +15,7 @@ struct EffectReceipt {
     reusable: bool,
 }
 
-/// 请求级副作用保护；模型状态和文字不能确认真实派发结果。
+/// 请求级副作用保护，以真实派发结果为准。
 #[derive(Default)]
 pub struct EffectLedger {
     completed: Vec<(String, EffectReceipt)>,
@@ -48,14 +48,14 @@ impl EffectLedger {
                             "completed"
                         })
                     });
-                // 此列表只是有界诊断投影；恢复保护保存在按操作键组织的集合中，不能因诊断容量丢弃。
+                // 此列表只是限量诊断映射；恢复保护另存在按操作键组织的集合中。
                 self.observed_receipt_count += 1;
                 if self.receipts.len() == MAX_EFFECT_RECEIPTS {
                     self.receipts.remove(0);
                 }
                 self.receipts
                     .push(json!({"id": call["id"], "name": call["name"], "status": status}));
-                // 复用回执和未派发结果不会产生新副作用，也不能刷新旧状态的有效性。
+                // 复用回执和未派发结果不产生新副作用，也不刷新旧状态。
                 if result["reused"].as_bool().unwrap_or(false) || result["executed"] == false {
                     return Ok(Value::Null);
                 }
@@ -72,7 +72,7 @@ impl EffectLedger {
                 } else if !is_truthy(&result["isError"])
                     && (!is_truthy(&result["status"]) || result["status"] == "completed")
                 {
-                    // 已恢复的受保护文件状态归属于本次派发，后续修复不能再绑定过期回执。
+                    // 已恢复的受保护文件状态归属于本次派发，后续修复绑定新回执。
                     if receipt.mutable_target.is_some() {
                         if let Some(protected) = &mut self.protected_effects {
                             if protected
@@ -105,7 +105,7 @@ impl EffectLedger {
                     return Ok(Value::Null);
                 }
                 let key = effect_key(call)?;
-                // 原样复用未确认的派发，既不重复执行，也不冒充成功。
+                // 原样复用未确认的派发，既不重复执行，也不算成功。
                 if let Some((_, receipt)) = self
                     .unknown
                     .iter()
@@ -311,7 +311,7 @@ fn mutable_target(call: &Value, workspace_root: Option<&str>) -> Option<String> 
         || path.to_owned(),
         |path| path.to_string_lossy().into_owned(),
     ));
-    // 已批准目标可能使用 Windows 短名别名；解析失败不能被当作已确认的同一目标。
+    // 已批准目标可能使用 Windows 短名别名，解析失败时不算同一目标。
     canonical(&normalized, true)
         .ok()
         .map(|target| path_key(&target))

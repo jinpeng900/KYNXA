@@ -231,7 +231,7 @@ public sealed class ModelApiClient : IDisposable
 
             cancellationToken.ThrowIfCancellationRequested();
             if (!CanRecoverObservation(observationError)) throw observationError;
-            // 异常投影按退避间隔重读，保留任务和已显示内容，避免快速空转。
+            // 异常映射按退避间隔重读，保留任务和已显示内容，避免快速空转。
             int delayMs = recoveryAttempt++ switch { 0 => 100, 1 => 300, 2 => 1000, 3 => 2000, _ => 5000 };
             await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
             ChatRunStatus? status = null;
@@ -444,7 +444,7 @@ public sealed class ModelApiClient : IDisposable
         }
         if (waitingForUser)
         {
-            // 暂停可能先于首条回复落盘；仅结束展示计时，界面保留已收到的正文，不伪造完成结果。
+            // 暂停可能先于首条回复写入磁盘；仅结束展示计时，界面保留已收到的正文，不伪造完成结果。
             var paused = new ChatStreamEvent("interrupted", conversationId, requestId, DateTimeOffset.UtcNow,
                 Content: "", Error: "", TaskId: taskId, RootRequestTaskId: taskId, ReplyMessageId: replyId,
                 Code: taskState == "paused" ? "TASK_PAUSED" : null);

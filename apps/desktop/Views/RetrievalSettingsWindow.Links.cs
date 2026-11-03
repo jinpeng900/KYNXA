@@ -41,7 +41,7 @@ public sealed partial class RetrievalSettingsWindow
             var failures = new List<string>();
             int importedCount = 0;
             string? latestJobId = null;
-            // 逐条有界请求让已导入结果立即生效；单条链接失败或超时不撤销之前资料。
+            // 逐条限量请求让已导入结果立即生效；单条链接失败或超时不撤销之前资料。
             for (int index = 0; index < links.Length && !_closed; index++)
             {
                 _indexStatus.Text = string.Format(UiText.Get("正在导入链接 · {0}/{1}"), index + 1, links.Length);

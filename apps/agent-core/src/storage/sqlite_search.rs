@@ -133,7 +133,7 @@ fn check_current(
         return Err(stale());
     }
     let current = sqlite_channels::snapshots(connection, Some(&scopes(&query.arguments)?))?;
-    // 范围快照来自候选生成前，不能用事后读取的元信息冒充候选所属版本。
+    // 范围快照来自候选生成前，候选所属版本以它为准。
     if current["scopeSnapshots"] != query.snapshot["scopeSnapshots"] {
         return Err(stale());
     }
@@ -367,7 +367,7 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
     let mut output = Vec::with_capacity(requested.len());
     for item in requested {
         let mut row = selected.remove(&text(item, "chunkId")).ok_or_else(stale)?;
-        // 先在当前快照重新核验范围与来源版本，再复用不可变正文；删除和撤权不能命中旧正文。
+        // 先在当前快照重新核验范围与来源版本，再复用不可变正文，已删除和撤权的内容不会命中。
         let load_body = || {
             connection.prepare_cached("SELECT text,lexical_text FROM chunks WHERE chunk_id=?")
                 .map_err(failure)?.query_row([text(&row, "chunk_id")], |record| {
@@ -404,7 +404,7 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
     )
 }
 
-/// 查询上下文仅保留有界标识，异步等待不持正文、游标或事务。
+/// 查询上下文仅保留限量标识，异步等待不持正文、游标或事务。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.index.queryBegin" {
         return begin(arguments);

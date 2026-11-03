@@ -90,7 +90,7 @@ pub(crate) fn event_identity(raw: &str) -> Result<(String, String), ContractErro
     // 借用完整正文而不解码，仅身份和角色标量参与事件排序，原始 UTF-16 字节继续保留。
     let event: HashMap<String, &RawValue> = match serde_json::from_str(raw) {
         Ok(event) => event,
-        // 旧标量投影也接受未使用对象键中的孤立 UTF-16；罕见兼容路径保留原验证行为。
+        // 旧标量映射也接受未使用对象键中的孤立 UTF-16；罕见兼容路径保留原验证行为。
         Err(_) => return projected_event_identity(raw),
     };
     let scalar = |value: Option<&&RawValue>| -> Result<Value, ContractError> {
@@ -205,7 +205,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                         .iter()
                         .rposition(|byte| *byte == b'\n')
                         .map_or(0, |index| index + 1);
-                    // 仅为识别末尾截断字符允许有损投影；恢复回执在截断前备份完整原始残尾字节。
+                    // 仅为识别末尾截断字符允许有损映射；恢复回执在截断前备份完整原始残尾字节。
                     if bytes.ends_with(b"\n")
                         || encoding.error_len().is_some()
                         || encoding.valid_up_to() < tail_start

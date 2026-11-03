@@ -60,7 +60,7 @@ public sealed partial class ShellPage
             }
             var metadata = current[index];
             if (metadata.IsArchived) return null;
-            // 保留正文、草稿及历史投影身份，正式元数据仍以重新读取的目录为准。
+            // 保留正文、草稿及历史映射身份，正式元数据仍以重新读取的目录为准。
             previous.Title = metadata.Title;
             previous.IsSample = metadata.IsSample;
             previous.IsPinned = metadata.IsPinned;

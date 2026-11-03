@@ -1,4 +1,4 @@
-//! 从真实工作回执派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式账本。
+//! 从真实工作回执派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式记录。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ const VOLATILE_OUTCOME_FIELDS: [&str; 16] = [
 const INITIAL_DISCOVERY_ROUNDS: u64 = 2;
 const IDENTICAL_FAILURE_ATTEMPTS: u64 = 2;
 
-/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果核验账本。
+/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果核验记录。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeterministicFailures {
@@ -114,7 +114,7 @@ impl DeterministicFailures {
                 let key = self.failure_key(call, definition, environment, class);
                 self.actions.remove(&key);
             }
-            // 条件只取真实回执状态；调用 ID、说明和归档 ID 变化不能重置保护。
+            // 条件只取真实回执状态，调用 ID、说明和归档 ID 变化不影响保护。
             if let Some(condition) = observed_condition(receipt) {
                 for target in action_targets(call) {
                     self.observed_conditions
@@ -166,7 +166,7 @@ impl DeterministicFailures {
             })
             .collect::<Vec<_>>();
         if call["name"] == "knowledge.search" && arguments["requirementId"].is_string() {
-            // 只绑定当前引用的原生要求；新增无关要求不能重置其他失败动作的次数。
+            // 只绑定当前引用的原生要求，其他失败动作的次数不变。
             let identity = arguments["requirementId"].as_str().unwrap_or("");
             let requirement = identity
                 .strip_prefix("requirement-")
@@ -357,7 +357,7 @@ fn observed_condition(receipt: &Value) -> Option<String> {
 
 fn deterministic_failure(receipt: &Value) -> Option<(&'static str, String)> {
     let nodes = receipt_nodes(receipt);
-    // 未知执行和暂时等待优先于嵌套参数错误；不能因此放行重放未知写入。
+    // 未知执行和暂时等待优先于嵌套参数错误。
     if nodes.iter().any(|node| {
         node["outcomeUnknown"] == true
             || node["timedOut"] == true
@@ -475,12 +475,12 @@ pub struct RoundProgress {
     pub discovery_calls: u64,
     pub work_calls: u64,
     pub waiting_only: bool,
-    /// 这些动作均被已有同条件失败保护拒绝，不把纠偏回执算成新工作。
+    /// 这些动作都被已有同条件失败保护拒绝，纠偏回执不算新工作。
     pub suppressed_calls: u64,
     pub strategy_changed: bool,
     /// 执行阶段只叙述未变工作的轮次计为停滞；普通文字回答不传入此标记。
     pub execution_without_action: bool,
-    /// 回复与上一轮纯文字不同，说明模型不是在原地重复。
+    /// 回复与上一轮纯文字不同，说明模型没有原地重复。
     pub text_changed: bool,
     /// 未见过的失败操作属于排查，既不算进展，也不计入停滞。
     pub new_failed_outcomes: u64,
@@ -488,7 +488,7 @@ pub struct RoundProgress {
     pub action_outcomes_only: bool,
 }
 
-/// 计数可随业务检查点保存；逐文档事实仍由现有工作记录保存，不复制另一份证据账本。
+/// 计数可随业务检查点保存；逐文档事实仍由现有工作记录保存，不复制另一份证据记录。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkProgress {
@@ -599,7 +599,7 @@ impl WorkProgress {
         self.text_only_rounds = 0;
     }
 
-    /// 工作停滞时提前转入综合建议；不改变授额，不把已读资料认定为任务完成。
+    /// 工作停滞时提前转入综合建议，额度不变。
     pub fn delivery_plan(&self, max_tool_calls: u64, used_tool_calls: u64) -> DeliveryBudgetPlan {
         let mut plan = delivery_budget_plan(max_tool_calls, used_tool_calls);
         if self.needs_strategy_change() && plan.phase == ToolBudgetPhase::Analyze {
@@ -609,13 +609,13 @@ impl WorkProgress {
         plan
     }
 
-    /// 统计有效变化而非调用数量；正式等待或状态轮询不增长、也不清除已有无进展轮次。
+    /// 统计有效变化而非调用数量；正式等待或状态轮询不改变无进展轮次。
     pub fn observe_round(&mut self, round: &RoundProgress) -> WorkProgressPlan {
         let made_progress = round.completed_source_count > self.completed_source_count
             || round.evidence_changed
             || round.artifact_updated
             || round.new_read_range;
-        // 纯文字轮次不携带文档计数，不能清掉已有真实完成水位再制造假进展。
+        // 纯文字轮次不带文档计数，已有的完成水位保持不变。
         self.completed_source_count = self
             .completed_source_count
             .max(round.completed_source_count);
@@ -676,7 +676,6 @@ impl WorkProgress {
         }
 
         let change_strategy = self.needs_strategy_change();
-        // 每三轮停滞工作提示一次，避免每次等待回执或每轮模型回复都追加纠偏文本。
         let correction_due = action_reminder
             || change_strategy
                 && has_calls
@@ -704,7 +703,7 @@ pub enum ToolBudgetPhase {
     Deliver,
 }
 
-/// 优先级建议不更改调用端真实授额，也不豁免缓存调用；耗尽工具额度仍可整理已有成果。
+/// 优先级建议不改变调用端额度；耗尽工具额度后仍可整理已有成果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryBudgetPlan {
@@ -720,7 +719,7 @@ pub struct DeliveryBudgetPlan {
 
 pub fn delivery_budget_plan(max_tool_calls: u64, used_tool_calls: u64) -> DeliveryBudgetPlan {
     let remaining_tool_calls = max_tool_calls.saturating_sub(used_tool_calls);
-    // 常用额度约保留五分之一给综合和核验；小授额同比缩小，不锁死十二次调用。
+    // 常用额度约保留五分之一给综合和核验；小额度同比缩小，不锁死十二次调用。
     let proportional_reserve = max_tool_calls / 5 + u64::from(max_tool_calls % 5 != 0);
     let small_grant_cap = (max_tool_calls / 3).max(u64::from(max_tool_calls > 0));
     let delivery_reserve_calls = proportional_reserve.clamp(12, 48).min(small_grant_cap);

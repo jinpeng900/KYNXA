@@ -25,7 +25,7 @@ struct Borrower {
     released: bool,
 }
 
-/// 共用一份预测账本，调用方仅持有活动运行时对象。
+/// 共用一份预测记录，调用方仅持有活动运行时对象。
 #[derive(Default)]
 pub struct ExternalAdmissionState {
     entries: HashMap<String, Entry>,

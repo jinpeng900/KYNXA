@@ -16,7 +16,7 @@ use tokio::{io::AsyncReadExt, sync::watch};
 
 const MAX_AUDIO: u64 = 256 * 1024 * 1024;
 const MAX_RESULT: u64 = 4 * 1024 * 1024;
-const MAX_SECONDS: u64 = 600;
+const MAX_SECONDS: u64 = 3600;
 struct Operation {
     sender: watch::Sender<bool>,
     running: bool,

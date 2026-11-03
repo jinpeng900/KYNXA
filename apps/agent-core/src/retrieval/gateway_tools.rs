@@ -1,4 +1,4 @@
-//! 证据工具复用范围、版本核验及账本，结果不授予执行权限。
+//! 证据工具复用范围、版本核验及记录，结果不授予执行权限。
 
 use super::{evidence::EvidenceLedger, gateway_index};
 use crate::{
@@ -88,7 +88,7 @@ pub fn release_task(conversation: &str, request: &str) {
         }
     }
 }
-/// 仅撤出已失效记忆的派生投影，保留正式归档、成功回执及其他来源的版本核验。
+/// 仅撤出已失效记忆的派生映射，保留正式归档、成功回执及其他来源的版本核验。
 pub(crate) fn retire_memory_sources(context: &Value, invalid_sources: &Value) -> ContractResult {
     let identities = invalid_sources
         .as_array()
@@ -277,7 +277,7 @@ fn resolve_reference(
     storage::retrieval::apply("storage.retrieval.reference", &json!({"value":reference}))?;
     Ok(reference)
 }
-/// 任务快照限定工作目录证据范围；同一项目后加挂载不会扩大进行中或恢复任务的读取权限。
+/// 任务快照限定工作目录证据范围，同一项目后加挂载不扩大进行中或恢复任务的读取权限。
 fn authorize_locator(
     context: &Value,
     source_type: &str,
@@ -709,7 +709,7 @@ fn register_read(
     let _ = config;
     Ok(receipt["result"]["decision"].clone())
 }
-/// 在任务锁外读取正式缺口次数快照；改写关键词、暂停和进程重启不能重置补搜余量。
+/// 在任务锁外读取正式缺口次数快照；改写关键词、暂停和进程重启都不重置补搜余量。
 fn load_refinement_receipts(
     config: &GatewayConfig,
     context: &Value,
@@ -824,7 +824,7 @@ fn reserve_refinement(
     let receipts = if needs_restore { Some(load()?) } else { None };
     let mut task = task.lock().unwrap();
     if let Some(receipts) = receipts {
-        // 两个恢复读取可并发完成；幂等max恢复不能覆盖其间已预留的次数。
+        // 两个恢复读取可并发完成，幂等 max 恢复保留其间已预留的次数。
         for mut receipt in receipts {
             // 旧版自由描述缺口归入原问题额度，仅原生已登记要求的身份可独立计数。
             let identity = receipt["gapIdentity"]
@@ -848,7 +848,7 @@ fn reserve_refinement(
         }
         task.refinements_restored = true;
     }
-    // 描述和关键词允许改写，补搜余量绑定正式任务要求，不能由模型换句话重新申请。
+    // 描述和关键词可以改写，补搜余量绑定正式任务要求。
     let gap_key = refinement_key(context, &gap_identity);
     task.ledger
         .apply("retrieval.refinement-reserve", &json!({"gapKey":gap_key}))
@@ -1479,7 +1479,7 @@ fn evidence_window_cost(item: &Value) -> Result<u64, ContractError> {
     Ok(crate::models::protocol::estimate_tokens(&record.to_string()) + 1)
 }
 
-/// 仅扩读当前已授权原文，显式与自动读取共用任务账本。
+/// 仅扩读当前已授权原文，显式与自动读取共用任务记录。
 fn expand_evidence_window(
     context: &Value,
     reference: &mut Value,
@@ -2090,7 +2090,7 @@ mod gateway_tests {
         let state = task(&context).unwrap();
         let gap = gateway_index::hash(&json!([request, "original-user-question"]).to_string());
         let saved = vec![json!({"gapKey":gap,"attempt":1})];
-        // 在首个快照尚未返回时穿插第二次恢复，确定性验证读盘锁边界和旧快照不能回滚新预约。
+        // 在首个快照返回前穿插第二次恢复，确定性验证读盘锁边界，以及旧快照不回滚新预约。
         let outer = reserve_refinement(&context, &json!({}), || {
             assert!(
                 state.try_lock().is_ok(),

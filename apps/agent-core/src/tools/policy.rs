@@ -46,7 +46,7 @@ pub fn is_read_only(name: &str) -> bool {
         || can_parallel(&json!({"name":name}))
 }
 
-/// 读取交付属于观察；记录接纳或退回会修改正式任务状态，不能伪装成只读回执。
+/// 读取交付属于观察；记录接纳或退回会修改正式任务状态。
 pub fn is_read_only_call(name: &str, arguments: &Value) -> bool {
     is_read_only(name) && !(name == "task.result" && arguments["review"].is_object())
 }

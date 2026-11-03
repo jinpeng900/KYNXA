@@ -167,7 +167,7 @@ fn bootstrap(connection: &Connection, root: &Path, arguments: &Value) -> Contrac
         connection
             .execute_batch(sqlite_schema::VECTOR_SPACES_SCHEMA)
             .map_err(failure)?;
-        // 来源撤销始终清理覆盖记录，首次导入的新库也必须在同一初始化事务准备该表。
+        // 来源撤销始终清理覆盖记录，首次导入的新库也在同一初始化事务准备该表。
         super::source_coverage::initialize(connection)?;
         let columns = metadata_columns(connection, "chunks")?;
         // PRAGMA 列序决定旧行编码，新增列也保持原顺序。

@@ -9,14 +9,14 @@ use scraper::{Html, Selector};
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
 
-const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXTRACTED_CHARS: usize = 262144;
 
 async fn decoded_body_bounded(
     response: reqwest::Response,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, GatewayError> {
-    // 限制 reqwest 解压后的正文大小，不能按压缩 Content-Length 计算。
+    // 限制 reqwest 解压后的正文大小，压缩后的 Content-Length 不可靠。
     if response
         .content_length()
         .is_some_and(|size| size > maximum_bytes as u64)
@@ -133,7 +133,7 @@ pub(crate) fn decode_text(
             .then(|| value.trim().trim_matches(['\'', '"']).to_owned())
     });
     let meta_charset = if mime == "text/html" || mime == "application/xhtml+xml" {
-        // 只检查有界 HTML 头中的编码声明；局部无效字节不能导致整页无法读取。
+        // 只检查限量 HTML 头中的编码声明，局部无效字节不影响整页读取。
         let header = String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]);
         let document = Html::parse_document(&header);
         document
@@ -283,7 +283,6 @@ fn download_failure(
         json!({"action":"stop-this-read","retrySameUrl":false,
             "notice":"Keep the original permission boundary; do not bypass it with another transport."})
     } else {
-        // 恢复只提供当前来源的建议；不会自动搜索，也不授权改变用户页面或复制登录凭据。
         json!({"action":if status==Some(404){"locate-current-source"}else{"use-another-enabled-read-path"},
             "retrySameUrl":retryable,"tool":"web.search",
             "arguments":{"query":format!("site:{}",url.host_str().unwrap_or("")),
@@ -324,7 +323,7 @@ where
             .await
             .unwrap_or_else(|_| Err(failure("WEB_TIMEOUT", "网页总读取预算已到期。", 504)))
             .map_err(|error| download_failure(error, &url, None, &redirects))?;
-        // 私有转接在响应正文读取完成或当前跳结束前保持所有权，不能收到响应头就提前关闭。
+        // 私有转接在响应正文读取完成或当前跳结束前保持所有权。
         let GuardedResponse {
             response,
             route,
@@ -462,7 +461,6 @@ async fn download_inner(
     .await
 }
 
-/// 取消释放同一受控请求及私有转接；导入链接不会取得另一套网络权限。
 pub(crate) async fn download_public(
     requested_url: &str,
     maximum_bytes: usize,
@@ -1099,7 +1097,7 @@ mod tests {
                 }),
             );
         }
-        // 约 2 KiB 的 gzip 夹具解压后超过 2 MiB；较小的 Content-Length 不能绕过正文限额。
+        // 约 17 KiB 的 gzip 夹具解压后超过 16 MiB，用来验证较小的 Content-Length 绕不过正文限额。
         service = service.route(
             "/limit",
             get(|| async {

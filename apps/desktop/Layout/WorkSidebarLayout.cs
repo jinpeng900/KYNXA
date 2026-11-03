@@ -51,7 +51,6 @@ public static class WorkSidebarLayout
         double lowerMinimum = hasLower ? Math.Min(rowHeight, limits[lower]) : 0;
         if (delta > 0)
         {
-            // 先使用底部空白，再压缩相邻列表。
             double spare = Math.Max(0, budget - heights.Sum());
             double growth = Math.Min(delta, Math.Max(0, limits[upper] - heights[upper]));
             growth = Math.Min(growth, spare + (hasLower ? Math.Max(0, heights[lower] - lowerMinimum) : 0));

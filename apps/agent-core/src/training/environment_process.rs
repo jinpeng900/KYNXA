@@ -91,7 +91,7 @@ pub(super) async fn run(
     }
     drop(tree);
     let _ = child.wait().await;
-    // 退出后收齐尾部输出；有界通道不会随安装日志增长。
+    // 退出后收齐尾部输出；限量通道不会随安装日志增长。
     while let Some(block) = rx.recv().await {
         let text = String::from_utf8_lossy(&block);
         captured.push_str(&text);

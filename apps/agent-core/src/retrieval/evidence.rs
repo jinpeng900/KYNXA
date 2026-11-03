@@ -30,7 +30,7 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
-/// 账本跟踪证据身份、版本和有界事实，原文及完整回执由原生存储保留。
+/// 记录跟踪证据身份、版本和限量事实，原文及完整回执由原生存储保留。
 #[derive(Default)]
 pub struct EvidenceLedger {
     opened: bool,

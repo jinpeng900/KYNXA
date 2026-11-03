@@ -1,4 +1,4 @@
-//! 个人 MCP OAuth 使用回环 PKCE 与当前用户加密凭据，不把令牌写入模型上下文或配置。
+//! 个人 MCP OAuth 使用回环 PKCE 与当前用户加密凭据，令牌不进模型上下文或配置。
 
 use super::gateway::{GatewayToolContext, failure};
 use crate::gateway_contract::GatewayError;
@@ -332,7 +332,7 @@ fn protect(bytes: &[u8], entropy: &[u8], decrypt: bool) -> Result<Vec<u8>, Gatew
         len: 0,
         data: std::ptr::null_mut(),
     };
-    // 禁止 DPAPI 交互弹窗；密文绑定当前 Windows 用户与此服务配置。
+    // 禁止 DPAPI 交互弹窗，密文绑定当前 Windows 用户与此服务配置。
     let ok = unsafe {
         if decrypt {
             CryptUnprotectData(
@@ -680,7 +680,7 @@ pub(crate) async fn start(id: &str, ctx: &GatewayToolContext) -> Result<Value, G
             .await?;
             let gate = token_gate(&server, &owned).await;
             let guard = gate.lock().await;
-            // 持久化前重新核对配置身份，过期登录不能覆盖另一服务配置。
+            // 持久化前重新核对配置身份，过期登录不覆盖另一服务配置。
             let current = super::gateway::get_config(&owned).await?;
             if !current["mcpServers"]
                 .as_array()

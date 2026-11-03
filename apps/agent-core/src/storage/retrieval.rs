@@ -687,7 +687,7 @@ fn reference(value: &Value) -> ContractResult {
     Ok(Value::Null)
 }
 
-/// 来源元信息不能替代原始字节、权限范围或当前文件版本。
+/// 来源元信息不代表原始字节、权限范围或当前文件版本。
 pub fn apply(operation: &str, args: &Value) -> ContractResult {
     let value = &args["value"];
     match operation {

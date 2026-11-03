@@ -24,7 +24,7 @@ internal sealed class DocumentArchiveException(string code, string message) : Ex
 }
 
 /// <summary>
-/// 在受控子进程解码已授权的固定字节，不落盘解压或执行内容。
+/// 在受控子进程解码已授权的固定字节，不写入磁盘解压或执行内容。
 /// </summary>
 internal static class DocumentArchive
 {
@@ -47,7 +47,7 @@ internal static class DocumentArchive
             throw Failure("ARCHIVE_FORMAT_MISMATCH", "Archive bytes do not match their format. / 压缩包字节与格式不符。");
         cancellation.ThrowIfCancellationRequested();
         using var input = new MemoryStream(bytes, writable: false);
-        // 仅流式读取归档成员，不落盘解压；按实际字节限量并支持取消。
+        // 仅流式读取归档成员，不写入磁盘解压；按实际字节限量并支持取消。
 
         await EmitAsync(new { kind = "header", protocolVersion = 1, boundary = "document-archive", version = Version }, cancellation);
         long expandedBytes = 0;

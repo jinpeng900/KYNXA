@@ -3,7 +3,7 @@
 use super::*;
 
 impl LoopState {
-    /// 派发前失败也须结束已发布分段，保留原文与身份，不能留下“正在生成”挡住后续结果。
+    /// 派发前失败也要结束已发布的分段，保留原文与身份，否则会一直显示“正在生成”。
     pub(in crate::orchestration::gateway_loop) async fn interrupt_open_segments(
         &mut self,
         run: &RequestRun,
@@ -96,7 +96,7 @@ impl Execution {
         } = prepared;
         let segment = new_id();
         let current = Arc::new(Mutex::new((String::new(), String::new())));
-        // 缓冲进度或最终答复可发布时才建可见分段，避免空生成段。
+        // 缓冲进度或最终答复可发布时才建可见分段。
         let buffered_delivery = requires_task_verification(&self.prepared.state);
         if !self.rounds.review_pending && !buffered_delivery {
             let phase = self.prepared.state.begin_segment(round, &segment);

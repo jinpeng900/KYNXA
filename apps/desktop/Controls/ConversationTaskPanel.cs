@@ -13,7 +13,7 @@ namespace KYNXA_Desktop.Controls;
 public sealed record TaskArtifactRequest(Guid ConversationId, TaskArtifact Artifact);
 
 /// <summary>
-/// 只读的虚拟任务投影；隐藏或释放只取消读取，绝不改变正式工作。
+/// 只读的虚拟任务映射；隐藏或释放只取消读取，不改变正式工作。
 /// </summary>
 public sealed class ConversationTaskPanel : Grid, IDisposable
 {

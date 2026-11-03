@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace KYNXA.ToolHost;
 
 /// <summary>
-/// 声明进程隔离、句柄与文件身份核对使用的 Win32 ABI；字段顺序及封送方式保持原生合同。
+/// 声明进程隔离、句柄与文件身份核对使用的 Win32 ABI；字段顺序及封送方式保持原生约定。
 /// </summary>
 internal static class NativeMethods
 {

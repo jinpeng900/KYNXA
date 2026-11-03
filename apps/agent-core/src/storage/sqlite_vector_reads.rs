@@ -444,7 +444,7 @@ pub(crate) fn vector_page_query(
 
 #[cfg(test)]
 fn physical_identity_token(identity: (u64, u64)) -> String {
-    // 文件系统 u64 身份不能经 JavaScript 数值安全往返，采用原样续传的十六进制不透明令牌。
+    // 文件系统 u64 身份无法经 JavaScript 数值安全往返，采用原样续传的十六进制不透明令牌。
     format!("{:016x}:{:016x}", identity.0, identity.1)
 }
 

@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, watch};
 
 /// 后台宿主命令等待空闲作业槽的最长时间，超过后如实报告容量不足。
 
-/// 网关崩溃或释放句柄时，Windows 自动关闭此自有进程树，避免只清理父进程。
+/// 网关崩溃或释放句柄时，Windows 自动关闭整个自有进程树。
 pub(crate) struct OwnedProcessJob(usize);
 
 /// 已核验的自有作业进程树时点采样，不代表资源预约或占用峰值。
@@ -248,7 +248,7 @@ impl OwnedProcessJob {
         Self::attach_with_policy(child, false)
     }
 
-    /// 仅已批准的图形应用启动助手允许显式创建独立应用；终端与 MCP 进程树仍不能脱离。
+    /// 只有已批准的图形应用启动助手能创建独立应用，终端与 MCP 进程树不脱离。
     fn attach_for_launch(child: &Child) -> Result<Self, GatewayError> {
         Self::attach_with_policy(child, true)
     }
@@ -260,7 +260,7 @@ impl OwnedProcessJob {
         Self::attach_pid_with_policy(pid, allow_breakaway)
     }
 
-    /// ConPTY 以挂起状态创建 Win32 进程，复用同一作业生命周期，不另建进程树账本。
+    /// ConPTY 以挂起状态创建 Win32 进程，复用同一作业生命周期，不另建进程树记录。
     pub(crate) fn attach_pid(pid: u32) -> Result<Self, GatewayError> {
         Self::attach_pid_with_policy(pid, false)
     }
@@ -331,7 +331,7 @@ impl Drop for OwnedProcessJob {
     }
 }
 
-/// 将后台终端的取消、回执和完成通知绑定到所属聊天，避免跨聊天复用任务。
+/// 将后台终端的取消、回执和完成通知绑定到所属聊天。
 #[derive(Clone)]
 pub(crate) struct HostJob {
     pub(crate) conversation_id: String,
@@ -345,7 +345,7 @@ pub(crate) fn hide(command: &mut Command) {
     command.creation_flags(0x08000000);
 }
 
-/// 分配前检查上限，对端不发换行也不能无限读取。
+/// 分配前检查上限，对端不发换行时也不会无限读取。
 pub(crate) async fn bounded_line<T: AsyncRead + Unpin>(
     reader: &mut BufReader<T>,
     maximum_bytes: usize,
@@ -387,7 +387,7 @@ pub(crate) async fn bounded_line<T: AsyncRead + Unpin>(
     }
 }
 
-/// 仅终止本次创建且仍持有句柄的子进程树，绝不按通用进程名杀进程。
+/// 只终止本次创建且仍持有句柄的子进程树，不按进程名查杀。
 pub(crate) async fn terminate(child: &mut tokio::process::Child) {
     #[cfg(windows)]
     if let Some(pid) = child.id() {
@@ -526,7 +526,7 @@ async fn invoke(
         Ok(job) => job,
         Err(error) => {
             terminate(&mut child).await;
-            // 登记失败时尚未提交任何请求字节，不会派发命令；助手已退出后归还准入。
+            // 登记失败时还没提交任何请求字节，命令未派发；助手退出后归还准入。
             if let Some(mut lease) = lease.take() {
                 if lease.release_confirmed().await.is_err() {
                     lease.retain_unknown_on_drop();
@@ -650,7 +650,7 @@ async fn invoke(
     if receipt.is_none() {
         let _ = stdin.write_all(b"cancel\n").await;
         let _ = stdin.flush().await;
-        // 先让助手关闭 Win32 作业并报告部分效果，再执行受控硬清理；取消不会伪装成未执行。
+        // 先让助手关闭 Win32 作业并报告部分效果，再执行受控硬清理。
         if let Ok(Ok(Some(line))) = tokio::time::timeout(
             Duration::from_secs(3),
             bounded_line(&mut stdout, 32 * 1024 * 1024),
@@ -706,7 +706,7 @@ async fn invoke(
     }))
 }
 
-/// 请求原生终端回执前核对宿主策略与工作目录身份，不把终端执行迁到沙箱或替换错误类别。
+/// 请求原生终端回执前核对宿主策略与工作目录身份。
 async fn host_run(
     mut input: Value,
     ctx: &GatewayToolContext,
@@ -749,7 +749,7 @@ async fn host_run(
             400,
         ));
     }
-    // 派发前解析已批准目录，避免 Windows 长短路径导致回执身份不一致。
+    // 派发前解析已批准目录，统一 Windows 长短路径，让回执身份一致。
     let resolved_cwd = super::service_filesystem::canonical(requested_cwd, false)
         .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
     input["cwd"] = json!(super::local_files::path_text(&resolved_cwd));
@@ -867,7 +867,7 @@ async fn observe_host_start(
     }
 }
 
-/// 接线终端与桌面工具，复用原生执行器的策略和任务状态，不另建执行账本。
+/// 接线终端与桌面工具，复用原生执行器的策略和任务状态，不另建执行记录。
 pub(crate) async fn execute(
     name: &str,
     mut input: Value,
@@ -877,7 +877,7 @@ pub(crate) async fn execute(
         return host_run(input, ctx, None).await;
     }
     if name == "terminal.host.start" {
-        // 作业池满时沿原取消身份等待容量，不因排队时间长而终止任务；未派发前不产生副作用。
+        // 作业池满时沿原取消身份等待容量；派发前没有副作用。
         let mut cancellation = ctx.cancellation.clone();
         let plan = loop {
             let attempt = native(
@@ -1040,7 +1040,7 @@ pub(crate) async fn execute(
             Value::Null
         };
         input["excludedRoots"] = json!([ctx.data_home, ctx.extension_root]);
-        // 仅信任当前聊天的精确无链接工作范围，不能放行其周围正式应用数据。
+        // 只信任当前聊天的精确无链接工作范围。
         let own_sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
         let managed = uuid::Uuid::parse_str(&ctx.conversation_id).is_ok()
             && super::local_files::inspect(&ctx.workdir, false, true).is_ok()
@@ -1062,7 +1062,7 @@ pub(crate) async fn execute(
         if result["completed"] == false && result["outcome"] == "unknown" {
             return Ok(result);
         }
-        // 收据必须证明隔离与子进程清理；不能把成功读取 JSON 当成沙箱执行已核验。
+        // 收据要证明隔离与子进程清理，成功读取 JSON 还不够。
         native(
             ctx,
             "runner.sandboxReceipt",
@@ -1077,7 +1077,7 @@ pub(crate) async fn execute(
             json!({"name":"terminal.run","value":result}),
         )
         .await?;
-        // 隔离证明仅说明执行位置；命令或技能是否成功还必须保留真实退出、超时和取消状态。
+        // 隔离证明只说明执行位置；命令或技能是否成功看真实退出、超时和取消状态。
         for (field, field_value) in completion.as_object().unwrap() {
             result[field] = field_value.clone();
         }
@@ -1195,7 +1195,7 @@ pub(crate) async fn execute(
     Err(failure("TOOL_NOT_FOUND", "终端或桌面操作不存在。", 404))
 }
 
-/// 校验计划仅控制投影，不能取代 ToolHost 的实际回执，否则窗口和进程身份会丢失。
+/// 校验计划只控制映射，窗口和进程身份来自 ToolHost 的实际回执。
 async fn desktop_receipt(
     action: &str,
     parameters: &Value,
@@ -1216,7 +1216,7 @@ async fn desktop_receipt(
             ]
             .contains(&code)
         {
-            // 启动后的观察失败不能证明未启动；保留未知状态，阻止盲目重复启动。
+            // 启动后的观察失败时状态记为未知，防止盲目重复启动。
             return Ok(json!({
                 "action": action,
                 "boundary": "host-desktop",

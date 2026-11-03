@@ -45,7 +45,7 @@ fn serialized(value: &Value) -> String {
 }
 
 fn value_tokens(value: &Value, field: &str) -> u64 {
-    // 图片编码字节属于传输数据，不是文本 token；其模型相关消耗仍须标记为未观测。
+    // 图片编码字节属于传输数据，不是文本 token；模型相关消耗标记为未观测。
     if matches!(
         value["type"].as_str(),
         Some("image" | "image_url" | "input_image")

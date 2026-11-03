@@ -408,7 +408,7 @@ internal static class AppContainerRunner
                 long total = Interlocked.Add(ref _bytes, count);
                 int accepted = (int)Math.Clamp(MaximumOutputBytes - (total - count), 0L, count);
                 stored.Write(buffer, 0, accepted);
-                // 有界保留区满后仍持续排空；日志量大不能终止仍在正常推进的任务。
+                // 限量保留区满后仍持续排空；日志量大不能终止仍在正常推进的任务。
                 if (total > MaximumOutputBytes) Interlocked.Exchange(ref _truncated, 1);
             }
             byte[] bytes = stored.ToArray();

@@ -10,7 +10,7 @@ use crate::models::protocol::{array, slice, string, truthy};
 const CACHE_ENTRIES: usize = 64;
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 
-/// 这些版本共用当前已实现的初始化和 JSON-RPC 生命周期；新主版本不能只改日期接入。
+/// 这些版本共用当前已实现的初始化和 JSON-RPC 生命周期，新主版本要单独适配。
 pub(crate) fn supports_protocol(version: &str) -> bool {
     matches!(
         version,
@@ -526,87 +526,7 @@ impl McpState {
                 "unavailable" => format!("\nScreenshot preview unavailable ({}). The browser operation result is preserved; do not claim the screenshot was viewed.", string(&arguments["code"])),
                 _ => String::new(),
             })),
-            "mcp.failure" => {
-                let direct = &arguments["code"];
-                let code = if direct.is_null() {
-                    &arguments["causeCode"]
-                } else {
-                    direct
-                };
-                let code = string(code);
-                let local = [
-                    "MCP_ENV_MISSING",
-                    "MCP_AUTH_ORIGIN_REJECTED",
-                    "MCP_INVALID_CATALOG",
-                    "MCP_PROTOCOL_MISMATCH",
-                    "MCP_INPUT_REQUIRED",
-                    "MCP_CONNECTION_CAPACITY",
-                    "MCP_NOT_CONNECTED",
-                    "MCP_NOT_ENABLED",
-                    "MCP_CATALOG_CHANGED",
-                    "MCP_PROCESS_CLEANUP_FAILED",
-                    "MCP_CONFIG_REQUIRED",
-                    "MCP_COMMAND_NOT_FOUND",
-                ];
-                let failure = if local.contains(&string(direct)) {
-                    ServiceError::new(
-                        string(direct),
-                        "MCP 连接或请求未完成。",
-                        arguments["statusCode"].as_u64().unwrap_or(409) as u16,
-                    )
-                } else if arguments["unauthorized"] == true
-                    || [
-                        "CLIENT_HTTP_AUTHENTICATION",
-                        "CLIENT_HTTP_AUTHORIZATION",
-                        "invalid_client",
-                        "invalid_token",
-                        "insufficient_scope",
-                    ]
-                    .contains(&code)
-                {
-                    ServiceError::new(
-                        "MCP_AUTH_REQUIRED",
-                        "MCP 服务需要有效认证，请检查环境变量引用。",
-                        401,
-                    )
-                } else if ["REQUEST_TIMEOUT", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"]
-                    .contains(&code)
-                {
-                    ServiceError::new("MCP_TIMEOUT", "MCP 请求超时；未自动重试。", 504)
-                } else if code == "ENOENT" {
-                    ServiceError::new(
-                        "MCP_COMMAND_NOT_FOUND",
-                        "MCP 启动程序或运行目录不存在，请检查依赖与配置。",
-                        409,
-                    )
-                } else if [
-                    "CONNECTION_CLOSED",
-                    "NOT_CONNECTED",
-                    "SEND_FAILED",
-                    "ECONNREFUSED",
-                    "ECONNRESET",
-                    "EPIPE",
-                    "UND_ERR_SOCKET",
-                    "ENOTFOUND",
-                ]
-                .contains(&code)
-                {
-                    ServiceError::new(
-                        "MCP_CONNECTION_LOST",
-                        "MCP 连接已中断，请手动重新连接；调用未自动重放。",
-                        409,
-                    )
-                } else {
-                    ServiceError::new(
-                        arguments["fallback"]
-                            .as_str()
-                            .unwrap_or("MCP_CONNECTION_FAILED"),
-                        "MCP 连接或请求失败；调用未自动重试。",
-                        502,
-                    )
-                };
-                Ok(failure.value())
-            }
+            "mcp.failure" => self.apply_mcp_failure(arguments),
             "mcp.environmentValue" => {
                 let value = arguments["value"].as_str().filter(|value| {
                     !value.is_empty()
@@ -818,50 +738,7 @@ impl McpState {
                     .collect::<Option<Vec<_>>>();
                 Ok(indices.map(|indices| json!(indices)).unwrap_or(Value::Null))
             }
-            "mcp.discovery" => {
-                let mut result = Vec::new();
-                for record in array(&arguments["records"]) {
-                    let server = &record["server"];
-                    if !truthy(&server["enabled"]) {
-                        continue;
-                    }
-                    let cached = self.catalog.get(string(&record["key"]));
-                    let state = if record["ready"] == true {
-                        record["state"].as_str().unwrap_or("ready")
-                    } else if record["connecting"] == true {
-                        "connecting"
-                    } else if record["hasError"] == true {
-                        "error"
-                    } else {
-                        "disconnected"
-                    };
-                    let tools = cached
-                        .map(|cached| array(&cached.tools))
-                        .unwrap_or(&[])
-                        .iter()
-                        .filter(|tool| !array(&server["disabledTools"]).contains(&tool["toolName"]))
-                        .map(|tool| {
-                            let mut tool = tool.clone();
-                            let description = string(&tool["description"]);
-                            let suffix = description
-                                .split_once(':')
-                                .map(|(_, suffix)| suffix)
-                                .unwrap_or(description);
-                            tool["description"] = json!(format!(
-                                "{}: {}",
-                                string(&server["name"]),
-                                super::intent::js_trim(suffix)
-                            ));
-                            tool["discoveryOnly"] = json!(true);
-                            tool["catalogVerified"] = json!(false);
-                            tool["needsConnection"] = json!(true);
-                            tool
-                        })
-                        .collect::<Vec<_>>();
-                    result.push(json!({"id":server["id"],"name":format!("mcp.{}",string(&server["id"])),"description":format!("{}: configured MCP service; load this name to connect and verify its current tools.",string(&server["name"])),"transport":server["transport"].as_str().unwrap_or("stdio"),"state":state,"tools":tools}));
-                }
-                Ok(json!(result))
-            }
+            "mcp.discovery" => self.apply_mcp_discovery(arguments),
             "mcp.validateLive" => {
                 self.policy(arguments)?;
                 let args = server_arguments(&arguments["input"])?;
@@ -912,6 +789,133 @@ impl McpState {
                 400,
             )),
         }
+    }
+
+    fn apply_mcp_failure(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let direct = &arguments["code"];
+        let code = if direct.is_null() {
+            &arguments["causeCode"]
+        } else {
+            direct
+        };
+        let code = string(code);
+        let local = [
+            "MCP_ENV_MISSING",
+            "MCP_AUTH_ORIGIN_REJECTED",
+            "MCP_INVALID_CATALOG",
+            "MCP_PROTOCOL_MISMATCH",
+            "MCP_INPUT_REQUIRED",
+            "MCP_CONNECTION_CAPACITY",
+            "MCP_NOT_CONNECTED",
+            "MCP_NOT_ENABLED",
+            "MCP_CATALOG_CHANGED",
+            "MCP_PROCESS_CLEANUP_FAILED",
+            "MCP_CONFIG_REQUIRED",
+            "MCP_COMMAND_NOT_FOUND",
+        ];
+        let failure = if local.contains(&string(direct)) {
+            ServiceError::new(
+                string(direct),
+                "MCP 连接或请求未完成。",
+                arguments["statusCode"].as_u64().unwrap_or(409) as u16,
+            )
+        } else if arguments["unauthorized"] == true
+            || [
+                "CLIENT_HTTP_AUTHENTICATION",
+                "CLIENT_HTTP_AUTHORIZATION",
+                "invalid_client",
+                "invalid_token",
+                "insufficient_scope",
+            ]
+            .contains(&code)
+        {
+            ServiceError::new(
+                "MCP_AUTH_REQUIRED",
+                "MCP 服务需要有效认证，请检查环境变量引用。",
+                401,
+            )
+        } else if ["REQUEST_TIMEOUT", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"]
+            .contains(&code)
+        {
+            ServiceError::new("MCP_TIMEOUT", "MCP 请求超时；未自动重试。", 504)
+        } else if code == "ENOENT" {
+            ServiceError::new(
+                "MCP_COMMAND_NOT_FOUND",
+                "MCP 启动程序或运行目录不存在，请检查依赖与配置。",
+                409,
+            )
+        } else if [
+            "CONNECTION_CLOSED",
+            "NOT_CONNECTED",
+            "SEND_FAILED",
+            "ECONNREFUSED",
+            "ECONNRESET",
+            "EPIPE",
+            "UND_ERR_SOCKET",
+            "ENOTFOUND",
+        ]
+        .contains(&code)
+        {
+            ServiceError::new(
+                "MCP_CONNECTION_LOST",
+                "MCP 连接已中断，请手动重新连接；调用未自动重放。",
+                409,
+            )
+        } else {
+            ServiceError::new(
+                arguments["fallback"]
+                    .as_str()
+                    .unwrap_or("MCP_CONNECTION_FAILED"),
+                "MCP 连接或请求失败；调用未自动重试。",
+                502,
+            )
+        };
+        Ok(failure.value())
+    }
+
+    fn apply_mcp_discovery(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let mut result = Vec::new();
+        for record in array(&arguments["records"]) {
+            let server = &record["server"];
+            if !truthy(&server["enabled"]) {
+                continue;
+            }
+            let cached = self.catalog.get(string(&record["key"]));
+            let state = if record["ready"] == true {
+                record["state"].as_str().unwrap_or("ready")
+            } else if record["connecting"] == true {
+                "connecting"
+            } else if record["hasError"] == true {
+                "error"
+            } else {
+                "disconnected"
+            };
+            let tools = cached
+                .map(|cached| array(&cached.tools))
+                .unwrap_or(&[])
+                .iter()
+                .filter(|tool| !array(&server["disabledTools"]).contains(&tool["toolName"]))
+                .map(|tool| {
+                    let mut tool = tool.clone();
+                    let description = string(&tool["description"]);
+                    let suffix = description
+                        .split_once(':')
+                        .map(|(_, suffix)| suffix)
+                        .unwrap_or(description);
+                    tool["description"] = json!(format!(
+                        "{}: {}",
+                        string(&server["name"]),
+                        super::intent::js_trim(suffix)
+                    ));
+                    tool["discoveryOnly"] = json!(true);
+                    tool["catalogVerified"] = json!(false);
+                    tool["needsConnection"] = json!(true);
+                    tool
+                })
+                .collect::<Vec<_>>();
+            result.push(json!({"id":server["id"],"name":format!("mcp.{}",string(&server["id"])),"description":format!("{}: configured MCP service; load this name to connect and verify its current tools.",string(&server["name"])),"transport":server["transport"].as_str().unwrap_or("stdio"),"state":state,"tools":tools}));
+        }
+        Ok(json!(result))
     }
 }
 

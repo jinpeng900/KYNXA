@@ -220,7 +220,7 @@ fn project_source(
     image_projection(bytes, format, arguments, cancellation)
 }
 
-/// 只读取已授权的同一文件版本；模型图像输入不会创建右侧预览。
+/// 只读取已授权的同一文件版本；模型图像输入不创建右侧预览。
 fn read_image(
     path: PathBuf,
     binding: Value,
@@ -299,7 +299,7 @@ where
     };
     let guard = WorkerCancellation::new(context);
     let signal = guard.signal.clone();
-    // 读取者持有并发名额直到解码结束，等待方取消也不会提前放开资源。
+    // 读取者持有并发名额直到解码结束，等待方取消不影响。
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         work(&signal)

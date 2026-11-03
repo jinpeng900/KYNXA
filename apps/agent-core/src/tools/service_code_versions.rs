@@ -179,7 +179,7 @@ impl CodeVersions {
                     })
                     .collect::<Vec<_>>();
                 records.sort_by(|left, right| left.path_id.cmp(&right.path_id));
-                // 字段顺序属于历史签名编码合同，不依赖 JSON 映射自身的键排序。
+                // 字段顺序属于历史签名编码约定，不依赖 JSON 映射自身的键排序。
                 let signature = sha256(serde_json::to_string(&records).unwrap().as_bytes());
                 let overflow = arguments["overflow"] == true;
                 let complete = !overflow

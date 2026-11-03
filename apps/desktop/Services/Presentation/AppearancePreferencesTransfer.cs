@@ -62,7 +62,7 @@ public static class AppearancePreferencesTransfer
 
     private static void Validate(AppearanceTransferPreferences preferences)
     {
-        // 导入时拒绝不支持的值，不静默回退成用户没有选择过的外观。
+        // 导入时拒不支持的值，不静默回退成用户没有选择过的外观。
         if (!AppearanceService.Palettes.Any(palette => palette.Id == preferences.PaletteId)
             || preferences.Mode is not ("light" or "dark" or "system")
             || !double.IsFinite(preferences.ChatFontSize)

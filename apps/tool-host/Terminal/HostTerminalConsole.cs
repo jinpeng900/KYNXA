@@ -6,7 +6,7 @@ using static KYNXA.ToolHost.NativeMethods;
 namespace KYNXA.ToolHost;
 
 /// <summary>Real console verification and bounded screen reading, never a redirected-output TTY simulation.</summary>
-/// <remarks>验证真实控制台并有界读取屏幕，不用重定向输出模拟交互终端。</remarks>
+/// <remarks>验证真实控制台并限量读取屏幕，不用重定向输出模拟交互终端。</remarks>
 internal static class HostTerminalConsole
 {
     internal const int MaximumSnapshotCharacters = 65536;

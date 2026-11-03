@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::intent::utf16_length;
 
-// 执行来源只是说明，不能授予权限；返回字段只包含受限的固定枚举，不包含端点和凭据。
+// 执行来源只作说明；返回字段是受限的固定枚举，不含端点和凭据。
 fn normalize_environment(input: &Value) -> Option<Value> {
     let object = input.as_object()?;
     let network = input["network"].as_object()?;
@@ -298,7 +298,7 @@ fn validate_input(schema: &Value, node: &Value, path: &str, depth: usize) -> Opt
         }
         if !schema["items"].is_null() {
             for (index, child) in children.iter().enumerate() {
-                // 稀疏数组空槽通过 JSON 变为 null；显式 null 保留类型投影，仍执行完整校验。
+                // 稀疏数组空槽通过 JSON 变为 null；显式 null 保留类型映射，仍执行完整校验。
                 if child.is_null() {
                     continue;
                 }

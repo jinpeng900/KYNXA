@@ -51,7 +51,7 @@ fn temporal_value(value: &Value) -> Option<Value> {
     }
 }
 
-/// 保留来源原有时间字段及含义；不能把本次检索时间当成文章发布日期。
+/// 保留来源原有时间字段及含义，检索时间不当发布日期。
 pub(crate) fn preserve_temporal_metadata(source: &Value, target: &mut Value) {
     for field in TEMPORAL_FIELDS {
         if target[*field].is_null() {
@@ -440,7 +440,7 @@ impl<'a> Sources<'a> {
     }
 }
 
-/// 原生 JSON 回执复用 URL、摘录与去重规则，不再建立另一份图投影。
+/// 原生 JSON 回执复用 URL、摘录与去重规则，不再建立另一份图映射。
 pub(crate) fn normalize_result(value: &Value, maximum: usize) -> Vec<Value> {
     let mut sources = Sources {
         nodes: HashMap::new(),

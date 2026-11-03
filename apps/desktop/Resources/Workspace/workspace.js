@@ -86,7 +86,7 @@
         post({ type: 'previewError', key: requestScope.key, renderId: message.renderId, message: text });
       }
     } else if (message.kind === 'markdown' || message.kind === 'mermaid' || message.kind === 'code') {
-      // HTML 仅来自现有禁止原生 HTML 的 Markdown 渲染器，绝不直接接受文档内的 HTML。
+      // HTML 仅来自现有禁止原生 HTML 的 Markdown 渲染器，不直接接受文档内的 HTML。
       content.innerHTML = typeof message.html === 'string' ? message.html : '';
       for (const formula of content.querySelectorAll('.math[data-latex]')) {
         if (!window.katex) continue;

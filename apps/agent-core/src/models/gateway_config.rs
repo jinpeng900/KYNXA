@@ -96,7 +96,7 @@ async fn observation_read(
     }).await.unwrap_or_else(|_|Err(ModelError::new("LOCAL_MODEL_OBSERVATION_TIMEOUT","本地模型观测超时。",504)))
 }
 
-/// 只读取有界 localhost 遥测；信任、资源解释及缓存决策均沿原有原生规则。
+/// 只读取限量 localhost 遥测；信任、资源解释及缓存决策均沿原有原生规则。
 pub async fn observe_local(
     connection: &Value,
     model: &str,
@@ -106,7 +106,7 @@ pub async fn observe_local(
     observe_local_with_refresh(connection, model, context_tokens, cancellation, false).await
 }
 
-/// 准备完成必须重新观察服务，不能用预载前的缓存冒充模型已经驻留。
+/// 准备完成后重新观察服务，预载前的缓存不算模型已驻留。
 pub async fn observe_local_fresh(
     connection: &Value,
     model: &str,
@@ -461,7 +461,7 @@ pub fn validate_connection(mut input: Value, require_models: bool) -> Result<Val
     )
 }
 
-/// 有界读完发现错误正文以复用连接；不解析正文或发起生成。
+/// 限量读完发现错误正文以复用连接；不解析正文或发起生成。
 async fn drain_discovery_response(
     response: reqwest::Response,
     cancellation: &mut watch::Receiver<bool>,
@@ -666,7 +666,7 @@ mod tests {
         let original = serde_json::to_vec(&json!({"version":1,"providers":providers})).unwrap();
         let path = root.join("connections.json");
         std::fs::write(&path, &original).unwrap();
-        // 调用真实公共处理器，避免手写桌面样例掩盖原生列表投影缺陷。
+        // 调用真实公共处理器，避免手写桌面样例掩盖原生列表映射缺陷。
         let (status, response) = handle_models("GET", "/api/models", Value::Null, &root)
             .await
             .unwrap()

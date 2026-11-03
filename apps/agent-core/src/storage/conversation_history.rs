@@ -367,7 +367,7 @@ pub(crate) fn read_latest(
 }
 
 /// 在已有版本化偏移缓存内复用规范化消息，不改写正式原文日志。
-/// 投影器共用同一存储消息表示；公开字段过滤与即时范围核验仍由调用方负责。
+/// 映射器共用同一存储消息表示；公开字段过滤与即时范围核验仍由调用方负责。
 pub(crate) fn read_projected(
     root: &Path,
     location: &Value,

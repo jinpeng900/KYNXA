@@ -10,7 +10,7 @@ pub(super) enum PreparedRoot {
     Ready(Box<RootExecution>),
 }
 
-/// 会话锁及工具清理守卫覆盖后续完整执行，不能在准备函数返回时释放。
+/// 会话锁及工具清理守卫要覆盖后续完整执行。
 pub(super) struct RootExecution {
     pub(super) state: LoopState,
     pub(super) ctx: tools::GatewayToolContext,
@@ -524,7 +524,7 @@ fn resolve_identity(
             control.is_some_and(|event| {
                 matches!(event.payload["reason"].as_str(),
                 Some("user-resumed" | "user-requested-revision"))
-                // 内部恢复时，较早的恢复控制不能撤销较新的用户停止。
+                // 内部恢复时，较新的用户停止优先于较早的恢复控制。
                 && directive.is_none_or(|directive| directive.payload["stop"] != true
                     || event.sequence > directive.sequence)
             })
@@ -569,7 +569,7 @@ fn resolve_identity(
         }
     }
     if run.journal.is_none() {
-        // 正式终态记录只允许恢复读取，答复缺失不能变成重新派发模型的授权。
+        // 正式终态记录只用于恢复读取；答复缺失时也不重新派发模型。
         return Err(GatewayError::new(
             "CHAT_COMPLETED_REPLY_UNAVAILABLE",
             "The completed task reply is temporarily unavailable; retain its saved state and verify storage before reconnecting. / 已完成任务的正式答复暂不可读，原状态保留，请核验存储后重连。",
@@ -793,7 +793,7 @@ async fn restore_execution(
             })
             .flat_map(|message| message["ToolActivities"].as_array().into_iter().flatten())
         {
-            // 仅恢复外部副作用，内部压缩不要求工具派发回执。
+            // 只恢复外部副作用，内部压缩不需要工具派发回执。
             if is_read_only_tool(activity["name"].as_str().unwrap_or("")) {
                 continue;
             }
@@ -943,7 +943,7 @@ async fn restore_execution(
         state.tools.selected.clear();
     }
     if !resuming && requires_task_verification(state) {
-        // 历史建议不阻塞模型就绪，也不授予执行权限。
+        // 历史建议不阻塞模型就绪。
         if let Ok(hint) = tokio::time::timeout(
             Duration::from_millis(30),
             tools::verified_experience_hint(
@@ -1184,7 +1184,7 @@ async fn assemble_prompt(
     let live_memory =
         LiveMemoryProjection::prepare(memories, input["message"].clone(), memory_budget)?;
     system.push_str(&live_memory.block);
-    // 当前记忆保留为可替换的后部块；撤销不能复用失效快照。
+    // 当前记忆放在可替换的后部块，撤销时不复用失效快照。
     let base_system = system.clone();
     let initial_runtime_authority = runtime_authority(&ctx, permission, &live_memory.block);
     if work_context_restored

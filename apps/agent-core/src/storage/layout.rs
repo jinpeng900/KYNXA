@@ -40,7 +40,7 @@ fn inspect_session(root: &Path, session: &Path) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// 每次即时检查所选正式范围；目录准备缓存不能替代实际路径授权。
+/// 每次即时检查所选正式范围，目录准备缓存不算路径授权。
 pub(crate) fn inspect_conversation(root: &Path, location: &Value) -> Result<(), ContractError> {
     let chat_id = id(&location["Id"])?;
     let session = if location["ProjectId"].is_null() {

@@ -16,7 +16,7 @@ fn exact_official_endpoint(endpoint: &Value) -> bool {
         && ["", "/", "/v1", "/v1/"].contains(&string(&endpoint["pathname"]))
 }
 
-/// 摘要专用模式不代表代理额度，也不改变正常回复设置。
+/// 摘要专用模式不影响代理额度和正常回复设置。
 fn summary_controls(args: &Value) -> Value {
     let endpoint = &args["endpoint"];
     let known_model = ["deepseek-flash", "deepseek-v4-pro"].contains(&string(&args["model"]));
@@ -291,7 +291,6 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
             value["capabilitySource"] = source.clone();
         }
     }
-    // 分别返回输入、输出和总窗口上限，三者不能互相代替。
     for (source, target) in [
         ("maxInputTokens", "providerMaxInputTokens"),
         ("maxOutputTokens", "providerMaxOutputTokens"),

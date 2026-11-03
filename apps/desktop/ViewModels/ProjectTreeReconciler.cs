@@ -53,7 +53,7 @@ public static class ProjectTreeReconciler
             if (previous < 0) rows.Insert(index, entry);
             else
             {
-                // TreeView 的 WinRT ItemsSource 投影不能可靠处理 ObservableCollection.Move；用受支持的移除与插入表达移动，行对象和展开状态不变。
+                // TreeView 的 WinRT ItemsSource 映射不能可靠处理 ObservableCollection.Move；用受支持的移除与插入表达移动，行对象和展开状态不变。
                 rows.RemoveAt(previous);
                 rows.Insert(index, entry);
             }

@@ -31,7 +31,7 @@ fn mapped(error: crate::gateway_contract::GatewayError) -> ContractError {
     gateway::error(&error.message, code, error.status)
 }
 
-/// MIME 与魔数选择解析器，不能仅靠 URL 后缀把二进制内容当成普通文本。
+/// MIME 与魔数选择解析器，不只看 URL 后缀。
 fn filename(download: &crate::tools::gateway_web::PublicDownload) -> PathBuf {
     let declared = download
         .final_url
@@ -102,7 +102,7 @@ fn filename(download: &crate::tools::gateway_web::PublicDownload) -> PathBuf {
             Some("zip")
         }
     } else if bytes.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) {
-        // DOC、PPT、XLS 共用 CFB 魔数；依据真实根流选择解析器，不把一种 Office 文档误当另一种。
+        // DOC、PPT、XLS 共用 CFB 魔数，依据真实根流选择解析器。
         cfb::CompoundFile::open(std::io::Cursor::new(bytes))
             .ok()
             .and_then(|document| {

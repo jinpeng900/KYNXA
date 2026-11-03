@@ -1,4 +1,4 @@
-//! 已核验方案查询是既有任务账本的范围投影，不是自动执行器。
+//! 已核验方案查询是既有任务记录的范围映射，只读。
 
 use super::gateway::{GatewayToolContext, check_configuration_generation, experience_identities};
 use crate::{gateway_contract::GatewayError, storage::gateway};
@@ -75,7 +75,7 @@ async fn lookup(
     }
     value["limit"] = json!(limit);
     if legacy {
-        // 复用既有范围绑定的专用读取回调，只读取本聊天的旧导航文件，不另建范围或账本。
+        // 复用既有范围绑定的专用读取回调，只读取本聊天的旧导航文件，不另建范围或记录。
         let previous = if check_configuration_generation(context).is_ok() {
             if let Some(execute) = &context.external_execute {
                 execute("knowledge.experience".into(), forwarded).await.ok()

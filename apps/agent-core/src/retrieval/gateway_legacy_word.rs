@@ -155,7 +155,7 @@ fn piece_table<'a>(
     Ok(table)
 }
 
-/// MS-DOC 八位压缩 Unicode 使用固定映射；中文正文应来自 UTF-16 片段，不能按 GBK 猜解。
+/// MS-DOC 八位压缩 Unicode 使用固定映射，中文正文来自 UTF-16 片段，不按 GBK 猜解。
 fn compressed_unit(byte: u8) -> u16 {
     match byte {
         0x82 => 0x201a,
@@ -246,7 +246,7 @@ fn read_characters(
     Ok(units)
 }
 
-/// 仅投影已经保存的域结果；不执行域指令、宏或链接，也不把指令当成正文证据。
+/// 只映射已经保存的域结果；域指令、宏和链接不执行，也不算正文证据。
 fn append_story(
     output: &mut DocumentText,
     units: &[u16],

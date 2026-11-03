@@ -19,7 +19,7 @@ fn official_deepseek_root(base_url: &str) -> bool {
     })
 }
 
-/// 每个请求序列只选择一次路线；调用方在整个序列内沿用投影后的连接，执行中不改道。
+/// 每个请求序列只选择一次路线；调用方在整个序列内沿用映射后的连接，执行中不改道。
 pub(crate) fn project_connection(connection: &mut Value, model: &str) {
     let enabled = match std::env::var(DEEPSEEK_MESSAGES_SWITCH).as_deref() {
         Ok("0") => false,

@@ -1,4 +1,4 @@
-//! 稳定工作挂载复用正式目录，不建立另一套路径或权限账本。
+//! 稳定工作挂载复用正式目录，不建立另一套路径或权限记录。
 
 use super::{ContractError, ContractResult};
 use serde_json::{Value, json};

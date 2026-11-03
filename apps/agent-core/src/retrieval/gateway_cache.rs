@@ -1,4 +1,4 @@
-//! 可重建缓存复用现有硬件授额；共享计算的各个观察者独立取消，缓存不足直接走原链路。
+//! 可重建缓存复用现有硬件额度；共享计算的各个观察者独立取消，缓存不足直接走原链路。
 
 use super::{
     cache::ByteLru,
@@ -101,7 +101,7 @@ fn hardware_headroom(snapshot: &Value, approved: usize) -> HardwareHeadroom {
             .map(|_| number_bytes(&snapshot["memory"]["availableBytes"])),
         approved_cache_bytes: approved,
         queued: snapshot["queuedRequests"].as_f64().unwrap_or(0.0) > 0.0,
-        // 仅采纳明确的本地前台反馈，不把供应商网络耗时或模型思考耗时当作界面延迟。
+        // 只采纳明确的本地前台反馈，供应商网络耗时和模型思考耗时不算界面延迟。
         foreground_latency_micros: snapshot["feedback"]["foregroundLatencyMs"]
             .as_f64()
             .filter(|n| n.is_finite() && *n > 0.0)
@@ -109,7 +109,7 @@ fn hardware_headroom(snapshot: &Value, approved: usize) -> HardwareHeadroom {
     }
 }
 
-/// 复用已有内存阈值；队列或CPU准入需求不等于缺内存，缺失或不可信观测不触发模型卸载。
+/// 复用已有内存阈值；队列或 CPU 准入需求不算缺内存，缺失或不可信观测不触发模型卸载。
 pub(crate) fn confirmed_memory_pressure(snapshot: &Value) -> bool {
     let valid_pair = |total: &Value, free: &Value| {
         total
@@ -344,7 +344,7 @@ async fn refresh_memory(service: Arc<hardware::ResourceService>, runtime: tokio:
             else {
                 continue;
             };
-            // 容量与真实授额在发布锁内一起更新；授额等待已在锁外完成，旧请求不能覆盖新收缩。
+            // 容量与真实额度在发布锁内一起更新，额度等待已在锁外完成，旧请求不覆盖新收缩。
             resize_cache(kind, target);
             slot.grant.replace(grant)
         };
@@ -376,7 +376,7 @@ fn retire_slot(kind: CacheKind, generation: u64) {
     drop(retired);
 }
 
-/// 三类目标统一自适应，前台仅使用现有已批准授额；缓存不足旁路原链路，不排队、不结束长任务。
+/// 三类目标统一自适应，前台仅使用现有已批准额度；缓存不足旁路原链路，不排队、不结束长任务。
 pub(crate) fn cache_memory_limit(name: &'static str, seed_bytes: usize, reclaim: fn()) -> usize {
     let Some(kind) = CacheKind::from_name(name) else {
         return 0;
@@ -431,7 +431,7 @@ pub(crate) fn memory_grant(name: &'static str) -> Option<Arc<MemoryGrant>> {
         .clone()
 }
 
-/// 回收只清理可重建值，活动工作者持有授额直到真实计算返回，不清会话、任务或正式检索数据。
+/// 回收只清理可重建值，活动工作者持有额度直到真实计算返回，不清会话、任务或正式检索数据。
 pub(crate) fn reclaim_memory(_reason: &'static str) {
     let retired = {
         let Some(mut state) = MEMORY.get().and_then(|state| state.lock().ok()) else {
@@ -594,7 +594,7 @@ impl<V: Send + Sync + 'static> FlightCache<V> {
         if caller_cancel.load(Ordering::Acquire) {
             return Err(cancelled());
         }
-        // 共享工作线程栈也计入缓存授额；可选额度不足只旁路缓存，不拒绝必要推理。
+        // 共享工作线程栈也计入缓存额度；可选额度不足只旁路缓存，不拒绝必要推理。
         const STACK_BYTES: usize = 2 * 1024 * 1024;
         let charge = input_bytes
             .saturating_add(key.capacity())

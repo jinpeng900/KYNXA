@@ -284,7 +284,7 @@ pub struct ProviderTokenUsage {
     pub client_metrics: Option<ModelRequestClientMetrics>,
 }
 
-/// 每次原始派发只观测一次，随已有预约恢复；不能为补计量重发模型或重做操作。
+/// 每次原始派发只观测一次，随已有预约恢复，补计量时不重发模型或重做操作。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRequestClientMetrics {

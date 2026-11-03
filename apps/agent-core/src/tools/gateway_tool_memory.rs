@@ -1,4 +1,4 @@
-//! 可复用能力元信息与衍生经验；不替代权限检查或正式执行账本。
+//! 可复用能力元信息与衍生经验；不替代权限检查或正式执行记录。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -73,7 +73,7 @@ fn configuration(ctx: &GatewayToolContext) -> (HashMap<String, String>, HashSet<
             disabled.insert(format!("mcp.{id}.{tool}"));
         }
     }
-    // 稳定排序避免哈希容器迭代顺序变化引发无意义落盘。
+    // 稳定排序，防止哈希容器迭代顺序变化引发无意义写入磁盘。
     let ordered = sources.iter().collect::<std::collections::BTreeMap<_, _>>();
     let ordered_disabled = disabled.iter().collect::<std::collections::BTreeSet<_>>();
     let signature = digest(&json!({"sources":ordered,"disabled":ordered_disabled}));
@@ -81,7 +81,7 @@ fn configuration(ctx: &GatewayToolContext) -> (HashMap<String, String>, HashSet<
 }
 
 fn report_failure(code: &str) {
-    // 衍生记忆异常只记机器码，不把已完成工具或普通聊天变成失败，也不输出私有内容。
+    // 衍生记忆异常只记机器码，已完成的工具和普通聊天不受影响。
     eprintln!("[tool-memory] {code}");
 }
 
@@ -161,7 +161,7 @@ pub(crate) fn cached_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// 操作派发前只捕获当前已核验元信息视图的身份；缺失、撤销或繁忙时不猜测身份，也不执行工具。
+/// 操作派发前只捕获当前已核验元信息视图的身份；缺失、撤销或繁忙时不执行工具。
 pub(crate) fn experience_identities(
     ctx: &GatewayToolContext,
     names: &[String],
@@ -290,7 +290,7 @@ fn learning_outcome<'a>(
                 return None;
             }
             let failed = value["isError"] == true || ["failed", "error"].contains(&status);
-            // 传输成功不能把验证页面变成可用证据，也不能把未核验文件当成已交付成果。
+            // 传输成功不等于内容可用：验证页面和未核验文件都不算成果。
             if !failed && value["evidenceUsable"] == false {
                 return Some((
                     false,
@@ -330,7 +330,7 @@ pub(crate) async fn remember_outcome(
     elapsed: Duration,
     ctx: &GatewayToolContext,
 ) {
-    // 工具发现属于基础设施；等待、审批及未知结果也不计作动作成功。
+    // 工具发现属于基础设施；等待、审批及未知结果都不算动作成功。
     if name.starts_with("tool.") {
         return;
     }

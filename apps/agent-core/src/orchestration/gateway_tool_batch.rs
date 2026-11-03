@@ -1,4 +1,4 @@
-//! 同一模型步骤内独立只读调用的有界调度。
+//! 同一模型步骤内独立只读调用的限量调度。
 //!
 //! 只有相邻的独立只读调用组成批次；其他调用都是有序屏障，写操作、浏览器／终端会话、未知 MCP
 //! 以及同一 MCP 连接上的调用仍保持原有串行顺序。
@@ -52,7 +52,7 @@ pub(crate) enum PrefetchOutcome {
     Failed(GatewayError),
 }
 
-/// 独立读取的资源身份；返回 `None` 表示该调用必须作为有序屏障。
+/// 独立读取的资源身份；返回 `None` 表示该调用要作为有序屏障。
 pub(crate) fn parallel_resource(call: &Value) -> Option<String> {
     if call["unavailable"] == true {
         return None;
@@ -251,7 +251,7 @@ impl Drop for BatchCallActivity<'_, '_> {
     }
 }
 
-/// 有界并发执行批次，按原调用顺序返回结果。
+/// 限量并发执行批次，按原调用顺序返回结果。
 ///
 /// 第一个调用无需额外准入；其余调用在资源队列中等待，等待期间被停止时返回 `rejected`，不执行调用。
 pub(crate) async fn run_batch<Item, Lease, Output, Admit, AdmitFuture, Execute, ExecuteFuture>(
@@ -358,7 +358,7 @@ pub(crate) fn record_dispatch(
     } else {
         Value::Null
     };
-    // 升级续接时保留旧版未派发操作的指纹，不因新增挂载元数据重建操作。
+    // 升级续接时保留旧版未派发操作的指纹。
     let input_reference = journal
         .repository()
         .operation(journal.task_id(), operation_id)?
@@ -723,7 +723,7 @@ mod tests {
             at(2200),
         );
         suspended += activity.transition(Some(CallPhase::Executing), None, at(2300));
-        // 最后一个等待被取消时结算其区间，不把它记为实际执行。
+        // 最后一个等待被取消时结算其区间，不记为实际执行。
         suspended += activity.transition(Some(CallPhase::Waiting), None, at(2500));
         assert_eq!(suspended, Duration::from_millis(2200));
         assert_eq!(

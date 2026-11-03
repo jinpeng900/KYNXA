@@ -108,7 +108,7 @@ impl Drop for SqliteConnectionLease {
         let Some(entry) = self.entry.take() else {
             return;
         };
-        // 清理前撤除请求截止回调，已取消的请求不能污染下一位借用者。
+        // 清理前撤除请求截止回调，已取消的请求不影响下一位借用者。
         let clean_handler = entry
             .connection
             .progress_handler(0, None::<fn() -> bool>)
@@ -188,7 +188,7 @@ fn pool_for(root: &Path, path: &Path) -> Result<Arc<ConnectionPool>, ContractErr
         if pool.identity == identity {
             return Ok(pool.clone());
         }
-        // 数据库文件替换后退休旧句柄，不能继续查询已脱离当前路径的旧文件。
+        // 数据库文件替换后退休旧句柄。
         if let Ok(mut state) = pool.state.lock() {
             state.retire();
         }
@@ -335,7 +335,7 @@ fn acquire_owned(
         pool,
         writable,
     };
-    // 复用句柄同时按本次期限限制SQLite忙等待及SQL执行，不能只缩短借连接排队时间。
+    // 复用句柄同时按本次期限限制 SQLite 忙等待及 SQL 执行。
     lease
         .busy_timeout(
             timeout

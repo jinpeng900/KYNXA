@@ -1,4 +1,4 @@
-//! 有界、按聊天隔离的公共网页快照；连续分页不重新下载易变页面。
+//! 限量、按聊天隔离的公共网页快照；连续分页不重新下载易变页面。
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ impl PageSnapshot {
             .as_str()
             .is_some_and(|hash| self.value["responseHash"].as_str() != Some(hash));
         let unanchored = !cached && requested > 0 && input["responseHash"].as_str().is_none();
-        // 快照过期后正文可能变化；明确从新版第一页恢复，不能把两个版本拼接成同一份证据。
+        // 快照过期后正文可能变化，从新版第一页恢复。
         let mut offset = if changed || unanchored {
             0
         } else {

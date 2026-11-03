@@ -55,7 +55,7 @@ pub(crate) async fn import(
         let conversation = conversation.to_owned();
         let message = message.clone();
         let selected = tokio::task::spawn_blocking(move || {
-            // 原生选择器授权本次选中的精确文件，不因此登记或授权整个父目录。
+            // 原生选择器只授权本次选中的文件，父目录不在授权范围内。
             let (bytes, _) = crate::tools::service_source_reading::read_binary_stable(
                 &path,
                 message_attachments::MAXIMUM_FILE_BYTES,
@@ -86,7 +86,7 @@ pub(crate) async fn list(
         .map_err(Into::into)
 }
 
-/// 分页读取本工作已保存附件的元信息，不派发工具，也不创建任务。
+/// 分页读取本工作已保存附件的元信息，只读。
 pub(crate) async fn project_list(
     runtime: &GatewayRuntime,
     project: &str,

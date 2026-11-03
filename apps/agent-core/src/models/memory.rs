@@ -223,7 +223,7 @@ fn recalls_memory(query: &str) -> bool {
     RECALL.get_or_init(|| Regex::new(r"(?:查看|读取|检查|列出|显示|回忆).{0,12}(?:(?:已保存|已确认|全局|用户|我的|当前聊天|当前项目)的?记忆|记忆内容|(?:你|我们)?(?:已)?记住的(?:内容|事情|信息))|(?:查看|读取|列出|显示).{0,12}(?:已保存|已确认|记住)的(?:内容|偏好|决定)|^(?:你|我们)(?:还)?记得(?:什么|哪些|的内容)[？?。\s]*$|\b(?:read|inspect|list|show|recall)\b.{0,24}\b(?:(?:saved|stored|confirmed)\s+(?:memory|memories|preferences|decisions)|remembered\s+(?:content|facts|preferences|decisions))\b|\bwhat\s+(?:do|did|have)\s+you\s+(?:remember|remembered)\b").unwrap()).is_match(query)
 }
 
-/// 已确认状态和作用域先于排序；相关性不能把候选事实提升为权威记忆。
+/// 已确认状态和作用域先于排序，相关性只影响同级候选的顺序。
 fn prepare(args: &Value) -> Value {
     let entries = array(&args["entries"]);
     let mut seen = HashSet::new();

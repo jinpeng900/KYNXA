@@ -360,7 +360,7 @@ fn is_deleted_shape(payload: &[u8], budget: &mut ParseBudget<'_>) -> Result<bool
     Err(failure("DOCUMENT_PARSE_FAILED"))
 }
 
-/// 删除形状可能仍保留大纲引用；备用大纲路径不得重新引入这些删除正文。
+/// 删除形状可能仍保留大纲引用，备用大纲路径要跳过这些删除正文。
 fn suppress_deleted_outlines(
     payload: &[u8],
     used_outlines: &mut HashSet<usize>,

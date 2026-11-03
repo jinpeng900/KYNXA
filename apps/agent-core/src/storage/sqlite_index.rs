@@ -530,7 +530,7 @@ fn retire_chat_batch(connection: &Connection, arguments: &Value) -> ContractResu
         .strip_prefix("chat:")
         .ok_or_else(|| failure("invalid retired chat scope"))?;
     super::identity(&json!(id))?;
-    // 小批原子清理使大聊天也能持续前进；正式目录已撤销此scope，不会在分批期间重新暴露残留内容。
+    // 小批原子清理使大聊天也能持续前进；正式目录已撤销此 scope，分批期间残留内容不可见。
     let chunks = sql_execute(
         connection,
         "DELETE FROM chunks WHERE id IN (SELECT c.id FROM chunks c JOIN sources s ON s.source_id=c.source_id WHERE s.scope_key=? ORDER BY c.id LIMIT 128)",

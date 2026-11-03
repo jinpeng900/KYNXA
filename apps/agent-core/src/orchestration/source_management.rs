@@ -132,7 +132,7 @@ struct CorpusPlan {
     complete: bool,
 }
 
-/// 持久存储仍是权威；原生状态拥有复用证明、语料计划及变更关闭账本，不以取消请求撤销已提交资料。
+/// 持久存储仍是权威；原生状态拥有复用证明、语料计划及变更关闭记录，不以取消请求撤销已提交资料。
 #[derive(Default)]
 pub struct SourceManagementState {
     closed: bool,
@@ -280,174 +280,12 @@ impl SourceManagementState {
                     "cache": snapshot["preparationFailures"] == args["preparationFailures"], "complete": complete}),
                 )
             }
-            "orchestration.sourceManagement.checkpoint" => {
-                let settings = raw_object(&args["settingsJson"])?;
-                let local = raw_object(&json!(raw_field(&settings, "local")))?;
-                let project = settings
-                    .get("projectIndexing")
-                    .and_then(|value| {
-                        serde_json::from_str::<HashMap<String, Box<RawValue>>>(value.get()).ok()
-                    })
-                    .unwrap_or_default();
-                let binding = project
-                    .get("bindingRevision")
-                    .filter(|value| value.get() != "null")
-                    .map(|value| value.get())
-                    .unwrap_or("0");
-                let mounted = project
-                    .get("mountedFolder")
-                    .filter(|value| value.get() != "null")
-                    .map(|value| value.get())
-                    .unwrap_or("false");
-                let signature = digest(&format!(
-                    "[{},{},{},{},{},{mounted},{binding}]",
-                    raw_field(&local, "enabled"),
-                    raw_field(&local, "semantic"),
-                    raw_field(&local, "embeddingProfileId"),
-                    raw_field(&local, "vectorBackend"),
-                    raw_field(&local, "indexing")
-                ));
-                let root = if mounted != "false"
-                    && mounted != "null"
-                    && mounted != "0"
-                    && mounted != "\"\""
-                {
-                    args["resolvedRoot"].clone()
-                } else {
-                    Value::Null
-                };
-                let preparation = string(&args["preparationVersionJson"]);
-                let preparation = if preparation.is_empty() {
-                    "null"
-                } else {
-                    preparation
-                };
-                let checkpoint_id = digest(&format!(
-                    "[{},{},{root},{binding},{preparation}]",
-                    args["projectId"],
-                    quote(&signature)
-                ));
-                Ok(
-                    json!({"version": 1, "kind": "source-index", "checkpointId": checkpoint_id, "settingsSignature": signature,
-                    "root": root, "bindingRevision": serde_json::from_str::<Value>(binding).unwrap_or(Value::Null),
-                    "preparationVersion": serde_json::from_str::<Value>(preparation).unwrap_or(Value::Null), "updatedAt": args["updatedAt"]}),
-                )
-            }
-            "orchestration.sourceManagement.signature" => {
-                const FIELDS: &[&str] = &[
-                    "sourceId",
-                    "contentHash",
-                    "sourceRevision",
-                    "bindingRevision",
-                    "scopeKey",
-                    "sourceType",
-                    "title",
-                    "locator",
-                    "parserVersion",
-                    "chunkerVersion",
-                    "tokenizerVersion",
-                    "embeddingInputVersion",
-                    "structure",
-                ];
-                let sources = array(&args["sourcesJson"]);
-                let rows: Result<Vec<String>, String> = array(&args["order"])
-                    .iter()
-                    .map(|index| {
-                        let source = sources
-                            .get(index.as_u64().unwrap_or(u64::MAX) as usize)
-                            .ok_or("INVALID_SOURCE_SIGNATURE")?;
-                        let object = raw_object(source)?;
-                        Ok(format!(
-                            "[{}]",
-                            FIELDS
-                                .iter()
-                                .map(|field| raw_field(&object, field))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        ))
-                    })
-                    .collect();
-                Ok(json!(digest(&format!(
-                    "[{},{},{},[{}]]",
-                    string(&args["preparationVersionJson"]),
-                    string(&args["localJson"]),
-                    args["projectIndexingJson"].as_str().unwrap_or("null"),
-                    rows?.join(",")
-                ))))
-            }
+            "orchestration.sourceManagement.checkpoint" => self.apply_orchestration_source_management_checkpoint(args),
+            "orchestration.sourceManagement.signature" => self.apply_orchestration_source_management_signature(args),
             "orchestration.sourceManagement.version" => {
                 Ok(json!(ordered_version(&args["value"], &args["order"])))
             }
-            "orchestration.sourceManagement.syncPlan" => {
-                let snapshot = &args["snapshot"];
-                let sources = array(&snapshot["sources"]);
-                let scopes: Vec<Value> = array(&snapshot["scopes"])
-                    .iter()
-                    .filter(|scope| *scope == "user" || string(scope).starts_with("project:"))
-                    .cloned()
-                    .collect();
-                let corpus: Vec<usize> = sources
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, source)| {
-                        ["knowledge", "work-file"].contains(&string(&source["sourceType"]))
-                    })
-                    .map(|(index, _)| index)
-                    .collect();
-                let other: Vec<usize> = sources
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, source)| {
-                        !["knowledge", "work-file"].contains(&string(&source["sourceType"]))
-                    })
-                    .map(|(index, _)| index)
-                    .collect();
-                if args["hasScopeVersion"] != true {
-                    return Ok(
-                        json!({"mode": "legacy", "corpusScopes": scopes, "corpusIndexes": corpus, "otherIndexes": other}),
-                    );
-                }
-                if args["planned"] != true {
-                    return Ok(
-                        json!({"corpusScopes": scopes, "corpusIndexes": corpus, "otherIndexes": other}),
-                    );
-                }
-                let key = string(&args["key"]);
-                let signature = string(&args["signature"]);
-                let version = string(&args["version"]);
-                let previous = self.corpus.get(key);
-                let cached = previous.is_some_and(|previous| {
-                    previous["signature"] == signature && previous["version"] == version
-                });
-                let mode = if cached {
-                    "cached"
-                } else if truthy(&snapshot["sourceScan"]["backgroundPending"])
-                    || snapshot["sourceScan"]["coverage"]["complete"] == false
-                    || corpus.len() > 512
-                {
-                    "job"
-                } else {
-                    "inline"
-                };
-                self.sequence += 1;
-                let id = self.sequence;
-                let complete = previous.is_none_or(|previous| previous["complete"] != false)
-                    && snapshot["sourceScan"]["coverage"]["complete"] != false;
-                self.plans.insert(
-                    id,
-                    CorpusPlan {
-                        key: key.into(),
-                        signature: signature.into(),
-                        can_cache: cached,
-                        complete,
-                    },
-                );
-                Ok(
-                    json!({"planId": id, "mode": mode, "corpusScopes": scopes, "corpusIndexes": corpus, "otherIndexes": other, "projectId": project_id(snapshot),
-                    "invalidate": !cached && mode == "inline" && previous.is_some_and(|previous| previous["version"] != version),
-                    "patch": if cached && previous.is_some_and(|previous| previous["complete"] == false) { json!({"indexingPartial": true}) } else { json!({}) }}),
-                )
-            }
+            "orchestration.sourceManagement.syncPlan" => self.apply_orchestration_source_management_sync_plan(args),
             "orchestration.sourceManagement.syncOutcome" => {
                 let plan = self
                     .plans
@@ -551,5 +389,173 @@ impl SourceManagementState {
             }
             _ => Err("AGENT_CORE_UNKNOWN_OPERATION".into()),
         }
+    }
+
+    fn apply_orchestration_source_management_checkpoint(&mut self, args: &Value) -> Result<Value, String> {
+        let settings = raw_object(&args["settingsJson"])?;
+        let local = raw_object(&json!(raw_field(&settings, "local")))?;
+        let project = settings
+            .get("projectIndexing")
+            .and_then(|value| {
+                serde_json::from_str::<HashMap<String, Box<RawValue>>>(value.get()).ok()
+            })
+            .unwrap_or_default();
+        let binding = project
+            .get("bindingRevision")
+            .filter(|value| value.get() != "null")
+            .map(|value| value.get())
+            .unwrap_or("0");
+        let mounted = project
+            .get("mountedFolder")
+            .filter(|value| value.get() != "null")
+            .map(|value| value.get())
+            .unwrap_or("false");
+        let signature = digest(&format!(
+            "[{},{},{},{},{},{mounted},{binding}]",
+            raw_field(&local, "enabled"),
+            raw_field(&local, "semantic"),
+            raw_field(&local, "embeddingProfileId"),
+            raw_field(&local, "vectorBackend"),
+            raw_field(&local, "indexing")
+        ));
+        let root = if mounted != "false"
+            && mounted != "null"
+            && mounted != "0"
+            && mounted != "\"\""
+        {
+            args["resolvedRoot"].clone()
+        } else {
+            Value::Null
+        };
+        let preparation = string(&args["preparationVersionJson"]);
+        let preparation = if preparation.is_empty() {
+            "null"
+        } else {
+            preparation
+        };
+        let checkpoint_id = digest(&format!(
+            "[{},{},{root},{binding},{preparation}]",
+            args["projectId"],
+            quote(&signature)
+        ));
+        Ok(
+            json!({"version": 1, "kind": "source-index", "checkpointId": checkpoint_id, "settingsSignature": signature,
+            "root": root, "bindingRevision": serde_json::from_str::<Value>(binding).unwrap_or(Value::Null),
+            "preparationVersion": serde_json::from_str::<Value>(preparation).unwrap_or(Value::Null), "updatedAt": args["updatedAt"]}),
+        )
+    }
+
+    fn apply_orchestration_source_management_signature(&mut self, args: &Value) -> Result<Value, String> {
+        const FIELDS: &[&str] = &[
+            "sourceId",
+            "contentHash",
+            "sourceRevision",
+            "bindingRevision",
+            "scopeKey",
+            "sourceType",
+            "title",
+            "locator",
+            "parserVersion",
+            "chunkerVersion",
+            "tokenizerVersion",
+            "embeddingInputVersion",
+            "structure",
+        ];
+        let sources = array(&args["sourcesJson"]);
+        let rows: Result<Vec<String>, String> = array(&args["order"])
+            .iter()
+            .map(|index| {
+                let source = sources
+                    .get(index.as_u64().unwrap_or(u64::MAX) as usize)
+                    .ok_or("INVALID_SOURCE_SIGNATURE")?;
+                let object = raw_object(source)?;
+                Ok(format!(
+                    "[{}]",
+                    FIELDS
+                        .iter()
+                        .map(|field| raw_field(&object, field))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+            })
+            .collect();
+        Ok(json!(digest(&format!(
+            "[{},{},{},[{}]]",
+            string(&args["preparationVersionJson"]),
+            string(&args["localJson"]),
+            args["projectIndexingJson"].as_str().unwrap_or("null"),
+            rows?.join(",")
+        ))))
+    }
+
+    fn apply_orchestration_source_management_sync_plan(&mut self, args: &Value) -> Result<Value, String> {
+        let snapshot = &args["snapshot"];
+        let sources = array(&snapshot["sources"]);
+        let scopes: Vec<Value> = array(&snapshot["scopes"])
+            .iter()
+            .filter(|scope| *scope == "user" || string(scope).starts_with("project:"))
+            .cloned()
+            .collect();
+        let corpus: Vec<usize> = sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| {
+                ["knowledge", "work-file"].contains(&string(&source["sourceType"]))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let other: Vec<usize> = sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| {
+                !["knowledge", "work-file"].contains(&string(&source["sourceType"]))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if args["hasScopeVersion"] != true {
+            return Ok(
+                json!({"mode": "legacy", "corpusScopes": scopes, "corpusIndexes": corpus, "otherIndexes": other}),
+            );
+        }
+        if args["planned"] != true {
+            return Ok(
+                json!({"corpusScopes": scopes, "corpusIndexes": corpus, "otherIndexes": other}),
+            );
+        }
+        let key = string(&args["key"]);
+        let signature = string(&args["signature"]);
+        let version = string(&args["version"]);
+        let previous = self.corpus.get(key);
+        let cached = previous.is_some_and(|previous| {
+            previous["signature"] == signature && previous["version"] == version
+        });
+        let mode = if cached {
+            "cached"
+        } else if truthy(&snapshot["sourceScan"]["backgroundPending"])
+            || snapshot["sourceScan"]["coverage"]["complete"] == false
+            || corpus.len() > 512
+        {
+            "job"
+        } else {
+            "inline"
+        };
+        self.sequence += 1;
+        let id = self.sequence;
+        let complete = previous.is_none_or(|previous| previous["complete"] != false)
+            && snapshot["sourceScan"]["coverage"]["complete"] != false;
+        self.plans.insert(
+            id,
+            CorpusPlan {
+                key: key.into(),
+                signature: signature.into(),
+                can_cache: cached,
+                complete,
+            },
+        );
+        Ok(
+            json!({"planId": id, "mode": mode, "corpusScopes": scopes, "corpusIndexes": corpus, "otherIndexes": other, "projectId": project_id(snapshot),
+            "invalidate": !cached && mode == "inline" && previous.is_some_and(|previous| previous["version"] != version),
+            "patch": if cached && previous.is_some_and(|previous| previous["complete"] == false) { json!({"indexingPartial": true}) } else { json!({}) }}),
+        )
     }
 }

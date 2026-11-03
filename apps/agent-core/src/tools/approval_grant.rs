@@ -1,4 +1,4 @@
-//! 任务授权只匹配可信执行绑定，不派发工具，也不替代现有策略检查。
+//! 任务授权只匹配可信执行绑定，现有策略检查照常进行。
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -76,7 +76,7 @@ pub(crate) fn fingerprint(
     )
 }
 
-/// 授权仅有界保存在 GatewayRuntime 中，重启后须重新批准。
+/// 授权仅限量保存在 GatewayRuntime 中，重启后须重新批准。
 #[derive(Default)]
 pub(crate) struct TaskApprovalGrants {
     task_id: Option<String>,

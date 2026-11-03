@@ -25,7 +25,7 @@ public interface ITasksApi
 }
 
 /// <summary>
-/// 读取持久任务投影并提交明确的带版本控制；不拥有正式任务状态。
+/// 读取持久任务映射并提交明确的带版本控制；不拥有正式任务状态。
 /// </summary>
 public sealed class TasksApiClient : ITasksApi, IDisposable
 {
@@ -221,7 +221,7 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
             catch (Exception error) when (attempt == 0 && !cancellationToken.IsCancellationRequested
                 && (error is HttpRequestException || error is GatewayApiException gateway && (int)gateway.StatusCode >= 500))
             {
-                // 临时读取故障仅重试一次；带版本控制和插话写入绝不由客户端自动重放。
+                // 临时读取故障仅重试一次；带版本控制和插话写入不由客户端自动重放。
                 await Task.Delay(TimeSpan.FromMilliseconds(300), cancellationToken);
             }
         }

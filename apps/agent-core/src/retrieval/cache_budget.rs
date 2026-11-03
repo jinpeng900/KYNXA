@@ -1,4 +1,4 @@
-//! 自适应缓存目标仅是可重建优化策略，不承担任务状态，也不替代硬件资源服务授额。
+//! 自适应缓存目标只是可重建的优化策略，硬件资源仍由资源服务额度。
 
 use serde_json::{Value, json};
 
@@ -184,7 +184,7 @@ impl BudgetController {
     }
     pub(crate) fn update(&mut self, now_ms: u64, hardware: HardwareHeadroom) {
         let caps = CacheKind::ALL.map(|kind| self.manual_cap(kind));
-        // 各缓存上限与物理内存份额同时约束；16 GiB 主机也不因此预分配 1 GiB。
+        // 各缓存上限与物理内存份额同时约束；16 GiB 主机也不预分配 1 GiB。
         self.hardware_limit = hardware
             .limit()
             .min(self.total_cap.unwrap_or(usize::MAX))
@@ -286,7 +286,7 @@ impl BudgetController {
         };
         self.total = next.min(self.hardware_limit);
         let mut targets = allocate(self.total, &weights, &caps);
-        // 正常小幅波动保留已有授额；硬件或手动上限降低时立即优先收缩。
+        // 正常小幅波动保留已有额度；硬件或手动上限降低时立即优先收缩。
         if !must_shrink && !self.dirty {
             for i in 0..3 {
                 if targets[i].abs_diff(self.targets[i]) < self.targets[i] / 8 {

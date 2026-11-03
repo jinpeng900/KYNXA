@@ -92,7 +92,7 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
     private async Task LoadAsync()
     {
         if (_closed || _disposed || _busy || _lifetime.IsCancellationRequested) return;
-        // 重试只读取同一个已验证的归档身份，绝不重新执行截图操作。
+        // 重试只读取同一个已验证的归档身份，不重新执行截图操作。
         _busy = true; _retry.IsEnabled = false;
         _noticeKey = "正在读取工具结果…"; RefreshLanguage(); _notice.Visibility = Visibility.Visible;
         var token = _lifetime.Token;

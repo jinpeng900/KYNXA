@@ -7,7 +7,7 @@ use super::protocol::{
     text_parts, truthy, validate_buffer, validate_count,
 };
 
-/// 单次上游流拥有有界增量状态；重复 open 不能重置已接收内容与参数账目。
+/// 单次上游流拥有限量增量状态，重复 open 不重置已接收内容与参数账目。
 #[derive(Default)]
 pub struct StreamState {
     plain: super::plain::PlainStreamState,

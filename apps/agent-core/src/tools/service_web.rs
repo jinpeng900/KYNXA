@@ -270,7 +270,7 @@ impl WebState {
                     input["query"] = arguments["query"].clone();
                 }
                 if properties.get("objective").is_some() {
-                    // 部分 Exa 声明还要求 objective；沿用本次明确用途，不改写原始搜索词，也不给旧声明硬加字段。
+                    // 部分 Exa 声明还要求 objective，沿用本次明确用途，原始搜索词不变。
                     input["objective"] = arguments["reason"]
                         .as_str()
                         .filter(|reason| !reason.trim().is_empty())
@@ -278,7 +278,6 @@ impl WebState {
                         .unwrap_or_else(|| arguments["query"].clone());
                 }
                 if provider_kind(descriptor) == Some("parallel") {
-                    // 保留原查询与稳定聊天身份，不能通过轮换身份规避限流。
                     if properties.get("search_queries").is_some() {
                         input["search_queries"] = json!([arguments["query"]]);
                     }

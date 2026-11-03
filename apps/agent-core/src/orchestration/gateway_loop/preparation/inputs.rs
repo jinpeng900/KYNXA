@@ -395,7 +395,7 @@ impl RootExecution {
                     .summary_sources
                     .extend(resumed_projection.summary_sources);
             }
-            // 历史重投影不能丢弃本次准备的恢复或控制说明。
+            // 历史重映射时保留本次准备的恢复或控制说明。
             for (message, mut source) in preparation_notes {
                 state
                     .context
@@ -414,7 +414,7 @@ impl RootExecution {
                 json!({"messageId":message["Id"],"attachmentId":attachment["Id"],"name":attachment["Name"]}))
         }).take(64).collect::<Vec<_>>();
         if !attachment_directory.is_empty() && !work_context_restored {
-            // 附件导航按原观测位置保存，避免恢复时重复或丢失。
+            // 附件导航按原观测位置保存，恢复时才不会重复或丢失。
             state.context.runtime_snapshot = crate::models::runtime_context::snapshot(
                 runtime_role,
                 &format!(

@@ -38,7 +38,7 @@ public static class ApplicationPaths
         get
         {
             string data = DataRoot;
-            // Agent 目录也可能只有新任务账本，不能据此判定旧扩展位置。
+            // Agent 目录也可能只有新任务记录，不能据此判定旧扩展位置。
             return UsesPackagedStorage && (Directory.Exists(Path.Combine(data, "MCP")) || Directory.Exists(Path.Combine(data, "Skills")))
                 ? data : null;
         }

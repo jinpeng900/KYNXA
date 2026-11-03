@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 const MAXIMUM_PROJECTION_BYTES: usize = 128 * 1024 * 1024;
 
-/// 正文在最终投影前保留可追加缓冲；增量不会反复复制已经累计的整段文字。
+/// 正文在最终映射前保留可追加缓冲；增量不会反复复制已经累计的整段文字。
 #[derive(Default)]
 struct SegmentBuffer {
     metadata: serde_json::Map<String, Value>,
@@ -51,7 +51,7 @@ fn take_text(value: &mut Value, field: &str) -> String {
     }
 }
 
-/// 重叠部分逐字节核对，只追加真正缺失的UTF8后缀；水位以前缺字或任意冲突都不能猜测恢复。
+/// 重叠部分逐字节核对，只追加真正缺失的 UTF-8 后缀；水位以前缺字或有冲突时不恢复。
 fn recover_delta(text: &mut String, offset: &mut usize, delta: &str, append: bool) -> bool {
     if *offset > text.len() {
         return false;
@@ -491,7 +491,7 @@ impl<'a> StreamProjection<'a> {
             }
             return;
         }
-        // 回放水位可跳过私有账本事件，但同一请求回复的SSE观察不得重号或逆序。
+        // 回放水位可跳过私有记录事件，但同一请求回复的 SSE 观察序号要连续递增。
         if sequence <= self.stream_sequence {
             self.incomplete("non-monotonic-stream-observation");
             return;

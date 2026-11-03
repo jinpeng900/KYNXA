@@ -1,4 +1,4 @@
-//! 离线请求快照诊断及显式价目核算；不是 API 客户端或生产策略，不读取正式数据目录。
+//! 离线请求快照诊断及显式价目核算，不读取正式数据目录。
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -323,7 +323,7 @@ struct CalibrationGroup {
     absolute_difference_total: f64,
 }
 
-/// 有界分析已保存请求；文件由调用方读取，不重放工具或供应商请求。
+/// 限量分析已保存请求；文件由调用方读取，不重放工具或供应商请求。
 pub struct ReplayAnalyzer {
     scopes: HashMap<String, ReplayScope>,
     order: VecDeque<String>,
@@ -519,7 +519,7 @@ pub fn mutation_cost_advice(
             let Some(write_rate) = rate(prices, "cacheCreationPerMillion") else {
                 return json!({"state":"incomplete","reason":"separate-cache-creation-price-required"});
             };
-            // 缓存创建子集使用独立创建价替代普通输入价，不能对同一 token 同时加收两项。
+            // 缓存创建子集用独立创建价替代普通输入价，同一 token 不重复计费。
             (
                 (1.0 - creation_fraction) * ordinary_rate + creation_fraction * write_rate,
                 "cache creation priced explicitly for the assumed fraction of every miss",
@@ -573,7 +573,7 @@ impl ReplayAnalyzer {
         let prices = select_prices(prices, protocol, model);
         let counts = super::usage::token_counts(protocol, &record["usage"]);
         let cache = super::usage::cache_breakdown(protocol, &record["usage"]);
-        // Anthropic 普通输入不含缓存读写；创建量缺失时总输入未证实，不能猜零后报告精确命中率。
+        // Anthropic 普通输入不含缓存读写；创建量缺失时总输入未知，此时不报告精确命中率。
         let complete_input = protocol != "anthropic-messages"
             || cache.creation_tokens.is_some() && cache.uncached_input_tokens.is_some();
         let eligible = date_eligible(record)
@@ -828,7 +828,7 @@ impl ReplayAnalyzer {
                 self.incomplete("model-protocol-group-diagnostic-capacity");
             }
         }
-        // 缺少供应商分词和驻留数据，稳定前缀只能比较，不能证明实际命中。
+        // 缺少供应商分词和驻留数据时，稳定前缀只能比较，无法确认实际命中。
         if self.observations.len() < MAXIMUM_OBSERVATIONS {
             self.observations.push(observation);
         } else {

@@ -4,7 +4,7 @@ use super::protocol::{
     array, characters, check_finish, error, final_parts, string, text_parts, truthy,
 };
 
-/// 普通模型流独立保留 8 Mi UTF-16 上限，不与工具流 2 Mi 合同混用。
+/// 普通模型流独立保留 8 Mi UTF-16 上限，不与工具流 2 Mi 约定混用。
 #[derive(Default)]
 pub struct PlainStreamState {
     opened: bool,

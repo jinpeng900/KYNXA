@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-/// 发布准入发生在 I/O 前；归档已经提交后不能重新开放句柄并重复发布。
+/// 发布准入发生在 I/O 前，归档提交后不再重新发布。
 #[derive(Default)]
 pub struct EvidencePublicationState {
     context_key: String,

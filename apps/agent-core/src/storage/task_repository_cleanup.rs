@@ -1,4 +1,4 @@
-//! 正式删除在任务行消失前保存精确托管路径；清理失败保留计划，绝不递归删除工作目录。
+//! 正式删除在任务行消失前保存精确托管路径；清理失败时保留计划，工作目录不会被递归删除。
 
 use super::*;
 use serde::Deserialize;
@@ -109,7 +109,7 @@ impl TaskRepository {
                 }
             }
             let plan=TaskCleanupPlan {cleanup_id:uuid::Uuid::new_v4().to_string(),conversation_id:conversation_id.into(),task_ids:tasks.iter().map(|task|task.task_id.clone()).collect(),files:files.into_values().collect(),created_at_ms:now_ms(),last_error:None};
-            // 清理计划可以覆盖多个小产物；它不是模型上下文或事件正文，不套用 64KiB 事件上限。
+            // 清理计划可以覆盖多个小产物，不属于模型上下文或事件正文，64KiB 事件上限不适用。
             let document=serde_json::to_string(&plan).map_err(|_|failure())?;
             connection.execute("INSERT INTO task_cleanup_plans(cleanup_id,conversation_id,document) VALUES(?,?,?)",params![plan.cleanup_id,conversation_id,document]).map_err(|_|failure())?;
             connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS task_cleanup_ids(task_id TEXT PRIMARY KEY); DELETE FROM task_cleanup_ids;").map_err(|_|failure())?;

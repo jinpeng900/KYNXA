@@ -313,7 +313,7 @@
     const expectedConversation = conversationId, expectedGeneration = conversationNavigationGeneration;
     const expectedNavigation = navigationGeneration;
     if (changingFont) { updatingAppearance = true; cancelAnimationFrame(scrollFrame); cancelAnimationFrame(appearanceFrame); }
-    // 配色和字号仅修改样式，不替换已选文字节点或有界会话缓存。
+    // 配色和字号仅修改样式，不替换已选文字节点或限量会话缓存。
     for (const [key, variable] of Object.entries(variables)) style.setProperty(variable, palette[key]);
     for (const [key, variable] of Object.entries(semanticVariables))
       if (typeof palette[key] === 'string' && /^#[0-9a-f]{6}$/i.test(palette[key])) style.setProperty(variable, palette[key]);

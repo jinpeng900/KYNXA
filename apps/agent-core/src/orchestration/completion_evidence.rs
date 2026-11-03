@@ -1,4 +1,4 @@
-//! 按回执类型、目标和版本核对验收引用，不认证语义质量。
+//! 按回执类型、目标和版本核对验收引用，不确认语义质量。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -48,7 +48,7 @@ fn normalized_command_text(text: &str) -> String {
     text
 }
 
-/// 同次评审复用一份当前投影，不另建持久回执账本。
+/// 同次评审复用一份当前映射，不另建持久回执记录。
 pub(super) struct CompletionEvidenceSet {
     pub verification: Value,
     pub valid_references: Vec<Value>,
@@ -143,7 +143,7 @@ impl CompletionEvidenceSet {
 /// 仅把明确目标关联到原生回执身份，无法确定的依赖继续参与核验。
 pub(super) fn validation_scope(requirements: &[String], records: &[Value]) -> ValidationScope {
     let records = current(records);
-    // 检查意图来自当前正式要求，不能由模型填写的证据标签增删。
+    // 检查意图来自当前正式要求，与模型填写的证据标签无关。
     let requires_code_validation = task::requires_code_validation(&requirements.join("，"));
     let known_targets = records
         .iter()
@@ -476,7 +476,6 @@ pub(super) fn bind_validation(proof: &mut Value, verification: &Value) {
     }
 }
 
-/// 标记过期目标，保留历史执行事实。
 pub(super) fn current(records: &[Value]) -> Vec<Value> {
     let mut latest = HashMap::new();
     let mut changes = HashMap::new();
@@ -485,7 +484,7 @@ pub(super) fn current(records: &[Value]) -> Vec<Value> {
     for (index, record) in records.iter().enumerate() {
         let next_sequence = record["mutationSequence"].as_u64().unwrap_or(sequence);
         let mutating = record["mutating"] == true;
-        // 修改序号有缺口时，不能假定未保留的回执只改了某个已知目标。
+        // 修改序号有缺口时，未保留的回执可能改过任何目标。
         if next_sequence > sequence.saturating_add(u64::from(mutating)) {
             last_opaque = Some(index);
             last_mutation = Some(index);
@@ -574,7 +573,7 @@ fn has_kind(record: &Value, kind: &str) -> bool {
 }
 
 fn has_target_scope(record: &Value) -> bool {
-    // 图片文件哈希只标识图片容器，不能冒充画面中的场景或窗口版本。
+    // 图片文件哈希只标识图片容器，与画面中的场景或窗口版本无关。
     record["targets"].as_array().is_some_and(|targets| {
         !targets.is_empty()
             && targets.iter().all(|target| {
@@ -590,7 +589,7 @@ fn has_target_scope(record: &Value) -> bool {
     })
 }
 
-/// 只读 current() 的有效投影，不重复复制；已投递的有效图片可跨审查轮复用。
+/// 只读 current() 的有效映射，不重复复制；已投递的有效图片可跨审查轮复用。
 pub(super) fn readbacks(records: &[Value], visual: bool) -> impl Iterator<Item = &Value> {
     records.iter().filter(move |record| {
         record["current"] == true
@@ -608,7 +607,7 @@ pub(super) fn has_readback(records: &[Value], visual: bool) -> bool {
 }
 
 fn annotated_call_reference(reference: &str, id: &str) -> bool {
-    // 仅在可信调用 ID 完整匹配后忽略冒号附注；路径、URL 和附注均不能补造证明。
+    // 可信调用 ID 完整匹配后才忽略冒号附注；路径、URL 和附注本身不算证明。
     if id.is_empty()
         || id.chars().any(|character| {
             character.is_whitespace() || matches!(character, '/' | '\\' | ':' | '：')
@@ -885,7 +884,7 @@ fn acceptance_clauses(requirement: &str) -> Vec<&str> {
                 continue;
             }
         }
-        // 明确的下一动作单独核验，不能把前一读取目标误当成后一写入目标；引号及 URL 内标点保留。
+        // 明确的下一动作单独核验，前一读取目标与后一写入目标分开；引号及 URL 内标点保留。
         if !requirement[start..found.start()].trim().is_empty() {
             clauses.push(&requirement[start..found.start()]);
         }
@@ -897,7 +896,17 @@ fn acceptance_clauses(requirement: &str) -> Vec<&str> {
     clauses
 }
 
-/// 核对引用回执的覆盖，模型标签不能改变其目标或证明类型。
+/// 终端回执不记录操作了哪些文件，成功退出的命令里出现该文件名就算对应上。
+fn command_names_target(record: &Value, expected: &str) -> bool {
+    record["targets"].as_array().is_none_or(Vec::is_empty)
+        && record["command"].as_str().is_some_and(|command| {
+            // 命令常用变量拼路径，所以只比对文件名。
+            let expected = normalized_command_text(expected);
+            command.contains(expected.rsplit('/').next().unwrap_or(&expected))
+        })
+}
+
+/// 核对引用回执的覆盖范围，目标和证明类型以回执为准。
 pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]) -> bool {
     let clauses = acceptance_clauses(requirement);
     if clauses.len() > 1 {
@@ -905,7 +914,7 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
             .iter()
             .all(|part| supports_claim(claim, part, records));
     }
-    // 判断是否执行不等于必须执行，不能为通过验收而补做已撤销或不需要的副作用。
+    // “判断是否执行”只要求作出判断，不要求真的执行。
     static OPTIONAL_ACTION: OnceLock<Regex> = OnceLock::new();
     let decision = OPTIONAL_ACTION
         .get_or_init(|| {
@@ -963,7 +972,11 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
             .expect("static explicit write expression")
         })
         .is_match(requirement);
-    let expected = explicit_targets(requirement, &records);
+    // 要求里点名的工具（如 web.fetch）长得像文件名，但不是操作目标。
+    let expected: Vec<String> = explicit_targets(requirement, &records)
+        .into_iter()
+        .filter(|target| !matched.iter().any(|record| record["tool"] == target.as_str()))
+        .collect();
     if writing {
         let writers: Vec<&Value> = matched
             .iter()
@@ -971,6 +984,9 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
             .filter(|record| {
                 has_kind(record, "committed-output")
                     || record["mutating"] == true && has_kind(record, "execution")
+                    || expected
+                        .iter()
+                        .any(|expected| command_names_target(record, expected))
             })
             .collect();
         if writers.is_empty()
@@ -981,10 +997,11 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
                         .into_iter()
                         .flatten()
                         .any(|target| target["current"] == true && target_matches(target, expected))
+                        || command_names_target(writer, expected)
                     {
                         return true;
                     }
-                    // 不透明命令须与同一执行段的真实目标版本观察组合，读取本身不能冒充写入。
+                    // 不透明命令要与同一执行段的目标版本观察组合才算写入。
                     targets.is_none_or(Vec::is_empty)
                         && writer["mutationSequence"].as_u64().is_some_and(|sequence| {
                             matched.iter().any(|observed| {
@@ -1016,15 +1033,25 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
                     && record["visualObserved"] == true
                     && record["observationCurrent"] != false
             } else if explicit_read {
-                record["observationCurrent"] != false && has_kind(record, "observed-content")
+                record["observationCurrent"] != false
+                    && (has_kind(record, "observed-content")
+                        || expected
+                            .iter()
+                            .any(|expected| command_names_target(record, expected)))
             } else if readback {
                 record["observationCurrent"] != false
-                    && ["observed-content", "observed-state", "validation"]
+                    && (["observed-content", "observed-state", "validation"]
                         .iter()
                         .any(|kind| has_kind(record, kind))
+                        || expected
+                            .iter()
+                            .any(|expected| command_names_target(record, expected)))
             } else if writing {
                 has_kind(record, "committed-output")
                     || record["mutating"] == true && has_kind(record, "execution")
+                    || expected
+                        .iter()
+                        .any(|expected| command_names_target(record, expected))
                     || record["observationCurrent"] != false
                         && (has_kind(record, "observed-state")
                             || has_kind(record, "observed-content"))
@@ -1054,16 +1081,12 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
                 .iter()
                 .filter(|image| image["targets"].as_array().is_none_or(Vec::is_empty))
                 .any(|image| matched_commit_target(&records, claim, expected, image));
-        // 终端回执不记录操作了哪些文件；非写入要求里，成功命令明确用到该文件即可对应。
-        let named_by_command = !writing
-            && !visual
-            && !explicit_read
-            && suitable.iter().any(|record| {
-                record["targets"].as_array().is_none_or(Vec::is_empty)
-                    && record["command"]
-                        .as_str()
-                        .is_some_and(|command| command.contains(&normalized_command_text(expected)))
-            });
+        let named_by_command = !visual
+            && !requires_full
+            && line_range.is_none()
+            && suitable
+                .iter()
+                .any(|record| command_names_target(record, expected));
         if !combined_visual && !named_by_command {
             return false;
         }
@@ -1193,8 +1216,56 @@ mod tests {
         );
         assert!(
             !supports_claim(&claim(&["good"]), "把结果写入 report.txt", &[good]),
-            "writes keep their stricter proof"
+            "a command that never names the file does not prove the write"
         );
+        let write = "把结果写入同目录 squares.txt";
+        let wrote = run("wrote", "python gen.py > squares.txt", "", 0);
+        assert!(
+            supports_claim(&claim(&["wrote"]), write, &[wrote]),
+            "a clean command naming the file proves the write"
+        );
+        let broken = run("broken", "python gen.py > squares.txt", "", 1);
+        assert!(
+            !supports_claim(&claim(&["broken"]), write, &[broken]),
+            "a failed command does not prove the write"
+        );
+        let joined = run("joined", "$dir = 'C:/x'; Set-Content (Join-Path $dir 'seg.cpp') $code", "", 0);
+        assert!(
+            supports_claim(&claim(&["joined"]), r"把代码写到 C:\\Users\\a~1\\seg.cpp", &[joined]),
+            "a path joined from variables still names the file"
+        );
+        let tested = run("tested", "python numbers.py", "1", 0);
+        assert!(supports_claim(&claim(&["tested"]), "测试 numbers.py 能运行", std::slice::from_ref(&tested)));
+        assert!(supports_claim(&claim(&["tested"]), "读取 numbers.py", std::slice::from_ref(&tested)));
+        assert!(
+            !supports_claim(&claim(&["tested"]), "完整读取 numbers.py", &[tested]),
+            "a full read still needs a real reading receipt"
+        );
+    }
+
+    #[test]
+    fn a_tool_named_in_the_request_is_not_treated_as_a_file_target() {
+        let url = "https://example.com/list";
+        let proof = from_receipt(
+            &json!({"name":"web.fetch","id":"fetch","arguments":{"url":url}}),
+            &json!({"status":"completed","isError":false,"content":{"url":url,"finalUrl":url,"text":"Title"}}),
+        );
+        let requirement = format!("用网页读取工具（web.fetch）读取 {url} ，告诉我页面标题");
+        assert!(supports_claim(&claim(&["fetch"]), &requirement, &[proof]));
+    }
+
+    #[test]
+    fn a_script_that_writes_and_runs_a_named_file_proves_a_compound_requirement() {
+        let proof = from_receipt(
+            &json!({"name":"terminal.host.run","id":"run","arguments":{"script":r"$dir = 'C:\Users\a~1\Temp\live'
+$py = Join-Path $dir 'numbers.py'
+Set-Content -LiteralPath $py -Value $code
+& 'D:\Anaconda\python.exe' $py
+Get-Item (Join-Path $dir 'squares.txt')"}}),
+            &json!({"status":"completed","isError":false,"content":{"value":{"exitCode":0,"stdout":"ok"}}}),
+        );
+        let requirement = r"在 C:\\Users\\a~1\\Temp\\live 里写一个 Python 脚本 numbers.py，打印 1 到 20 的平方，用 D:\Anaconda\python.exe 运行，告诉我结果；并把同样的结果写入同目录的 squares.txt，报告该文件大小";
+        assert!(supports_claim(&claim(&["run"]), requirement, &[proof]));
     }
 
     #[test]

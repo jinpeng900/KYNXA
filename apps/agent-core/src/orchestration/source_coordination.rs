@@ -39,7 +39,7 @@ fn safe_error(args: &Value) -> Value {
     })
 }
 
-/// 目录准备与记忆发布由原生账本拥有；原始 JSON 字节保留 SDK 身份，I/O 关闭不冒充发布完成。
+/// 目录准备与记忆发布由原生记录拥有；原始 JSON 字节保留 SDK 身份，I/O 关闭不冒充发布完成。
 pub struct SourceCoordinationState {
     fields: Value,
     maps: HashMap<String, Vec<(String, String)>>,

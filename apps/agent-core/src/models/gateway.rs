@@ -506,7 +506,7 @@ mod tests {
     }
     #[tokio::test]
     async fn an_active_stream_outlives_the_start_deadline_but_a_stalled_one_stops() {
-        // 每块都在 idleTimeoutMs 内到达，但整段流长于 timeoutMs；持续有效的输出不能被开始期限截断。
+        // 每块都在 idleTimeoutMs 内到达，但整段流长于 timeoutMs；持续有效的输出不受开始期限限制。
         async fn stream_fixture(gap: Duration) -> (Value, tokio::task::JoinHandle<()>) {
             let server = Router::new().fallback(move || async move {
                 let chunks = (0..6).map(move |index| {
@@ -1129,7 +1129,7 @@ pub async fn request(
     request_with_catalog(connection, body, cancellation, events, &catalog).await
 }
 
-/// 一个 Rust future 拥有连接、有界响应和取消生命周期；不经过 SDK 子进程、Node 或 NAPI。
+/// 一个 Rust future 拥有连接、限量响应和取消生命周期；不经过 SDK 子进程、Node 或 NAPI。
 pub async fn request_with_catalog(
     connection: &Value,
     body: Value,

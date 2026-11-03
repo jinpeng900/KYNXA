@@ -1353,7 +1353,7 @@ mod tests {
         call(&home, "/api/local-models/delete", json!({"id":id})).await;
         assert!(source.is_file());
 
-        // 从已落盘断点续接微型真实 HTTP 响应，不下载任何公开大模型权重。
+        // 从已写入磁盘断点续接微型真实 HTTP 响应，不下载任何公开大模型权重。
         let observed = Arc::new(AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

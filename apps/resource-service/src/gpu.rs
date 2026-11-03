@@ -79,7 +79,7 @@ mod windows {
     type NvmlDeviceProcesses =
         unsafe extern "C" fn(NvmlDevice, *mut u32, *mut NvmlProcessInfo) -> u32;
 
-    // NVML v3 使用 v2 进程布局；WDDM 无法归属时返回 u64::MAX，绝不能当作占用或零。
+    // NVML v3 使用 v2 进程布局；WDDM 无法归属时返回 u64::MAX，不能当作占用或零。
     #[repr(C)]
     #[derive(Clone, Default)]
     struct NvmlProcessInfo {

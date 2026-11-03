@@ -332,7 +332,6 @@ pub(super) async fn prepare_round(round: RoundPreparation<'_>) -> Result<bool> {
         }
     }
     if work_scope["ancestorControlPending"] == true {
-        // 等待父级正式处理引导，不调用模型、不伪造阶段，也不认证原目标完成。
         let wait_started = Instant::now();
         let mut cancelled = run.cancellation.subscribe();
         tokio::select! {

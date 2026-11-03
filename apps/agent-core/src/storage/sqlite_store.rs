@@ -228,7 +228,7 @@ pub fn inspect_path(
     })
 }
 
-/// SQLite 连接关闭可能在元信息与句柄检查之间移除并重建 WAL/SHM；有界重试仍执行完整路径及链接核验。
+/// SQLite 连接关闭可能在元信息与句柄检查之间移除并重建 WAL/SHM；限量重试仍执行完整路径及链接核验。
 pub(crate) fn inspect_sidecar(root: &Path, path: &Path) -> Result<bool, ContractError> {
     let mut previous = None;
     for _ in 0..4 {
@@ -442,7 +442,7 @@ pub fn finish(connection: &Connection, result: super::ContractResult) -> super::
 }
 
 fn rollback_failure(connection: &Connection, original: ContractError) -> ContractError {
-    // SQLITE_INTERRUPT 及冲突策略可能已自动回滚，不能再用二次回滚错误覆盖原始失败。
+    // SQLITE_INTERRUPT 及冲突策略可能已自动回滚，保留原始失败，不被二次回滚错误覆盖。
     if connection.is_autocommit() {
         return original;
     }

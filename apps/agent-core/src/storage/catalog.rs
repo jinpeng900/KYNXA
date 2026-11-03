@@ -135,7 +135,7 @@ fn is_metadata_only_update(
     if !same_directory(previous, location)? {
         return Ok(false);
     }
-    // 已登记且位置不变的正式聊天已经通过准入；界面未提交历史不能解释为清空正式日志。
+    // 已登记且位置不变的正式聊天已通过准入；界面未提交历史不代表清空正式日志。
     Ok(!location["Chat"]["Messages"]
         .as_array()
         .into_iter()

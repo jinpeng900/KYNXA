@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-/// 仅嵌入当前有效请求，被排除的语句不能把已拒绝能力重新带回候选。
+/// 仅嵌入当前有效请求，已排除的语句不进入候选。
 pub(super) fn query_text(query: &str) -> Option<String> {
     let projection = super::intent::analyze_clauses(query);
     let active = projection["activeText"].as_str().unwrap_or(query).trim();

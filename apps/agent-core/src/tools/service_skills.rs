@@ -213,7 +213,7 @@ fn bounded(
         })
 }
 
-/// 分页校验不解析文件路径或读取技能包，失败不会产生副作用或改变读取位置。
+/// 分页校验不解析文件路径也不读取技能包，失败时读取位置不变。
 pub(crate) fn resource_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
     if !arguments.is_object() {
         return Err(ServiceError::new(

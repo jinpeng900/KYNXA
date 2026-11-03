@@ -31,7 +31,7 @@ pub fn protocol(connection: &Value) -> &str {
         .unwrap_or("openai-completions")
 }
 
-/// 身份回答绑定本次已解析的请求路由，不暴露凭据，也不把连接配置当成真实上游权重的认证。
+/// 身份回答绑定本次已解析的请求路由，不暴露凭据。
 pub(crate) fn runtime_identity_prompt(connection: &Value, model: &str) -> String {
     let endpoint_host = url::Url::parse(connection["baseUrl"].as_str().unwrap_or(""))
         .ok()
@@ -52,7 +52,7 @@ pub(crate) fn runtime_identity_prompt(connection: &Value, model: &str) -> String
     )
 }
 
-/// 自管模型能力由已核验的运行时观测投影；API及外部本地连接仍沿用原合同。
+/// 自管模型能力由已核验的运行时观测映射；API及外部本地连接仍沿用原约定。
 pub fn supports_tools(connection: &Value) -> bool {
     !connection["providerId"]
         .as_str()
@@ -84,7 +84,7 @@ fn merge_text_turns(messages: Vec<Value>) -> Vec<Value> {
             };
             previous["content"] = joined;
         } else {
-            // 此模型不支持工具执行，历史空调用字段也不能意外激活服务端工具解析器。
+            // 此模型不支持工具执行，历史空调用字段也要去掉，以免激活服务端工具解析器。
             if let Some(fields) = message.as_object_mut() {
                 fields.remove("tool_calls");
             }
@@ -179,7 +179,7 @@ pub fn build_summary_request_with_tools(
     Ok((body, controls["audit"].clone()))
 }
 
-/// 只给已投影的协议前缀追加原生摘要尾部；已有工具增量块不再翻译第二遍。
+/// 只给已映射的协议前缀追加原生摘要尾部；已有工具增量块不再翻译第二遍。
 pub(crate) fn build_summary_from_wire_prefix(
     connection: &Value,
     model: &str,
@@ -343,7 +343,7 @@ pub fn build_request(
         });
     }
     if !supports_tools(connection) {
-        // 调度提示与用户补充可能相邻；仅在不支持工具的自管模型投影中合并同角色，正式消息仍原样保存。
+        // 调度提示与用户补充可能相邻；仅在不支持工具的自管模型映射中合并同角色，正式消息仍原样保存。
         messages = merge_text_turns(messages);
     }
     if plan["prependSystem"] == true && !system.is_empty() {
@@ -383,7 +383,7 @@ pub fn build_request(
         if let Some(limit) = body.as_object_mut().unwrap().remove("max_tokens") {
             options["num_predict"] = limit;
         }
-        // 正式生成沿用本地预热所用的窗口，不能重新落回 Ollama 默认值。
+        // 正式生成沿用本地预热所用的窗口，不落回 Ollama 默认值。
         if let Some(window) = connection["contextWindowTokens"]
             .as_u64()
             .filter(|window| *window > 0)
@@ -424,7 +424,7 @@ pub fn build_request(
     Ok(body)
 }
 
-/// 缓存投影使用已核验稳定范围及逐字前缀，不另存第二份请求历史。
+/// 缓存映射使用已核验稳定范围及逐字前缀，不另存第二份请求历史。
 pub fn apply_prompt_cache(
     connection: &Value,
     model: &str,
@@ -766,7 +766,7 @@ fn task_completion(message: &Value) -> Value {
     history::task_completion(&message["ToolRun"]["taskCompletion"])
 }
 
-/// 使用现有 Rust 历史状态投影已保存的模型/工具配对；历史记录绝不授权重新执行。
+/// 使用现有 Rust 历史状态映射已保存的模型/工具配对，历史记录只用于展示上下文。
 pub fn history_messages(name: &str, formal_history: &[Value]) -> Result<Vec<Value>, ModelError> {
     history_messages_with_tools(name, formal_history, &[])
 }
@@ -932,7 +932,7 @@ fn restore_continuation(
     true
 }
 
-/// 签名仅在正式回执、原始请求前缀和拥有者均一致时恢复；失配保留公开历史，绝不授权工具重放。
+/// 签名仅在正式回执、原始请求前缀和拥有者均一致时恢复；失配时保留公开历史。
 pub async fn history_projection_verified(
     connection: &Value,
     model: &str,

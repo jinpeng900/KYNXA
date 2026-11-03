@@ -43,7 +43,7 @@ pub(super) async fn prepare(
     let selection_error = selection.as_ref().err().cloned();
     let can_use_workspace = selection_error.is_none();
     let mut call_context = selection.unwrap_or_else(|_| ctx.clone());
-    // 保留原委派根目录，切换挂载不能重解释相对写权限。
+    // 保留原委派根目录，切换挂载后相对写权限含义不变。
     call_context.authorized_roots = ctx.authorized_roots.clone();
     let ctx = &mut call_context;
     if journal

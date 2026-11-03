@@ -126,7 +126,7 @@ public sealed partial class ShellPage
                     QueueWorkspaceResourceDiscovery(message.ConversationId, message.Message.Id, tool,
                         _pendingReplies.TryGetValue(message.ConversationId, out var pending) && pending.Message.Id == message.Message.Id);
             }
-        // 实时回执可能先于消息投影到达；新产物在后台加入，不抢占已有选择。
+        // 实时回执可能先于消息映射到达；新产物在后台加入，不抢占已有选择。
         items.AddRange(screenshots.Values);
         if (resources is not null) items.AddRange(resources.Items.Values.OrderBy(item => item.Order).Select(item => item.Tab));
         string? finalAnswer = ActiveMessages.LastOrDefault(message => message.Message.Role == "assistant" &&
@@ -148,7 +148,7 @@ public sealed partial class ShellPage
     {
         try
         {
-            // 历史回执可能很大；后台只读取及投影不可变回执，缓存和标签更新仍留在界面线程。
+            // 历史回执可能很大；后台只读取及映射不可变回执，缓存和标签更新仍留在界面线程。
             var tab = await Task.Run(async () =>
             {
                 ConversationWorkTab? discovered = null;

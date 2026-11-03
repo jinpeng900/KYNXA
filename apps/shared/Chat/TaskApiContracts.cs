@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace KYNXA.Contracts;
 
 /// <summary>
-/// 持久工作身份及只读投影；执行尝试不替换任务 ID。
+/// 持久工作身份及只读映射；执行尝试不替换任务 ID。
 /// </summary>
 public sealed record TaskScope(Guid ConversationId, Guid? ProjectId);
 public sealed record TaskUsage(ulong ModelRequests, ulong FailedRequests, ulong Retries, ulong Compactions,
@@ -16,7 +16,7 @@ public sealed record TaskRecord(Guid TaskId, string RequestId, string Goal, stri
     ulong Version, ulong ExecutionVersion, Guid? CurrentAttemptId, ulong EventSequence, string? StopReason,
     long CreatedAtMs, long UpdatedAtMs, bool? DisplayInTaskList = null, string? Title = null);
 public sealed record TaskListResponse(TaskRecord[] Tasks, bool HasMore, Guid? NextTaskId);
-// 同聊天有界查询区分无断点、唯一断点和多项待继续任务，不改变工作任务列表范围。
+// 同聊天限量查询区分无断点、唯一断点和多项待继续任务，不改变工作任务列表范围。
 public sealed record TaskPausedResponse(TaskRecord[] Tasks);
 public sealed record TaskArtifact(string ArtifactId, string Kind, JsonElement Reference,
     string Sha256, ulong SizeBytes, string? SourceVersion);

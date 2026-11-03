@@ -4,7 +4,7 @@ use super::*;
 
 const UNVERIFIED_REPLY_NOTICE: &str = "这次回答没有通过完成核验，可以让它继续。";
 
-/// 收尾异常时说明已落地事实，文件保存不等于全部要求均已满足。
+/// 收尾异常时说明已落地的事实；文件保存成功不代表全部要求已满足。
 fn stopped_reply_notice(
     error: &GatewayError,
     review: &super::super::completion_evidence::CompletionEvidenceSet,
@@ -36,7 +36,7 @@ fn stopped_reply_notice(
         (false, false) => "",
     };
     let reason = if error.code == "MODEL_TOOL_OUTPUT_TRUNCATED" {
-        // 截断的工具请求尚未执行；解码器错误不能作为正常答复交付。
+        // 截断的工具请求尚未执行，解码器错误不作为答复交付。
         "这一步的操作内容未能完整生成，尚未执行；已有结果保留。"
     } else if error.code == "TASK_CONTINUATION_NO_PROGRESS" {
         if review.verification["state"] == "checks-failed" {
@@ -52,7 +52,7 @@ fn stopped_reply_notice(
     format!("{result}{reason}")
 }
 
-/// 本轮已公开的普通说明可以正常交付，不因此认证未完成的任务。
+/// 本轮已公开的普通说明可以正常交付，任务状态另行判断。
 fn current_public_reply(
     error: &GatewayError,
     assessment: &Value,
@@ -77,7 +77,7 @@ fn current_public_reply(
                 .is_none_or(|count| count.as_u64() == Some(0))
     };
     if error.code == "TASK_COMPLETION_REVIEW_INVALID" {
-        // 内部核验可在公开回答之后继续；不能用核验文字或空段替换已公开的正常回答。
+        // 内部核验可在公开回答之后继续，已公开的回答保持不变。
         delivery
             .segments
             .iter()
@@ -303,7 +303,7 @@ impl FinalDelivery<'_> {
         let validation_config = runtime.config.clone();
         let validation_context = json!({"conversationId":run.conversation_id,"requestId":run.request_id,
                 "bindingSnapshot":ctx.config["bindingSnapshot"],"workspaceMounts":ctx.config["workspaceMounts"]});
-        // 停止保留已有证据，不认证完成，也不启动新的验收检查。
+        // 停止时保留已有证据，不开始新的验收检查。
         let evidence_validation = if work_suspended {
             json!({"state":"not-checked","reason":"execution-suspended-with-saved-progress"})
         } else if user_stopped || response_only || settled_limitation {
@@ -416,7 +416,6 @@ impl FinalDelivery<'_> {
                                 &observations,
                             )
                         {
-                            // 衍生候选仅作私有提示，不是产物、权限或成熟经验。
                             let _ = journal.emit_control("experience.candidate", &candidate);
                         }
                     }

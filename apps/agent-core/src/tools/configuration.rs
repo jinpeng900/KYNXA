@@ -95,7 +95,7 @@ fn mcp_url(arguments: &Value) -> Result<Value, String> {
 
 pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
     let server = &arguments["server"];
-    // JSON 无法表示 NaN 和无穷值；保留拒绝状态，不能将其作为 null 使用默认超时。
+    // JSON 无法表示 NaN 和无穷值，这里保留拒绝状态，不按 null 使用默认超时。
     let special = |key: &str| arguments["nonFiniteNumbers"][key].is_string();
     let field_truthy = |key: &str| {
         if special(key) {

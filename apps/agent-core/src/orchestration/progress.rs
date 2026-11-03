@@ -34,7 +34,7 @@ struct DocumentReadWindow {
     ranges: Vec<(u64, u64)>,
 }
 
-/// 请求内计量和执行证据不能认证任务语义正确；计时及正式持久化仍属于调用端。
+/// 请求内计量和执行证据只记录事实；计时及正式持久化由调用端负责。
 pub struct RunProgress {
     mutation_revision: u64,
     checked_mutation_revision: u64,
@@ -262,7 +262,7 @@ impl RunProgress {
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| {
-                // 旧断点没有命令身份，按调用隔离，不能让无关成功抵消失败。
+                // 旧断点没有命令身份，按调用隔离。
                 let legacy = receipt["toolCallId"]
                     .as_str()
                     .map(str::to_owned)
@@ -489,7 +489,7 @@ impl RunProgress {
         let total = checked_sum(&self.diagnostics["totalModelMs"], duration)?;
         let calls = checked_sum(&self.diagnostics["modelCalls"], 1)?;
         let maximum = safe_integer(&self.diagnostics["maxModelMs"])?.max(duration);
-        // 先验证全部计数，避免溢出后发布半份计量状态。
+        // 先验证全部计数，溢出时不发布半份计量状态。
         self.diagnostics["totalModelMs"] = json!(total);
         self.diagnostics["maxModelMs"] = json!(maximum);
         self.diagnostics["modelCalls"] = json!(calls);
@@ -502,7 +502,7 @@ impl RunProgress {
     }
 
     fn record_tool(&mut self, args: &Value) -> Result<Value, String> {
-        // 审批等待独立计量；复用回执或被阻止的调用不能计为真实派发。
+        // 审批等待独立计量；复用回执或被阻止的调用不算真实派发。
         let duration = safe_integer(&args["durationMs"])?;
         let approval = safe_integer(&args["approvalMs"])?;
         let round = metric_round(&args["round"])?;
@@ -636,7 +636,7 @@ impl RunProgress {
                 } else if self.artifact_revisions.len() < MAX_DOCUMENT_TARGETS {
                     self.artifact_revisions.insert(self.mutation_revision);
                 }
-                // 导出原件不新增质量声明，也不因此要求再次回读文档。
+                // 导出原件无需再次回读文档。
                 return;
             }
             if completed
@@ -687,7 +687,7 @@ impl RunProgress {
         if !host_effect_tool(name) {
             return;
         }
-        // 直接借用真实宿主回执，避免复制大输出；结构化 MCP 内容继续保持最高优先级。
+        // 直接借用真实宿主回执，省去复制大输出；结构化 MCP 内容优先级最高。
         let isolated = output["sandbox"] == "appcontainer"
             && output["tokenVerified"] == true
             && output["workspaceCopy"] == true;
@@ -711,7 +711,7 @@ impl RunProgress {
                 if observed_code_targets(&after) {
                     self.latest_code_version = after;
                 }
-                // 未分类宿主副作用需要重新核对版本；保留旧范围供同哈希复用，不能继续把旧版本当已验收。
+                // 未分类宿主副作用需要重新核对版本；保留旧范围供同哈希复用。
                 for document in self.document_validations.values_mut() {
                     document.version_check_required = true;
                 }
@@ -748,7 +748,7 @@ impl RunProgress {
             && after["complete"] == true
             && !before["signature"].is_null()
             && before["signature"] == after["signature"];
-        // 真实通过的检查覆盖其观察版本，不认证无关副作用或沙箱副本。
+        // 真实通过的检查覆盖其观察版本，不确认无关副作用或沙箱副本。
         let covered = passed && same_version && !isolated;
         self.latest_code_version = after.clone();
         let state = if unknown {
@@ -856,7 +856,7 @@ impl RunProgress {
         let Some(hash) = content_hash(&output["sha256"])
             .or_else(|| preview.then(|| content_hash(&output["version"])).flatten())
         else {
-            // 大文件属性回执可能不含哈希；明确转为未知版本，下一次原文读取取得真实版本，不能反复空查属性。
+            // 大文件属性回执可能不含哈希，此时转为未知版本，下一次原文读取再取真实版本。
             if !preview && output["type"] == "file" && document.version_check_required {
                 *document = DocumentValidation::default();
             }
@@ -905,7 +905,7 @@ impl RunProgress {
             {
                 continue;
             }
-            // 仅已认证的同任务断点保留读取覆盖；跨任务仅恢复目标导航，两者都须重新核对当前文件版本。
+            // 仅已确认的同任务断点保留读取覆盖；跨任务仅恢复目标导航，两者都须重新核对当前文件版本。
             let mut document = DocumentValidation {
                 sha256: hash.to_owned(),
                 total_characters: target["totalCharacters"]
@@ -1120,7 +1120,6 @@ impl RunProgress {
                 .is_match(task)
     }
 
-    /// 传输完成与任务结果分别记录；核验失败不能被提升为已完成事实。
     fn complete(&mut self, arguments: &Value) -> Value {
         self.complete_with_verification(arguments, self.verification())
     }
@@ -1140,7 +1139,7 @@ impl RunProgress {
         let unmet = arguments["modelTaskState"]["unmet"]
             .as_array()
             .is_some_and(|items| !items.is_empty());
-        // 有真实外部操作却没有核对状态时，任务属于尚未评估，不能记为完成。
+        // 有外部操作却没有核对状态时，任务属于尚未评估。
         let acceptance_unreviewed =
             arguments["requiresVerification"] == true && arguments["acceptanceReviewed"] != true;
         // 程序已核验的完成结论，与保留的模型下一步提议分别记录。
@@ -1252,7 +1251,7 @@ impl RunProgress {
                     })
                 })
         });
-        // 修改记录不能替普通制作任务增加测试要求；真实失败、未知结果及版本冲突仍须处理。
+        // 修改记录不会给普通制作任务增加测试要求；真实失败、未知结果和版本冲突仍要处理。
         let code_check_required = scope.is_none_or(|scope| scope.requires_code_validation)
             || !self.uncertain_mutations.is_empty()
             || observed_version_changed;

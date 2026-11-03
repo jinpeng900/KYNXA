@@ -428,7 +428,7 @@ impl SourceReadingState {
                     }
                 }
             }
-            // SDK 文档延后到已准入文本目录遍历完成；资源等待不能阻住后续可读文本。
+            // SDK 文档延后到已准入文本目录遍历完成，资源等待不影响后续可读文本。
             let queued = self.entries.pop_front().or_else(|| {
                 if self.directories.is_empty() {
                     self.documents.pop_first()
@@ -526,7 +526,7 @@ impl SourceReadingState {
                 if let Some(rule) = load_ignore(&directory)? {
                     rules.push(Arc::new(rule));
                 }
-                // 只保留有界稳定前缀，避免按操作系统 read_dir 顺序截断，也不缓存整棵树正文。
+                // 只保留限量稳定前缀，结果与操作系统 read_dir 顺序无关，不缓存整棵树正文。
                 let maximum = number(&self.options["maximumEntries"], 20000);
                 let capacity = maximum.saturating_sub(self.visited).saturating_add(1) as usize;
                 let mut candidates = BinaryHeap::new();
@@ -1007,7 +1007,7 @@ fn append_window(
     *byte += bytes;
 }
 
-/// 原生线程读取来源，使用取消标记并核验已打开句柄；缓存路径检查不能代替句柄核验。
+/// 原生线程读取来源，使用取消标记并核验已打开句柄。
 /// 二进制解码复用同一核验，不经过 JSON/base64 传输。
 pub(crate) fn read_binary_stable(
     path: &Path,
@@ -1263,7 +1263,7 @@ mod tests {
 
     #[test]
     fn source_metadata_preserves_exact_number_round_trips_and_detects_actual_changes() {
-        // 真实窗口时间曾在 JSON 解析时偏移一个浮点精度单位，误拒绝未变化文件；往返必须精确且真实变化仍须拒绝。
+        // 真实窗口时间曾在 JSON 解析时偏移一个浮点精度单位，误拒绝未变化的文件，因此往返要精确。
         let observed = json!({
             "sizeBytes": 2_835_021,
             "mtimeMs": 1_791_721_997_237.2227,

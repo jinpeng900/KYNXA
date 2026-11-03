@@ -313,7 +313,7 @@ public sealed partial class ShellPage
         }
         try
         {
-            // 缓存失效按消息有序后台落盘；重接观察不能等待所有聊天的磁盘写入。
+            // 缓存失效按消息有序后台写入磁盘；重接观察不能等待所有聊天的磁盘写入。
             _ = MessageTimePresentation.ForgetAsync(chat.Id, message);
             if (_chatClosing || _pendingReplies.ContainsKey(chat.Id)) return;
             original = chat.Messages.FirstOrDefault(item => item.Id == userId && item.Role == "user");

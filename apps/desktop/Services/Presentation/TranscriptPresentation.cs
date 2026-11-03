@@ -3,7 +3,7 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// 聊天可见内容的投影；正式聊天记录与模型历史不变。
+/// 聊天可见内容的映射；正式聊天记录与模型历史不变。
 /// </summary>
 internal static class TranscriptPresentation
 {

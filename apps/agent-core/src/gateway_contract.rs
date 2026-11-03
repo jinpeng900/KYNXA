@@ -1,4 +1,4 @@
-//! 原生网关共享合同；传输层不维护第二份业务账本。
+//! 原生网关共享约定；传输层不维护第二份业务记录。
 
 use serde_json::{Value, json};
 use std::path::PathBuf;

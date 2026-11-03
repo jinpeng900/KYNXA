@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 const MAX_OBSERVATIONS: usize = 256;
 
-/// 代理与重复读取保护共用同一来源身份计算，避免接口投影与控制账本各自维护规则。
+/// 代理与重复读取保护共用同一来源身份计算。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     match operation {
         "observations.fingerprint" => Ok(arguments
@@ -22,7 +22,7 @@ pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     }
 }
 
-/// 成功观察与失败读取使用独立的请求级历史；不共享跨请求缓存，也不授予执行权限。
+/// 成功观察与失败读取使用独立的请求级历史，不跨请求共享。
 #[derive(Default)]
 pub struct ObservationGuard {
     observations: Vec<(String, String)>,
@@ -59,7 +59,7 @@ impl ObservationGuard {
                 || is_truthy(&result["code"])
                 || (is_truthy(&result["status"]) && result["status"] != "completed")
             {
-                // 发现工具和失败读取不会抹掉已读来源；真实写入重置无进展轮次，仍保留版本指纹。
+                // 发现工具和失败读取不影响已读来源；真实写入重置无进展轮次，保留版本指纹。
                 changed_state |= !pair["observation"].as_bool().unwrap_or(false)
                     && !is_truthy(&result["isError"])
                     && !is_truthy(&result["code"])
@@ -408,7 +408,7 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 && is_truthy(&value["resultRef"]["sha256"])
                 && value["text"].is_string() =>
         {
-            // 页身份使用原始不可变归档与实际范围，新回执 ID 或调用说明不能伪装成新证据。
+            // 页身份使用原始不可变归档与实际范围，与回执 ID 和调用说明无关。
             json!([
                 value["resultRef"]["id"],
                 value["resultRef"]["sha256"],

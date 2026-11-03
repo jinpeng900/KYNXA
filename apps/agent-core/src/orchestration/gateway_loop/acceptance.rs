@@ -1,4 +1,4 @@
-//! 根任务验收投影、版本和恢复；正式证明仍由原领域维护。
+//! 根任务验收映射、版本和恢复；正式证明仍由原领域维护。
 
 use super::super::{
     completion_evidence::{
@@ -25,7 +25,7 @@ pub(super) struct CompletionState {
 }
 
 impl CompletionState {
-    /// 重置评审不改成功观察，也不改当前工作版本。
+    /// 重置评审不影响成功观察和当前工作版本。
     pub(super) fn reset_review(&mut self) {
         self.review_checkpoint = Value::Null;
         self.acceptance_reviewed = false;
@@ -76,7 +76,7 @@ impl CompletionState {
 }
 
 impl LoopState {
-    /// 未发布的公开草稿沿用验收事实版本，不另建结果或执行账本。
+    /// 未发布的公开草稿沿用验收事实版本，不另建结果或执行记录。
     pub(in crate::orchestration::gateway_loop) fn bind_pending_delivery(
         &mut self,
         assessment: &Value,
@@ -110,7 +110,7 @@ impl LoopState {
             && binding["revision"] == json!(acceptance_revision(self))
     }
 
-    /// 停止只可直接发布本轮对应的受阻结论，不能把未验收完成声明当终稿。
+    /// 停止时只直接发布本轮对应的受阻结论。
     pub(in crate::orchestration::gateway_loop) fn pending_delivery_matches_blocker(
         &self,
         assessment: &Value,
@@ -196,7 +196,7 @@ pub(super) fn reconcile_restored_delivery(state: &mut LoopState, before: &[Value
     let revising_delivery = unresolved_user_steering(state);
     let unbound_delivery =
         !state.delivery.pending_delivery.is_empty() && !state.pending_delivery_is_current();
-    // 只保留绑定当前证据、要求与权限的草稿，旧的无版本完成声明不能复用。
+    // 只保留绑定当前证据、要求与权限的草稿。
     if !evidence_changed && !revising_delivery && !unbound_delivery {
         return;
     }
@@ -307,13 +307,13 @@ pub(super) fn apply_steering_revision(
     inspected: &Value,
     minimum_active_ms: &mut u64,
 ) {
-    // 同一已接受消息只修改一次范围，后续尾部不能再按变更后的要求编号重放。
+    // 同一已接受消息只修改一次范围。
     if !unresolved_user_steering(state) {
         return;
     }
     let latest = &state.assistant["LatestUserSteering"];
     let id = latest["userMessageId"].as_str().unwrap_or("").to_owned();
-    // 只绑定明确控制，缺少变更不能默认为用户要求不变。
+    // 只绑定明确控制；没有变更字段时不视为要求未变。
     let mut revision = inspected["steeringRevision"].clone();
     if let Some(disposition) = inspected["disposition"]
         .as_str()
@@ -341,7 +341,7 @@ pub(super) fn apply_steering_revision(
             if revision["disposition"].is_null() && revision["stop"].is_null()
                 && updated.requirements == state.completion.acceptance_requirements
                 && updated.minimum_active_ms == *minimum_active_ms {
-                // 只复写消息身份，不能代替明确选择按原范围继续。
+                // 这里只复写消息身份，按原范围继续需要明确选择。
                 return;
             }
             let suspended = updated.stop.then(|| state.completion.acceptance_requirements.clone());
@@ -356,6 +356,36 @@ pub(super) fn apply_steering_revision(
         }
         Err(_) => state.broker_note("The steeringRevision metadata did not match the latest user message or current requirement IDs. Correct it in the next normal reply; retain progress and successful receipts."),
     }
+}
+
+/// 用户是否在要求停下；这类话不能当成新增要求继续执行。
+pub(super) fn steering_means_stop(text: &str) -> bool {
+    static STOP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    STOP.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)停止|停下|别做|不用做|不用了|不要了|算了|取消|终止|\b(?:stop|cancel|abort|halt)\b",
+        )
+        .expect("static stop expression")
+    })
+    .is_match(text)
+}
+
+/// 模型两次都没给出合规确认时，把用户原话加入验收项继续工作，格式问题不该让任务中断。
+pub(super) fn adopt_unacknowledged_steering(state: &mut LoopState, minimum_active_ms: u64) {
+    let latest = state.assistant["LatestUserSteering"].clone();
+    let text = latest["text"].as_str().unwrap_or("").trim().to_owned();
+    if !text.is_empty() && !state.completion.acceptance_requirements.contains(&text) {
+        state.completion.acceptance_requirements.push(text);
+    }
+    state.assistant["UserTaskDirective"] = json!({"userMessageId":latest["userMessageId"],
+        "minimumActiveMs":minimum_active_ms,"stop":false,"deliverExisting":false,
+        "requirements":state.completion.acceptance_requirements,"suspendedRequirements":null,
+        "revisionHash":"adopted-without-revision"});
+    state.completion.reset_review();
+    if let Some(fields) = state.completion.review_checkpoint.as_object_mut() {
+        fields.remove("reviewFormatRepair");
+    }
+    state.broker_note("The latest user message was added to the requirements as written. Tools are available again; continue the work and answer it.");
 }
 
 pub(super) fn acceptance_revision(state: &LoopState) -> (u64, String) {
@@ -557,7 +587,7 @@ fn completion_execution_plan(
     proposed: &Value,
     revision: &Value,
 ) -> Option<Value> {
-    // 引用错误应修正元数据，不能据此遍读全部旧回执；具体动作仍经原授权、去重和派发链。
+    // 引用错误只修正元数据；具体动作仍走原授权、去重和派发链。
     if let Some(plan) = replanned_action(checkpoint, selected, proposed, revision) {
         return Some(plan);
     }
@@ -1015,7 +1045,6 @@ mod tests {
             state.context.runtime_snapshot = None;
         }
         let history_length = state.context.history.len();
-        // 证据未变的受阻草稿仍是原结果，不是新的执行要求。
         let blocked = json!({"source":"model-task-state","state":"blocked","blocker":"authorization",
             "reason":"The requested operation was denied by the execution environment."});
         state
@@ -1148,5 +1177,21 @@ mod tests {
             observations[0]["completionProof"]["visualHashes"],
             proof["visualHashes"]
         );
+    }
+}
+
+#[cfg(test)]
+mod steering_stop_tests {
+    use super::steering_means_stop;
+
+    #[test]
+    fn stop_words_are_not_adopted_as_new_requirements() {
+        for text in ["先停下", "算了不用做", "取消吧", "please stop now"] {
+            assert!(steering_means_stop(text), "{text}");
+        }
+        for text in ["另外把结果写到 squares.txt", "顺便加一个非停止条件的测试用例说明"] {
+            assert_eq!(steering_means_stop(text), text.contains("停止"), "{text}");
+        }
+        assert!(!steering_means_stop("add a nonstop mode"));
     }
 }

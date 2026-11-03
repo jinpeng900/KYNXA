@@ -1,4 +1,4 @@
-//! 衍生步骤引用既有已验收任务及回执，不建立第二套执行账本，也不自动执行历史参数。
+//! 衍生步骤引用既有已验收任务及回执。
 
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -7,7 +7,6 @@ const MATURITY_MS: i64 = 24 * 60 * 60 * 1000;
 const MINIMUM_ACCEPTED_TASKS: usize = 3;
 
 impl TaskRepository {
-    /// 范围由正式工具上下文给出；模型参数不能选择其他项目或自行提升至用户全局。
     pub(crate) fn verified_procedures(
         &self,
         conversation: &str,
@@ -45,7 +44,7 @@ impl TaskRepository {
         for row in rows {
             let (task_id, document) = row.map_err(|_| failure())?;
             let event: TaskEvent = decode(document)?;
-            // 程序保存的候选仅在原成功操作回执仍存在时可复用，不凭模型自报或派生统计认证。
+            // 程序保存的候选仅在原成功操作回执仍存在时可复用，不凭模型自报或派生统计确认。
             if receipt_task != task_id {
                 operations = read_operations(&connection, &task_id)?;
                 receipt_task = task_id.clone();

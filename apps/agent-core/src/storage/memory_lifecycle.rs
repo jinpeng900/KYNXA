@@ -136,62 +136,7 @@ impl MemoryLifecycleState {
                     Ok(json!(false))
                 }
             }
-            "storage.memoryLifecycle.capturePlan" => {
-                let conversation = &args["conversationId"];
-                let mut consumed = HashSet::new();
-                let mut checkpoints = HashSet::new();
-                for document in args["documents"].as_array().into_iter().flatten() {
-                    for entry in document["entries"].as_array().into_iter().flatten() {
-                        if entry["source"]["conversationId"] == *conversation {
-                            if let Some(id) = entry["source"]["messageId"].as_str() {
-                                consumed.insert(id.to_owned());
-                            }
-                            let quotes = entry["candidate"]
-                                .get("quotes")
-                                .or_else(|| entry["proposal"].get("quotes"));
-                            for quote in quotes.and_then(Value::as_array).into_iter().flatten() {
-                                if let Some(id) = quote["messageId"].as_str() {
-                                    consumed.insert(id.to_owned());
-                                }
-                            }
-                        }
-                        if document["scope"] == "chat" {
-                            if let Some(id) = entry["candidate"]["batchThroughMessageId"].as_str() {
-                                checkpoints.insert(id.to_owned());
-                            }
-                        }
-                    }
-                    for source in document["dismissedSources"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                    {
-                        if source["conversationId"] == *conversation {
-                            if let Some(id) = source["messageId"].as_str() {
-                                consumed.insert(id.to_owned());
-                            }
-                        }
-                        if document["scope"] == "chat" {
-                            if let Some(id) = source["candidateBatchThroughMessageId"].as_str() {
-                                checkpoints.insert(id.to_owned());
-                            }
-                        }
-                    }
-                }
-                let after = args["messages"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .rev()
-                    .find(|message| {
-                        message["role"] == "user"
-                            && checkpoints.contains(message["id"].as_str().unwrap_or(""))
-                    })
-                    .map(|message| message["id"].clone());
-                Ok(
-                    json!({"consumedMessageIds":consumed.into_iter().collect::<Vec<_>>(),"afterMessageId":after,"hasProject":args["hasProject"]==true&&args["documents"].as_array().is_some_and(|documents|documents.iter().any(|document|document["scope"]=="project"))}),
-                )
-            }
+            "storage.memoryLifecycle.capturePlan" => self.calculate_storage_memory_lifecycle_capture_plan(args),
             "storage.memoryLifecycle.quoteCheck" => {
                 let users = &args["usersRaw"];
                 let candidate = &args["candidate"];
@@ -396,6 +341,63 @@ impl MemoryLifecycleState {
                 400,
             )),
         }
+    }
+
+    fn calculate_storage_memory_lifecycle_capture_plan(&mut self, args: &Value) -> ContractResult {
+        let conversation = &args["conversationId"];
+        let mut consumed = HashSet::new();
+        let mut checkpoints = HashSet::new();
+        for document in args["documents"].as_array().into_iter().flatten() {
+            for entry in document["entries"].as_array().into_iter().flatten() {
+                if entry["source"]["conversationId"] == *conversation {
+                    if let Some(id) = entry["source"]["messageId"].as_str() {
+                        consumed.insert(id.to_owned());
+                    }
+                    let quotes = entry["candidate"]
+                        .get("quotes")
+                        .or_else(|| entry["proposal"].get("quotes"));
+                    for quote in quotes.and_then(Value::as_array).into_iter().flatten() {
+                        if let Some(id) = quote["messageId"].as_str() {
+                            consumed.insert(id.to_owned());
+                        }
+                    }
+                }
+                if document["scope"] == "chat" {
+                    if let Some(id) = entry["candidate"]["batchThroughMessageId"].as_str() {
+                        checkpoints.insert(id.to_owned());
+                    }
+                }
+            }
+            for source in document["dismissedSources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if source["conversationId"] == *conversation {
+                    if let Some(id) = source["messageId"].as_str() {
+                        consumed.insert(id.to_owned());
+                    }
+                }
+                if document["scope"] == "chat" {
+                    if let Some(id) = source["candidateBatchThroughMessageId"].as_str() {
+                        checkpoints.insert(id.to_owned());
+                    }
+                }
+            }
+        }
+        let after = args["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .find(|message| {
+                message["role"] == "user"
+                    && checkpoints.contains(message["id"].as_str().unwrap_or(""))
+            })
+            .map(|message| message["id"].clone());
+        Ok(
+            json!({"consumedMessageIds":consumed.into_iter().collect::<Vec<_>>(),"afterMessageId":after,"hasProject":args["hasProject"]==true&&args["documents"].as_array().is_some_and(|documents|documents.iter().any(|document|document["scope"]=="project"))}),
+        )
     }
     pub fn apply(&mut self, operation: &str, args: &Value) -> Result<Value, String> {
         Ok(match self.calculate(operation, args) {

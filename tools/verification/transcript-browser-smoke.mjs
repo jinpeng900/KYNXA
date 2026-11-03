@@ -26,7 +26,8 @@ const segment = {id:'answer',round:1,order:0,phase:'commentary',status:'complete
 const message = {id:'reply',role:'assistant',status:'streaming',streaming:true,content:text,html:'',
   reasoningHtml:'',assistantSegments:[segment],toolActivities:[],generationElapsedMs:90000,generationTimingState:'live',generationClockId:'clock'};
 try {
-  send({type:'render',conversationId:'chat',revision:1,openAtBottom:true,messages:[message]}); await tick();
+  send({type:'render',conversationId:'chat',revision:1,openAtBottom:true,messages:[message]});
+  await waitFor(() => document.querySelector('.message-body'));
   check(document.querySelector('.message-body')?.textContent.includes('长回复正文'),'long body rendered');
   check(!!document.querySelector('.streaming-dot'),'active reply shows generation marker');
   const body = document.querySelector('.message-body');

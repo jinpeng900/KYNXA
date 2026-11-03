@@ -8,7 +8,7 @@ fn corpus_source(value: &Value) -> bool {
     matches!(value.as_str(), Some("knowledge" | "work-file"))
 }
 
-/// 持久身份账本在可重建 SQLite 发布之前拥有范围绑定与永久撤销状态。
+/// 持久身份记录在可重建 SQLite 发布之前拥有范围绑定与永久撤销状态。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let mut registry = arguments["registry"].clone();
     if registry["schemaVersion"] != 1
@@ -59,7 +59,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         let scope = format!("chat:{}", id.as_str().unwrap().to_ascii_lowercase());
         let sources = registry["sources"].as_object_mut().unwrap();
         let before = sources.len();
-        // 仅移除归属此聊天的派生身份；创建来源不等于共享资料归属，撤销恢复仍允许按原日志重建。
+        // 只移除归属此聊天的派生身份；创建来源不等于共享资料归属，撤销恢复仍可按原日志重建。
         sources.retain(|_, source| source["scopeKey"] != scope);
         let removed = before - sources.len();
         if removed > 0 {

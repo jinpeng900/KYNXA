@@ -1,4 +1,4 @@
-//! 任务 HTTP 是现有 Hub 的范围投影，不另建任务状态存储。
+//! 任务 HTTP 是现有 Hub 的范围映射，不另建任务状态存储。
 
 use super::gateway_runtime::{GatewayRuntime, checked_id};
 use crate::{

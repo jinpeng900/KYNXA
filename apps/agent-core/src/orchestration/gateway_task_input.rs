@@ -1,4 +1,4 @@
-//! 接受时保存一次传输输入；恢复仅读取本次请求，不能扫描全部聊天日志。
+//! 接受时保存一次传输输入，恢复只读取本次请求。
 
 use crate::{
     gateway_contract::{GatewayConfig, GatewayError},
@@ -37,7 +37,7 @@ pub async fn accept(
         let relationship = data::relationship(&root, conversation)?;
         let permission = input["permissionMode"].as_str().unwrap_or("smart");
         if !["ask", "smart", "full"].contains(&permission) { return Err(invalid("INVALID_PERMISSION_MODE")); }
-        // 写入前解析执行配置，但不得改写参与指纹计算的原始传输输入。
+        // 写入前解析执行配置，参与指纹计算的原始传输输入保持不变。
         let resolved = super::budget::resolve_input_limits(&input);
         let message = input["message"].as_str().unwrap_or("");
         let goal: String = message.trim().chars().take(4096).collect();

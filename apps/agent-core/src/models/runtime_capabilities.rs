@@ -1,4 +1,4 @@
-//! 追加运行事实的原生角色取决于已核验端点、协议和模型，不能从显示名称或代理标签推断。
+//! 追加运行事实的原生角色取决于已核验端点、协议和模型，与显示名称和代理标签无关。
 
 use serde_json::Value;
 
@@ -34,7 +34,7 @@ fn documented_model(model: &str, models: &[&str]) -> bool {
 }
 
 fn openai_role(model: &str) -> &'static str {
-    // o1 的旧 preview/mini 模板早于 developer 支持；也不能把当前规则外推到未知未来代际。
+    // o1 的旧 preview/mini 模板早于 developer 支持；未知的未来代际也不套用当前规则。
     if model_family(model, "o1-preview") || model_family(model, "o1-mini") {
         return "user";
     }
@@ -53,9 +53,9 @@ fn openai_role(model: &str) -> &'static str {
     }
 }
 
-/// 仅选择代理自身文本事实的角色，不增加授权，也不负责创建消息。
-/// 权限与记忆撤销仍由当前顶层系统指导和执行核验负责，不因此降级或冻结。
-/// Messages 适配器必须把原生 system 更新放在 user/工具结果轮之后，不能插入工具调用配对内部。
+/// 仅选择代理自身文本事实的角色。
+/// 权限与记忆撤销仍由当前顶层系统指导和执行核验负责。
+/// Messages 适配器要把原生 system 更新放在 user/工具结果轮之后，工具调用配对内部不插入。
 pub fn runtime_message_role(connection: &Value, model: &str) -> &'static str {
     let Some(endpoint) = verified_endpoint(connection) else {
         return "user";
@@ -83,7 +83,7 @@ pub fn runtime_message_role(connection: &Value, model: &str) -> &'static str {
         (Some("api.deepseek.com"), "anthropic-messages")
             if matches!(path, "/anthropic" | "/anthropic/v1") && model == "deepseek-flash" =>
         {
-            // 固定官方 Harness 687f282 的默认目录仅为此模型声明历史内 system 更新，不能扩展给 V4 Pro。
+            // 固定官方 Harness 687f282 的默认目录仅为此模型声明历史内 system 更新，V4 Pro 不适用。
             "system"
         }
         (Some("api.anthropic.com"), "anthropic-messages")
@@ -103,7 +103,7 @@ pub fn runtime_message_role(connection: &Value, model: &str) -> &'static str {
                     ],
                 ) =>
         {
-            // 官方会话中途 system 消息合同明确排除 Sonnet 5，不能按版本大小笼统放行。
+            // 官方会话中途 system 消息约定明确排除 Sonnet 5。
             "system"
         }
         _ => "user",

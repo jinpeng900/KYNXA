@@ -103,7 +103,7 @@ impl Blocks<'_> {
     }
 }
 
-/// 只识别已支持的 Markdown/文本块；未解析区间由上层保留原文，不能扩大语法覆盖声明。
+/// 只识别已支持的 Markdown/文本块，未解析区间由上层保留原文。
 pub fn parse(args: &Value) -> Result<Value, String> {
     let lines = args["lines"]
         .as_array()

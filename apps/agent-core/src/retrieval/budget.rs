@@ -7,7 +7,7 @@ fn bounded(value: &Value, fallback: i64, minimum: i64, maximum: i64) -> i64 {
         .map_or(fallback, |number| number.clamp(minimum, maximum))
 }
 
-/// 同时记录配置、授额与截断；内部候选容量独立于最终引用额度，资源建议不能改变用户上限。
+/// 同时记录配置、额度与截断；内部候选容量独立于最终引用额度，用户上限不变。
 pub fn apply(args: &Value) -> Result<Value, String> {
     if let Some(budget) = args.get("budget").filter(|value| value.is_object()) {
         return Ok(retire_rerank_budget(budget.clone()));

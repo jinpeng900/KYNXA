@@ -1,4 +1,4 @@
-//! Rust 网关拥有事务化任务树；执行者更换不改变任务身份，派发未知不能被续接当作未执行。
+//! Rust 网关拥有事务化任务树；执行者更换不改变任务身份，未知派发在续接时仍算未知。
 
 #[path = "task_repository_cleanup.rs"]
 mod cleanup;
@@ -236,7 +236,7 @@ fn extend_budget(
 ) -> Result<()> {
     let previous = task.budget.clone();
     task.budget.max_model_requests = task.budget.max_model_requests.max(min_model_requests);
-    // None 已表示不限时；续展不能新增时限，也不修改 token 上限。
+    // None 已表示不限时，续展不新增时限，token 上限不变。
     task.budget.max_execution_ms = task
         .budget
         .max_execution_ms
@@ -266,7 +266,7 @@ pub struct TaskRepository {
 }
 
 impl TaskRepository {
-    /// 核验账本不建表或改行，损坏及未来版本文件保留原样并报错。
+    /// 核验记录不建表或改行，损坏及未来版本文件保留原样并报错。
     pub fn validate_existing(root: &Path) -> Result<()> {
         let path = root.join("Agent/tasks.sqlite");
         if !managed_files::inspect(root, &path, false, true, u64::MAX)? {
@@ -565,7 +565,7 @@ impl TaskRepository {
             .collect()
     }
 
-    /// 恢复列表限定当前聊天的未结束根任务，展示偏好不能隐藏可恢复工作。
+    /// 恢复列表限定当前聊天的未结束根任务，不受展示偏好影响。
     pub fn recoverable_roots_for_conversation(
         &self,
         conversation_id: &str,
@@ -760,7 +760,7 @@ impl TaskRepository {
         )
     }
 
-    /// 已确认的隐式执行段随接管原子续展，接管失败不能改变祖先预算。
+    /// 已确认的隐式执行段随接管原子续展，接管失败时祖先预算不变。
     pub fn start_attempt_with_budget_extension(
         &self,
         task_id: &str,
@@ -1113,7 +1113,7 @@ impl TaskRepository {
                 if event.payload != payload { return Err(conflict("Steering identity was reused. / 插话身份不能复用于其他内容。")); }
                 return Ok(task);
             }
-            // 保留旧回执；同一聊天的同条消息不得新增绑定到另一根任务。
+            // 保留旧回执；同一聊天的同条消息只绑定一个根任务。
             if !steering_roots(connection, &task.scope.conversation_id, message_id)?.is_empty() {
                 return Err(ContractError::new("Steering is already bound to another task. / 这条引导已关联其他任务，请重连原任务。", "TASK_STEERING_TARGET_CONFLICT", 409));
             }
@@ -1125,7 +1125,7 @@ impl TaskRepository {
             if task.state == TaskState::Paused { task.stop_reason = Some(event_id.clone()); }
             append(connection, &mut task, &event_id, "task.user-steering", &payload)?;
             if action == "update" && task.state == TaskState::Paused {
-                // 方案变更保留旧委派回执，不能静默重启未知操作。
+                // 方案变更保留旧委派回执，未知操作不重启。
                 let mut query = connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;
                 let ids = query.query_map([task_id], |row|row.get::<_,String>(0)).map_err(|_|failure())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|_|failure())?;
                 drop(query);
@@ -1466,7 +1466,7 @@ impl TaskRepository {
     ) -> Result<TaskOperation> {
         self.dispatch_operation_with_ancestor_scope(token, operation_id, &Value::Null)
     }
-    /// 派发事务内核对调用方已读取的祖先引导，刷新后的新限制不能被旧调用越过。
+    /// 派发事务内核对调用方已读取的祖先引导，刷新后的新限制对旧调用同样生效。
     pub fn dispatch_operation_with_ancestor_scope(
         &self,
         token: &AttemptToken,
@@ -1679,7 +1679,7 @@ impl TaskRepository {
             None,
         )
     }
-    /// 模型 I/O 结束但回执未落盘时，派发及成本保持未知。
+    /// 模型 I/O 结束但回执未写入磁盘时，派发及成本保持未知。
     pub fn mark_model_request_unknown(
         &self,
         token: &AttemptToken,

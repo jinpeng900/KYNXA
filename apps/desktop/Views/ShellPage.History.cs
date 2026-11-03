@@ -121,7 +121,7 @@ public sealed partial class ShellPage
             if (direction == "refresh" && liveAtRequest.Length == 0 && page.Snapshot is not null && page.Snapshot == state.LatestPage?.Snapshot
                 && page.StartIndex == state.LatestPage.StartIndex && page.EndIndex == state.LatestPage.EndIndex) return;
             var preserved = PreserveRequestTail();
-            // 在 UI 线程之外统计原文及工具回执，再应用有界页面窗口。
+            // 在 UI 线程之外统计原文及工具回执，再应用限量页面窗口。
             var measured = await Task.Run(() => (Page: ConversationHistoryWindow.Measure(page.Messages),
                 Preserved: ConversationHistoryWindow.Measure(preserved)));
             if (!OwnsHistoryState(state)) return;

@@ -382,7 +382,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed || row.ConversationId != _conversationId) return;
         var message = row.Message;
-        // 状态不等 Markdown 和正文编码；版本号防止在途旧投影把终态改回生成中。
+        // 状态不等 Markdown 和正文编码；版本号防止在途旧映射把终态改回生成中。
         Post(new { type = "messageState", conversationId = _conversationId?.ToString() ?? "", revision = _revision,
             message = new { id = message.Id, role = message.Role, status = message.Status, streaming = row.IsStreaming,
                 waiting = row.IsWaiting, error = message.Error, canRetry = row.RetryVisibility == Visibility.Visible,
@@ -711,7 +711,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             bool initialPublished = !_hasPublishedSnapshot && _messages.Count > 4;
             if (initialPublished)
             {
-                // 先捕获并发送可见尾部，再投影更早的任务与工具历史，首屏不等待整页处理。
+                // 先捕获并发送可见尾部，再映射更早的任务与工具历史，首屏不等待整页处理。
                 var recent = _messages.TakeLast(4).Select(CaptureSnapshot).Select(row =>
                 {
                     _html.TryGetValue(row.Id, out var cached);
@@ -724,7 +724,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 await Task.Yield();
                 if (_disposed || generation != _generation) return;
             }
-            // 流式更新只投影脏行；导航时仍核对整个消息窗口。
+            // 流式更新只映射脏行；导航时仍核对整个消息窗口。
             var snapshots = refreshAll ? _messages.Select(CaptureSnapshot).ToArray()
                 : pendingRows.Where(_messageRows.ContainsKey).Select(id => CaptureSnapshot(_messageRows[id])).ToArray();
             var order = sourceOrder;
@@ -832,7 +832,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private Snapshot CaptureSnapshot(ConversationMessageViewModel row)
     {
         SnapshotCaptureCount++;
-        // 复用未变的历史投影；活动消息只让自身快照失效。
+        // 复用未变的历史映射；活动消息只让自身快照失效。
         if (_capturedRows.TryGetValue(row.Message.Id, out var captured)) return captured;
         var visible = TranscriptPresentation.Select(row.Message.Role, row.Message.Status, row.Content,
             row.Message.AssistantSegments, row.ToolActivities, row.Message.TaskCompletionState);

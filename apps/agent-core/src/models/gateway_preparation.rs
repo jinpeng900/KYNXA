@@ -1,4 +1,4 @@
-//! 有界启动准备复用供应商通信及原生资源准入，不发送计费生成；仅按策略启动已选中的自管本地模型。
+//! 限量启动准备复用供应商通信及原生资源准入，不发送计费生成；仅按策略启动已选中的自管本地模型。
 
 use super::{
     connections,
@@ -242,7 +242,7 @@ impl PreparationService {
         }).await.unwrap_or(false)
     }
 
-    /// 仅复用当前本地预载等待，避免重复准入；结束或未知结果交正式请求核验。
+    /// 只复用当前本地预载等待；结束或未知结果交由正式请求核验。
     pub async fn wait_model(
         &self,
         provider_id: &str,
@@ -303,7 +303,7 @@ impl PreparationService {
         }
         self.changed.notify_waiters();
         drop(state);
-        // 取消请求不等于任务结算；后台准备与阻塞的模型回收全部退出后才允许迁移。
+        // 取消请求不等于任务结算，后台准备与阻塞的模型回收全部退出后才能迁移。
         self.activity.drain().await;
     }
 
@@ -405,7 +405,7 @@ impl PreparationService {
         } else {
             self.prepare_api(provider, entry["modelId"].as_str().unwrap_or(""), token)
         };
-        // 此期限只约束准备观察；自管权重装载保留独立引擎生命周期，不把初始连通冒充装载完成。
+        // 此期限只约束准备观察；自管权重装载有独立引擎生命周期。
         let result = tokio::time::timeout(Duration::from_secs(60), preparation).await;
         match result {
             Ok(Ok(observed)) => {
@@ -556,7 +556,7 @@ impl PreparationService {
                         None,
                     ));
                 }
-                // 目录匹配证明模型可用；服务健康不能证明该模型已驻留，只有新鲜loaded观测允许就绪。
+                // 目录匹配说明模型可用，服务健康不代表已驻留；只有新鲜的 loaded 观测才算就绪。
                 return Ok(local_result(
                     "unknown",
                     Some(true),
@@ -668,7 +668,7 @@ impl PreparationService {
                 model.into(),
                 context,
             )?;
-            // 空预载不含业务提示；不拉取、不卸载、不要求永久驻留，只加载已确认安装的当前选择。
+            // 空预载不含业务提示，只加载已确认安装的当前选择。
             let result = json_request(
                 connection,
                 "/api/generate",
@@ -745,7 +745,7 @@ async fn reconcile_preload(pending: &std::sync::Mutex<HashMap<String, String>>, 
     }
 }
 
-/// 外部装载派发后，以完成回执或新鲜驻留观测核销预约；调用方取消不能证明外部服务停止。
+/// 外部装载派发后，以完成回执或新鲜驻留观测核销预约；调用方取消时外部服务可能仍在运行。
 struct PendingPreload {
     lease: Option<crate::resources::gateway::ResourceLease>,
     pending: Arc<std::sync::Mutex<HashMap<String, String>>>,
@@ -847,7 +847,7 @@ impl Drop for PendingPreload {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 };
-                // 核验有界；仍未知的租约停止续租后进入既有隔离账本，后续新鲜驻留观测可受控核销。
+                // 核验限量；仍未知的租约停止续租后进入既有隔离记录，后续新鲜驻留观测可受控核销。
                 tokio::select! {
                     _ = tokio::time::timeout(Duration::from_secs(60), verify) => {},
                     _ = owner.wait_stopped() => {},

@@ -275,7 +275,7 @@ public sealed partial class ShellPage
         AutomationProperties.SetLiveSetting(empty, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         Grid.SetRow(empty, 2);
         body.Children.Add(empty);
-        // 列表行只是展示投影；选择和保存仍使用原始稳定模型身份。
+        // 列表行只是展示映射；选择和保存仍使用原始稳定模型身份。
         var choices = _availableModels.Select(choice => new ModelPickerRow(choice,
             choice.ProviderId == _selectedModel?.ProviderId && choice.ModelId == _selectedModel?.ModelId)).ToArray();
         Grid? menuContent = null;

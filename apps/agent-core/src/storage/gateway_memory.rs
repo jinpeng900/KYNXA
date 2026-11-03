@@ -2126,7 +2126,7 @@ mod candidate_transition_tests {
                 let root = root.clone();
                 let chat = chat.clone();
                 let project = project.clone();
-                // 在提取完成后暂停捕获，由另一个线程执行正式目录移动，不能靠等候读取线程退出消除占用。
+                // 在提取完成后暂停捕获，由另一个线程执行正式目录移动，以此验证占用已释放。
                 let receipt = std::thread::spawn(move || {
                     let mut catalog = gateway::load_catalog(&root)?;
                     let chats = catalog["Chats"].as_array_mut().unwrap();

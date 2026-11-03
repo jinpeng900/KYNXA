@@ -42,7 +42,7 @@
     return translated(state.pre.dataset.codeComplete === 'false' ? 'copyCurrentContent' : 'copyBlock');
   }
   function localize(state) {
-    // 标签来自不可信模型文本，使用 textContent 仅显示文字，绝不解释为标记。
+    // 标签来自不可信模型文本，使用 textContent 仅显示文字，不解释为标记。
     const label = state.code.dataset.language || translated('blockPlainText');
     if (state.label.textContent !== label) state.label.textContent = label;
     state.label.title = state.label.textContent;
@@ -202,7 +202,7 @@
         const state = activeStates.get(preference);
         const scrollLeft = Math.max(0, state && !preference.wrap ? state.pre.scrollLeft : preference.scrollLeft || 0);
         if (!preference.wrap && !preference.collapsed && !scrollLeft) continue;
-        // 虚拟行仅保留有界的标量偏好，不复制源码，也不持有已卸载 DOM。
+        // 虚拟行仅保留有上限的标量偏好，不复制源码，也不持有已卸载 DOM。
         saved.push({ bodyIndex, blockIndex, wrap: preference.wrap === true, collapsed: preference.collapsed === true, scrollLeft });
         if (saved.length >= MAX_SAVED_READING_BLOCKS) return saved;
       }

@@ -50,7 +50,7 @@ impl PassageCache {
         let computed = started.elapsed().as_micros() as u64;
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.computed_micros = state.computed_micros.saturating_add(computed);
-        // 回收或禁用必须优先于先前在途的 SQL 读取，禁止旧代重新填回缓存。
+        // 回收或禁用优先于先前在途的 SQL 读取，旧代不会重新填回缓存。
         if state.values.generation() == generation {
             let bytes = retained_json_bytes(&body).saturating_add(std::mem::size_of::<Entry>());
             state.values.insert(

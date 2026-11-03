@@ -569,7 +569,7 @@ async fn apply_restored_context(
         .ok_or_else(invalid_context)?;
     let catalog = tools::builtin_catalog();
     let mut restored_selected = Vec::new();
-    // 声明授额前恢复模型选择的顺序，包括最近加载项。
+    // 声明额度前恢复模型选择的顺序，包括最近加载项。
     for name in selected_names {
         if restored_selected
             .iter()

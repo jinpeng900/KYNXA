@@ -62,7 +62,7 @@ impl ToolSeries {
         *self = Self::default();
     }
 
-    /// 以完整的当前授权目录核对，不能用预算裁剪后的短集合替代授权；撤权或定义变化立即重建。
+    /// 以完整的当前授权目录核对，预算裁剪后的短集合不算授权；撤权或定义变化立即重建。
     pub(crate) fn reconcile(
         &mut self,
         connection: &Value,
@@ -173,7 +173,7 @@ fn strip_deferred(tool: &Value) -> Value {
     tool
 }
 
-/// 投影已支持的工具更新并返回缓存策略诊断；其他路线保持原样。
+/// 映射已支持的工具更新并返回缓存策略诊断；其他路线保持原样。
 pub(crate) fn project(connection: &Value, body: &mut Value, series: &mut ToolSeries) -> Value {
     let tools = body["tools"].as_array().cloned().unwrap_or_default();
     if mode(connection) == Mode::Rebuild {

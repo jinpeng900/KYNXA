@@ -57,7 +57,7 @@ pub fn calculate(
     ) {
         return runtime_policy::calculate(operation, arguments);
     }
-    // 结果分类属于意图解释，须先于检索策略的宽前缀分派，避免合法操作被误拒绝。
+    // 结果分类属于意图解释，要先于检索策略的宽前缀分派。
     if operation == "orchestration.retrievalOutcome" {
         return interpretation::calculate(operation, arguments);
     }

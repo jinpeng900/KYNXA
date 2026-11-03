@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 namespace KYNXA.Contracts;
 
 /// <summary>
-/// 检索配置与派生索引传输合同；原始聊天仍为正式数据来源。
+/// 检索配置与派生索引传输约定；原始聊天仍为正式数据来源。
 /// </summary>
 public sealed record RetrievalSettingsDocument(int SchemaVersion, long Revision, RetrievalLocalSettings Local,
     RetrievalWebSettings Web, RetrievalCacheSettings Cache);
@@ -87,7 +87,7 @@ public sealed record RetrievalRerankingStatus(string State,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalInferenceBackendStatus? InferenceBackend = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? ResourceReservation = null);
 
-// 观察数据沿用有界 HTTP 响应，不依赖原生分配器布局；存在 GPU 不代表已启用。
+// 观察数据沿用限量 HTTP 响应，不依赖原生分配器布局；存在 GPU 不代表已启用。
 public sealed record RetrievalStatus(string Backend, int SourceCount, int ChunkCount,
     RetrievalEmbeddingStatus Embedding, RetrievalIndexJob[] Jobs,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Resources = null,

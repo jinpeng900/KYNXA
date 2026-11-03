@@ -17,7 +17,6 @@ fn metadata_mismatch(expected: &Value, result: &Value) -> bool {
         })
 }
 
-/// 检索策略核验实时 SDK 回执，不把相似性替换为依赖关系证明。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "orchestration.retrievalGapValid" => Ok(json!(

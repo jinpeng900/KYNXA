@@ -551,7 +551,7 @@ pub fn publish_semantic(
         json!({"receipt":receipt,"chunks":prepared["chunks"].as_array().unwrap().len(),"vectorChunks":batch.vectors.len(),"profileId":source["embeddingProfileId"],"spaceId":source["embeddingSpaceId"],"device":batch.device}),
     )
 }
-/// 正式发布与原生离线评测共用同一来源投影，不复制或漂移嵌入输入格式。
+/// 正式发布与原生离线评测共用同一来源映射，不复制或漂移嵌入输入格式。
 pub fn embedding_projection(source: &Value, chunk: &Value) -> Value {
     fn bounded(text: &str, count: usize) -> String {
         let units = text.encode_utf16().take(count).collect::<Vec<_>>();
@@ -1349,7 +1349,7 @@ fn ann_auto(
                 Err(error) => return Err(error),
             }
         }
-        // 仅返回完整分片集合，缺图时不能静默降低语义覆盖范围。
+        // 只返回完整分片集合，缺图时报告覆盖不足。
         if complete {
             return Ok(rows);
         }
@@ -1768,7 +1768,7 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                                 }
                                 Err(error) if ann_readiness_error(error.code()) => {
                                     ann_pending = true;
-                                    // ANN 未就绪或资源不足时，沿用有界精确检索。
+                                    // ANN 未就绪或资源不足时，沿用限量精确检索。
                                     if admit_exact_descriptor(descriptor, &mut exact_remaining) {
                                         exact.push(descriptor.clone());
                                         semantic = Some("exact");
@@ -1927,7 +1927,7 @@ fn public_chunk(row: &Value) -> Result<Value, ContractError> {
             .or_else(|| locator["path"].as_str())
             .unwrap_or(""),
     );
-    // 原生定位事实随投影保留，避免有效精确证据因字段丢失触发额外推理。
+    // 原生定位事实随映射保留，避免有效精确证据因字段丢失触发额外推理。
     Ok(
         json!({"sourceId":source["sourceId"],"scopeKey":source["scopeKey"],"sourceType":row["source_type"],"title":row["title"],
         "locator":locator,"exactPath":exact_path,"exactTargetMatch":row["exact_target_match"]==true,"excerpt":row["text"],

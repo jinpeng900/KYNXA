@@ -14,8 +14,8 @@ use super::service_error::{ServiceError, ServiceResult};
 use super::service_mcp::preview_sections;
 use crate::models::protocol::{array, string, truthy};
 
-const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PIXELS: u64 = 16_000_000;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PIXELS: u64 = 64_000_000;
 
 fn appended_image_receipt(image: Value, arguments: &Value) -> Value {
     let mut receipt = json!({"screenshotStatus":"available"});

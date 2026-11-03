@@ -412,7 +412,7 @@ pub(crate) fn decode(
             }
         }
         "ods" => {
-            // 共用容器路径先拒绝加密 manifest，再提取表格 XML，不能绕过文档加密校验。
+            // 共用容器路径先拒绝加密 manifest，再提取表格 XML。
             return super::gateway_office_documents::open_document(
                 "ods", bytes, limits, cancel, digest,
             );

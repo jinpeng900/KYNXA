@@ -20,7 +20,7 @@ pub struct FileVersion {
 
 pub fn path_text(path: &Path) -> String {
     let text = path.to_string_lossy();
-    // Windows 真实路径解析使用扩展前缀；公开合同仍返回普通本机盘符路径。
+    // Windows 真实路径解析使用扩展前缀；公开约定仍返回普通本机盘符路径。
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
 
@@ -432,7 +432,7 @@ pub(super) fn metadata_projection(path: &Path, metadata: Metadata) -> ServiceRes
     )
 }
 
-/// 工具路径共用一个真实范围合同；下方同步操作仅计算策略，I/O 操作走异步服务。
+/// 工具路径共用一个真实范围约定；下方同步操作仅计算策略，I/O 操作走异步服务。
 pub fn path_operation(operation: &str, arguments: &Value) -> ServiceResult<Value> {
     use super::intent::matches;
     let path = absolute_path(arguments["path"].as_str().unwrap_or(""));

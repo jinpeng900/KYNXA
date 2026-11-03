@@ -19,7 +19,7 @@ impl WatchSet {
         self.owners
             .retain(|path, owner| roots.contains(path) && !owner.finished());
         for root in roots {
-            // 超出原生驻留容量的根仍由周期清单覆盖，不会丢失索引；限制的是句柄/线程而非用户挂载数量。
+            // 超出原生驻留容量的根由周期清单覆盖，索引不丢；限制的是句柄/线程，不是挂载数量。
             if self.owners.len() >= 64 {
                 break;
             }

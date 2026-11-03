@@ -461,7 +461,7 @@ fn saved_page(mut rows: Vec<SavedAttachmentRow>, offset: usize, limit: usize) ->
         "nextOffset":if has_more {Some(next)} else {None}})
 }
 
-/// 汇总本聊天正式引用的已保存快照；普通消息级附件列表继续使用原有合同。
+/// 汇总本聊天正式引用的已保存快照；普通消息级附件列表继续使用原有约定。
 pub fn conversation_list(
     root: &Path,
     conversation: &str,
@@ -500,7 +500,7 @@ pub fn project_list(root: &Path, project: &str, offset: usize, limit: usize) -> 
     Ok(saved_page(rows, offset, limit))
 }
 
-/// 同字节重试复用不可变快照；同一附件 ID 不能替换成另一份文件。
+/// 同字节重试复用不可变快照，同一附件 ID 不换文件。
 pub fn save(
     root: &Path,
     conversation: &str,
@@ -517,7 +517,7 @@ pub fn save(
         let (directory, item) = match scope(root, document, conversation, message) {
             Ok((directory, saved_message)) => (directory, descriptor(&saved_message, attachment)?),
             Err(error) if error.code() == "MESSAGE_NOT_FOUND" => {
-                // 引导上传可在用户消息提交前预留字节；读取和模型使用仍必须核对正式消息引用。
+                // 引导上传可在用户消息提交前预留字节；读取和模型使用要核对正式消息引用。
                 let location = gateway::locate(document, conversation)?;
                 let directory = conversation_logs::directory(root, &location)?
                     .join("attachments")
@@ -891,7 +891,7 @@ mod tests {
         let (root, conversation, message, attachment) = setup();
         let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
-        // 引导可先上传附件；正式消息引用提交前，不能读取该预留附件。
+        // 引导可先上传附件；正式消息引用提交前，该预留附件不可读。
         save(
             &root,
             &conversation,

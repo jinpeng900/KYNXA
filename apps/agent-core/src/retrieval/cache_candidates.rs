@@ -299,7 +299,7 @@ pub(crate) fn reclaim() {
     state.entries.set_capacity(0);
 }
 
-/// 检索 I/O 边界提供已有硬件授额；本模块只维护内存状态。
+/// 检索 I/O 边界提供已有硬件额度；本模块只维护内存状态。
 pub(crate) fn set_capacity(bytes: usize) {
     let mut state = cache()
         .state

@@ -1,4 +1,4 @@
-//! 从有界结构化输入生成可编辑 Office 文档，不启动外部运行时。
+//! 从限量结构化输入生成可编辑 Office 文档，不启动外部运行时。
 
 use serde_json::Value;
 use std::io::{Cursor, Write};
@@ -98,7 +98,7 @@ fn append_xml(target: &mut String, fragment: &str) -> Result<(), String> {
     Ok(())
 }
 
-// 统一过滤 XML 1.0 非法字符并转义正文与属性，避免模型文字破坏包结构。
+// 统一过滤 XML 1.0 非法字符并转义正文与属性，保持包结构完整。
 fn escaped(text: &str) -> String {
     let mut xml = String::with_capacity(text.len());
     for character in text.chars() {

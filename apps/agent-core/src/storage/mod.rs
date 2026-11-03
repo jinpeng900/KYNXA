@@ -252,7 +252,7 @@ fn undefined_policy(arguments: &Value) -> Value {
                 &["patch", "coverage", "sources", "*"],
                 &["errorCode"],
             );
-            // 作业适配器另传实际清除事实；缺省不得清除身份与状态等必需字段。
+            // 作业适配器另传实际清除事实；缺省时保留身份与状态等必需字段。
             optional_fields(
                 &mut optional_paths,
                 &["patch"],
@@ -437,7 +437,7 @@ fn undefined_policy(arguments: &Value) -> Value {
     json!({"optionalPaths": optional_paths, "defaults": defaults})
 }
 
-/// 领域合同与已声明 I/O 服务共用错误封装；适配器保留原始字节、日期与既有哈希身份。
+/// 领域约定与已声明 I/O 服务共用错误封装；适配器保留原始字节、日期与既有哈希身份。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     let boundary_before = sqlite_connections::boundary_counts();
     let result = if operation == "storage.undefinedPolicy" {

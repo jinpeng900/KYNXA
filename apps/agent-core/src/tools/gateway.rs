@@ -126,7 +126,7 @@ pub(crate) async fn verified_experience_hint(context: &GatewayToolContext, query
         .unwrap_or_else(|_| json!({"entries":[],"navigationOnly":true}))
 }
 
-/// 审批仅属于本次调用；模型生成的 reason、policy 等说明不能授予执行权限。
+/// 审批只属于本次调用，模型生成的 reason、policy 等说明不影响权限。
 #[derive(Clone)]
 pub struct GatewayToolContext {
     pub data_home: PathBuf,
@@ -151,7 +151,7 @@ pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch:
             break;
         }
         if cancellation.changed().await.is_err() {
-            // 信号通道关闭不等于用户明确取消，继续等待外层执行或超时结束。
+            // 信号通道关闭不代表用户取消，继续等待外层执行或超时结束。
             std::future::pending::<()>().await;
         }
     }
@@ -195,7 +195,7 @@ pub(crate) fn decode_native(result: Result<Value, String>) -> Result<Value, Gate
             error["message"].as_str().unwrap_or("工具执行失败。"),
             error["statusCode"].as_u64().unwrap_or(500) as u16,
         );
-        // 仅保留安全的分页纠错合同，不将任意原生错误正文带入模型上下文。
+        // 仅保留安全的分页纠错约定，不将任意原生错误正文带入模型上下文。
         if [
             "INVALID_SKILL_LIST_PAGINATION",
             "INVALID_SKILL_RESOURCE_PAGINATION",
@@ -323,7 +323,7 @@ fn observe_code_target(ctx: &GatewayToolContext, binding: &Value) -> Result<(), 
     Ok(())
 }
 
-/// 只核对当前请求实际获准访问的目标；不扫描全仓，也不共享其他请求的文件账。
+/// 只核对当前请求实际获准访问的目标。
 pub async fn capture_code_version(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     check_cancelled(ctx)?;
     let state = version_state(ctx)?.unwrap_or_default();
@@ -375,7 +375,7 @@ pub async fn capture_code_version(ctx: &GatewayToolContext) -> Result<Value, Gat
     result?
 }
 
-/// 最终核对后在请求 finally 释放，失败和取消也不能留下无界目标账。
+/// 最终核对后在请求 finally 释放，失败和取消时也一样。
 pub fn release_request(ctx: &GatewayToolContext) {
     if let Some(key) = version_request_key(ctx) {
         if let Ok(mut states) = ctx.runtime.code_versions.lock() {
@@ -384,7 +384,7 @@ pub fn release_request(ctx: &GatewayToolContext) {
     }
 }
 
-/// 后续真实观察仅能确认自有任务已派发；不能泛化为 MCP/文件操作成功，更不能自动重放。
+/// 后续真实观察只能确认自有任务已派发，MCP 和文件操作是否成功另行判断。
 pub async fn verify_unknown_effects(
     ctx: &GatewayToolContext,
     records: &[Value],
@@ -478,7 +478,7 @@ pub fn executable_descriptor(tool: &Value) -> bool {
 pub async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, GatewayError> {
     check_cancelled(ctx)?;
     let mut tools = builtin_catalog();
-    // 发现失败按服务保留；一个 MCP 不可用不能把其余工具目录一起隐藏。
+    // 发现失败按服务保留，一个 MCP 不可用时其余工具目录照常显示。
     tools.extend(super::gateway_mcp::catalog(ctx).await?);
     *ctx.runtime.schemas.write().await = tools.clone();
     Ok(tools)
@@ -491,7 +491,7 @@ pub(super) fn validate_schema(
 ) -> Result<(), GatewayError> {
     let invalid = || {
         let mut details = json!({"parameter":label,"executed":false,"requestDispatched":false,"recoverable":true});
-        // 参数校验发生在派发前，不将其记作工具已执行，也不因此重试任何副作用。
+        // 参数校验发生在派发前，不记作工具已执行。
         for field in [
             "type",
             "minimum",
@@ -1031,7 +1031,7 @@ async fn filesystem_bound(
         return Ok(result);
     }
     if name == "document.create" {
-        // 二进制写入只接收本层授权的规范路径绑定，模型参数不能自行提供该绑定。
+        // 二进制写入只接收本层授权的规范路径绑定。
         let mut input = args;
         input["path"] = json!(super::local_files::path_text(&path));
         input["_pathBinding"] = binding;
@@ -1040,7 +1040,7 @@ async fn filesystem_bound(
     if name == "filesystem.search" {
         let identity = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"workspaceRoot":ctx.workdir,
             "permissionMode":ctx.permission_mode});
-        // 本会话精确沙箱本身就是有界搜索根；其他正式数据依旧受保护，不能放开整个 Data。
+        // 本会话精确沙箱就是限量搜索根，其他正式数据依旧受保护。
         let search_protected = if own_sandbox {
             managed.iter().skip(1).cloned().collect::<Vec<_>>()
         } else {
@@ -1495,7 +1495,6 @@ async fn execute_inner(
             let mut known = all.clone();
             known.extend(ctx.runtime.schemas.read().await.iter().cloned());
             known.extend(reusable_mcp_catalog(ctx));
-            // 只归一化已知工具的精确协议别名；模型拼写或猜出的哈希不能创造能力。
             let names: Vec<Value> = args["names"]
                 .as_array()
                 .into_iter()
@@ -1600,7 +1599,7 @@ fn execution_environment(
 ) -> Result<Value, GatewayError> {
     let descriptor =
         json!({"name":tool_name,"source":if tool_name.starts_with("mcp."){"mcp"}else{"builtin"}});
-    // 仅信任原生浏览器和搜索来源信息；MCP 结果不能选择执行主机。
+    // 仅信任原生浏览器和搜索来源信息来选择执行主机。
     if (tool_name.starts_with("browser.") || tool_name == "web.search")
         && result["executionEnvironment"].is_object()
     {
@@ -1623,7 +1622,7 @@ fn execution_environment(
         && result["tokenVerified"] == true
         && result["activeProcessesAfterExit"] == 0
     {
-        // runner.sandboxReceipt 已在返回前核验这些事实；它们不是模型自报的能力。
+        // runner.sandboxReceipt 已在返回前核验这些事实。
         json!({"available":true,"sandbox":"appcontainer","failClosed":true,"checksChildToken":true,"network":result["network"]})
     } else {
         result.clone()
@@ -1635,7 +1634,7 @@ fn execution_environment(
     .map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))
 }
 
-/// 已保存的请求快照可以被撤销能力，配置更新不能给旧请求扩大能力。
+/// 已保存的请求快照可以被撤销能力，配置更新不扩大旧请求的能力。
 pub(crate) async fn checked_configuration(
     ctx: &GatewayToolContext,
 ) -> Result<GatewayToolContext, GatewayError> {
@@ -1840,7 +1839,7 @@ pub async fn execute(
             ));
         }
     }
-    // 将较大的原生执行分支放到堆上，避免调试构建的浏览器握手层层占用线程栈。
+    // 将较大的原生执行分支放到堆上，减少调试构建下浏览器握手占用的线程栈。
     let started = std::time::Instant::now();
     let outcome = Box::pin(execute_inner(tool_name, args, ctx)).await;
     super::gateway_tool_memory::remember_outcome(tool_name, &outcome, started.elapsed(), ctx).await;
@@ -2051,7 +2050,7 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             if !metadata.is_file() {
                 continue;
             }
-            // 已选择技能只读取自身正文，其他包的大小或损坏不能拖慢、阻断该次读取。
+            // 已选择技能只读取自身正文，其他包的大小或损坏不影响这次读取。
             let identity = super::service_skill_discovery::identity(
                 &path,
                 &json!({"bundledDirectory":official,"officialDirectory":official}),
@@ -2172,7 +2171,7 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             pending["invocation"]["skillIdentity"] = identity;
             return Ok(pending);
         }
-        // 恢复审批仅授权已检查的技能包，不能执行相同路径后来被替换的脚本。
+        // 恢复审批只授权已检查的技能包，相同路径后来被替换的脚本不在其内。
         if ctx.approved
             && ctx.config["approvedInvocation"].is_object()
             && ctx.config["approvedInvocation"]["skillIdentity"] != identity
@@ -2402,7 +2401,7 @@ pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError>
 pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let _update = ctx.runtime.configuration_updates.write().await;
     get_config(ctx).await?;
-    // 首次配置写入进入异步等待前使已检查的派发失效，避免检查与保存之间的竞争。
+    // 首次配置写入进入异步等待前使已检查的派发失效，消除检查与保存之间的竞争。
     ctx.runtime
         .configuration_generation
         .fetch_add(1, Ordering::AcqRel);
@@ -2419,7 +2418,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     Ok(result)
 }
 
-/// 只读取来源已存凭据及已有 MCP 状态；打开设置不握手，也不把已配置说成网络已经连通。
+/// 只读取来源已存凭据及已有 MCP 状态，打开设置不握手。
 pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     let diagnostics = super::gateway_mcp::diagnostics(ctx).await;
     let loaded = ctx.runtime.schemas.read().await;
@@ -2437,7 +2436,7 @@ pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
     drop(loaded);
-    // 复用官方模型凭据，不复制密钥，也不因打开设置发起搜索。
+    // 复用官方模型凭据，不复制密钥；打开设置不发起搜索。
     let builtin = super::gateway_deepseek_search::source(ctx).await;
     let has_credential = builtin.is_some();
     let cooling = builtin
@@ -2738,7 +2737,7 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
     super::gateway_browser::shutdown(ctx).await;
 }
 
-/// 恢复事件日志中的 MCP 任务身份，禁止重做原写操作。
+/// 恢复事件日志中的 MCP 任务身份，原写操作不重做。
 pub async fn recover_mcp_task_checkpoint(
     handle: &Value,
     original_call_id: &str,
@@ -2747,7 +2746,7 @@ pub async fn recover_mcp_task_checkpoint(
     super::gateway_mcp::recover_checkpoint(handle, original_call_id, ctx).await
 }
 
-/// 迁移必须取得核验清理结果；尽力退出应用不能作为迁移就绪回执。
+/// 迁移要取得核验清理结果，尽力退出应用还不够。
 pub async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     crate::training::shutdown_checked(&ctx.data_home).await?;
     super::gateway_mcp_oauth::shutdown(ctx).await;
@@ -2865,7 +2864,7 @@ mod tests {
             std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),
             "updated"
         );
-        // 相同授权不能替代最新覆盖前提，旧哈希即使已有任务授权也不能改写文件。
+        // 相同授权不能替代最新覆盖前提，旧哈希有任务授权也不能改写文件。
         assert!(
             execute("filesystem.write", update.clone(), &approved)
                 .await
@@ -3843,7 +3842,7 @@ mod tests {
                 .code,
             "APP_SKILL_NOT_FOUND"
         );
-        // 绑定到技能调用的任务授权不能挪用于其他工具。
+        // 绑定到技能调用的任务授权只用于该技能。
         assert_eq!(
             execute("mcp.fixture.echo", json!({}), &approved)
                 .await

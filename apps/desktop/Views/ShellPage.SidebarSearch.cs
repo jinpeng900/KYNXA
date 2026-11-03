@@ -269,7 +269,7 @@ public sealed partial class ShellPage
         state.AppliedQuery = query;
         if (scope == "projects" && queryChanged)
         {
-            // 修改树投影前先刷新完整树行；过滤不改变正式归属关系。
+            // 修改树映射前先刷新完整树行；过滤不改变正式归属关系。
             RenderProjects();
             return;
         }
@@ -305,7 +305,7 @@ public sealed partial class ShellPage
                 try { ProjectTreeReconciler.ReconcileRows(target, desired); }
                 finally
                 {
-                    // 原生树解绑可能回写 IsExpanded；过滤期间保留原有界面展开状态。
+                    // 原生树解绑可能回写 IsExpanded；过滤期间保留原限量面展开状态。
                     foreach (var expansion in expansions) expansion.Row.IsExpanded = expansion.IsExpanded;
                     _renderingProjects = wasRendering;
                 }
