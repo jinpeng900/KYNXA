@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// 小窗口模型每次都在同一位置被截断，续写超过这个次数只会反复重写。
+const MAX_COMPACT_OUTPUT_CONTINUATIONS: u64 = 2;
+
 impl Execution {
     pub(super) async fn inspect_response(
         &mut self,
@@ -991,6 +994,23 @@ impl Execution {
         }
         if let Some(error) = self.continuation_interruption(&decision, response.output_truncated) {
             self.rounds.stopped = Some(error);
+            self.prepared
+                .state
+                .save(&self.runtime, &self.run, "streaming", None)
+                .await?;
+            return Ok(PhaseOutcome::Stop);
+        }
+        if decision["action"] == "resume"
+            && response.output_truncated
+            && response.calls.is_empty()
+            && self.prepared.ctx.config["compactLocalModel"] == true
+            && self.rounds.output_continuations >= MAX_COMPACT_OUTPUT_CONTINUATIONS
+        {
+            self.rounds.stopped = Some(GatewayError::new(
+                "MODEL_OUTPUT_WINDOW_FULL",
+                "模型窗口已满，回答可能不完整。可以让它继续，或换用上下文更大的模型。",
+                409,
+            ));
             self.prepared
                 .state
                 .save(&self.runtime, &self.run, "streaming", None)

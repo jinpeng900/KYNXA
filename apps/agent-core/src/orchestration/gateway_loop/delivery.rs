@@ -112,6 +112,19 @@ fn current_public_reply(
 }
 
 /// 取最后一轮写好的公开回答；内部检查、工具轮次和已经显示过的内容不算。
+/// 上下文放不下，而最后一轮已经是公开的完整回答。
+fn answer_outgrew_review(code: &str, rounds: &[Value], shown: &str) -> bool {
+    matches!(
+        code,
+        "CONTEXT_INPUT_TOO_LARGE" | "CONTEXT_IRREDUCIBLE_INPUT" | "TOOL_CONTEXT_BUDGET_EXCEEDED"
+    ) && rounds.last().is_some_and(|round| {
+        round["calls"].as_array().is_some_and(Vec::is_empty)
+            && round["text"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && shown.contains(text.trim()))
+    })
+}
+
 pub(super) fn unpublished_answer(rounds: &[Value], shown: &str) -> Option<String> {
     let round = rounds.iter().rev().find(|round| {
         round["reviewing"] != true
@@ -249,6 +262,10 @@ impl FinalDelivery<'_> {
                     .await;
                 state.append(&note, "", round, &id);
                 run.emit(json!({"type":"assistant_segment","segment":state.segment(&id),"toolStreamProtocol":3})).await;
+            } else if answer_outgrew_review(&error.code, &state.transcript.rounds, &state.content()) {
+                // 回答已经交付，只是后续核验放不下，不再提示“任务未完成”。
+                state.delivery.pending_delivery.clear();
+                state.delivery.delivery_continuing = false;
             } else {
                 // 已取消的任务不再发布内容；原草稿仍保留在此前检查点中。
                 state.delivery.pending_delivery.clear();
@@ -671,5 +688,21 @@ mod tests {
             records: vec![],
         };
         assert_eq!(stopped_reply_notice(&error, &review), error.message);
+    }
+}
+
+#[cfg(test)]
+mod context_stop_tests {
+    use super::answer_outgrew_review;
+    use serde_json::json;
+
+    #[test]
+    fn a_shown_answer_is_not_reported_as_unfinished_when_only_review_overflows() {
+        let answer = [json!({"text":"完整回答","calls":[]})];
+        assert!(answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &answer, "完整回答"));
+        assert!(!answer_outgrew_review("TOOL_RUN_TIMEOUT", &answer, "完整回答"));
+        assert!(!answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &answer, "别的内容"));
+        let working = [json!({"text":"我先读文件","calls":[{"id":"read"}]})];
+        assert!(!answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &working, "我先读文件"));
     }
 }

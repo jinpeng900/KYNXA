@@ -279,7 +279,9 @@ impl Execution {
         // 一次未声明后关闭工具一轮，让模型先回应插话。
         let steering_repair = unresolved_user_steering(&self.prepared.state)
             && self.prepared.state.completion.review_checkpoint["reviewFormatRepair"].is_object();
-        let tools_closed = delivery.tools_exhausted || steering_repair;
+        let tools_closed = delivery.tools_exhausted
+            || steering_repair
+            || self.prepared.ctx.config["plainLocalAnswer"] == true;
         let declarations_disabled = !self.prepared.supports_tools || tools_closed;
         let mut delivery_notice = (!self.rounds.review_pending && (delivery.deprioritize_discovery_and_search || synthesize_delivery)).then(|| {
             format!(

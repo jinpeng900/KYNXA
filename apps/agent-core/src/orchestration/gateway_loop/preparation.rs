@@ -1004,6 +1004,19 @@ async fn assemble_prompt(
     state: &mut LoopState,
     work_context_restored: bool,
 ) -> Result<PromptContext, GatewayError> {
+    let compact_local =
+        crate::models::gateway_local_engine::is_managed(&connection) && context_window <= 16384;
+    // 小窗口模型看到工具就容易去调用，把窗口耗在技能和搜索上；纯问答直接回答，涉及文件或运行的请求不受影响。
+    let plain_answer = compact_local
+        && !super::super::task::requires_execution_verification(
+            input["message"].as_str().unwrap_or(""),
+        );
+    let prompt_skills: &[Value] = if plain_answer { &[] } else { skill_headers };
+    if plain_answer {
+        state.tools.selected.clear();
+    }
+    ctx.config["compactLocalModel"] = json!(compact_local);
+    ctx.config["plainLocalAnswer"] = json!(plain_answer);
     let guide = native(crate::tools::calculate(
         "tools.systemPrompt",
         &json!({
@@ -1031,11 +1044,11 @@ async fn assemble_prompt(
             "now": now_iso8601(),
             "timeZone": "Asia/Shanghai",
             "browserPrompt": if browser_prompt.is_empty() { json!([]) } else { json!([browser_prompt]) },
-            "skills": skill_headers,
+            "skills": prompt_skills,
             "contextWindowTokens": context_window,
             "includeParts": true,
             "maximumTokens": 1800,
-            "compactLocalModel": crate::models::gateway_local_engine::is_managed(&connection) && context_window <= 16384
+            "compactLocalModel": compact_local
         }),
     ))?;
     // 规则变化使旧评审失效；时钟和普通观测不进入此指纹，继续复用原缓存。
