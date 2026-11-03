@@ -309,6 +309,7 @@ async fn execute_loop(
             &response,
             &model.connection,
             &work_scope,
+            &ctx,
         )
         .await?
         {
@@ -386,6 +387,7 @@ async fn correct_pending_scope(
     response: &protocol::ModelResponse,
     connection: &Value,
     work_scope: &Value,
+    ctx: &GatewayToolContext,
 ) -> Result<bool> {
     if !response.calls.iter().any(|call| {
         !task::scope_allows_call(
@@ -394,6 +396,9 @@ async fn correct_pending_scope(
             crate::tools::policy::is_read_only_call(
                 call["name"].as_str().unwrap_or(""),
                 &call["arguments"],
+            ) || crate::tools::gateway_mcp::scope_read_only_call(
+                call["name"].as_str().unwrap_or(""),
+                ctx,
             ),
         )
     }) {

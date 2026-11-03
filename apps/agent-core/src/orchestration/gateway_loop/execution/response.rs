@@ -295,6 +295,9 @@ impl Execution {
                 crate::tools::policy::is_read_only_call(
                     call["name"].as_str().unwrap_or(""),
                     &call["arguments"],
+                ) || crate::tools::gateway_mcp::scope_read_only_call(
+                    call["name"].as_str().unwrap_or(""),
+                    &self.prepared.ctx,
                 ),
             )
         }) {

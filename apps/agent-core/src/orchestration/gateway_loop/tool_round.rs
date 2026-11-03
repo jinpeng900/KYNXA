@@ -789,15 +789,7 @@ impl ToolRound<'_> {
             let declared_read_only = ctx.runtime.schemas.read().await.iter().any(|descriptor| {
                 descriptor["name"] == name && descriptor["annotations"]["readOnlyHint"] == true
             });
-            let scene_read_only = name.rsplit('.').next().is_some_and(|method| {
-                matches!(
-                    method,
-                    "get_scene_info"
-                        | "get_object_info"
-                        | "list_scene_items"
-                        | "get_world_state_snapshot"
-                )
-            });
+            let scene_read_only = crate::tools::gateway_mcp::scene_read_method(name);
             let mutating = !is_observation
                 && !declared_read_only
                 && !scene_read_only

@@ -1548,6 +1548,32 @@ pub(crate) fn reusable_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
     reusable
 }
 
+/// 这些方法只读场景或连接状态，部分服务没有声明只读注解。
+pub(crate) fn scene_read_method(name: &str) -> bool {
+    name.rsplit('.').next().is_some_and(|method| {
+        matches!(
+            method,
+            "get_scene_info"
+                | "get_object_info"
+                | "list_scene_items"
+                | "get_world_state_snapshot"
+                | "get_addon_status"
+                | "kynxa_resources_list"
+                | "kynxa_resources_templates_list"
+                | "kynxa_resources_read"
+        )
+    })
+}
+
+/// 只回答“只读请求能否调用”；不授予权限，也不用于恢复时判断能否重放。
+pub(crate) fn scope_read_only_call(name: &str, ctx: &GatewayToolContext) -> bool {
+    name.starts_with("mcp.")
+        && (scene_read_method(name)
+            || reusable_catalog(ctx).iter().any(|descriptor| {
+                descriptor["name"] == name && descriptor["annotations"]["readOnlyHint"] == true
+            }))
+}
+
 fn invocation_generation(ctx: &GatewayToolContext) -> u64 {
     ctx.config["mcpConfigurationGeneration"]
         .as_u64()
@@ -3191,6 +3217,36 @@ mod tests {
             failure("LEGACY", "message", 500).response(),
             json!({"code":"LEGACY","error":"message"})
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_requests_allow_only_declared_read_only_mcp_tools() {
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let server = json!({"id":"fixture","enabled":true,"trusted":true,"transport":"streamable-http",
+            "url":"http://127.0.0.1:9/mcp","disabledTools":[]});
+        ctx.config["mcpServers"] = json!([server.clone()]);
+        super::super::gateway_tool_memory::synchronize(&ctx).await;
+        let schema = json!({"type":"object","properties":{}});
+        remember_actual_catalog(
+            &server,
+            &[
+                json!({"name":"lookup","inputSchema":schema,"annotations":{"readOnlyHint":true}}),
+                json!({"name":"change","inputSchema":schema,"annotations":{"readOnlyHint":false}}),
+                json!({"name":"unknown","inputSchema":schema}),
+            ],
+            configuration_generation(&ctx),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(scope_read_only_call("mcp.fixture.lookup", &ctx));
+        assert!(!scope_read_only_call("mcp.fixture.change", &ctx));
+        assert!(!scope_read_only_call("mcp.fixture.unknown", &ctx));
+        assert!(scope_read_only_call("mcp.blender.get_scene_info", &ctx));
+        assert!(!scope_read_only_call("mcp.blender.execute_blender_code", &ctx));
+        assert!(!scope_read_only_call("filesystem.write", &ctx));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

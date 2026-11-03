@@ -108,7 +108,7 @@ mod gateway_document_read;
 mod gateway_experience;
 mod gateway_extension_install;
 mod gateway_image;
-mod gateway_mcp;
+pub(crate) mod gateway_mcp;
 mod gateway_mcp_budget;
 mod gateway_mcp_oauth;
 pub(crate) mod gateway_process;

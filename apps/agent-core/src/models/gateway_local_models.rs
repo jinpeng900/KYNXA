@@ -145,13 +145,18 @@ fn catalog_model(spec: &ModelSpec) -> Option<&'static ModelSpec> {
     })
 }
 
-/// 仅对相同文件身份同步已修正的能力；不替换用户路径、启用状态、下载来源或上下文设置。
+/// 仅对相同文件身份同步已修正的能力；不替换用户路径、启用状态或下载来源。
+/// 上下文只把旧默认的 8K 升到目录值，其他取值视为用户设置。
 fn refresh_catalog_capabilities(manifest: &mut Manifest) -> bool {
     let mut changed = false;
     for model in manifest.models.values_mut() {
         if let Some(current) = catalog_model(&model.spec) {
             if model.spec.capabilities != current.capabilities {
                 model.spec.capabilities = current.capabilities.clone();
+                changed = true;
+            }
+            if model.spec.context_tokens == 8192 && current.context_tokens > 8192 {
+                model.spec.context_tokens = current.context_tokens;
                 changed = true;
             }
         }
@@ -859,7 +864,7 @@ async fn import_model(home: &Path, library: &Library, body: &Value) -> Result<()
         } else {
             vec!["text".into()]
         },
-        context_tokens: 8192,
+        context_tokens: 16384,
         license: "user-supplied".into(),
         source_url: String::new(),
         revision: String::new(),
@@ -1245,6 +1250,25 @@ mod tests {
         assert_eq!(restored["capabilities"], metadata["capabilities"]);
         shutdown(&home).await.unwrap();
         tokio::fs::remove_dir_all(home).await.unwrap();
+    }
+
+    #[test]
+    fn only_the_old_default_window_is_raised() {
+        let home = std::env::temp_dir().join("kynxa-local-window-upgrade");
+        assert!(catalog().iter().all(|model| model.context_tokens >= 16384));
+        let window_after_refresh = |id: &str, tokens: u64| {
+            let spec = catalog().iter().find(|model| model.id == id).unwrap();
+            let mut record = new_record(&home, &home.join(id), spec.clone());
+            record.spec.context_tokens = tokens;
+            let mut manifest = Manifest::default();
+            manifest.models.insert(id.into(), record);
+            refresh_catalog_capabilities(&mut manifest);
+            manifest.models[id].spec.context_tokens
+        };
+        assert_eq!(window_after_refresh("q25-7b-q4km", 8192), 16384);
+        assert_eq!(window_after_refresh("q25-7b-q4km", 24576), 24576);
+        assert_eq!(window_after_refresh("deepseek-r1-7b-q4km", 8192), 16384);
+        assert_eq!(window_after_refresh("deepseek-r1-7b-q4km", 4096), 4096);
     }
 
     #[tokio::test]
