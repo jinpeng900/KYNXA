@@ -422,6 +422,109 @@ mod durability_tests {
     }
 
     #[tokio::test]
+    async fn old_root_checkpoints_are_pruned_and_the_latest_still_restores() {
+        let root =
+            std::env::temp_dir().join(format!("kynxa-journal-prune-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = NewTask {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            goal: "Prune checkpoints".into(),
+            acceptance: Vec::new(),
+            scope: TaskScope {
+                project_id: None,
+                conversation_id: uuid::Uuid::new_v4().to_string(),
+                permission_snapshot: json!({"permissionMode":"full"}),
+            },
+            parent_task_id: None,
+            dependency_ids: Vec::new(),
+            budget: TaskBudget::default(),
+            input_reference: None,
+        };
+        crate::storage::gateway::ensure_conversation(
+            &root,
+            &input.scope.conversation_id,
+            "Prune fixture",
+        )
+        .unwrap();
+        let journal = TaskJournal::begin(&root, &input, "prune-first", 60_000).unwrap();
+        let origin = json!({"providerId":"fixture","model":"fixture"});
+        let output = journal
+            .save_task_blob("task-output", &json!({"kept":true}))
+            .await
+            .unwrap()
+            .reference;
+        let mut references = Vec::new();
+        for step in 0..5 {
+            let context = json!({"messages":[],"step":step});
+            let reference = journal
+                .save_root_work_context(&input.request_id, "fingerprint", &origin, &context)
+                .await
+                .unwrap();
+            journal
+                .checkpoint_from_chat(
+                    "assistant-prune",
+                    &input.request_id,
+                    Some(reference.clone()),
+                    json!({"step":step}),
+                )
+                .await
+                .unwrap();
+            journal.prune_root_checkpoints().unwrap();
+            references.push(reference);
+        }
+        let exists = |reference: &Value| {
+            root.join(reference["relativePath"].as_str().unwrap())
+                .exists()
+        };
+        assert!(references[..3].iter().all(|reference| !exists(reference)));
+        assert!(references[3..].iter().all(exists));
+        let kinds = journal
+            .repository
+            .artifacts(journal.task_id())
+            .unwrap()
+            .into_iter()
+            .map(|artifact| artifact.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "task-checkpoint").count(),
+            2
+        );
+        assert!(exists(&output));
+        assert!(journal.read_blob(&output).await.is_ok());
+        let (restored, reference) = journal
+            .read_root_work_context("assistant-prune", &input.request_id, "fingerprint", &origin)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored["step"], 4);
+        assert_eq!(reference, references[4]);
+        // 内容相同的新检查点复用旧产物，不能被当成旧版本删除。
+        let repeated = journal
+            .save_root_work_context(
+                &input.request_id,
+                "fingerprint",
+                &origin,
+                &json!({"messages":[],"step":4}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated, references[4]);
+        journal
+            .checkpoint_from_chat(
+                "assistant-prune",
+                &input.request_id,
+                Some(repeated.clone()),
+                json!({"step":"repeat"}),
+            )
+            .await
+            .unwrap();
+        journal.prune_root_checkpoints().unwrap();
+        assert!(exists(&repeated));
+        assert!(journal.read_blob(&repeated).await.is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn model_checkpoints_restore_scoped_images_without_changing_receipts_or_raw_hashes() {
         let root =
             std::env::temp_dir().join(format!("kynxa-journal-images-{}", uuid::Uuid::new_v4()));
@@ -1452,6 +1555,10 @@ impl TaskJournal {
         Ok(self.repository.save_checkpoint(&self.token, checkpoint)?)
     }
     /// 根私有快照绑定请求、范围及供应商，不作公开工具证据。
+    pub fn prune_root_checkpoints(&self) -> Result<()> {
+        Ok(self.repository.prune_checkpoints(&self.token, 2)?)
+    }
+
     pub async fn save_root_work_context(
         &self,
         request_id: &str,

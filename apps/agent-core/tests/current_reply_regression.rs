@@ -396,5 +396,5 @@ fn current_public_reply(error: &GatewayError, assessment: &Value, delivery: &Del
 fn extracted_delivery_source_matches_the_current_production_snapshot() {
     use sha2::{Digest, Sha256};
     assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop/delivery.rs").as_bytes())), "9769e7da4bd481e49567f99d20422e9bfb135a5c12b4ce1fde4a4d3ee88478da");
-    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop.rs").as_bytes())), "d1f09be6f0673c5a2f06bee9359f2719f73848aed096a35e630ca9abf5cec063");
+    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop.rs").as_bytes())), "705193b55dbfca5c3e1842e6f3c15f549893cd1aa1c41e9f0a6052d7757e49d5");
 }

@@ -1587,6 +1587,8 @@ impl LoopState {
                 }
                 journal.checkpoint_from_chat(self.assistant["Id"].as_str().unwrap_or(&run.request_id), &run.request_id,
                     self.context.work_context_reference.is_object().then(||self.context.work_context_reference.clone()), json!({"status":status,"round":self.transcript.rounds.len(),"toolCalls":self.assistant["ToolActivities"].as_array().map_or(0,Vec::len)})).await?;
+                // 清理失败不影响已保存的进度。
+                let _ = journal.prune_root_checkpoints();
             }
         }
         Ok(())

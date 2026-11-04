@@ -13,6 +13,9 @@ const MAX_RECORD_BYTES: usize = 128 * MIB;
 const MAX_INDEX_BYTES: usize = 64 * MIB;
 const MAX_CACHE_BYTES: usize = 96 * MIB;
 const MAX_PROJECTION_BYTES: usize = 32 * MIB;
+/// 同一条消息每次保存都追加完整新版本；旧版本占到这个规模才压缩，小记录保持原样。
+const COMPACT_MIN_BYTES: u64 = 16 * MIB as u64;
+const COMPACT_RATIO: u64 = 3;
 static HISTORY_CACHE: Mutex<Vec<(String, Arc<HistoryIndex>)>> = Mutex::new(Vec::new());
 
 #[derive(Clone)]
@@ -208,6 +211,45 @@ fn build_index(
     })
 }
 
+fn should_compact(index: &HistoryIndex) -> bool {
+    let live = index.records.iter().map(|record| record.length as u64).sum::<u64>();
+    index.file_bytes >= COMPACT_MIN_BYTES && index.file_bytes >= live.saturating_mul(COMPACT_RATIO)
+}
+
+/// 读取只用每条消息的最新版本，旧版本重写时丢弃；顺序不变，整体替换，中断时原文件仍完整。
+fn compact_log(
+    root: &Path,
+    path: &Path,
+    index: &HistoryIndex,
+) -> Result<(managed_files::StableReader, HistoryIndex), ContractError> {
+    let mut reader = managed_files::open_reader(root, path, u64::MAX)?.ok_or_else(changed)?;
+    let mut latest = Vec::new();
+    for record in &index.records {
+        conversation_logs::check_cancelled()?;
+        reader
+            .file
+            .seek(SeekFrom::Start(record.offset))
+            .map_err(conversation_logs::io_error)?;
+        let start = latest.len();
+        latest.resize(start + record.length, 0);
+        reader
+            .file
+            .read_exact(&mut latest[start..])
+            .map_err(conversation_logs::io_error)?;
+    }
+    reader.verify()?;
+    if reader.version_token()? != index.version_token {
+        return Err(changed());
+    }
+    // Windows 不能替换仍被打开的文件。
+    drop(reader);
+    managed_files::atomic_write(root, path, &latest, u64::MAX)?;
+    let mut reader = managed_files::open_reader(root, path, u64::MAX)?.ok_or_else(changed)?;
+    let version_token = reader.version_token()?;
+    let compacted = build_index(&mut reader, version_token)?;
+    Ok((reader, compacted))
+}
+
 /// 完成的读取仅保留来源身份与指定记录，最终复核时短时重开文件，不阻止目录所有者移动会话。
 pub(crate) struct HistoryRead {
     pub messages: Vec<String>,
@@ -263,7 +305,7 @@ impl HistoryRead {
             .map_err(conversation_logs::io_error)?;
         handle.sync_all().map_err(conversation_logs::io_error)?;
         drop(handle);
-        let reader =
+        let mut reader =
             managed_files::open_reader(&self.root, &self.path, u64::MAX)?.ok_or_else(changed)?;
         reader.verify()?;
         let version_token = reader.version_token()?;
@@ -311,6 +353,19 @@ impl HistoryRead {
                 .map(|(id, (_, role))| id.capacity() + role.capacity())
                 .sum::<usize>()
             + index.projection_bytes;
+        if should_compact(&index) {
+            drop(reader);
+            // 压缩失败不影响已保存的消息，下次保存再试。
+            let compacted = compact_log(&self.root, &self.path, &index);
+            reader = match compacted {
+                Ok((compacted_reader, compacted_index)) => {
+                    index = compacted_index;
+                    compacted_reader
+                }
+                Err(_) => managed_files::open_reader(&self.root, &self.path, u64::MAX)?
+                    .ok_or_else(changed)?,
+            };
+        }
         let receipt = json!({"appended":true,"hash":index.snapshot});
         let index = Arc::new(index);
         let owner = managed_files::digest(self.path.to_string_lossy().as_bytes());
@@ -1039,6 +1094,75 @@ mod tests {
                 .projected_messages
                 .is_empty()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_versions_are_compacted_without_changing_what_is_read() {
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-history-compact-{}-{}",
+            std::process::id(),
+            NEXT_HISTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let chat = "11111111-1111-4111-8111-111111111111";
+        let user = "33333333-3333-4333-8333-333333333333";
+        let target = "22222222-2222-4222-8222-222222222222";
+        let later = "44444444-4444-4444-8444-444444444444";
+        let location = json!({"Id":chat,"ProjectId":null});
+        let path = root.join("Chats").join(chat).join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let event = |id: &str, role: &str, content: &str| {
+            format!(
+                r#"{{"version":1,"type":"message.upsert","message":{{"Id":"{id}","Role":"{role}","Status":"streaming","Content":"{content}"}}}}"#
+            ) + "\n"
+        };
+        let mut log = event(user, "user", "question");
+        let padding = "x".repeat(MIB);
+        for _ in 0..17 {
+            log += &event(target, "assistant", &padding);
+        }
+        log += &event(later, "user", "later");
+        fs::write(&path, &log).unwrap();
+
+        let ids = HashSet::from([target.to_owned()]);
+        let mut read = read_latest(&root, &location, Some(&ids), false).unwrap();
+        let updated = json!({"Id":target,"Role":"assistant","Status":"completed","Content":"final"})
+            .to_string();
+        let receipt = read.append_message(&updated, false).unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.len() < 4096, "old versions remain: {}", bytes.len());
+        assert_eq!(receipt["hash"], managed_files::digest(&bytes));
+        read.verify().unwrap();
+        let all = read_latest(&root, &location, None, false).unwrap();
+        let contents = all
+            .messages
+            .iter()
+            .map(|raw| serde_json::from_str::<Value>(raw).unwrap()["Content"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec![json!("question"), json!("final"), json!("later")]);
+        let (page, _) = read_page(&json!({"root":root,"location":location,"limit":2})).unwrap();
+        assert_eq!(page["totalMessages"], 3);
+        let next = json!({"Id":target,"Role":"assistant","Status":"completed","Content":"again"})
+            .to_string();
+        let mut read = read_latest(&root, &location, Some(&ids), false).unwrap();
+        read.append_message(&next, false).unwrap();
+        let again = read_latest(&root, &location, Some(&ids), false).unwrap();
+        assert_eq!(again.messages, vec![next]);
+        drop(read);
+        drop(again);
+        drop(all);
+
+        // 有效内容本身很大时不反复重写。
+        let mut large = String::new();
+        for id in [user, later] {
+            large += &event(id, "user", &"y".repeat(9 * MIB));
+        }
+        fs::write(&path, &large).unwrap();
+        let mut read = read_latest(&root, &location, Some(&ids), false).unwrap();
+        read.append_message(&updated, false).unwrap();
+        assert!(fs::read(&path).unwrap().starts_with(large.as_bytes()));
+        drop(read);
         fs::remove_dir_all(root).unwrap();
     }
 

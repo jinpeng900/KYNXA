@@ -1997,6 +1997,74 @@ impl TaskRepository {
             connection.execute("INSERT INTO task_checkpoints(task_id,checkpoint_id,event_sequence,fingerprint,document) VALUES(?,?,?,?,?)",params![token.task_id,checkpoint.checkpoint_id,checkpoint.through_event_sequence,digest,raw(checkpoint)?]).map_err(|_|failure())?;Ok(checkpoint.clone())
         })
     }
+    /// 恢复只读最新检查点，更早的上下文正文只占磁盘；保留最近几个，防止最新的写坏。
+    pub fn prune_checkpoints(&self, token: &AttemptToken, keep: usize) -> Result<()> {
+        let stale = self.write(|connection| {
+            verify_fence(connection, token, true)?;
+            let mut kept = std::collections::HashSet::new();
+            {
+                let mut query = connection
+                    .prepare_cached("SELECT document FROM task_checkpoints WHERE task_id=? ORDER BY event_sequence DESC,rowid DESC LIMIT ?")
+                    .map_err(|_| failure())?;
+                let rows = query
+                    .query_map(params![token.task_id, keep as i64], |row| row.get::<_, String>(0))
+                    .map_err(|_| failure())?;
+                for row in rows {
+                    let checkpoint: TaskCheckpoint = decode(row.map_err(|_| failure())?)?;
+                    let context = &checkpoint.context_reference;
+                    for reference in [context, &context["summaryReference"]] {
+                        if let Some(id) = reference["artifactId"].as_str() {
+                            kept.insert(id.to_owned());
+                        }
+                    }
+                }
+            }
+            let stale = {
+                let mut query = connection
+                    .prepare_cached("SELECT document FROM task_artifacts WHERE task_id=? AND json_extract(document,'$.kind')='task-checkpoint'")
+                    .map_err(|_| failure())?;
+                let rows = query
+                    .query_map([&token.task_id], |row| row.get::<_, String>(0))
+                    .map_err(|_| failure())?;
+                let mut stale = Vec::new();
+                for row in rows {
+                    let artifact: TaskArtifact = decode(row.map_err(|_| failure())?)?;
+                    if !kept.contains(&artifact.artifact_id) {
+                        stale.push(artifact);
+                    }
+                }
+                stale
+            };
+            for artifact in &stale {
+                connection
+                    .execute(
+                        "DELETE FROM task_artifacts WHERE task_id=? AND artifact_id=?",
+                        params![token.task_id, artifact.artifact_id],
+                    )
+                    .map_err(|_| failure())?;
+            }
+            connection
+                .execute(
+                    "DELETE FROM task_checkpoints WHERE task_id=?1 AND rowid NOT IN (SELECT rowid FROM task_checkpoints WHERE task_id=?1 ORDER BY event_sequence DESC,rowid DESC LIMIT ?2)",
+                    params![token.task_id, keep as i64],
+                )
+                .map_err(|_| failure())?;
+            Ok(stale)
+        })?;
+        for artifact in stale {
+            let relative = format!(
+                "Agent/task-artifacts/{}/{}.json",
+                token.task_id, artifact.artifact_id
+            );
+            if artifact.reference["relativePath"].as_str() == Some(relative.as_str()) {
+                let path = self.root.join(&relative);
+                if managed_files::inspect(&self.root, &path, false, true, u64::MAX).is_ok() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn latest_checkpoint(&self, task_id: &str) -> Result<Option<TaskCheckpoint>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         let document:Option<String>=connection.query_row("SELECT document FROM task_checkpoints WHERE task_id=? ORDER BY event_sequence DESC,rowid DESC LIMIT 1",[task_id],|row|row.get(0)).optional().map_err(|_|failure())?;
