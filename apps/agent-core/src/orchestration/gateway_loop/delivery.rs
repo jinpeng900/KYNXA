@@ -2,7 +2,25 @@
 
 use super::*;
 
-const UNVERIFIED_REPLY_NOTICE: &str = "这次回答没有通过完成核验，可以让它继续。";
+/// 网关自己决定停下的情况（没有进展、核验没过、额度用完），不是硬件、软件关闭或模型的问题，
+/// 由模型写完回答，不向用户追加系统提示。
+pub(super) fn answered_by_model(code: &str) -> bool {
+    matches!(
+        code,
+        "TASK_CONTINUATION_NO_PROGRESS"
+            | "TASK_COMPLETION_REVIEW_INVALID"
+            | "TOOL_RUN_ROUND_LIMIT"
+            | "TOOL_RUN_TIMEOUT"
+            | "TOOL_RUN_CALL_LIMIT"
+            | "TOOL_RUN_OUTPUT_LIMIT"
+            | "EVIDENCE_SOURCE_CHANGED"
+    )
+}
+
+/// 额度用完的持久任务会自动开下一段继续做，长任务靠这一点连续运行，不能在这里收尾。
+pub(super) fn writes_closing_answer(code: &str, durable: bool) -> bool {
+    answered_by_model(code) && !(durable && internal_recovery_required(code))
+}
 
 /// 收尾异常时说明已落地的事实；文件保存成功不代表全部要求已满足。
 fn stopped_reply_notice(
@@ -38,14 +56,9 @@ fn stopped_reply_notice(
     let reason = if error.code == "MODEL_TOOL_OUTPUT_TRUNCATED" {
         // 截断的工具请求尚未执行，解码器错误不作为答复交付。
         "这一步的操作内容未能完整生成，尚未执行；已有结果保留。"
-    } else if error.code == "TASK_CONTINUATION_NO_PROGRESS" {
-        if review.verification["state"] == "checks-failed" {
-            "仍有检查未通过，尚未完成全部要求；已有结果和进度已保留。"
-        } else if review.verification["pendingValidation"] == true {
-            "必要检查尚未完成，已有结果和进度已保留。"
-        } else {
-            error.message.as_str()
-        }
+    } else if answered_by_model(&error.code) {
+        // 到这里说明模型连收尾回答也没有写出来。
+        "模型未返回可见正文，请重试。"
     } else {
         error.message.as_str()
     };
@@ -111,15 +124,16 @@ fn current_public_reply(
     }
 }
 
-/// 回答已经显示，只是后续核验放不下或模型只回了空内容；之后的空轮次不算新进展。
-fn answer_outgrew_review(code: &str, rounds: &[Value], shown: &str) -> bool {
-    matches!(
+/// 回答已经显示，只是后续核验放不下、网关决定停下或模型只回了空内容；之后的空轮次不算新进展。
+pub(super) fn answer_outgrew_review(code: &str, rounds: &[Value], shown: &str) -> bool {
+    (matches!(
         code,
         "CONTEXT_INPUT_TOO_LARGE"
             | "CONTEXT_IRREDUCIBLE_INPUT"
             | "TOOL_CONTEXT_BUDGET_EXCEEDED"
             | "MODEL_RESPONSE_EMPTY"
-    ) && rounds
+    ) || answered_by_model(code))
+        && rounds
         .iter()
         .rev()
         .find(|round| {
@@ -192,7 +206,7 @@ impl FinalDelivery<'_> {
         if !final_received && stopped.is_none() {
             stopped = Some(GatewayError::new(
                 "TOOL_RUN_ROUND_LIMIT",
-                "本次任务轮次已用完，已完成内容和回执保留。",
+                "本次任务轮次已用完。",
                 409,
             ));
         }
@@ -268,16 +282,12 @@ impl FinalDelivery<'_> {
                 && super::super::task::unexecuted_tool_names(&state.delivery.pending_delivery)
                     .is_empty()
             {
-                // 任务仍不算完成，但模型已写好的回答要交给用户。
+                // 任务状态另行记录，模型已写好的回答要交给用户。
                 let id = new_id();
                 state.publish_buffered_delivery(run, round, &id).await;
-                let note = format!("\n\n{UNVERIFIED_REPLY_NOTICE}");
-                run.emit(json!({"type":"text_delta","delta":note,"segmentId":id}))
-                    .await;
-                state.append(&note, "", round, &id);
                 run.emit(json!({"type":"assistant_segment","segment":state.segment(&id),"toolStreamProtocol":3})).await;
             } else if answer_outgrew_review(&error.code, &state.transcript.rounds, &state.content()) {
-                // 回答已经交付，只是后续核验放不下，不再提示“任务未完成”。
+                // 回答已经交付，不再追加提示。
                 state.delivery.pending_delivery.clear();
                 state.delivery.delivery_continuing = false;
             } else {
@@ -518,7 +528,7 @@ mod tests {
             "TASK_COMPLETION_REVIEW_INVALID",
         ] {
             let error =
-                GatewayError::new(code, "后续处理未能继续推进，已有结果和进度已保留。", 409);
+                GatewayError::new(code, "连续多轮没有新的进展。", 409);
             let (assessment, delivery, mut rounds) = published_explanation();
             assert_eq!(
                 current_public_reply(&error, &assessment, &delivery, &rounds),
@@ -635,7 +645,7 @@ mod tests {
     fn stopped_reply_reports_current_outputs_without_certifying_completion() {
         let error = GatewayError::new(
             "TASK_CONTINUATION_NO_PROGRESS",
-            "后续处理未能继续推进，已有结果和进度已保留。",
+            "连续多轮没有新的进展。",
             409,
         );
         let mut review = CompletionEvidenceSet {
@@ -654,7 +664,10 @@ mod tests {
                 && !notice.contains("中间内容")
         );
         review.verification = json!({"state":"checks-failed","pendingValidation":true});
-        assert!(stopped_reply_notice(&error, &review).contains("检查未通过"));
+        assert!(
+            !stopped_reply_notice(&error, &review).contains("检查")
+                && !stopped_reply_notice(&error, &review).contains("已保留")
+        );
         review
             .records
             .iter_mut()
@@ -714,10 +727,46 @@ mod context_stop_tests {
     fn a_shown_answer_is_not_reported_as_unfinished_when_only_review_overflows() {
         let answer = [json!({"text":"完整回答","calls":[]})];
         assert!(answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &answer, "完整回答"));
-        assert!(!answer_outgrew_review("TOOL_RUN_TIMEOUT", &answer, "完整回答"));
+        assert!(answer_outgrew_review("TOOL_RUN_TIMEOUT", &answer, "完整回答"));
+        assert!(!answer_outgrew_review("TOOL_ACCESS_DENIED", &answer, "完整回答"));
         assert!(!answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &answer, "别的内容"));
         let working = [json!({"text":"我先读文件","calls":[{"id":"read"}]})];
         assert!(!answer_outgrew_review("CONTEXT_INPUT_TOO_LARGE", &working, "我先读文件"));
+    }
+
+    #[test]
+    fn only_a_message_that_is_all_stop_counts_as_stopping() {
+        use super::super::acceptance::steering_means_stop;
+        for text in ["停止", "停下来吧", "算了", "不用了。", "stop", "取消，停下", "停下来吧 ，"] {
+            assert!(steering_means_stop(text), "{text}");
+        }
+        for text in [
+            "停下来吧 ， 放在右侧我先看看",
+            "停下来放在右侧我先看看",
+            "取消这一项，其他继续",
+            "取消这一项其他继续",
+            "每个章节加上引用资料链接",
+            "stop, then show me the file",
+        ] {
+            assert!(!steering_means_stop(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn long_tasks_continue_past_their_limits_instead_of_closing() {
+        for code in [
+            "TOOL_RUN_ROUND_LIMIT",
+            "TOOL_RUN_CALL_LIMIT",
+            "TOOL_RUN_TIMEOUT",
+            "TOOL_RUN_OUTPUT_LIMIT",
+        ] {
+            assert!(!super::writes_closing_answer(code, true), "{code}");
+            assert!(super::writes_closing_answer(code, false), "{code}");
+        }
+        for code in ["TASK_CONTINUATION_NO_PROGRESS", "TASK_COMPLETION_REVIEW_INVALID"] {
+            assert!(super::writes_closing_answer(code, true), "{code}");
+        }
+        assert!(!super::writes_closing_answer("MODEL_RESPONSE_EMPTY", true));
     }
 
     #[test]

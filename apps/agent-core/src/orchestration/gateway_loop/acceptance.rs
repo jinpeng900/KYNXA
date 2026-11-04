@@ -359,7 +359,7 @@ pub(super) fn apply_steering_revision(
 }
 
 /// 用户是否在要求停下；这类话不能当成新增要求继续执行。
-pub(super) fn steering_means_stop(text: &str) -> bool {
+fn steering_stop_words() -> &'static regex::Regex {
     static STOP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     STOP.get_or_init(|| {
         regex::Regex::new(
@@ -367,13 +367,32 @@ pub(super) fn steering_means_stop(text: &str) -> bool {
         )
         .expect("static stop expression")
     })
-    .is_match(text)
 }
 
-/// 模型两次都没给出合规确认时，把用户原话加入验收项继续工作，格式问题不该让任务中断。
+/// 去掉停止用语、语气词和标点后什么都不剩，才是单纯要求停下；不依赖用户怎么加标点。
+pub(super) fn steering_means_stop(text: &str) -> bool {
+    let rest = steering_stop_words().replace_all(text, "").to_lowercase();
+    steering_stop_words().is_match(text)
+        && rest
+            .replace("please", "")
+            .replace("now", "")
+            .chars()
+            .all(|c| !c.is_alphanumeric() || "来吧了呀啊哦嗯啦先请那就".contains(c))
+}
+
+/// 既提到停止又有别的内容时，原来的工作还做不做由模型按这句话的意思判断，这里不替它拆句。
+fn steering_changes_work(text: &str) -> bool {
+    steering_stop_words().is_match(text) && !steering_means_stop(text)
+}
+
+/// 把用户原话加入验收项继续工作，格式问题不该让任务中断。
 pub(super) fn adopt_unacknowledged_steering(state: &mut LoopState, minimum_active_ms: u64) {
     let latest = state.assistant["LatestUserSteering"].clone();
     let text = latest["text"].as_str().unwrap_or("").trim().to_owned();
+    let changes_work = steering_changes_work(&text);
+    if changes_work {
+        state.completion.acceptance_requirements.clear();
+    }
     if !text.is_empty() && !state.completion.acceptance_requirements.contains(&text) {
         state.completion.acceptance_requirements.push(text);
     }
@@ -385,7 +404,11 @@ pub(super) fn adopt_unacknowledged_steering(state: &mut LoopState, minimum_activ
     if let Some(fields) = state.completion.review_checkpoint.as_object_mut() {
         fields.remove("reviewFormatRepair");
     }
-    state.broker_note("The latest user message was added to the requirements as written. Tools are available again; continue the work and answer it.");
+    state.broker_note(if changes_work {
+        "The latest user message changes the earlier work. Follow it by its meaning: earlier work continues only where the message keeps it. If it says to stop that work, do not continue it and do only what it asks. Tools are available."
+    } else {
+        "The latest user message was added to the requirements as written. Tools are available; continue the work and cover it."
+    });
 }
 
 pub(super) fn acceptance_revision(state: &LoopState) -> (u64, String) {
@@ -1190,7 +1213,7 @@ mod steering_stop_tests {
             assert!(steering_means_stop(text), "{text}");
         }
         for text in ["另外把结果写到 squares.txt", "顺便加一个非停止条件的测试用例说明"] {
-            assert_eq!(steering_means_stop(text), text.contains("停止"), "{text}");
+            assert!(!steering_means_stop(text), "{text}");
         }
         assert!(!steering_means_stop("add a nonstop mode"));
     }

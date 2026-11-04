@@ -107,6 +107,41 @@ impl Execution {
             self.rounds.final_received = true;
             return Ok(PhaseOutcome::Stop);
         }
+        // 用户的新要求直接加入验收项，工作不中断；只有要求停止才等模型确认。
+        if unresolved_user_steering(&self.prepared.state)
+            && !response.output_truncated
+            && !steering_means_stop(
+                self.prepared.state.assistant["LatestUserSteering"]["text"]
+                    .as_str()
+                    .unwrap_or(""),
+            )
+        {
+            adopt_unacknowledged_steering(&mut self.prepared.state, self.rounds.minimum_active_ms);
+            self.rounds.review_pending = false;
+            append_control_notice(&mut self.prepared.state, "completionReviewNotice", None);
+            // 新要求到达前生成的调用和检查回复不算数，让模型按新要求重新决定。
+            if reviewing || steering_arrived && !response.calls.is_empty() {
+                let skipped = response.calls.iter().map(|call| json!({"call":call,"result":{
+                    "status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED",
+                    "content":{"notice":"Not dispatched because a newer user message arrived. Repeat this call if it still applies."}
+                }})).collect::<Vec<_>>();
+                self.prepared.state.context.history = protocol::append_results(
+                    &self.prepared.protocol_name,
+                    &self.prepared.state.context.history,
+                    &response,
+                    &skipped,
+                )?;
+                self.prepared.state.push_transcript_round(
+                    json!({"round":round,"text":"","calls":[],
+                    "unexecutedCallCount":response.calls.len(),"reviewing":reviewing}),
+                );
+                self.prepared
+                    .state
+                    .save(&self.runtime, &self.run, "streaming", None)
+                    .await?;
+                return Ok(PhaseOutcome::Continue);
+            }
+        }
         if unresolved_user_steering(&self.prepared.state) {
             let repair = crate::orchestration::task::steering_format_repair(
                 &mut self.prepared.state.completion.review_checkpoint,
@@ -176,7 +211,7 @@ impl Execution {
             if !response.output_truncated && repair["action"] == "wait" {
                 self.rounds.stopped = Some(GatewayError::new(
                     "TASK_COMPLETION_REVIEW_INVALID",
-                    "没能确认你刚才的新要求，已有结果和进度已保留，请再发一次。",
+                    "模型没有确认用户最新的要求。",
                     502,
                 ));
                 return Ok(PhaseOutcome::Stop);
@@ -582,7 +617,7 @@ impl Execution {
             if repair["action"] == "wait" {
                 self.rounds.stopped = Some(GatewayError::new(
                     "TASK_COMPLETION_REVIEW_INVALID",
-                    "这次回答没有通过完成核验，已有结果和进度已保留，可以让它继续。",
+                    "模型没有给出有效的完成状态。",
                     409,
                 ));
                 self.prepared
@@ -1094,7 +1129,7 @@ impl Execution {
                 self.rounds.task_status["reason"]
                     .as_str()
                     .filter(|reason| !reason.trim().is_empty())
-                    .unwrap_or("继续执行没有取得新的进展，已有结果保留。"),
+                    .unwrap_or("连续多轮没有新的进展。"),
                 409,
             ));
             return Ok(PhaseOutcome::Stop);

@@ -190,7 +190,8 @@ impl Execution {
             self.rounds.image_fallback = true;
             self.prepared.state.broker_note("The configured local model accepts text only. Original image attachments are preserved; read their text with attachment.read (OCR) when needed. Do not claim to have inspected image pixels.");
         }
-        if (self.run.active_elapsed(self.run.created).as_millis() as u64)
+        if self.rounds.closing_answer.is_none()
+            && (self.run.active_elapsed(self.run.created).as_millis() as u64)
             .saturating_sub(self.rounds.segment_initial_active_ms)
             > self.prepared.limits["maxDurationMs"]
                 .as_u64()
@@ -231,7 +232,13 @@ impl Execution {
             .rounds
             .review_pending
             .then(|| completion_review_instruction(&self.prepared.state));
-        let used_calls = count_tool_attempts(&self.prepared.state.assistant);
+        // 能续接的任务额度用完就开下一段，不关工具，也不提前催模型收尾；否则按段计算剩余额度。
+        let used_calls = if self.run.journal.is_some() {
+            0
+        } else {
+            count_tool_attempts(&self.prepared.state.assistant)
+                .saturating_sub(self.rounds.segment_initial_calls)
+        };
         let delivery = self.prepared.state.work_progress.delivery_plan(
             self.prepared.limits["maxToolCalls"].as_u64().unwrap_or(256),
             used_calls,
@@ -280,6 +287,7 @@ impl Execution {
         let steering_repair = unresolved_user_steering(&self.prepared.state)
             && self.prepared.state.completion.review_checkpoint["reviewFormatRepair"].is_object();
         let tools_closed = delivery.tools_exhausted
+            || self.rounds.closing_answer.is_some()
             || steering_repair
             || self.prepared.ctx.config["plainLocalAnswer"] == true;
         let declarations_disabled = !self.prepared.supports_tools || tools_closed;

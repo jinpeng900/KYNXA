@@ -867,6 +867,22 @@ async fn observe_host_start(
     }
 }
 
+/// 按要求停止且进程已全部退出的任务结果是确定的，不算结果未知。
+fn mark_requested_stop(view: &mut Value) {
+    let receipt = &view["receipt"];
+    if view["status"] == "unknown"
+        && receipt["cancelled"] == true
+        && receipt["activeProcessesAfterExit"] == 0
+    {
+        view["status"] = json!("stopped");
+        let receipt = view["receipt"].as_object_mut().unwrap();
+        receipt.insert("outcome".to_owned(), json!("stopped"));
+        receipt.insert("status".to_owned(), json!("stopped"));
+        receipt.remove("isError");
+        receipt.remove("code");
+    }
+}
+
 /// 接线终端与桌面工具，复用原生执行器的策略和任务状态，不另建执行记录。
 pub(crate) async fn execute(
     name: &str,
@@ -926,6 +942,8 @@ pub(crate) async fn execute(
             .insert(id.clone(), job.clone());
         let mut owned = ctx.clone();
         owned.cancellation = receiver;
+        // 后台任务有自己的取消标记；共用请求的标记时，停止任务会连带取消请求后续的操作。
+        owned.config["nativeCancellationId"] = json!(uuid::Uuid::new_v4().to_string());
         let task_id = id.clone();
         tokio::spawn(async move {
             let value = host_run(input, &owned, Some(&task_id))
@@ -993,6 +1011,7 @@ pub(crate) async fn execute(
             value["output"] = json!(String::from_utf16_lossy(&units));
             value.as_object_mut().unwrap().remove("outputUnits");
         }
+        mark_requested_stop(&mut value);
         return Ok(value);
     }
     if name == "terminal.run" {
@@ -1366,6 +1385,60 @@ pub(crate) async fn capabilities(kind: &str, ctx: &GatewayToolContext) -> Value 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_requested_stop_is_a_known_result() {
+        let mut stopped = serde_json::json!({"status":"unknown","receipt":{"outcome":"unknown","status":"unknown",
+            "cancelled":true,"activeProcessesAfterExit":0,"isError":true,"code":"TOOL_CANCELLED"}});
+        super::mark_requested_stop(&mut stopped);
+        assert_eq!(stopped["status"], "stopped");
+        assert_eq!(stopped["receipt"]["outcome"], "stopped");
+        assert!(stopped["receipt"]["isError"].is_null() && stopped["receipt"]["code"].is_null());
+        for mut unsettled in [
+            serde_json::json!({"status":"unknown","receipt":{"cancelled":true,"activeProcessesAfterExit":1}}),
+            serde_json::json!({"status":"unknown","receipt":{"cancelled":false,"activeProcessesAfterExit":0}}),
+            serde_json::json!({"status":"running"}),
+        ] {
+            let before = unsettled.clone();
+            super::mark_requested_stop(&mut unsettled);
+            assert_eq!(unsettled, before);
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_a_background_job_leaves_the_request_running() {
+        let Some(executable) = std::env::var_os("KYNXA_TEST_TOOLHOST_EXE") else {
+            return;
+        };
+        let (mut ctx, _sender) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        ctx.toolhost_exe = executable.into();
+        ctx.approved = true;
+        let key = uuid::Uuid::new_v4().to_string();
+        let lease = crate::service_cancellation::CancellationLease::acquire(&key).unwrap();
+        ctx.config["nativeCancellationId"] = serde_json::json!(key);
+        let started = super::execute(
+            "terminal.host.start",
+            serde_json::json!({"shell":"cmd","script":"ping -n 60 127.0.0.1 >nul","cwd":ctx.workdir,
+                "timeoutMs":90000,"reason":"Background job stop verification"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let stopped = super::execute(
+            "terminal.host.stop",
+            serde_json::json!({"jobId":started["jobId"],"reason":"Background job stop verification"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stopped["status"], "stopped", "{stopped}");
+        assert!(!lease.token.load(std::sync::atomic::Ordering::Acquire));
+        super::shutdown_checked(&ctx).await.unwrap();
+        drop(lease);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     use super::*;
 
     #[tokio::test]

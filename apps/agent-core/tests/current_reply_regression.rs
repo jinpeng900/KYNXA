@@ -266,7 +266,7 @@ fn steering_syntax_improvement_repairs_without_treating_prose_changes_as_work() 
 #[test]
 fn extracted_control_source_matches_the_current_production_snapshot() {
     use sha2::{Digest, Sha256};
-    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/task.rs").as_bytes())), "baf911b19e6eda8b61c61b347dfc97934cd66a86271d14a226f2bd04a9016328");
+    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/task.rs").as_bytes())), "20c3aac463d8f939a55bee652c2130d7a4dc1d2c5faa4d6b4383a3a45047b2f3");
 }
 
 mod delivery {
@@ -327,7 +327,7 @@ fn current_public_reply(error: &GatewayError, assessment: &Value, delivery: &Del
     #[test]
     fn current_public_explanation_survives_stopped_work_without_certifying_completion() {
         for code in ["TASK_CONTINUATION_NO_PROGRESS", "TASK_COMPLETION_REVIEW_INVALID"] {
-            let error = GatewayError::new(code, "后续处理未能继续推进，已有结果和进度已保留。", 409);
+            let error = GatewayError::new(code, "连续多轮没有新的进展。", 409);
             let (assessment, delivery, mut rounds) = published_explanation();
             assert_eq!(current_public_reply(&error, &assessment, &delivery, &rounds), Some(0));
             rounds[0]["unexecutedCallCount"] = json!(0);
@@ -395,6 +395,6 @@ fn current_public_reply(error: &GatewayError, assessment: &Value, delivery: &Del
 #[test]
 fn extracted_delivery_source_matches_the_current_production_snapshot() {
     use sha2::{Digest, Sha256};
-    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop/delivery.rs").as_bytes())), "1c9a91d1657662999c28b635de4bddbdb55d514368723c82a3021606c1ec08e0");
+    assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop/delivery.rs").as_bytes())), "9769e7da4bd481e49567f99d20422e9bfb135a5c12b4ce1fde4a4d3ee88478da");
     assert_eq!(format!("{:x}", Sha256::digest(include_str!("../src/orchestration/gateway_loop.rs").as_bytes())), "d1f09be6f0673c5a2f06bee9359f2719f73848aed096a35e630ca9abf5cec063");
 }

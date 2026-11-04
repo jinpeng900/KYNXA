@@ -373,6 +373,18 @@ impl RunProgress {
         Ok(json!({"hostEffectClassificationVersion":self.host_effect_classification_version}))
     }
 
+    /// 自身写入要同步到版本记录，否则之后的比对会把它当成外部改动。
+    fn follow_own_write(&mut self, args: &Value) {
+        let before = version_identity(&args["beforeVersion"]);
+        let after = version_identity(&args["afterVersion"]);
+        if observed_code_targets(&self.latest_code_version)
+            && observed_code_targets(&after)
+            && before["signature"] == self.latest_code_version["signature"]
+        {
+            self.latest_code_version = after;
+        }
+    }
+
     fn code_mutation_since(&self, revision: u64) -> bool {
         self.code_mutation_revision > revision
     }
@@ -628,6 +640,9 @@ impl RunProgress {
         {
             if completed || uncertain {
                 self.mutation_revision += 1;
+            }
+            if completed {
+                self.follow_own_write(args);
             }
             if name == "attachment.export" && completed {
                 if output["codeTarget"] == true {

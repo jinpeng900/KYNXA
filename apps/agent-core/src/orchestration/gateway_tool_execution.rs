@@ -23,7 +23,7 @@ pub(super) fn progress_interruption(plan: &WorkProgressPlan) -> Option<GatewayEr
     plan.wait_for_user.then(|| {
         GatewayError::new(
             "TASK_CONTINUATION_NO_PROGRESS",
-            "任务还没有全部完成，已有结果和进度已保留，可以让它继续。",
+            "连续多轮没有新的进展。",
             409,
         )
     })

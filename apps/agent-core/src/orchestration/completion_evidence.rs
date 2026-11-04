@@ -388,7 +388,7 @@ pub(super) fn from_receipt(call: &Value, receipt: &Value) -> Value {
         kinds.push(EvidenceKind::ObservedContent);
     } else if matches!(
         name,
-        "filesystem.stat" | "process.list" | "computer.read" | "computer.windows"
+        "filesystem.stat" | "filesystem.list" | "process.list" | "computer.read" | "computer.windows"
     ) || name == "artifact.open" && body["previewAvailable"] == true
         || name.rsplit('.').next().is_some_and(|method| {
             matches!(
@@ -989,7 +989,14 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
                         .any(|expected| command_names_target(record, expected))
             })
             .collect();
-        if writers.is_empty()
+        // 要求没点名文件时，本任务确实写过文件，读取结果就能证明“告诉我写了什么”这类汇报。
+        let reports_written_output = expected.is_empty()
+            && records.iter().any(|record| has_kind(record, "committed-output"))
+            && matched
+                .iter()
+                .any(|record| has_kind(record, "observed-state") || has_kind(record, "observed-content"));
+        if !reports_written_output
+            && (writers.is_empty()
             || expected.iter().any(|expected| {
                 !writers.iter().any(|writer| {
                     let targets = writer["targets"].as_array();
@@ -1019,7 +1026,7 @@ pub(super) fn supports_claim(claim: &Value, requirement: &str, records: &[Value]
                             })
                         })
                 })
-            })
+            }))
         {
             return false;
         }
@@ -1415,6 +1422,76 @@ Get-Item (Join-Path $dir 'squares.txt')"}}),
             );
             assert_eq!(progress.verification()["mutationRevision"], 1);
         }
+    }
+
+    #[test]
+    fn a_read_result_supports_a_claim_without_a_write_requirement() {
+        let records = vec![receipt(
+            "filesystem.list",
+            "list-output",
+            json!({"entries":[{"name":"step1.txt"}]}),
+        )];
+        let claim = json!({"item":"全部写完后告诉我一共创建了几个文件","evidence":["list-output"]});
+        assert!(supports_claim(&claim, "", &records));
+    }
+
+    #[test]
+    fn a_listing_can_prove_a_report_about_files_already_written() {
+        let requirement = "全部写完后告诉我一共创建了几个文件";
+        let claim = json!({"item":requirement,"evidence":["list-output"]});
+        let list = receipt(
+            "filesystem.list",
+            "list-output",
+            json!({"entries":[{"name":"step1.txt"}]}),
+        );
+        // 没有写入过，只列目录不能证明创建了文件。
+        assert!(!supports_claim(&claim, requirement, &[list.clone()]));
+        let write = receipt(
+            "filesystem.write",
+            "write-output",
+            json!({"path":"C:/work/step1.txt","sha256":"a".repeat(64),"bytes":9}),
+        );
+        assert!(supports_claim(&claim, requirement, &[write, list]));
+    }
+
+    #[test]
+    fn own_edits_after_a_terminal_snapshot_are_not_outside_changes() {
+        let path = "C:/work/page.html";
+        let first = code_snapshot(path, &"a".repeat(64));
+        let second = code_snapshot(path, &"b".repeat(64));
+        let (mut progress, _) = artifact_delivery(path);
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"serve","name":"terminal.host.start",
+            "arguments":{"script":"& serve.ps1"}},"result":{"status":"completed"},
+            "canonicalResult":{"status":"running"},"beforeVersion":first,"afterVersion":first})).unwrap();
+        let output = json!({"path":path,"sha256":"b".repeat(64),"bytes":100});
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"edit","name":"filesystem.edit"},
+            "result":{"status":"completed"},"canonicalResult":output,
+            "beforeVersion":first,"afterVersion":second})).unwrap();
+        let records = vec![
+            receipt("filesystem.edit", "edit", output),
+            receipt(
+                "artifact.open",
+                "open",
+                json!({"path":path,"version":"b".repeat(64),
+                "previewAvailable":true,"previewStatus":"registered","rendered":false}),
+            ),
+        ];
+        let scope = validation_scope(&["写一个网页，展示右侧".to_owned()], &records);
+        assert_eq!(
+            progress.verification_for_scope(&scope)["pendingValidation"],
+            false
+        );
+        // 外部改动仍要提示。
+        progress
+            .apply(
+                "progress.finalVersion",
+                &json!({"snapshot":code_snapshot(path, &"c".repeat(64))}),
+            )
+            .unwrap();
+        assert_eq!(
+            progress.verification_for_scope(&scope)["pendingValidation"],
+            true
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub(crate) fn resolve_work_scope(message: &str, previous: &Value) -> Value {
     let positive = positive_request_text(&text);
     let execute = EXECUTE.get_or_init(|| Regex::new(concat!(
         r"(?ix)(?:开始|直接|继续|接着|现在|立即|马上|就按.{0,24})(?:动手|执行|实施|修改|修复|制作|建模|生成|做)",
-        r"|^\s*(?:那就|好|好的|请)?(?:开始|执行|动手|继续做|开始做)(?:吧|了)?[。！!\s]*$",
+        r"|^\s*(?:那就|好|好的|请)?(?:开始|执行|动手|继续做|开始做|写|做|改)(?:吧|了)?[。！!\s]*$",
         r"|(?:^|[。！？!?\n])\s*(?:请|帮我)?(?:(?:修复|修改)(?:这个|这些|该)(?:bug|错误|问题|代码|功能)|把(?:这个|这些|上面|刚才)(?:问题|错误|代码)?(?:给)?(?:改掉|修复|修改))(?:[，,。；;！!\s]|$)",
         r"|\b(?:start|begin|proceed|continue)\s+(?:the\s+)?(?:implementation|executing|execution|building|coding|work)\b"
     )).expect("static execution scope expression")).is_match(&positive);
