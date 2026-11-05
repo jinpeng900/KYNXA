@@ -335,22 +335,29 @@ async fn prepare_session(
 ) -> Result<PreparedSession, GatewayError> {
     let provider = input["provider"].as_str().unwrap_or("");
     let permission = input["permissionMode"].as_str().unwrap_or("smart");
+    // 保存“记住：”消息会写记忆文件，读记忆要等它写完，这一轮才能读到新记忆。
+    let (user_committed, user_commit_done) = tokio::sync::oneshot::channel::<()>();
     let commit_user = async {
-        if !user_was_saved {
-            let root = runtime.config.data_root.clone();
-            let conversation = run.conversation_id.clone();
-            let original = run.original_message_raw.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Some(raw) = original {
-                    data::upsert_message_content_raw(&root, &conversation, &user, &raw)
-                } else {
-                    data::upsert_message(&root, &conversation, &user)
-                }
-            })
-            .await
-            .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "消息保存失败。", 500))??;
+        let result = async {
+            if !user_was_saved {
+                let root = runtime.config.data_root.clone();
+                let conversation = run.conversation_id.clone();
+                let original = run.original_message_raw.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(raw) = original {
+                        data::upsert_message_content_raw(&root, &conversation, &user, &raw)
+                    } else {
+                        data::upsert_message(&root, &conversation, &user)
+                    }
+                })
+                .await
+                .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "消息保存失败。", 500))??;
+            }
+            Ok::<(), GatewayError>(())
         }
-        Ok::<(), GatewayError>(())
+        .await;
+        let _ = user_committed.send(());
+        result
     };
     let prepare_connections = prepare_in_parallel(
         runtime.models.connection_for(provider),
@@ -374,6 +381,7 @@ async fn prepare_session(
                 .await
             },
             async {
+                let _ = user_commit_done.await;
                 tokio::task::spawn_blocking(move || {
                     gateway_memory::context(&memory_root, &memory_chat)
                 })

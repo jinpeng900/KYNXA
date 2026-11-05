@@ -1083,7 +1083,26 @@ pub fn validate_snapshot(root: &Path, conversation_id: &str, snapshot: &Value) -
     )
 }
 
+/// 读取期间文件被写入只说明读到了中间状态，重读即可，不能让这一轮对话失败。
 fn context_selected(
+    root: &Path,
+    conversation_id: &str,
+    selected: Option<&HashSet<String>>,
+) -> ContractResult {
+    const ATTEMPTS: u64 = 12;
+    for attempt in 1.. {
+        match read_context_selected(root, conversation_id, selected) {
+            Err(error) if error.code() == "MEMORY_CONFLICT" && attempt < ATTEMPTS => {
+                let wait = (25 * attempt).min(200);
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+fn read_context_selected(
     root: &Path,
     conversation_id: &str,
     selected: Option<&HashSet<String>>,
@@ -1896,6 +1915,25 @@ mod candidate_transition_tests {
         fn document(&self) -> Value {
             read_index_document(&self.root, "chat", &self.chat).unwrap()
         }
+        fn remember_while_reading(&self, count: usize) -> usize {
+            let done = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    for index in 0..count {
+                        let id = self.append("user", &format!("全局记住：并发约定第 {index} 条"));
+                        capture_explicit_instruction(&self.root, &self.chat, &id).unwrap();
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
+                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                let mut reads = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    context(&self.root, &self.chat).unwrap();
+                    reads += 1;
+                }
+                reads
+            })
+        }
         fn wait(&self) -> Value {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
@@ -2078,6 +2116,16 @@ mod candidate_transition_tests {
             next_users.contains(&quote["messageId"].as_str().unwrap().to_string())
                 && !users.contains(&quote["messageId"].as_str().unwrap().to_string())
         }));
+    }
+
+    #[test]
+    fn reading_memory_while_a_remember_instruction_saves_does_not_fail() {
+        let fixture = Fixture::new();
+        assert!(fixture.remember_while_reading(25) > 0);
+        let saved = read_scope(&fixture.root, &fixture.root.join("Memory/entries.json"), "user", "user")
+            .unwrap()
+            .0;
+        assert_eq!(saved["entries"].as_array().unwrap().len(), 25);
     }
 
     #[test]
