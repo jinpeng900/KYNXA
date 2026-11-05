@@ -391,7 +391,7 @@ fn read_current(
                     409,
                 ));
             }
-            let catalog = gateway::load_catalog(&config.data_root)?;
+            let catalog = gateway::read_catalog(&config.data_root)?;
             let project = storage::catalog::apply(
                 "storage.catalog.project",
                 &json!({"current":catalog,"id":project}),

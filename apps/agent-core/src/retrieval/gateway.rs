@@ -412,7 +412,7 @@ fn maintain_deleted_chats(
     cancel: &Arc<AtomicBool>,
     cursor: &mut usize,
 ) -> Result<(), ContractError> {
-    let catalog = gateway::load_catalog(&config.data_root)?;
+    let catalog = gateway::read_catalog(&config.data_root)?;
     let deleted = catalog["Tombstones"].as_array().unwrap();
     if deleted.is_empty() {
         *cursor = 0;
@@ -456,7 +456,7 @@ fn maintain_conversation_scope(
     conversation: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), ContractError> {
-    let catalog = gateway::load_catalog(&config.data_root)?;
+    let catalog = gateway::read_catalog(&config.data_root)?;
     let relation = storage::catalog::apply(
         "storage.catalog.relationship",
         &json!({"current":catalog,"id":conversation}),
@@ -761,7 +761,7 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 let _ = gateway_index::maintain_ann(&config, &shared.stop);
                 let cycle = (|| -> Result<(), ContractError> {
                     if shared.chat_scan_pending.swap(false, Ordering::AcqRel) {
-                        if let Ok(catalog) = gateway::load_catalog(&config.data_root) {
+                        if let Ok(catalog) = gateway::read_catalog(&config.data_root) {
                             let queued = startup_memory
                                 .iter()
                                 .filter_map(|entry| {
@@ -785,7 +785,7 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                     }
                     enqueue_startup_memory(&config.data_root, &mut startup_memory);
                     maintain_memory(&config, &shared.stop)?;
-                    let catalog = gateway::load_catalog(&config.data_root)?;
+                    let catalog = gateway::read_catalog(&config.data_root)?;
                     let roots = catalog["Projects"]
                         .as_array()
                         .unwrap()
@@ -1639,7 +1639,7 @@ fn run_index(
     let mut discovered = 0;
     let mut incomplete = false;
     let mut failures = Vec::new();
-    let catalog = gateway::load_catalog(&config.data_root)?;
+    let catalog = gateway::read_catalog(&config.data_root)?;
     let existing = gateway_index::cached_work_sources(config, &scope)?;
     let mut observations = Vec::new();
     let mut reused_files = 0u64;

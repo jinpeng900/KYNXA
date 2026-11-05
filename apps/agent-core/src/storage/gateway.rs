@@ -460,7 +460,7 @@ fn history_page_recovering(
     }
 }
 pub fn read_messages(root: &Path, id: &str, public: bool) -> Result<Vec<Value>, ContractError> {
-    let catalog = load_catalog(root)?;
+    let catalog = read_catalog(root)?;
     let location = locate(&catalog, id)?;
     let mut read = read_projected_snapshot(root, &location, project_conversation_message)?;
     with_catalog(root, |current, _| {
@@ -1242,8 +1242,37 @@ pub(crate) fn with_catalog<T>(
     let _guard = owner
         .lock()
         .map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
-    let (document, hash) = initialize(root)?;
+    let (document, hash) = prepared_catalog(root)?;
     operation(&document, hash.as_deref())
+}
+
+/// 日常读取只重核根布局，否则每次读取的耗时随聊天数量增长；启动和目录写入仍检查全部聊天路径，文件在打开时另行检查。
+fn prepared_catalog(root: &Path) -> Result<(Value, Option<String>), ContractError> {
+    let pending = managed_files::inspect(
+        root,
+        &root.join(".catalog-transaction.json"),
+        false,
+        true,
+        64 * 1024 * 1024,
+    )?;
+    if !pending {
+        if let (Some(document), hash) = read_catalog_snapshot(root)? {
+            let current = layout::apply("storage.layout.inspect", &json!({"root":root}))?;
+            let (_, plan, plan_hash) = prepare_layout_plan(&document, &current)?;
+            let manifests = layout_manifest_versions(root, &plan)?;
+            let prepared = LAYOUT_SNAPSHOTS
+                .lock()
+                .map_err(|_| error("布局缓存锁失效。", "STORAGE_IO_FAILED", 500))?
+                .iter()
+                .any(|cached| {
+                    cached.root == root && cached.plan == plan_hash && cached.manifests == manifests
+                });
+            if prepared {
+                return Ok((document, hash));
+            }
+        }
+    }
+    initialize(root)
 }
 
 /// 仅复用未变布局的已完成准备，每次重核范围和文件权限。
@@ -1312,7 +1341,16 @@ fn with_conversation_catalog<T>(
     let (document, hash) = prepared_conversation_catalog(root, conversation_id)?;
     operation(&document, hash.as_deref())
 }
+/// 完整读取：检查全部聊天路径，用于启动校验和事务恢复。
 pub fn load_catalog(root: &Path) -> ContractResult {
+    let owner = catalog_owner(root)?;
+    let _guard = owner
+        .lock()
+        .map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
+    initialize(root).map(|(document, _)| document)
+}
+
+pub(crate) fn read_catalog(root: &Path) -> ContractResult {
     with_catalog(root, |document, _| Ok(document.clone()))
 }
 
@@ -1360,7 +1398,7 @@ pub fn read_model_messages(root: &Path, id: &str) -> Result<Vec<Value>, Contract
     })
 }
 pub fn read_conversation(root: &Path, id: &str) -> ContractResult {
-    let document = load_catalog(root)?;
+    let document = read_catalog(root)?;
     let location = locate(&document, id)?;
     let mut read = read_projected_snapshot(root, &location, project_conversation_message)?;
     with_catalog(root, |current, _| {
@@ -2707,6 +2745,51 @@ mod gateway_tests {
             b"corrupt external catalog"
         );
     }
+    #[test]
+    fn daily_catalog_reads_skip_unrelated_chats_and_keep_root_and_change_checks() {
+        let workspace = Workspace::new();
+        let root = workspace.0.join("Data");
+        let chat = new_id();
+        ensure_conversation(&root, &chat, "chat").unwrap();
+        load_catalog(&root).unwrap();
+
+        let attachments = root.join("Chats").join(&chat).join("attachments");
+        std::fs::remove_dir(&attachments).unwrap();
+        std::fs::write(&attachments, b"wrong directory object").unwrap();
+        read_catalog(&root).unwrap();
+        assert_eq!(
+            load_catalog(&root).unwrap_err().code(),
+            "INVALID_DATA_LAYOUT"
+        );
+        std::fs::remove_file(&attachments).unwrap();
+        std::fs::create_dir(&attachments).unwrap();
+        load_catalog(&root).unwrap();
+
+        // 外部加入的聊天改变布局输入，读取时补齐目录。
+        let added = new_id();
+        let mut catalog = read_catalog(&root).unwrap();
+        catalog["Chats"].as_array_mut().unwrap().push(json!({"Id":added,"Title":"added","Draft":"","IsPinned":false,"IsArchived":false,"Messages":[]}));
+        catalog["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
+        let catalog_path = root.join("catalog.json");
+        std::fs::write(&catalog_path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        read_catalog(&root).unwrap();
+        assert!(root.join("Chats").join(&added).join("Memory").is_dir());
+
+        let settings_path = root.join("settings.json");
+        let original_settings = std::fs::read(&settings_path).unwrap();
+        let mut settings: Value = serde_json::from_slice(&original_settings).unwrap();
+        settings["Storage"]["LayoutVersion"] = json!(2);
+        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(
+            read_catalog(&root).unwrap_err().code(),
+            "INVALID_DATA_LAYOUT"
+        );
+        std::fs::write(&settings_path, &original_settings).unwrap();
+
+        std::fs::write(&catalog_path, b"corrupt external catalog").unwrap();
+        assert_eq!(read_catalog(&root).unwrap_err().code(), "CORRUPT_STORAGE");
+    }
+
     #[test]
     fn scoped_writes_skip_unrelated_layout_and_keep_target_path_and_version_checks() {
         let workspace = Workspace::new();

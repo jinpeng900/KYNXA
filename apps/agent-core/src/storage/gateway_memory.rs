@@ -84,7 +84,7 @@ fn candidate_content_hash(entry: &Value) -> Value {
     ))
 }
 pub(crate) fn read_index_document(root: &Path, scope: &str, id: &str) -> ContractResult {
-    let catalog = gateway::load_catalog(root)?;
+    let catalog = gateway::read_catalog(root)?;
     let (scope_id, path) = location(
         root,
         &catalog,
@@ -104,7 +104,7 @@ pub(crate) fn read_index_document(root: &Path, scope: &str, id: &str) -> Contrac
 /// 启动仅发现合法范围的已确认记录；持久草稿和候选不进入含义准备队列。
 pub(crate) fn startup_index_scopes(root: &Path, cancel: &Arc<AtomicBool>) -> ContractResult {
     // 仅在目录锁内取得身份快照；枚举不长期阻塞前台，实际维护发布前重新检查归属。
-    let catalog = gateway::load_catalog(root)?;
+    let catalog = gateway::read_catalog(root)?;
     let mut candidates = vec![("user".to_string(), "user".to_string())];
     for chat in catalog["Chats"]
         .as_array()
@@ -299,7 +299,7 @@ pub fn capture_explicit_instruction(
     )?;
     let conversation = source["conversationId"].as_str().unwrap();
     let message_id = source["messageId"].as_str().unwrap();
-    let catalog = gateway::load_catalog(root)?;
+    let catalog = gateway::read_catalog(root)?;
     let relationship = super::catalog::apply(
         "storage.catalog.related",
         &json!({"current":catalog,"id":conversation}),
@@ -515,7 +515,7 @@ fn capture_candidates(
     options: &Value,
     owner: &CandidateOwner,
 ) -> ContractResult {
-    let catalog_snapshot = gateway::load_catalog(root)?;
+    let catalog_snapshot = gateway::read_catalog(root)?;
     let mut history =
         gateway::read_raw_snapshot(root, &gateway::locate(&catalog_snapshot, conversation)?)?;
     let messages = history
@@ -1088,7 +1088,7 @@ fn context_selected(
     conversation_id: &str,
     selected: Option<&HashSet<String>>,
 ) -> ContractResult {
-    let catalog = gateway::load_catalog(root)?;
+    let catalog = gateway::read_catalog(root)?;
     let relationship = super::catalog::apply(
         "storage.catalog.related",
         &json!({"current":&catalog,"id":conversation_id}),
@@ -1370,7 +1370,7 @@ pub fn handle_tool(
         )
     };
     let result = if name == "memory.read" {
-        gateway::load_catalog(root).and_then(|catalog| operation(&catalog))
+        gateway::read_catalog(root).and_then(|catalog| operation(&catalog))
     } else {
         gateway::with_catalog(root, |catalog, _| operation(catalog))
     };
