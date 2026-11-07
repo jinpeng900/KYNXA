@@ -32,7 +32,6 @@ impl RecoveryWindow {
     }
 }
 
-/// Track capacity, cache order and recovery windows; hold dispatched capacity until cancellation settles.
 /// 维护容量、缓存顺序和恢复窗口，取消结算前保留已派发额度。
 #[derive(Default)]
 pub struct StructureState {
@@ -89,8 +88,7 @@ impl StructureState {
                 if bytes > budget || arguments["parseStatus"] == "unavailable" {
                     return Ok(json!({"store":false,"evicted":[]}));
                 }
-                // Replacing an existing Map entry retains its order; only reads refresh the LRU position.
-                // 替换现有 Map 项保留插入顺序，只有读取刷新 LRU 位置，以兼容并发解析回执。
+                // 替换现有 Map 项保留插入顺序，只有读取刷新 LRU 位置，以兼容并发解析结果。
                 if let Some(index) = self.cache.iter().position(|(stored, _)| stored == key) {
                     self.cache_bytes -= self.cache[index].1;
                     self.cache[index].1 = bytes;

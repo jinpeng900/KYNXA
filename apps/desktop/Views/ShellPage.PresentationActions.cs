@@ -26,10 +26,8 @@ public sealed partial class ShellPage
     private void InitializePresentationActions()
     {
         AutomationProperties.SetLiveSetting(ActionFeedbackText, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
-        // Page-wide shortcuts must not create an automatic tooltip over the transcript.
         // 页面级快捷键不在聊天正文上生成自动提示；按钮自己的说明提示继续保留。
         KeyboardAcceleratorPlacementMode = Microsoft.UI.Xaml.Input.KeyboardAcceleratorPlacementMode.Hidden;
-        // Register SDK key enums in code so the XAML compiler need not inspect their metadata.
         // 在代码中注册 SDK 按键枚举，避免 XAML 编译器解析其元数据。
         var findText = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
         findText.Invoked += TranscriptSearchShortcut_Invoked;
@@ -39,7 +37,6 @@ public sealed partial class ShellPage
         findPrevious.Invoked += TranscriptSearchNavigation_Invoked;
         var closeFind = new KeyboardAccelerator { Key = VirtualKey.Escape };
         closeFind.Invoked += TranscriptSearchClose_Invoked;
-        // Use Ctrl+Shift+K because Chinese input may intercept Ctrl+Shift+F before WebView.
         // 中文输入可能先拦截 Ctrl+Shift+F，因此会话搜索使用 Ctrl+Shift+K。
         var search = new KeyboardAccelerator { Key = VirtualKey.K, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift };
         search.Invoked += SearchShortcut_Invoked;
@@ -72,7 +69,6 @@ public sealed partial class ShellPage
         if (_chatClosing || !IsLoaded) return;
         ActionFeedbackText.Text = text;
         ActionFeedbackHost.Visibility = Visibility.Visible;
-        // Passive action feedback shares the notice duration while leaving the underlying workspace interactive.
         // 被动操作反馈沿用统一提示时长，同时允许继续操作下方工作区。
         _actionFeedbackTimer ??= new DispatcherTimer { Interval = CompactInfoBar.DismissDelay };
         _actionFeedbackTimer.Tick -= ActionFeedbackTimer_Tick;
@@ -95,13 +91,9 @@ public sealed partial class ShellPage
         if (!_isCompactLayout) _temporarySidebarOpen = false;
         bool expanded = _isCompactLayout ? _temporarySidebarOpen : !_layout.SidebarCollapsed;
         double preferredWidth = Math.Clamp(_layout.SidebarWidth, ShellLayoutMetrics.SidebarMin, ShellLayoutMetrics.SidebarMax);
-        // A temporary drawer never changes the user's saved sidebar width or collapse preference.
-        // 临时抽屉不改变用户保存的侧栏宽度或折叠偏好。
         SidebarColumn.Width = new GridLength(_isCompactLayout || !expanded ? ShellLayoutMetrics.SidebarCollapsed : preferredWidth);
-        // Trim only the reserved gutter so the existing footer icons have equal outer margins without moving them.
         // 仅缩小额外预留的拖动留白，让底栏原有图标外侧边距等宽，不移动图标。
         SidebarGripColumn.Width = new GridLength(_isCompactLayout || !expanded ? 0 : ShellLayoutMetrics.SidebarGripGutter);
-        // Span the root grid to keep the full eight-DIP drag target unclipped.
         // 拖动命中区跨根网格，保留完整 8 DIP 范围，避免窄列裁剪。
         SidebarGrip.Margin = new Thickness(preferredWidth - (SidebarGrip.Width - ShellLayoutMetrics.SidebarGripGutter) / 2, 0, 0, 0);
         SidebarPane.Width = _isCompactLayout && expanded ? preferredWidth : double.NaN;
@@ -131,7 +123,6 @@ public sealed partial class ShellPage
     private bool TryDismissCompactSidebar()
     {
         if (!_temporarySidebarOpen || HasPresentationModal() || XamlRoot is null) return false;
-        // Let native menus consume Escape before closing the drawer behind them.
         // 先让原生菜单处理 Escape，避免同时关闭其背后的抽屉。
         if (VisualTreeHelper.GetOpenPopupsForXamlRoot(XamlRoot).Any(popup => popup.IsOpen)) return false;
         SidebarScrim_Click(this, new RoutedEventArgs());
@@ -152,8 +143,7 @@ public sealed partial class ShellPage
     {
         if (_presentationDialogOpen) return true;
         if (XamlRoot is null) return false;
-        // Respect any dialog on this XamlRoot, including existing approvals and settings.
-        // 尊重此 XamlRoot 上的所有弹窗，包括既有审批和设置。
+        // 尊重此 XamlRoot 上的所有弹窗，包括现有审批和设置。
         static bool ContainsDialog(DependencyObject? element)
         {
             if (element is ContentDialog) return true;
@@ -220,7 +210,6 @@ public sealed partial class ShellPage
             EnqueueAction();
             return;
         }
-        // Wait for the flyout to unload and its close stack to unwind before activating another HWND.
         // Click 早于菜单卸载；卸载并退出关闭调用栈后再创建或激活窗口，避免焦点恢复冲突。
         void Closed(object? sender, object args)
         {
@@ -310,8 +299,7 @@ public sealed partial class ShellPage
     {
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
         if (chat is null || chat.Messages.Count == 0 || _chatClosing) return;
-        // Capture the projection before the picker awaits; a later chat switch cannot export another chat.
-        // 在文件选择器等待前捕获展示投影，随后切换聊天不会导出另一段会话。
+        // 在文件选择器等待前捕获展示映射，随后切换聊天不会导出另一段会话。
         string content = CurrentConversationMarkdown();
         Guid conversationId = chat.Id;
         try

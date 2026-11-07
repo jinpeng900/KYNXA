@@ -1,8 +1,7 @@
 namespace KYNXA_Desktop.Models.UI;
 
 /// <summary>
-/// Semantic colors shared by native chrome and the transcript, independent of model APIs.
-/// 原生界面与聊天区共用的语义颜色，与模型接口无关。
+/// 原生界面与聊天区共用的含义颜色，与模型接口无关。
 /// </summary>
 public sealed record AppearancePalette(
     string Id, string NameKey, string Accent, string AccentHover, string AccentPressed,
@@ -14,7 +13,6 @@ public sealed record AppearancePalette(
     public const double MinimumChatFontSize = 13;
     public const double MaximumChatFontSize = 22;
 
-    // Preset identity stays independent from the effective system theme and accessible colors.
     // 预设身份独立于当前系统主题与无障碍配色，切换模式不会改写用户选择的预设。
     public bool IsDark { get; init; }
     public bool IsHighContrast { get; init; }

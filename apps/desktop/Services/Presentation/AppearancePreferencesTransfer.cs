@@ -6,7 +6,6 @@ namespace KYNXA_Desktop.Services;
 public sealed record AppearanceTransferPreferences(string PaletteId, string Mode, double ChatFontSize, string? CustomAccent);
 
 /// <summary>
-/// Transfers only saved presentation preferences through a bounded, versioned document.
 /// 使用有容量限制和版本标记的文件，仅传递已保存的界面外观偏好。
 /// </summary>
 public static class AppearancePreferencesTransfer
@@ -33,7 +32,6 @@ public static class AppearancePreferencesTransfer
     {
         if (bytes.Length == 0 || bytes.Length > MaximumFileBytes)
             throw new InvalidDataException("Appearance preference file exceeds the size limit or is empty.");
-        // UTF-8 BOM is accepted for JSON files saved by common Windows editors.
         // 接受常见 Windows 编辑器保存的 UTF-8 BOM，但不改写文件内容。
         if (bytes.Span.StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) bytes = bytes[3..];
         using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 4 });
@@ -64,8 +62,7 @@ public static class AppearancePreferencesTransfer
 
     private static void Validate(AppearanceTransferPreferences preferences)
     {
-        // Imports reject unsupported values instead of silently normalizing them into different choices.
-        // 导入时拒绝不支持的值，不静默回退成用户没有选择过的外观。
+        // 导入时拒不支持的值，不静默回退成用户没有选择过的外观。
         if (!AppearanceService.Palettes.Any(palette => palette.Id == preferences.PaletteId)
             || preferences.Mode is not ("light" or "dark" or "system")
             || !double.IsFinite(preferences.ChatFontSize)

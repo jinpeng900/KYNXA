@@ -1,4 +1,3 @@
-// Workbench selectors share the host palette without changing preview-wide native controls.
 // 工作台选择器沿用宿主配色，不改变其他预览页面的原生控件。
 let nextSelectId = 0;
 const OPTION_HEIGHT = 36, OPTION_GAP = 4, POPUP_INSET = 14, VISIBLE_OPTIONS = 4;
@@ -62,7 +61,6 @@ export function createSelectScope(root) {
     const optionHeight = current.rows[0]?.getBoundingClientRect().height || OPTION_HEIGHT;
     const desired = rows * optionHeight + Math.max(0, rows - 1) * OPTION_GAP + POPUP_INSET;
     const opensBelow = below >= desired || below >= above, available = opensBelow ? below : above;
-    // Short viewports reduce the complete row count; they never expose a clipped fifth option.
     // 短窗口按完整行减少展示数量，不让第五个选项露出半行。
     const visibleRows = Math.min(rows, Math.max(1, Math.floor((available - POPUP_INSET + OPTION_GAP) / (optionHeight + OPTION_GAP))));
     const height = Math.min(available, visibleRows * optionHeight + Math.max(0, visibleRows - 1) * OPTION_GAP + POPUP_INSET);
@@ -94,7 +92,6 @@ export function createSelectScope(root) {
     const disabledObserver = new MutationObserver(() => { if (control.button.disabled) close(); });
     const current = opened = { control, button: control.button, popup, rows, events, disabledObserver,
       active: initialIndex < 0 ? 0 : initialIndex, composing: false, search: '', searchTime: 0 };
-    // Container queries may make the workbench a fixed-position containing block; keep the popup in viewport space.
     // 工作台的容器查询会改变 fixed 定位包含块；弹层挂页面根部，避免坐标偏移和内容裁剪。
     popup.style.setProperty('--workbench-font-size', window.getComputedStyle(root).getPropertyValue('--workbench-font-size'));
     document.body.append(popup); placePopup(current); setActive(current, current.active);
@@ -192,7 +189,6 @@ export function createSelectScope(root) {
       stroke.setAttribute('d', 'M4 6l4 4 4-4'); chevron.append(stroke); button.append(label, chevron);
       const control = { button, label, popupId, action, items: items.map(([id, text]) => [String(id), String(text)]), selected: -1 };
       controls.set(button, control); button.disabled = !control.items.length;
-      // Programmatic filtering updates only the visible value; it never repeats the user's action.
       // 程序清空筛选只同步显示值，不重复执行用户操作。
       Object.defineProperty(button, 'value', { configurable: true, get: () => control.items[control.selected]?.[0] || '',
         set: next => updateValue(control, next) });

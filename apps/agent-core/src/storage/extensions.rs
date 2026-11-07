@@ -92,7 +92,6 @@ fn filesystem_root(path: &Path) -> PathBuf {
         .collect()
 }
 
-/// Shared handle checks reject hard links as well as junctions before any extension effect.
 /// 扩展操作前共用句柄检查，同时拒绝硬链接、符号链接及联接点。
 fn inspect(path: &Path, directory: Option<bool>) -> Result<bool, ContractError> {
     let metadata = match fs::symlink_metadata(path) {
@@ -136,12 +135,10 @@ fn inspect(path: &Path, directory: Option<bool>) -> Result<bool, ContractError> 
     }
 }
 
-/// Match the settings client's strict top-level keys while retaining unknown JSON fields.
 /// 与设置客户端保持顶层字段唯一性；未知 JSON 字段及原始字符串仍可保留。
 fn parse_document(bytes: &[u8], code: &'static str) -> Result<Value, ContractError> {
     let source = std::str::from_utf8(bytes)
         .map_err(|_| invalid("扩展配置不是有效 UTF-8，原文件已保留。", code))?;
-    // TextDecoder removes the encoding BOM; the legacy explicit codec removes one further BOM.
     // TextDecoder 去除编码 BOM；历史显式编解码再去除一个 BOM。
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
@@ -223,8 +220,7 @@ fn layout(root: &Path) -> ContractResult {
     Ok(document.unwrap_or(Value::Null))
 }
 
-/// Staged receipts expose the callback boundary; storage retains file ownership and publication.
-/// 暂存回执提供回调边界，文件所有权及发布仍归存储服务。
+/// 暂存结果提供回调边界，文件所有权及发布仍归存储服务。
 fn stage(root: &Path) -> ContractResult {
     layout(root)?;
     let path = root.join("extension-layout.json");
@@ -325,7 +321,6 @@ fn publish(root: &Path, receipt: &Value) -> ContractResult {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(io_error(error)),
         }
-        // Publication makes the owned file temporarily have two links; remove only its staged name.
         // 发布暂时产生同一文件的两个链接；仅移除本次拥有的暂存名称，保留正式名称。
         fs::remove_file(&temporary).map_err(io_error)?;
     }
@@ -371,7 +366,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         }
         let pointer = absolute(&arguments["pointer"])?;
         let Some(document) = read_document(&pointer, "INVALID_EXTENSION_STORAGE")? else {
-            // Legacy extensions move with Data only until an independent pointer takes ownership.
             // 旧扩展仅在没有独立位置指针时随 Data 迁移；新指针始终优先于回退位置。
             if arguments["followDataRoot"] == true {
                 return Ok(json!(absolute(&arguments["dataRoot"])?));
@@ -384,7 +378,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 "UNSUPPORTED_EXTENSION_STORAGE",
             ));
         }
-        // Explicit pointers may live elsewhere; relative roots travel with that configuration file.
         // 显式指针可位于外部目录；相对扩展位置随该配置文件移动。
         let root = super::administration::configured_path(
             &document["extensionRoot"],

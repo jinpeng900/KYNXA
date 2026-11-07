@@ -15,7 +15,6 @@ public sealed partial class ModelManagementWindow
     private ContentDialog? _discardDialog;
     private string _discardAction = "";
 
-    // Track raw token drafts and automatic/manual context mode without storing any secret.
     // 记录 token 原始草稿及上下文自动/手动模式，不将密钥存入快照。
     private sealed record EditorState(string Name, string Id, string Address, string Models, string Protocol,
         string ContextChoice, string CustomContext, string OutputChoice, string CustomOutput, bool AutomaticContext);
@@ -52,7 +51,6 @@ public sealed partial class ModelManagementWindow
     private void UpdateDraftPresentation()
     {
         if (_closed || DraftStateText is null) return;
-        // This badge describes the editable configuration only; the operation footer owns busy and result feedback.
         // 此标签仅说明当前配置草稿；忙碌及操作结果仍由底部区域反馈。
         string key = HasUnsavedChanges() ? "未保存的修改" : _editing is null ? "尚未保存" : "已保存";
         DraftStateText.Text = UiText.Get(key);
@@ -106,7 +104,6 @@ public sealed partial class ModelManagementWindow
     private async void ModelWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (_closed || _allowClose || !HasUnsavedChanges()) return;
-        // Keep the native close request cancelled while the discard decision is pending.
         // 丢弃决策尚未结束时，持续取消原生关闭请求，保留当前编辑。
         args.Cancel = true;
         if (!await ConfirmDiscardAsync("关闭窗口")) return;

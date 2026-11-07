@@ -8,7 +8,6 @@ public sealed record MessageEndTimeEntry(Guid ConversationId, Guid MessageId, st
     string ContentHash, DateTimeOffset EndedAt);
 
 /// <summary>
-/// Stores only local terminal observations; the gateway remains the owner of conversation messages.
 /// 仅保存本机终态观测时间；正式聊天消息仍由网关拥有。
 /// </summary>
 public sealed class MessageEndTimeCache
@@ -50,7 +49,6 @@ public sealed class MessageEndTimeCache
             if (writeLock is null) return false;
             string path = FilePath(entry.ConversationId, entry.MessageId);
             var previous = await ReadFileAsync(path, entry.ConversationId, entry.MessageId).ConfigureAwait(false);
-            // Unknown or damaged records remain untouched, including when a retry requests replacement.
             // 未知版本或损坏记录始终原样保留，明确重试也不能覆盖。
             if (!previous.IsMissing && previous.Entry is null) return false;
             if (!replaceExisting && previous.Entry is { } existing &&
@@ -67,7 +65,6 @@ public sealed class MessageEndTimeCache
                 await JsonSerializer.SerializeAsync(output, stored, JsonOptions).ConfigureAwait(false);
                 await output.FlushAsync().ConfigureAwait(false);
             }
-            // Use a unique sibling file and root lock to preserve atomic first observations.
             // 用同目录唯一临时文件和根级写锁，避免半条读取和首次观测丢失。
             File.Move(temporaryPath, path, overwrite: true);
             temporaryPath = null;
@@ -101,7 +98,6 @@ public sealed class MessageEndTimeCache
                 return await RemoveFileAsync(FilePath(conversationId, singleMessageId), conversationId, singleMessageId).ConfigureAwait(false);
 
             bool removed = true;
-            // Delete only validated GUID message files; never recurse or touch unrelated files.
             // 只删除已验证的消息 GUID 文件，不递归或处理其他文件。
             foreach (string path in Directory.EnumerateFiles(folder, "*.json", SearchOption.TopDirectoryOnly))
             {
@@ -184,8 +180,6 @@ public sealed class MessageEndTimeCache
             }
             catch (IOException) when (elapsed.Elapsed < LockTimeout)
             {
-                // Yield while waiting for the write lock, with a bounded timeout.
-                // 异步等待写锁并设置超时，避免持续阻塞聊天。
                 await Task.Delay(TimeSpan.FromMilliseconds(40)).ConfigureAwait(false);
             }
             catch (Exception error) when (IsCacheFailure(error))

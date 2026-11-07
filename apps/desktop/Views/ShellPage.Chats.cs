@@ -24,7 +24,6 @@ public sealed partial class ShellPage
 
     private void PositionConversationComposer(ProjectChatState? chat)
     {
-        // Existing chat identity prevents new-chat layout while its paged body is loading.
         // 已有聊天的分页正文尚未加载时，也不能切成居中的新聊天布局。
         bool conversationLayout = chat is not null && (chat.IsPersisted || chat.Messages.Count > 0);
         ConversationMessages.Visibility = conversationLayout || ConversationMessages.IsFindTextOpen ? Visibility.Visible : Visibility.Collapsed;
@@ -41,7 +40,6 @@ public sealed partial class ShellPage
     private void PromptTextBox_TextCompositionEnded(TextBox sender, TextCompositionEndedEventArgs args)
     {
         _promptCompositionActive = false;
-        // Some IMEs finish composition before forwarding the confirming Enter key.
         // 某些输入法在转发确认用的 Enter 键之前就结束组合输入。
         _suppressComposingEnter = true;
     }
@@ -85,7 +83,6 @@ public sealed partial class ShellPage
 
     private void RebuildStandaloneRows()
     {
-        // Preserve chat row identities and let ListView virtualize their containers.
         // 保留聊天行身份，由 ListView 虚拟化容器，避免刷新时全部重建。
         var rows = ViewModel.RecentConversations;
         var desired = _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned).ToList();
@@ -187,7 +184,6 @@ public sealed partial class ShellPage
             ActiveMessages.Clear();
         if (chat is not null)
         {
-            // Reuse unchanged rows when history or reply state refreshes the current conversation.
             // 当前聊天的历史或回复状态更新时复用未变行，避免清空集合后重建全部消息。
             var existing = ActiveMessages.ToDictionary(row => row.Message.Id);
             var desired = new List<ConversationMessageViewModel>(chat.Messages.Count);
@@ -289,7 +285,6 @@ public sealed partial class ShellPage
                     AttachmentDraftsFor(attachmentDraftKey).RemoveAll(file => ids.Contains(file.Id));
                 }
                 chat.Draft = string.Empty;
-                // Present the accepted input before storage, gateway startup or model admission can wait.
                 // 点击发送即展示用户消息与回复占位；保存、网关启动和模型准入的等待不阻塞展示。
                 if (chatMode)
                 {
@@ -330,7 +325,6 @@ public sealed partial class ShellPage
         }
         if (preparedReply is not null)
         {
-            // Give the accepted input and cleared composer their UI turn before preparing network requests.
             // 先让已接受的消息与清空后的输入框完成本轮界面更新，再准备网络请求。
             var presented = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             if (DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal, () => presented.TrySetResult()))

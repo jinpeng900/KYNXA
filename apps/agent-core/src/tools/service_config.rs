@@ -54,7 +54,12 @@ mod lifecycle_configuration_tests {
         assert_eq!(normalized["startupTimeoutMs"], 15000);
         let mut omitted = source.clone();
         omitted.as_object_mut().unwrap().remove("timeoutMs");
-        assert!(normalize_server(&omitted).unwrap().get("timeoutMs").is_none());
+        assert!(
+            normalize_server(&omitted)
+                .unwrap()
+                .get("timeoutMs")
+                .is_none()
+        );
         let mut http = json!({"id":"remote","name":"Remote","enabled":true,"transport":"streamable-http",
             "url":"https://example.com/mcp","timeoutMs":600_000});
         assert_eq!(normalize_server(&http).unwrap()["timeoutMs"], 600_000);
@@ -128,7 +133,10 @@ mod lifecycle_configuration_tests {
             .apply("mcp.sdkOptions", &loaded["mcpServers"][17])
             .unwrap_err();
         assert_eq!(unsupported.code, "MCP_UNSUPPORTED_PROTOCOL");
-        assert!(mcp.apply("mcp.sdkOptions", &loaded["mcpServers"][0]).is_ok());
+        assert!(
+            mcp.apply("mcp.sdkOptions", &loaded["mcpServers"][0])
+                .is_ok()
+        );
 
         let mut input = loaded;
         input["expectedRevision"] = json!(7);
@@ -145,7 +153,10 @@ mod lifecycle_configuration_tests {
         let malformed_bytes = serde_json::to_vec(&malformed).unwrap();
         std::fs::write(&file, &malformed_bytes).unwrap();
         assert_eq!(
-            repository.apply("config.read", &json!({})).unwrap_err().code,
+            repository
+                .apply("config.read", &json!({}))
+                .unwrap_err()
+                .code,
             "CORRUPT_AGENT_CONFIG"
         );
         assert_eq!(std::fs::read(&file).unwrap(), malformed_bytes);
@@ -236,7 +247,11 @@ pub fn normalize_server(server: &Value) -> ServiceResult<Value> {
         "cwdResolved":cwd.as_ref().map(|path| path_text(path)),"url":url_projection(&server["url"]),
         "issuerUrl":url_projection(&server["auth"]["issuer"]),"nonFiniteNumbers":special}))
     .map_err(|code| {
-        ServiceError::new(&code, "MCP 连接配置无效；密钥使用环境变量引用，个人 OAuth 使用浏览器登录。", 400)
+        ServiceError::new(
+            &code,
+            "MCP 连接配置无效；密钥使用环境变量引用，个人 OAuth 使用浏览器登录。",
+            400,
+        )
     })?;
     if !server["enabled"].is_boolean() {
         return Err(invalid("请明确是否启用 MCP 服务。"));
@@ -250,8 +265,7 @@ pub fn normalize_server(server: &Value) -> ServiceResult<Value> {
     } else {
         protocol.as_str().unwrap_or("")
     };
-    // Persist well-formed revisions independently of this client's transport capabilities.
-    // 配置保留合法协议日期；连接时再判断实现能力，单个不兼容服务不能使整份配置损坏。
+    // 配置保留合法协议日期，连接时再判断实现能力，单个不兼容服务不影响整份配置。
     if !matches(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", protocol) {
         return Err(invalid("MCP 协议版本须为 YYYY-MM-DD 日期格式。"));
     }
@@ -276,7 +290,6 @@ pub fn normalize_server(server: &Value) -> ServiceResult<Value> {
     result["enabled"] = server["enabled"].clone();
     result["protocolVersion"] = json!(protocol);
     result["disabledTools"] = json!(unique(disabled));
-    // Trust is a saved configuration decision, never inferred from a script name or repository text.
     // 信任来自已保存的明确配置，不从脚本名称、文件存在或仓库文字推断。
     for field in ["trusted", "backgroundTask"] {
         if server.get(field).is_some_and(|value| !value.is_boolean()) {

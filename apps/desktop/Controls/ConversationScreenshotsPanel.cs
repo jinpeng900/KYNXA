@@ -11,7 +11,6 @@ using Microsoft.UI.Xaml.Media.Imaging;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// A lazy, bounded gallery owned by the current conversation. Images are never put in chat text.
 /// 当前聊天拥有的延迟加载、有容量上限的图片集合；截图不进入聊天正文。
 /// </summary>
 public sealed class ConversationScreenshotsPanel : Grid, IDisposable
@@ -199,7 +198,6 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         if (_disposed) return;
         _forceSourcesRefresh |= force;
         if (_sourcesRefreshQueued) return;
-        // Defer and merge activity scans; read the current conversation when dispatched.
         // 延后合并工具扫描，执行时读取当前聊天，避免旧队列带回上个聊天的截图。
         _sourcesRefreshQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
@@ -220,7 +218,6 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         _screenshotSources = next;
         if (!changed)
         {
-            // Queued discovery also completes an unchanged/empty catalog; waiting tab selection must settle.
             // 队列扫描也会完成未变化或空的目录，等待恢复的标签选择需要据此结算。
             ScreenshotsChanged?.Invoke(this, EventArgs.Empty);
             return;
@@ -252,7 +249,6 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         _navigation.Visibility = !_tabbedMode && _screenshotSources.Length > 1 ? Visibility.Visible : Visibility.Collapsed;
         _position.Text = $"{(_screenshotSources.Length == 0 ? 0 : _selectedSourceIndex + 1)} / {_screenshotSources.Length}";
         _previous.IsEnabled = _selectedSourceIndex > 0; _next.IsEnabled = _selectedSourceIndex < _screenshotSources.Length - 1;
-        // Shell can synchronously open the sidebar during ScreenshotsChanged. Keep the same in-flight read.
         // ScreenshotsChanged 可能让主界面同步打开侧栏；保留正在进行的同一次读取。
         if (!_disposed && _previewEnabled && IsLoaded && HasScreenshots && _loadCancellation is not null &&
             _loadingSourceIdentity == _screenshotSources[_selectedSourceIndex].Identity) return;

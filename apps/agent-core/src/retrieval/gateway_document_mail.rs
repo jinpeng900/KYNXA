@@ -1,4 +1,3 @@
-//! MIME extraction publishes readable bodies and names without executing or fetching attachments.
 //! MIME 提取保存可读正文与附件名称，不执行附件，也不自动抓取邮件链接。
 
 use super::gateway_office_documents::{DocumentText, cancelled, failure, html_text};
@@ -70,7 +69,6 @@ fn message_text(
     Ok(())
 }
 
-/// An MBOX envelope is recognized only at physical line boundaries; escaped body lines stay bodies.
 /// MBOX 信封仅在真实行首识别，转义的正文 From 行不当成新邮件。
 fn mailbox_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut starts = Vec::new();

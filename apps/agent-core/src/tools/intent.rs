@@ -4,8 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use regex::Regex;
 use serde_json::{Value, json};
 
-// Patterns originate in the existing gateway contract; ASCII word boundaries remain explicit.
-// 模式沿用已有网关合同；显式保留 JavaScript 的 ASCII 词边界，避免中文相邻字符改变匹配。
+// 模式沿用已有网关约定；显式保留 JavaScript 的 ASCII 词边界，中文相邻字符不影响匹配。
 pub(super) fn pattern(source: &str) -> Regex {
     static PATTERNS: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
     let mut patterns = PATTERNS
@@ -236,7 +235,6 @@ fn request_clauses(text: &str) -> Vec<Value> {
             continue;
         }
         ranges.push((cursor, separator.start()));
-        // Only punctuation is consumed by the original lookahead; trimming preserves subsequent offsets.
         // 原模式的前瞻不消费后续空白；这里仅消费标点，保留子句的原始位置。
         cursor = if text[separator.start()..].starts_with('.')
             || text[separator.start()..].starts_with(':')
@@ -684,7 +682,10 @@ const CODE_EXTENSIONS: &[&str] = &[
     "c", "cpp", "cxx", "cc", "h", "hpp", "hxx", "ps1", "psm1", "sh", "bat", "cmd", "sql", "xaml",
     "html", "css",
 ];
-const DOCUMENT_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "pdf", "docx", "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp"];
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "txt", "pdf", "docx", "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff",
+    "webp",
+];
 
 fn current_browser_instruction(text: &str) -> String {
     let units = text.encode_utf16().collect::<Vec<_>>();
@@ -753,8 +754,7 @@ fn forbidden_executables(clause: &str) -> Vec<String> {
                 matches(WINDOW_OBJECT, suffix),
             ));
         }
-        // Shared trailing windows constrain the group; an earlier per-brand window cannot erase a later app ban.
-        // 末尾共享窗口限定整组；前面品牌的独立窗口不能取消后续品牌的应用禁令。
+        // 末尾共享窗口限定整组，后续品牌的应用禁令继续生效。
         let shared_window = objects.len() > 1
             && objects.last().unwrap().1
             && objects[..objects.len() - 1].iter().all(|object| !object.1);
@@ -856,15 +856,18 @@ fn requests_browser_operation(clause: &str) -> bool {
     )
 }
 
-/// Presentation hints select an existing surface; they never authorize a browser or desktop effect.
-/// 展示线索仅选择既有界面，不授予浏览器或桌面操作权限。
+/// 展示线索仅选择既限量面，不授予浏览器或桌面操作权限。
 pub(super) fn browser_presentation(active: &str) -> &'static str {
     let in_workspace = matches(r"右侧|侧栏|工作区|\b(?:sidebar|workspace)\b", active);
     let external = matches(
         r"(?:本机|本地|系统|桌面|外部|我的).{0,12}(?:浏览器|chrome|chromium|edge|firefox)|\b(?:local|system|desktop|external|my)\s+(?:browser|chrome|edge|firefox)\b|(?:启动|运行|launch|start).{0,12}(?:浏览器|chrome|chromium|edge|firefox)",
         active,
     );
-    if external && !in_workspace { "application" } else { "workspace" }
+    if external && !in_workspace {
+        "application"
+    } else {
+        "workspace"
+    }
 }
 
 fn current_browser_intent(message: &str) -> Value {
@@ -914,7 +917,6 @@ fn current_browser_intent(message: &str) -> Value {
         );
         local |= !remote;
     }
-    // Keep website requests in-app unless a desktop browser is explicit; display hints do not grant authority.
     // 网页默认在软件内打开，明确要求桌面浏览器才用外部应用；展示线索不授予权限。
     let mut intent = json!({"allowLocalBrowser":local,"explicitBrowserTask":explicit,
         "presentationTarget":browser_presentation(projection["activeText"].as_str().unwrap_or(""))});
@@ -1024,11 +1026,28 @@ mod presentation_tests {
 
     #[test]
     fn website_presentation_defaults_to_workspace_and_honors_explicit_desktop_requests() {
-        for message in ["在右侧打开B站官网", "打开https://example.org", "不要用本机Chrome，在右侧打开网站", "Open this website in the sidebar"] {
-            assert_eq!(current_browser_intent(message)["presentationTarget"], "workspace", "{message}");
+        for message in [
+            "在右侧打开B站官网",
+            "打开https://example.org",
+            "不要用本机Chrome，在右侧打开网站",
+            "Open this website in the sidebar",
+        ] {
+            assert_eq!(
+                current_browser_intent(message)["presentationTarget"],
+                "workspace",
+                "{message}"
+            );
         }
-        for message in ["用系统浏览器打开网站", "启动本机Chrome", "Open this in the external browser"] {
-            assert_eq!(current_browser_intent(message)["presentationTarget"], "application", "{message}");
+        for message in [
+            "用系统浏览器打开网站",
+            "启动本机Chrome",
+            "Open this in the external browser",
+        ] {
+            assert_eq!(
+                current_browser_intent(message)["presentationTarget"],
+                "application",
+                "{message}"
+            );
         }
         let resumed = browser_intent("在右侧打开网站", &[json!("启动本机Chrome")]);
         assert_eq!(resumed["presentationTarget"], "workspace");

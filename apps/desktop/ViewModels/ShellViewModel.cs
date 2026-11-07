@@ -15,12 +15,10 @@ public sealed record RecentConversation(string Title, string RelativeTime)
 public sealed record SidebarProject(string Name, IReadOnlyList<string> Conversations);
 
 /// <summary>
-/// Presentation state for the initial KYNXA shell.
 /// 初始 KYNXA 主界面的展示状态。
 /// </summary>
 public partial class ShellViewModel : ObservableObject
 {
-    // Sample projects for the UI prototype; no persisted user history is implied.
     // 用于 UI 原型的示例项目，不代表已保存的用户历史。
     public IReadOnlyList<SidebarProject> Projects { get; } =
     [

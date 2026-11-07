@@ -22,8 +22,7 @@ public sealed partial class ShellPage
         IsEnabled = false;
         try
         {
-            // The local acknowledgement transfers shutdown ownership; the foreground does not save tasks itself.
-            // 本机回执确认后台已接管退出；前台不再逐条暂停或等待任务保存。
+            // 本机结果确认后台已接管退出；前台不再逐条暂停或等待任务保存。
             sender.Hide();
             foreach (var window in new Window?[] { _modelManagementWindow, _memoryManagementWindow,
                 _toolManagementWindow, _retrievalSettingsWindow, _storageSettingsWindow })
@@ -50,7 +49,6 @@ public sealed partial class ShellPage
 
     private async Task SaveExitDraftsAsync()
     {
-        // Preserve the existing best-effort draft write without delaying exit behind catalog work or migration.
         // 保留原有的尽力保存草稿，不让退出排在目录操作或迁移后等待。
         if (!_projectsReady || _projectActionPending || StoragePaths.IsMigrating) return;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(1));

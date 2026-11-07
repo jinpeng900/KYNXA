@@ -135,8 +135,7 @@ fn is_metadata_only_update(
     if !same_directory(previous, location)? {
         return Ok(false);
     }
-    // An unchanged registered location already witnesses admission; empty UI history never clears its log.
-    // 已登记且位置不变的正式聊天已经通过准入；界面未提交历史不能解释为清空正式日志。
+    // 已登记且位置不变的正式聊天已通过准入；界面未提交历史不代表清空正式日志。
     Ok(!location["Chat"]["Messages"]
         .as_array()
         .into_iter()
@@ -144,7 +143,6 @@ fn is_metadata_only_update(
         .any(|message| message["Role"] == "user"))
 }
 
-/// Catalog state owns stable ownership, draft admission, undo/deletion and cross-folder transaction planning.
 /// 目录状态拥有稳定归属、草稿准入、撤销及删除，以及跨目录事务规划。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let current = &arguments["current"];
@@ -155,7 +153,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 .as_array()
                 .filter(|entries| entries.len() <= 2000)
                 .ok_or_else(|| invalid("消息批量校验参数无效。"))?;
-            // A page validates metadata in one frame; exact bodies remain in the original gateway codec objects.
             // 单页元信息共用一次传输校验，精确正文继续留在网关原始编码对象中，不进行标量改写。
             return entries
                 .iter()
@@ -542,7 +539,10 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                     && !saved.contains(&key(&message["Id"]).unwrap_or_default())
             })
             .collect();
-        if !truthy(&location["Chat"]["IsSample"]) && location["Chat"]["KeepWorkspace"] != true && messages.is_empty() && new_messages.is_empty()
+        if !truthy(&location["Chat"]["IsSample"])
+            && location["Chat"]["KeepWorkspace"] != true
+            && messages.is_empty()
+            && new_messages.is_empty()
         {
             continue;
         }
@@ -581,8 +581,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         .filter(|item| !retained.contains(&key(&item["Id"]).unwrap_or_default()))
         .cloned()
         .collect();
-    // Preserve canonical traversal order for deterministic move intent and deletion receipts.
-    // 按正式目录遍历顺序产生移动意图和删除回执，保证恢复顺序稳定。
+    // 按正式目录遍历顺序产生移动意图和删除结果，保证恢复顺序稳定。
     for location in locations(current) {
         if !retained.contains(&key(&location["Id"])?) {
             moves.push(
@@ -769,8 +768,13 @@ mod save_plan_tests {
             {"Id":"workspace-chat","Title":"Workspace","KeepWorkspace":true,"Messages":[]},
             {"Id":"draft-chat","Title":"Unsent draft","Messages":[]}
         ]));
-        let saved = plan("storage.catalog.savePlan", &current, &next,
-            json!([{"id":"workspace-chat","messages":[]},{"id":"draft-chat","messages":[]}])).unwrap();
+        let saved = plan(
+            "storage.catalog.savePlan",
+            &current,
+            &next,
+            json!([{"id":"workspace-chat","messages":[]},{"id":"draft-chat","messages":[]}]),
+        )
+        .unwrap();
         assert_eq!(saved["next"]["Chats"].as_array().unwrap().len(), 1);
         assert_eq!(saved["next"]["Chats"][0]["Id"], "workspace-chat");
         assert_eq!(saved["writes"], json!([]));

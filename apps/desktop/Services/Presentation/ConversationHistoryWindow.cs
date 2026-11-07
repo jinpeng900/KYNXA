@@ -3,7 +3,6 @@ using KYNXA_Desktop.Models.UI;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// A replaceable display window over durable history, with cursors on both retained edges.
 /// 正式聊天历史的可替换展示窗口；保留两端游标，不在界面重建正式消息日志。
 /// </summary>
 internal sealed class ConversationHistoryWindow(int maximumMessages = 2000, long maximumCharacters = 16 * 1024 * 1024)
@@ -28,8 +27,6 @@ internal sealed class ConversationHistoryWindow(int maximumMessages = 2000, long
         if (reset) Clear();
         if (newer) _pages.AddLast((page, characters)); else _pages.AddFirst((page, characters));
         Characters += characters; MessageCount += page.Messages.Count;
-        // Keep the requested page and its adjacent page so the visible scroll anchor can survive.
-        // An individually oversized page is reported rather than silently dropping its source.
         // 保留当前请求页及相邻页，让可见滚动锚点继续有效；单页超额明确记录，不静默丢弃原文。
         while (_pages.Count > 2 && ExceedsBudget)
         {

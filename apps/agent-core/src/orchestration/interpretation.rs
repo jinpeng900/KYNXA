@@ -91,8 +91,7 @@ fn outcome(args: &Value) -> Value {
     value
 }
 
-/// Projection preserves the user's original request; derived hints never grant authority.
-/// 投影保留用户原始请求；派生线索不授予任何权限。
+/// 映射保留用户原始请求；派生线索不授予任何权限。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "orchestration.retrievalOutcome" => Ok(outcome(args)),

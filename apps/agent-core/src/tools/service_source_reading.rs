@@ -10,10 +10,13 @@ use std::sync::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Reuse scanner exclusions for notifications; the scanner still checks custom ignores and permissions.
-/// 通知复用扫描器的目录排除；自定义忽略规则和权限仍由扫描器核验。
+/// 通知复用扫描器的目录排除；自定义忽略规则和权限仍由扫描器检查。
 pub(crate) fn watch_path_relevant(path: &Path) -> bool {
-    !path.components().any(|part| part.as_os_str().to_str().is_some_and(|name| IGNORED.contains(&name.to_ascii_lowercase().as_str())))
+    !path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_some_and(|name| IGNORED.contains(&name.to_ascii_lowercase().as_str()))
+    })
 }
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,12 +29,79 @@ use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::{array, string, truthy};
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    "txt", "md", "markdown", "mjs", "cjs", "js", "jsx", "ts", "mts", "cts", "tsx", "cs", "xaml",
-    "html", "css", "json", "yaml", "yml", "xml", "toml", "csv", "py", "pyi", "rs", "go", "java",
-    "cpp", "c", "h", "sql", "ps1", "log", "rst", "adoc", "asciidoc", "tex", "bib", "org",
-    "ini", "cfg", "conf", "env", "properties", "tsv", "ndjson", "jsonl", "ipynb", "srt", "vtt",
-    "scss", "sass", "less", "vue", "svelte", "kt", "kts", "swift", "rb", "php", "sh", "bat",
-    "cmd", "lua", "r", "rmd", "jl", "dart", "scala", "clj", "ex", "exs", "erl", "hrl",
+    "txt",
+    "md",
+    "markdown",
+    "mjs",
+    "cjs",
+    "js",
+    "jsx",
+    "ts",
+    "mts",
+    "cts",
+    "tsx",
+    "cs",
+    "xaml",
+    "html",
+    "css",
+    "json",
+    "yaml",
+    "yml",
+    "xml",
+    "toml",
+    "csv",
+    "py",
+    "pyi",
+    "rs",
+    "go",
+    "java",
+    "cpp",
+    "c",
+    "h",
+    "sql",
+    "ps1",
+    "log",
+    "rst",
+    "adoc",
+    "asciidoc",
+    "tex",
+    "bib",
+    "org",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "tsv",
+    "ndjson",
+    "jsonl",
+    "ipynb",
+    "srt",
+    "vtt",
+    "scss",
+    "sass",
+    "less",
+    "vue",
+    "svelte",
+    "kt",
+    "kts",
+    "swift",
+    "rb",
+    "php",
+    "sh",
+    "bat",
+    "cmd",
+    "lua",
+    "r",
+    "rmd",
+    "jl",
+    "dart",
+    "scala",
+    "clj",
+    "ex",
+    "exs",
+    "erl",
+    "hrl",
 ];
 const IGNORED: &[&str] = &[
     ".git",
@@ -106,8 +176,7 @@ fn metadata(path: &Path, info: std::fs::Metadata) -> ServiceResult<Value> {
         json!({"sizeBytes": fact["size"], "mtimeMs": fact["mtimeMs"], "ctimeMs": fact["ctimeMs"], "device": fact["dev"], "inode": fact["ino"]}),
     )
 }
-// Public metadata follows Node Number round-trips; opened object identity remains exact FileVersion below.
-// 公开元数据遵循 Node Number 往返；后文打开文件对象的身份仍按精确 FileVersion 核验。
+// 公开元数据遵循 Node Number 往返；后文打开文件对象的身份仍按精确 FileVersion 检查。
 fn same(left: &Value, right: &Value) -> bool {
     !left.is_null()
         && ["sizeBytes", "mtimeMs", "ctimeMs", "device", "inode"]
@@ -223,7 +292,6 @@ fn record_failure(stats: &mut Value, relative: &str, failure: &Value, directory:
     stats["failures"].as_array_mut().unwrap().push(row);
 }
 
-/// Full scan ownership includes traversal/ignore rules, budgets, retries and reuse; SDK bodies remain external.
 /// 完整扫描拥有遍历/忽略规则、预算、重试与复用；SDK 正文留在外部，失败清单不证明删除。
 #[derive(Default)]
 pub(crate) struct SourceReadingState {
@@ -360,8 +428,7 @@ impl SourceReadingState {
                     }
                 }
             }
-            // SDK documents wait until all admitted text directories have been traversed.
-            // SDK 文档延后到已准入文本目录遍历完成；资源等待不能阻住后续可读文本。
+            // SDK 文档延后到已准入文本目录遍历完成，资源等待不影响后续可读文本。
             let queued = self.entries.pop_front().or_else(|| {
                 if self.directories.is_empty() {
                     self.documents.pop_first()
@@ -459,8 +526,7 @@ impl SourceReadingState {
                 if let Some(rule) = load_ignore(&directory)? {
                     rules.push(Arc::new(rule));
                 }
-                // Retain a bounded stable prefix, rather than an OS-dependent read_dir prefix.
-                // 只保留有界稳定前缀，避免按操作系统 read_dir 顺序截断，也不缓存整棵树正文。
+                // 只保留限量稳定前缀，结果与操作系统 read_dir 顺序无关，不缓存整棵树正文。
                 let maximum = number(&self.options["maximumEntries"], 20000);
                 let capacity = maximum.saturating_sub(self.visited).saturating_add(1) as usize;
                 let mut candidates = BinaryHeap::new();
@@ -625,7 +691,7 @@ impl SourceReadingState {
                 stats["publishedSources"] = json!(self.window_count);
                 stats["publishedTextBytes"] = json!(self.bytes);
                 Ok(stats)
-            },
+            }
             "scanClose" => {
                 self.directories.clear();
                 self.entries.clear();
@@ -941,17 +1007,32 @@ fn append_window(
     *byte += bytes;
 }
 
-/// Read sources on native workers with cancellation and open-handle identity checks, not cached path checks.
-/// 原生线程读取来源，使用取消标记并核验已打开句柄；缓存路径检查不能代替句柄核验。
-/// Binary decoders share those checks without JSON/base64 transport.
-/// 二进制解码复用同一核验，不经过 JSON/base64 传输。
-pub(crate) fn read_binary_stable(path:&Path,maximum:u64,token:&Option<Arc<AtomicBool>>)->ServiceResult<(Vec<u8>,Value)> {
-    cancelled(token)?;let (mut file,first)=stable_file(path,maximum)?;
-    let mut bytes=Vec::new();let mut buffer=[0u8;64*1024];
-    loop {cancelled(token)?;let count=file.read(&mut buffer).map_err(ServiceError::io)?;if count==0{break;}
-        if bytes.len() as u64+count as u64>maximum{return Err(error("STALE_RETRIEVAL_SOURCE"));}bytes.extend_from_slice(&buffer[..count]);}
-    if bytes.len() as u64!=first.size{return Err(error("STALE_RETRIEVAL_SOURCE"));}
-    Ok((bytes,final_metadata(path,&file,&first)?))
+/// 原生线程读取来源，使用取消标记并检查已打开句柄。
+/// 二进制解码复用同一检查，不经过 JSON/base64 传输。
+pub(crate) fn read_binary_stable(
+    path: &Path,
+    maximum: u64,
+    token: &Option<Arc<AtomicBool>>,
+) -> ServiceResult<(Vec<u8>, Value)> {
+    cancelled(token)?;
+    let (mut file, first) = stable_file(path, maximum)?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        cancelled(token)?;
+        let count = file.read(&mut buffer).map_err(ServiceError::io)?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() as u64 + count as u64 > maximum {
+            return Err(error("STALE_RETRIEVAL_SOURCE"));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    if bytes.len() as u64 != first.size {
+        return Err(error("STALE_RETRIEVAL_SOURCE"));
+    }
+    Ok((bytes, final_metadata(path, &file, &first)?))
 }
 pub(crate) fn execute_io(
     operation: &str,
@@ -1177,13 +1258,12 @@ pub(crate) fn execute_io(
 
 #[cfg(test)]
 mod tests {
-    use super::{same, SourceReadingState};
+    use super::{SourceReadingState, same};
     use serde_json::{Value, json};
 
     #[test]
     fn source_metadata_preserves_exact_number_round_trips_and_detects_actual_changes() {
-        // A real window timestamp once changed by one ULP during JSON parsing and rejected an unchanged file.
-        // 真实窗口时间曾在 JSON 解析时偏移一个浮点精度单位，误拒绝未变化文件；往返必须精确且真实变化仍须拒绝。
+        // 真实窗口时间曾在 JSON 解析时偏移一个浮点精度单位，误拒绝未变化的文件，因此往返要精确。
         let observed = json!({
             "sizeBytes": 2_835_021,
             "mtimeMs": 1_791_721_997_237.2227,
@@ -1207,17 +1287,57 @@ mod tests {
         let root = std::env::temp_dir();
         for extension in ["png", "JPG", "jpeg", "bmp", "gif", "tif", "tiff", "webp"] {
             let path = root.join(format!("authorized-picture.{extension}"));
-            let policy = state.apply("filePolicy", &json!({"path":path}), &None).unwrap();
+            let policy = state
+                .apply("filePolicy", &json!({"path":path}), &None)
+                .unwrap();
             assert!(policy["format"].is_string());
             assert_eq!(policy["version"], "windows-image-ocr-text-v1");
-            assert!(state.apply("filePolicy", &json!({"path":path,"window":true}), &None).is_err());
-            assert_eq!(super::super::calculate("tools.pathDomain", &json!({"path":path})).unwrap(), "knowledge");
+            assert!(
+                state
+                    .apply("filePolicy", &json!({"path":path,"window":true}), &None)
+                    .is_err()
+            );
+            assert_eq!(
+                super::super::calculate("tools.pathDomain", &json!({"path":path})).unwrap(),
+                "knowledge"
+            );
         }
-        assert_eq!(state.apply("version", &json!({"path":root.join("a.pdf")}), &None).unwrap(), "rust-lopdf-text-v1");
-        assert_eq!(state.apply("version", &json!({"path":root.join("a.docx")}), &None).unwrap(), "rust-docx-text-v1");
-        assert!(state.apply("filePolicy", &json!({"path":root.join("unsupported-media.avi")}), &None).is_err());
-        let references = super::super::calculate("tools.fileReferences", &json!({"message":"检索 account-guide.png 的密码说明"})).unwrap();
+        assert_eq!(
+            state
+                .apply("version", &json!({"path":root.join("a.pdf")}), &None)
+                .unwrap(),
+            "rust-lopdf-text-v1"
+        );
+        assert_eq!(
+            state
+                .apply("version", &json!({"path":root.join("a.docx")}), &None)
+                .unwrap(),
+            "rust-docx-text-v1"
+        );
+        assert!(
+            state
+                .apply(
+                    "filePolicy",
+                    &json!({"path":root.join("unsupported-media.avi")}),
+                    &None
+                )
+                .is_err()
+        );
+        let references = super::super::calculate(
+            "tools.fileReferences",
+            &json!({"message":"检索 account-guide.png 的密码说明"}),
+        )
+        .unwrap();
         assert_eq!(references[0]["domain"], "knowledge");
-        assert!(super::super::calculate("tools.fileReferences", &json!({"message":"图片清晰度如何改善"})).unwrap().as_array().unwrap().is_empty());
+        assert!(
+            super::super::calculate(
+                "tools.fileReferences",
+                &json!({"message":"图片清晰度如何改善"})
+            )
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+        );
     }
 }

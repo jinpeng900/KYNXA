@@ -61,11 +61,9 @@ node_modules/
 # 评测输入、索引与结果保留本地。
 /test/
 
-# Keep standalone tests and fixtures local; production sources remain tracked.
-# 独立测试和夹具只留本地，生产源码继续纳入版本管理。
+# Local-only test helpers stay out of the repository.
+# 仅本地使用的测试辅助内容不进入仓库。
 /tests/
-/apps/**/tests/
-*_tests.rs
 /apps/mock-backend/
 /tools/development/fixtures/unified-agent/
 /tools/development/evaluate-unified-retrieval.mjs

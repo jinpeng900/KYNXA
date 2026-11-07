@@ -210,8 +210,6 @@ impl CompactionPlan {
     }
 }
 
-/// Build plans from compact metadata without copying original bodies back.
-/// 根据紧凑元信息生成计划，不回传原始正文副本。
 fn context_compaction(args: &Value) -> Value {
     let hard = args["inputBudgetTokens"]
         .as_i64()

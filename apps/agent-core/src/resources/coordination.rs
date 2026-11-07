@@ -32,8 +32,7 @@ fn bounded_put(
     }
 }
 
-/// Preserve reservations, feedback and admission order across restarts; callers supply OS/IPC receipts.
-/// 监控重启后保留隔离预约、反馈和准入顺序；系统与 IPC 回执由调用方提供。
+/// 监控重启后保留隔离预约、反馈和准入顺序；系统与 IPC 结果由调用方提供。
 pub struct CoordinationState {
     leases: BTreeMap<String, Value>,
     claims: BTreeMap<String, Value>,
@@ -292,7 +291,7 @@ impl CoordinationState {
                 if self.queue.len() >= MAX_QUEUE {
                     json!(false)
                 } else {
-                    self.queue_sequence = self.queue_sequence.saturating_add(1);
+                    self.queue_sequence += 1;
                     self.queue.insert(key(&args["id"]),json!({"request":args["request"],"queuedAt":now,"ordinal":self.queue_sequence}));
                     json!(true)
                 }
@@ -340,11 +339,11 @@ impl CoordinationState {
                 json!({"attempts":self.recovery_attempts,"consecutiveFailures":self.recovery_failures,"retryAt":self.retry_at,"reason":self.recovery_reason})
             }
             "recoveryAttempt" => {
-                self.recovery_attempts = self.recovery_attempts.saturating_add(1);
+                self.recovery_attempts += 1;
                 Value::Null
             }
             "recoveryFailed" => {
-                self.recovery_failures = self.recovery_failures.saturating_add(1);
+                self.recovery_failures += 1;
                 self.retry_at = now
                     + (1000u64
                         .saturating_mul(1u64 << self.recovery_failures.saturating_sub(1).min(5)))

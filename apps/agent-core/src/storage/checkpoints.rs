@@ -65,8 +65,7 @@ fn validate_job_id(value: &Value) -> Result<&str, ContractError> {
         })
 }
 
-/// Verify complete records against their original JSON order before repairing only the uncommitted tail.
-/// 完整回执先按原始 JSON 属性顺序校验，再只修复未提交尾部。
+/// 完整结果先按原始 JSON 属性顺序校验，再只修复未提交尾部。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let _transaction = TRANSACTIONS
         .lock()

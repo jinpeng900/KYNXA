@@ -3,7 +3,6 @@ namespace KYNXA_Desktop.Services;
 public enum WorkspacePresentationPriority { CatalogOnly, Automatic, Requested, Final }
 
 /// <summary>
-/// Key follows each resource's stable identity; Version describes that resource's content revision.
 /// 键沿用各类资源的稳定身份；Version 描述该资源的内容版本。
 /// </summary>
 public sealed record ConversationWorkTab(string Key, string Kind, string Title,
@@ -11,7 +10,6 @@ public sealed record ConversationWorkTab(string Key, string Kind, string Title,
     WorkspacePresentationPriority PresentationPriority = WorkspacePresentationPriority.Automatic, Guid? MountId = null);
 
 /// <summary>
-/// Per-conversation display state. Closing never deletes or cancels the source resource.
 /// 按聊天隔离的展示状态；关闭标签不会删除资源或取消执行。
 /// </summary>
 public sealed class ConversationWorkTabState
@@ -63,9 +61,7 @@ public sealed class ConversationWorkTabState
         var added = next.Where(item => !previousKeys.Contains(item.Key) && !tabs.Closed.ContainsKey(item.Key)).ToArray();
         foreach (var item in next.Where(item => item.UserSelected)) tabs.ExplicitlyOpened[item.Key] = ++_version;
         tabs.Items = next;
-        // A late/empty UI projection does not prove that a formal resource was deleted.
-        // Remember recent absent closed keys so rehydration cannot silently reopen them.
-        // 晚到或空的 UI 投影不证明正式资源已删除；保留近期关闭键，避免重新加载后悄悄打开。
+        // 晚到或空的 UI 映射不证明正式资源已删除；保留近期关闭键，避免重新加载后悄悄打开。
         var absentClosed = tabs.Closed.Where(pair => !keys.Contains(pair.Key)).OrderByDescending(pair => pair.Value).ToArray();
         foreach (var pair in absentClosed.Skip(MaximumAbsentClosedTabs)) tabs.Closed.Remove(pair.Key);
         foreach (var pair in tabs.ExplicitlyOpened.Where(pair => !keys.Contains(pair.Key)).OrderByDescending(pair => pair.Value).Skip(MaximumAbsentClosedTabs).ToArray())
@@ -74,9 +70,7 @@ public sealed class ConversationWorkTabState
             foreach (var item in added.Where(item => item.Key != tabs.SelectedKey && !tabs.ExplicitlyOpened.ContainsKey(item.Key)))
                 tabs.Closed[item.Key] = ++_version;
         ApplyAutomaticPresentation(tabs);
-        // Background presentation preserves the current reader; lower-priority files remain reopenable.
         // 后台展示保留正在阅读的标签；低优先级文件仍在目录中，用户可按需打开。
-        // A partial catalog cannot revoke this chat's selection; no absent resource is exposed meanwhile.
         // 部分目录不撤销本聊天的选择意图；来源缺席期间不暴露该资源。
         bool awaitingSelected = !catalogComplete && tabs.SelectedKey is { } selectedKey && !keys.Contains(selectedKey);
         if (!awaitingSelected && !tabs.HomeSelected && keys.Count > 0 && (tabs.SelectedKey is null || !keys.Contains(tabs.SelectedKey) || tabs.Closed.ContainsKey(tabs.SelectedKey)))
@@ -88,7 +82,6 @@ public sealed class ConversationWorkTabState
 
     private static void ApplyAutomaticPresentation(Tabs tabs)
     {
-        // Choose by purpose, never a fixed count; requested/final outputs stay available together.
         // 按用途选择，不按固定数量截断；明确展示与最终成果可以同时保留。
         var selected = tabs.Items.FirstOrDefault(item => item.Key == tabs.SelectedKey && IsOpen(tabs, item.Key));
         tabs.AutomaticallyHidden.Clear();

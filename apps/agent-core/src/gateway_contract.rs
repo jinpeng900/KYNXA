@@ -1,5 +1,4 @@
-//! Shared native gateway contracts; transport never owns a second business ledger.
-//! 原生网关共享合同；传输层不维护第二份业务账本。
+//! 原生网关共享约定；传输层不维护第二份业务记录。
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -40,7 +39,6 @@ impl GatewayError {
         self
     }
 
-    /// Expose safe diagnostics only; exclude credentials and untrusted error bodies.
     /// 仅公开安全诊断，不携带凭据或不可信错误正文。
     pub fn with_details(mut self, details: Value) -> Self {
         self.details = details;
@@ -56,7 +54,6 @@ impl std::fmt::Display for GatewayError {
 impl std::error::Error for GatewayError {}
 impl From<std::io::Error> for GatewayError {
     fn from(_error: std::io::Error) -> Self {
-        // Public errors expose an error code, not host paths or credentials.
         // 公开错误仅返回错误码，不暴露主机私有路径或凭据。
         Self::new(
             "GATEWAY_IO_FAILED",
@@ -198,7 +195,6 @@ impl GatewayConfig {
         })
     }
 
-    /// Store maintenance markers beside persistent pointers, outside read-only packages.
     /// 维护标记可放在持久指针旁，避免写入只读安装目录。
     pub fn migration_lock_path(&self) -> Result<PathBuf, GatewayError> {
         std::env::var_os("KYNXA_STORAGE_MIGRATION_LOCK")

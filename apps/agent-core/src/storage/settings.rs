@@ -165,10 +165,11 @@ fn merge_local(base: &Value, patch: &Value) -> Value {
             result[name] = merge_values(&base[name], &patch[name]);
         }
     }
-    // Ignore retired cross-encoder settings while accepting older persisted/client schemas.
-    // 接受旧持久设置与客户端字段，但不能重新启用已移除的交叉编码器。
+    // 接受旧持久设置与客户端字段，已移除的交叉编码器保持关闭。
     if let Some(fields) = result.as_object_mut() {
-        for name in ["rerankProfileId", "rerankDevicePolicy", "rerankCandidates"] { fields.remove(name); }
+        for name in ["rerankProfileId", "rerankDevicePolicy", "rerankCandidates"] {
+            fields.remove(name);
+        }
     }
     if result.get("rrfK").is_some() {
         result["rrfK"] = json!(result["rrfK"].as_u64().unwrap_or(60).clamp(20, 100));
@@ -209,9 +210,7 @@ fn patch(value: &Value) -> ContractResult {
             clean[name] = match name.as_str() {
                 "enabled" => boolean(value, name)?,
                 "semantic" => choice(value, &["auto", "off"], name)?,
-                "embeddingDevicePolicy" => {
-                    choice(value, &["auto", "cpu", "gpu"], name)?
-                }
+                "embeddingDevicePolicy" => choice(value, &["auto", "cpu", "gpu"], name)?,
                 "vectorBackend" => choice(value, &["sqlite"], name)?,
                 "rerankProfileId" | "rerankCandidates" | "rerankDevicePolicy" => Value::Null,
                 "rrfK" => json!(integer(value, 20, 100, name)?),
@@ -301,7 +300,6 @@ fn project_patch(value: &Value) -> ContractResult {
             let Some(ids) = ids.as_array().filter(|ids| ids.len() <= 100000) else {
                 return Err(failure("Invalid knowledge selection. / 资料选择列表无效。"));
             };
-            // Retain first-selection order with linear duplicate detection.
             // 以线性去重保留首次选择顺序，避免大型资料列表触发平方级比较。
             let mut seen = HashSet::with_capacity(ids.len());
             let mut unique = Vec::with_capacity(ids.len());
@@ -399,8 +397,7 @@ fn document(value: &Value, project_id: &Value) -> ContractResult {
         MAX_SAFE_INTEGER,
         "bindingRevision",
     )?;
-    // Work preparation is automatic; old opt-in documents cannot disable the active binding.
-    // 工作资料自动准备；旧版选择加入配置不能关闭当前目录绑定。
+    // 工作资料自动准备，旧版选择加入配置不影响当前目录绑定。
     clean["mountedFolder"]["enabled"] = json!(true);
     result["indexingSources"] = clean;
     Ok(result)
@@ -443,8 +440,7 @@ fn project_next(args: &Value) -> ContractResult {
     Ok(result)
 }
 
-/// Settings remain CAS documents owned by the gateway; this module computes policy and validation only.
-/// 配置仍由网关独占执行 CAS 持久化；此模块只计算策略和校验结果。
+/// 配置仍由网关独占执行 CAS 保存；此模块只计算策略和校验结果。
 pub fn apply(operation: &str, args: &Value) -> ContractResult {
     match operation {
         "storage.settings.storageBudget" => {
@@ -564,11 +560,16 @@ mod lightweight_settings_tests {
     use super::*;
     #[test]
     fn retired_settings_cannot_reload_a_model_and_project_edits_preserve_global_rrf_k() {
-        let legacy=merge_local(&defaults()["local"],&json!({"rerankProfileId":"retired-profile","rerankDevicePolicy":"gpu","rerankCandidates":60}));
-        for field in ["rerankProfileId","rerankDevicePolicy","rerankCandidates"] {assert!(legacy.get(field).is_none());}
-        assert_eq!(legacy["rrfK"],60);
-        let local_patch=merge_local(&json!({}),&json!({"enabled":true}));
+        let legacy = merge_local(
+            &defaults()["local"],
+            &json!({"rerankProfileId":"retired-profile","rerankDevicePolicy":"gpu","rerankCandidates":60}),
+        );
+        for field in ["rerankProfileId", "rerankDevicePolicy", "rerankCandidates"] {
+            assert!(legacy.get(field).is_none());
+        }
+        assert_eq!(legacy["rrfK"], 60);
+        let local_patch = merge_local(&json!({}), &json!({"enabled":true}));
         assert!(local_patch.get("rrfK").is_none());
-        assert_eq!(merge_local(&json!({"rrfK":35}),&local_patch)["rrfK"],35);
+        assert_eq!(merge_local(&json!({"rrfK":35}), &local_patch)["rrfK"], 35);
     }
 }

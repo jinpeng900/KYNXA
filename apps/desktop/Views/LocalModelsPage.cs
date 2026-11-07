@@ -6,7 +6,6 @@ using Microsoft.UI.Xaml.Controls;
 namespace KYNXA_Desktop.Views;
 
 /// <summary>
-/// Manages local generation models inside settings; category navigation retains the page and background downloads.
 /// 在设置内管理本地生成模型；切换分类保留页面和后台下载，关闭设置才释放界面资源。
 /// </summary>
 public sealed partial class LocalModelsPage : UserControl, IDisposable
@@ -86,7 +85,6 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
             _directory.Text = snapshot.InstallDirectory;
             RenderStorageSpace();
             _ = RefreshStorageSpaceAsync(snapshot.InstallDirectory);
-            // Keep the pending choice during save; reconcile with the authoritative result afterward.
             // 保存期间保留当前选择，结束后按正式快照确认或回滚，避免等待时跳动。
             _policy.SelectedKey = _pendingLoadPolicy ?? snapshot.LoadPolicy;
             _policyHint.Text = UiText.Get((_pendingLoadPolicy ?? snapshot.LoadPolicy) switch
@@ -115,7 +113,6 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
         finally { _rendering = false; }
         if (snapshot.Models.Any(IsTransfer)) _downloadTimer.Start();
         else _downloadTimer.Stop();
-        // Catalog changes refresh available choices, never replace the user's current API/model selection here.
         // 目录变化只刷新可选模型；此处不改用户当前 API 或模型选择。
         string signature = snapshot.Enabled + ":" + string.Join("|", snapshot.Models.Where(model => model.Installed && model.Enabled)
             .Select(model => model.Id).Order(StringComparer.Ordinal));
@@ -134,7 +131,6 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
             .Where(model => query.Length == 0 || string.Join(" ", model.Name, model.Id, model.Family, model.Category, model.Quantization)
                 .Contains(query, StringComparison.CurrentCultureIgnoreCase))
             .Select(model => _rows[model.Id]).ToArray();
-        // Change only membership/order; stable row instances retain keyboard focus and virtualization state.
         // 仅调整成员及顺序，稳定行实例保留键盘焦点和虚拟化状态，不清空重建列表。
         for (int index = 0; index < desired.Length; index++)
         {
@@ -166,7 +162,6 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
         _storageDirectory = directory;
         _storageRefreshAt = DateTimeOffset.UtcNow;
         if (changed) _storageAvailableBytes = null;
-        // Read free disk space off the UI thread; reuse model-size snapshots without scanning.
         // 后台读取磁盘可用量，模型占用复用快照，不递归扫描目录。
         long? available = await Task.Run(() =>
         {

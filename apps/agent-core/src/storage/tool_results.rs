@@ -72,10 +72,15 @@ fn depth(value: &Value, level: usize) -> Result<(), ContractError> {
 }
 
 pub(crate) fn validate_result_shape(call: &Value, canonical: &Value) -> Result<(), ContractError> {
-    if !call["id"].as_str().is_some_and(|value| !value.is_empty() && utf16_length(value) <= 200
-        && !value.contains(['\0', '\r', '\n']))
-        || !call["name"].as_str().is_some_and(|value| !value.is_empty() && utf16_length(value) <= 256)
-        || !canonical.is_object() { return Err(invalid()); }
+    if !call["id"].as_str().is_some_and(|value| {
+        !value.is_empty() && utf16_length(value) <= 200 && !value.contains(['\0', '\r', '\n'])
+    }) || !call["name"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty() && utf16_length(value) <= 256)
+        || !canonical.is_object()
+    {
+        return Err(invalid());
+    }
     depth(canonical, 0)
 }
 
@@ -141,7 +146,9 @@ fn projection(
                 removals.push(json!(path));
             } else {
                 let next = if (path.len() == 1 || path.len() == 2 && path[0] == "value")
-                    && key == "content" && child.is_array() {
+                    && key == "content"
+                    && child.is_array()
+                {
                     "content"
                 } else if kind == "block" && value["type"] == "resource" && key == "resource" {
                     "resource"

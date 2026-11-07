@@ -1,8 +1,8 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$OutputDirectory,
     [string]$ReleaseManifestPath,
-    [string]$PackageVersion = '1.8.7',
+    [string]$PackageVersion = '1.8.9',
     [string]$CompilerPath,
     [switch]$AllowUnpublished
 )
@@ -16,7 +16,6 @@ if (-not $ReleaseManifestPath) { $ReleaseManifestPath = Join-Path $OutputDirecto
 $ReleaseManifestPath = [IO.Path]::GetFullPath($ReleaseManifestPath)
 if (-not $CompilerPath) { $CompilerPath = Join-Path $repositoryRoot 'artifacts/development/installer-tools/InnoSetup/tools/ISCC.exe' }
 
-# The bootstrapper consumes an existing pinned release; it never rebuilds or silently republishes the full application.
 # 在线引导器只复用已生成的固定版本发布清单，不重编应用，也不隐式发布完整安装包。
 $release = Get-Content -LiteralPath $ReleaseManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $expectedFileName = "KYNXA-$PackageVersion-windows-x64-setup.exe"

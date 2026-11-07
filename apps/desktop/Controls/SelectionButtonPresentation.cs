@@ -6,7 +6,6 @@ using Microsoft.UI.Xaml.Media;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Keeps selection visible while native button states provide shared themed pointer feedback.
 /// 保持原生按钮的选中底色，并为未选中按钮提供统一的主题悬停与按下反馈。
 /// </summary>
 internal static class SelectionButtonPresentation
@@ -23,13 +22,11 @@ internal static class SelectionButtonPresentation
         var foreground = AppearanceService.GetBrush(highContrastSelection ? "KynxaOnAccentBrush" : "KynxaTextBrush");
         button.Background = selected ? selection : idleBackground ?? TransparentBrush;
         button.Foreground = foreground;
-        // Native templates otherwise replace a local Background when the pointer enters the selected button.
         // 原生模板会在指针进入时覆盖按钮的本地 Background，因此同时配置选中项的状态资源。
         UpdateStateBrush(button, "ButtonBackgroundPointerOver", selected ? selection : AppearanceService.GetBrush("KynxaControlHoverBrush"));
         UpdateStateBrush(button, "ButtonBackgroundPressed", selected ? selection : AppearanceService.GetBrush("KynxaControlPressedBrush"));
         UpdateStateBrush(button, "ButtonForegroundPointerOver", foreground);
         UpdateStateBrush(button, "ButtonForegroundPressed", foreground);
-        // A changed TemplateBinding can replace the active setter's fill without changing its state name.
         // TemplateBinding 更新可能覆盖当前状态的底色，但不改变状态名；同一帧无动画重应用，保留真实指针反馈。
         if (pointerState is "PointerOver" or "Pressed")
         {
@@ -40,7 +37,6 @@ internal static class SelectionButtonPresentation
 
     internal static void UpdateStateBrush(FrameworkElement control, string resourceKey, SolidColorBrush source)
     {
-        // An active WinUI setter retains its brush reference when a resource is replaced. Recolor an owned brush instead.
         // WinUI 已生效的状态 Setter 会保留原画刷引用；原位改色，确保指针未离开时切换选择也立即生效。
         string ownedKey = "KynxaOwnedState_" + resourceKey;
         if (!control.Resources.TryGetValue(ownedKey, out var resource) || resource is not SolidColorBrush brush)

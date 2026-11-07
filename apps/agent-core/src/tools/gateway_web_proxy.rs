@@ -1,8 +1,6 @@
-//! Preserve the user's HTTP proxy while pinning public web destinations.
-//! 保留用户配置的 HTTP 代理，并把公共网页目的地绑定到已核验地址。
+//! 保留用户配置的 HTTP 代理，并把公共网页目的地绑定到已检查地址。
 //!
-//! This transport owns address verification and the per-request relay; gateway_web owns extraction and pagination.
-//! 本传输模块拥有地址核验与单次请求的转接生命周期；gateway_web 拥有正文提取和分页。
+//! 本传输模块拥有地址检查与单次请求的转接生命周期；gateway_web 拥有正文提取和分页。
 
 use super::gateway::failure;
 use crate::gateway_contract::GatewayError;
@@ -16,7 +14,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use url::Url;
 
-/// Dropping the transport aborts its private relay, including on caller cancellation or timeout.
 /// 传输对象释放时中止自有转接任务，覆盖调用取消和超时路径。
 pub(crate) struct PublicClient {
     pub client: reqwest::Client,
@@ -27,23 +24,8 @@ pub(crate) struct PublicClient {
 
 impl Drop for PublicClient {
     fn drop(&mut self) {
-        // A cancelled fetch must not leave an internal proxy or tunnel running.
-        // 取消抓取后不得留下内部转接监听或网络隧道。
         if let Some(relay) = self.relay.take() {
             relay.abort();
-        }
-    }
-}
-
-fn is_fake_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            address.octets()[0] == 198 && [18, 19].contains(&address.octets()[1])
-        }
-        IpAddr::V6(address) => {
-            // Recognize the specific Clash mapping prefix, never arbitrary ULA/private IPv6.
-            // 只识别 Clash 的明确映射前缀，不能把任意 ULA/私有 IPv6 都当作代理地址。
-            address.segments()[..3] == [0xfdfe, 0xdcba, 0x9876]
         }
     }
 }
@@ -149,7 +131,6 @@ fn system_proxy() -> Result<Option<(String, String)>, GatewayError> {
         while length < 32768 && unsafe { *pointer.add(length) } != 0 {
             length += 1;
         }
-        // WinHTTP returns GlobalAlloc-owned text; copy it before releasing that allocation exactly once.
         // WinHTTP 返回 GlobalAlloc 所有的文本；先复制内容，再仅释放该分配一次。
         let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, length) });
         unsafe {
@@ -188,7 +169,6 @@ fn system_proxy() -> Result<Option<(String, String)>, GatewayError> {
 }
 
 pub(crate) fn proxy_for(url: &Url) -> Result<Option<Url>, GatewayError> {
-    // Explicit bypass and environment proxy rules take precedence over the current user's Windows proxy.
     // 明确绕过规则和环境代理配置优先于当前用户的 Windows 代理配置。
     let bypass = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
@@ -239,8 +219,7 @@ async fn public_dns(
             return Ok(addresses.clone());
         }
     }
-    // Resolve through the existing proxy, never leak a direct DNS/HTTP query around it.
-    // 核验解析仍经过现有代理，不能绕过代理直连 DNS/HTTP；只发送当前公共网页域名。
+    // 检查解析经过现有代理，只发送当前公共网页域名。
     let client = reqwest::Client::builder()
         .no_proxy()
         .proxy(
@@ -296,8 +275,7 @@ async fn public_dns(
         .min()
         .unwrap_or(0)
         .min(120);
-    // Repeated pagination reuses only verified addresses within DNS TTL; cache never grants private access.
-    // 连续分页只在 DNS TTL 内复用已核验地址；有界缓存不授予私网访问能力。
+    // 连续分页只在 DNS TTL 内复用已检查地址；限量缓存不授予私网访问能力。
     if ttl_seconds > 0 {
         if let Ok(mut cache) = cache.lock() {
             cache.retain(|_, (expires, _)| *expires > Instant::now());
@@ -358,8 +336,7 @@ fn public_dns_addresses(value: &Value) -> Result<Vec<SocketAddr>, GatewayError> 
 
 async fn read_http_header(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
     let mut bytes = Vec::new();
-    // Header-only reads avoid losing bytes belonging to the following TLS tunnel.
-    // 只读取协议头，避免吞掉随后 TLS 隧道的首批字节。
+    // 只读取协议头，随后 TLS 隧道的首批字节留给隧道。
     while bytes.len() < 16384 {
         let byte = stream.read_u8().await?;
         bytes.push(byte);
@@ -408,8 +385,7 @@ async fn relay_public_request(
         proxy.port_or_known_default().unwrap_or(80),
     ))
     .await?;
-    // The configured upstream connects the verified public IP; it cannot re-resolve the target privately.
-    // 上游代理只连接已核验公共 IP，不能在第二次解析时把网页域名重绑到内网。
+    // 上游代理只连接已检查公共 IP，防止第二次解析时把网页域名重绑到内网。
     let target = destinations[0].to_string();
     let mut connect = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if !proxy.username().is_empty() || proxy.password().is_some() {
@@ -473,37 +449,38 @@ pub(crate) async fn client(url: &Url, timeout: Duration) -> Result<PublicClient,
     let port = url.port_or_known_default().unwrap_or(443);
     let gateway_addresses = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|_| failure("WEB_DNS_FAILED", "网页主机解析失败。", 502))?
-        .collect::<Vec<_>>();
-    let has_fake_addresses = gateway_addresses
-        .iter()
-        .any(|address| is_fake_address(address.ip()));
-    let is_public_resolution = !gateway_addresses.is_empty()
-        && gateway_addresses.len() <= 64
-        && gateway_addresses
-            .iter()
-            .all(|address| super::service_http::public_address(&address.ip().to_string()));
-    let (mut addresses, resolution) = if is_public_resolution {
-        (gateway_addresses, "gateway-dns-public")
-    } else if proxy.is_some()
-        && has_fake_addresses
-        && gateway_addresses.len() <= 64
-        && gateway_addresses.iter().all(|address| {
-            is_fake_address(address.ip())
-                || super::service_http::public_address(&address.ip().to_string())
-        })
-        && host.contains('.')
-    {
-        (
-            public_dns(host, proxy.as_ref().unwrap(), timeout).await?,
-            "public-dns-via-configured-proxy",
-        )
-    } else {
-        return Err(failure(
-            "WEB_URL_BLOCKED",
-            "DNS 包含无法核验的非公共地址；网页读取已拒绝。",
-            403,
-        ));
+        .map(|addresses| addresses.collect::<Vec<_>>());
+    let is_public_resolution = gateway_addresses.as_ref().is_ok_and(|addresses| {
+        !addresses.is_empty()
+            && addresses.len() <= 64
+            && addresses
+                .iter()
+                .all(|address| super::service_http::public_address(&address.ip().to_string()))
+    });
+    // 配了代理时本地 DNS 可能是虚拟地址或被污染，优先经代理查公共解析；结果同样必须是公网地址。
+    let verified = match proxy.as_ref().filter(|_| host.contains('.')) {
+        Some(proxy) => Some(public_dns(host, proxy, timeout).await),
+        None => None,
+    };
+    let (mut addresses, resolution) = match verified {
+        Some(Ok(addresses)) => (addresses, "public-dns-via-configured-proxy"),
+        Some(Err(error)) if error.code == "WEB_URL_BLOCKED" || !is_public_resolution => {
+            return Err(error);
+        }
+        _ if is_public_resolution => (
+            gateway_addresses.unwrap_or_default(),
+            "gateway-dns-public",
+        ),
+        _ if gateway_addresses.is_err() => {
+            return Err(failure("WEB_DNS_FAILED", "网页主机解析失败。", 502));
+        }
+        _ => {
+            return Err(failure(
+                "WEB_URL_BLOCKED",
+                "DNS 包含无法核验的非公共地址；网页读取已拒绝。",
+                403,
+            ));
+        }
     };
     for address in &mut addresses {
         address.set_port(port);
@@ -565,12 +542,7 @@ pub(crate) async fn client(url: &Url, timeout: Duration) -> Result<PublicClient,
 mod tests {
     use super::*;
     #[test]
-    fn proxy_bypass_and_fake_addresses_do_not_expand_private_access() {
-        assert!(is_fake_address("198.18.0.10".parse().unwrap()));
-        assert!(is_fake_address("fdfe:dcba:9876::a".parse().unwrap()));
-        for address in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "fd00::1", "::1"] {
-            assert!(!is_fake_address(address.parse().unwrap()));
-        }
+    fn proxy_bypass_does_not_expand_private_access() {
         assert!(bypass_matches("example.org", "*.example.org"));
         assert!(bypass_matches("part.example.org", ".example.org"));
         assert!(!bypass_matches("fakeexample.org", "example.org"));

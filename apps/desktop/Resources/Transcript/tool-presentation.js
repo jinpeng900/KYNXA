@@ -106,7 +106,6 @@
       try { return readableError(JSON.parse(value), depth + 1); } catch { return plain(value); }
     }
     if (typeof value !== 'object' || Array.isArray(value)) return '';
-    // Read only documented public error fields. Never scan metadata, parameters or arbitrary result objects.
     // 只读取已有约定的公开错误字段；不扫描元数据、参数或任意结果对象。
     const message = plain(value.message) || plain(value.error?.message);
     if (message) return message;

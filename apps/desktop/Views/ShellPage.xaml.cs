@@ -13,7 +13,6 @@ using static KYNXA_Desktop.Layout.ShellLayoutMetrics;
 namespace KYNXA_Desktop.Views;
 
 /// <summary>
-/// The default KYNXA desktop shell defined by UI Design Spec v1.1.
 /// 符合 UI Design Spec v1.1 的默认 KYNXA 桌面主界面。
 /// </summary>
 public sealed partial class ShellPage : Page
@@ -38,7 +37,6 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
-        // Bind immutable chat rows at runtime; XAML metadata must not generate setters for their init-only properties.
         // 不可变聊天行在运行时接入列表，避免 XAML 元数据为 init-only 属性生成写入器。
         ChatHistoryList.ItemsSource = VisibleChatEntries;
         InitializePresentationActions();
@@ -62,7 +60,6 @@ public sealed partial class ShellPage : Page
         MountedWorkspace.OpenRequested += MountedWorkspaceOpenRequested;
         MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
         MountedWorkspace.UnmountRequested += MountedWorkspaceUnmountRequested;
-        // A click in native chrome/input is outside the browser document too.
         // 在原生界面区域或输入控件单击，也属于浏览器文档之外的操作。
         AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
         {
@@ -70,7 +67,6 @@ public sealed partial class ShellPage : Page
                 if (node == ConversationMessages) return;
             ConversationMessages.ClearSelection();
         }), handledEventsToo: true);
-        // Preview runs before TextBox inserts a return; bubbling KeyDown runs after its editing handler.
         // 预览阶段先拦截发送键，避免 TextBox 在普通 KeyDown 之前已经插入换行。
         PromptTextBox.AddHandler(UIElement.PreviewKeyDownEvent,
             new KeyEventHandler(PromptTextBox_KeyDown), handledEventsToo: true);
@@ -90,7 +86,6 @@ public sealed partial class ShellPage : Page
         ConversationMessages.Preload();
         InitializeModelPicker();
         InitializePermissionPicker();
-        // Present the current mode before awaiting the gateway; loading must not replace a user's later choice.
         // 等待网关前呈现当前模式；目录返回后不能覆盖用户在加载期间选择的模式和草稿。
         SetPrimaryMode(ViewModel.IsChatMode);
         await InitializeProjectsAsync();
@@ -126,7 +121,6 @@ public sealed partial class ShellPage : Page
                 ? maximumComposerHeight
                 : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
             ComposerHost.EditorHeight = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
-            // Measure the current localized actions instead of reserving a fixed label budget.
             // 测量当前语言下的操作区，避免为权限文字预留固定宽度。
             SelectedPermissionLabel.Visibility = ComposerHost.Width < 480 ? Visibility.Collapsed : Visibility.Visible;
             ComposerToolbarLeft.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
@@ -149,7 +143,6 @@ public sealed partial class ShellPage : Page
             return;
         }
 
-        // Scale gently around the reference layout while keeping compact windows usable.
         // 围绕参考布局缓慢缩放，同时保证小窗口仍可使用。
         double scale = Math.Clamp(Math.Min(width / 1100, height / 720), 0.76, 1.12);
         LogoHost.Width = 164 * scale;
@@ -162,7 +155,6 @@ public sealed partial class ShellPage : Page
         double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
 
         MainContentHost.Translation = UsesConversationLayout ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
-        // The transcript fills the remaining grid column as the work panel resizes.
         // 工作面板调整宽度时，聊天填满网格中剩余的列空间。
         ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 64 + UsageSummaryHeight + InlineApprovalHeight);
 
@@ -202,7 +194,6 @@ public sealed partial class ShellPage : Page
             _layout.SidebarCollapsed = !_layout.SidebarCollapsed;
         }
         ApplyLayout();
-        // Keep keyboard focus on the visible counterpart after hiding the clicked button.
         // 隐藏被点击的按钮后，将键盘焦点交给当前可见的对应按钮。
         (CompactSidebarButton.Visibility == Visibility.Visible ? CompactSidebarButton : CollapseSidebarButton)
             .Focus(focusState);
@@ -380,7 +371,6 @@ public sealed partial class ShellPage : Page
         MainContentHost.Visibility = Visibility.Visible;
         if (changed)
         {
-            // TextBox's two-way source can still be pending a focus change.
             // TextBox 双向绑定的源值可能仍在等待焦点改变后提交。
             PromptTextBox.Text = chat ? _chatDraft : _workDraft;
             ViewModel.Prompt = PromptTextBox.Text;
@@ -398,7 +388,6 @@ public sealed partial class ShellPage : Page
     private void ModeSwitchTrack_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (PrimaryModeSelectionPill is null) return;
-        // Resize immediately; only mode changes animate between the two equal halves.
         // 尺寸拖动立即生效；只有模式切换才在相等的左右半区间播放动画。
         var transition = PrimaryModeSelectionPill.TranslationTransition;
         PrimaryModeSelectionPill.TranslationTransition = null;
@@ -448,7 +437,6 @@ public sealed partial class ShellPage : Page
     private void WorkSidebarContent_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (WorkRecentHistory is null || ProjectTree is null) return;
-        // Recalculate only geometry; dragged heights and list identities survive a resize.
         // 仅重算布局；窗口缩放保留拖动高度及原列表对象。
         UpdateWorkSidebarHeights(e.NewSize.Height);
     }
@@ -524,7 +512,6 @@ public sealed partial class ShellPage : Page
 
     private void ModelManagementButton_Click(object sender, RoutedEventArgs e)
     {
-        // Finish the navigation button's focus/visual-state stack before presenting a second native window.
         // 导航按钮完成焦点与可视状态调用栈后，再呈现第二个原生窗口，与菜单入口的排队时序保持一致。
         DispatcherQueue.TryEnqueue(() =>
         {
@@ -561,7 +548,6 @@ public sealed partial class ShellPage : Page
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         UpdateSendButtonState();
-        // Match the editor's reserved scrollbar lane so wrapping never runs beneath it.
         // 与输入区预留的滚动条通道对齐，避免换行文本延伸到滚动条下。
         double availableTextWidth = Math.Max(120, PromptTextBox.ActualWidth - 88);
         _promptMeasure.Text = string.IsNullOrEmpty(PromptTextBox.Text) ? " " : PromptTextBox.Text;

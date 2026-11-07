@@ -1,5 +1,4 @@
-//! Project saved attachments into the current model turn without changing the user's original text.
-//! 将已保存附件投影到当前模型轮次，保留用户原文；附件正文始终作为资料而非指令。
+//! 将已保存附件映射到当前模型轮次，保留用户原文；附件正文始终作为资料而非指令。
 
 use std::sync::OnceLock;
 
@@ -16,7 +15,10 @@ pub(crate) fn user_message(text: &str, message_id: &str, prepared: &Value) -> Va
             item["sha256"].as_str().unwrap_or("unavailable")
         ));
     }
-    if prepared["attachments"].as_array().is_some_and(|items| !items.is_empty()) {
+    if prepared["attachments"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
         document.push_str("Attachment access: attachment.read extracts text/OCR; image.read(messageId, attachmentId) supplies pixels; attachment.export(messageId, attachmentId, path) copies the original to an authorized work file for scripts. No private path search or duplicate upload is needed.\n");
     }
     for item in prepared["texts"].as_array().into_iter().flatten() {
@@ -60,7 +62,6 @@ pub(crate) fn user_message(text: &str, message_id: &str, prepared: &Value) -> Va
     }
 }
 
-/// Checkpoints retain attachment identity and existing text; image bytes remain in the immutable blob store.
 /// 检查点保留附件身份与已有文字，原图字节只存在不可变附件存储，恢复时按正式消息补图。
 pub(crate) fn checkpoint_messages(history: &[Value]) -> Vec<Value> {
     history
@@ -113,8 +114,7 @@ pub(crate) fn remove_images(history: &mut [Value]) -> bool {
     removed
 }
 
-/// Adapt only this request to verified local capabilities; preserve API contracts, attachments and history.
-/// 仅按已核验本地能力调整请求；保留 API 合同、正式附件和历史。
+/// 仅按已检查本地能力调整请求；保留 API 约定、正式附件和历史。
 pub(crate) fn project_text_only_model(connection: &Value, history: &mut [Value]) -> bool {
     let managed = connection["providerId"]
         .as_str()
@@ -128,7 +128,6 @@ pub(crate) fn project_text_only_model(connection: &Value, history: &mut [Value])
     managed && known_text_only && remove_images(history)
 }
 
-/// Classify explicit upstream image refusals without publishing their body or arbitrary provider metadata.
 /// 仅识别上游明确的图片拒绝；原始正文和任意供应商元数据不进入公开诊断。
 pub(crate) fn classify_image_rejection(status: u16, body: &Value) -> Value {
     if ![400, 415, 422, 500].contains(&status) {
@@ -170,8 +169,7 @@ pub(crate) fn classify_image_rejection(status: u16, body: &Value) -> Value {
 }
 
 pub(crate) fn image_rejection(status: u16, _message: &str, details: &Value) -> bool {
-    // The gateway's public 502 is distinct from the provider rejection that authorizes this text fallback.
-    // 网关公开的502与供应商实际拒绝不同；只有已核验的图片分类允许文字回退。
+    // 网关公开的 502 与供应商实际拒不同，只有已检查的图片分类才走文字回退。
     let upstream_status = details["upstreamStatus"]
         .as_u64()
         .and_then(|value| u16::try_from(value).ok())
@@ -218,17 +216,31 @@ mod tests {
     #[test]
     fn upstream_image_classification_is_explicit_private_and_works_through_gateway_status() {
         for (message, reason) in [
-            ("This model does not support image inputs. fixture-secret", "unsupported"),
-            ("Image inputs are not supported fixture-secret", "unsupported"),
+            (
+                "This model does not support image inputs. fixture-secret",
+                "unsupported",
+            ),
+            (
+                "Image inputs are not supported fixture-secret",
+                "unsupported",
+            ),
             ("Invalid image format fixture-secret", "invalid"),
             ("failed to decode the image fixture-secret", "invalid"),
         ] {
-            let classification = classify_image_rejection(400, &json!({"error":{"message":message}}));
-            assert_eq!(classification, json!({"kind":"image-input","reason":reason,"verified":true}));
+            let classification =
+                classify_image_rejection(400, &json!({"error":{"message":message}}));
+            assert_eq!(
+                classification,
+                json!({"kind":"image-input","reason":reason,"verified":true})
+            );
             assert!(!classification.to_string().contains("fixture-secret"));
             let details = json!({"upstreamStatus":400,"imageRejection":classification});
             assert!(image_rejection(502, "模型拒绝了图片输入。", &details));
-            assert!(!image_rejection(502, "", &json!({"upstreamStatus":401,"imageRejection":classification})));
+            assert!(!image_rejection(
+                502,
+                "",
+                &json!({"upstreamStatus":401,"imageRejection":classification})
+            ));
         }
         for body in [
             json!({"error":{"message":"Invalid API key for image model"}}),
@@ -239,7 +251,11 @@ mod tests {
         }
         assert!(classify_image_rejection(401, &json!({"error":"unsupported image"})).is_null());
         assert!(!image_rejection(400, "unsupported image", &Value::Null));
-        assert!(!image_rejection(400, "", &json!({"imageRejection":{"kind":"image-input","verified":false,"reason":"invalid"}})));
+        assert!(!image_rejection(
+            400,
+            "",
+            &json!({"imageRejection":{"kind":"image-input","verified":false,"reason":"invalid"}})
+        ));
     }
 
     #[test]

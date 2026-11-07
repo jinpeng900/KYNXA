@@ -14,7 +14,6 @@ using Windows.UI.ViewManagement;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// A compact radio group with a compositor-owned sliding capsule; labels never move with the selection.
 /// 紧凑单选分段控件；合成器仅移动选中胶囊，文字不随选择移动。
 /// </summary>
 public sealed partial class SegmentedSelector : UserControl, IDisposable
@@ -96,7 +95,6 @@ public sealed partial class SegmentedSelector : UserControl, IDisposable
     {
         if (_disposed || key is null || !_options.Any(entry => entry.Option.Key == key)) return;
         bool changed = !string.Equals(_selectedKey, key, StringComparison.Ordinal);
-        // Preference refreshes echo the selected key; they must not cancel an in-flight capsule transition.
         // 偏好刷新会回写同一个选中值；不得因此取消正在进行的胶囊移动。
         if (!changed)
         {
@@ -187,12 +185,10 @@ public sealed partial class SegmentedSelector : UserControl, IDisposable
         var offset = new Vector3((float)position.X, (float)position.Y, 0);
         var size = new Vector2((float)button.ActualWidth, (float)button.ActualHeight);
         if (_positioned && _capsule.Offset == offset && _capsule.Size == size) return;
-        // Implicit compositor animations retarget from the current presentation during rapid consecutive clicks.
         // 连续点击时隐式合成动画从当前可见位置接续，不停止旧动画后跳回起点。
         _capsule.ImplicitAnimations = animate && _positioned && _systemSettings.AnimationsEnabled ? _animations : null;
         _capsule.Offset = offset;
         _capsule.Size = size;
-        // Initial layout and language resizing snap once, then restore transitions for the next user selection.
         // 初始布局和语言尺寸变化只立即定位一次，随后恢复下一次用户切换所需的动画。
         _capsule.ImplicitAnimations = _systemSettings.AnimationsEnabled ? _animations : null;
         _positioned = true;
@@ -225,7 +221,6 @@ public sealed partial class SegmentedSelector : UserControl, IDisposable
 
     private void RefreshPointerBrushes(SegmentButton button, bool selected)
     {
-        // The compositor owns selection; the selected radio's pointer surface must stay transparent above its capsule.
         // 选中底色由合成器绘制；已选单选项的指针表面须保持透明，避免遮住下方胶囊。
         SelectionButtonPresentation.UpdateStateBrush(button, "KynxaControlHoverBrush",
             selected ? _transparentBrush : AppearanceService.GetBrush("KynxaControlHoverBrush"));

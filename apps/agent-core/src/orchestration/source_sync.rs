@@ -60,7 +60,6 @@ fn wire_with_fields(value: &Value, fields: &HashMap<String, String>) -> String {
     )
 }
 
-/// Track source caches, generations and notifications; failed scans do not prove deletion.
 /// 维护来源缓存、代次和通知，扫描失败不证明来源已删除。
 #[derive(Default)]
 pub struct SourceSyncState {

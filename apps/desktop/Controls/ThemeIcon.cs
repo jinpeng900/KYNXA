@@ -8,7 +8,7 @@ using PathShape = Microsoft.UI.Xaml.Shapes.Path;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>Displays trusted, built-in vector geometry with a shared semantic brush.</summary>
-/// <remarks>仅显示内置的固定矢量几何，通过共享语义画刷跟随主题；不读取或解析用户 SVG、HTML。</remarks>
+/// <remarks>仅显示内置的固定矢量几何，通过共享含义画刷跟随主题；不读取或解析用户 SVG、HTML。</remarks>
 public sealed class ThemeIcon : UserControl
 {
     public static readonly DependencyProperty IconKeyProperty = DependencyProperty.Register(
@@ -52,7 +52,6 @@ public sealed class ThemeIcon : UserControl
         _canvas.Height = icon.Height;
         foreach (var definition in icon.Paths)
         {
-            // The mini-language comes only from the fixed catalog generated from repository-owned assets.
             // 几何简写只来自仓库内受信图标生成的固定目录，调用者只能选择键，不能传入几何或标记。
             var path = (PathShape)XamlReader.Load(
                 "<Path xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\" Data=\"" + definition.Data + "\" />");

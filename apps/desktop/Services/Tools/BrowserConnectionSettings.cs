@@ -15,8 +15,6 @@ public sealed record BrowserConnectionSettings(string Engine, BrowserConnectionM
 
     public static BrowserConnectionSettings? Read(string command, IReadOnlyList<string> args, IEnumerable<string>? environmentNames = null)
     {
-        // The editor can temporarily contain valid JSON with invalid members while the user types.
-        // Leave its browser controls unavailable until Save performs the formal input validation.
         // 输入期间 JSON 可能合法而成员值暂时无效；正式保存验证之前不启用浏览器编辑控件。
         if (args.Any(argument => argument is null)) return null;
         string source = string.Join(' ', args.Append(command.Replace('\\', '/')));
@@ -52,8 +50,6 @@ public sealed record BrowserConnectionSettings(string Engine, BrowserConnectionM
         if (HasEnvironmentConfiguration || previous.Any(arg => arg == "--config" || arg.StartsWith("--config=", StringComparison.Ordinal)))
             throw new ArgumentException("浏览器使用配置文件，请在高级设置中修改连接方式。");
         var args = new List<string>();
-        // Direct executable configurations may carry no package name in their arguments.
-        // Retain their profile when the engine's existing mode remains unchanged.
         // 直接启动程序的配置可能没有包名参数；浏览器模式未变时保留原用户配置目录。
         var previousMode = Read(Engine == "playwright" ? "playwright-mcp" : "chrome-devtools-mcp", previous)?.Mode;
         for (int index = 0; index < previous.Count; index++)
@@ -61,8 +57,6 @@ public sealed record BrowserConnectionSettings(string Engine, BrowserConnectionM
             string argument = previous[index], name = argument.Split('=', 2)[0];
             if (ValueOptions.Contains(name))
             {
-                // Preserve explicitly configured independent profile paths in the same mode.
-                // 同一模式下保留用户明确配置的独立浏览器目录。
                 if ((Mode == BrowserConnectionMode.Independent && (name is "--user-data-dir" or "--userDataDir")) ||
                     (name == "--profile-dir-name" && previousMode == Mode))
                 {

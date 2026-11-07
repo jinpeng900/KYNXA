@@ -1,4 +1,3 @@
-// Adapter mapping is isolated from sampling because CUDA and DXGI identities are initialized once.
 // 适配器映射与采样分离，CUDA 与 DXGI 设备身份仅在初始化时核对。
 #[cfg(windows)]
 pub struct AdapterIdentity {
@@ -77,7 +76,6 @@ pub fn dml_device_id(identity: &AdapterIdentity) -> Option<u32> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
-        // Bound adapter enumeration; release every COM interface through its owned wrapper.
         // 适配器枚举有固定上限，所有 COM 接口由拥有者包装释放。
         for ordinal in 0..16 {
             let adapter = match factory.EnumAdapters1(ordinal) {

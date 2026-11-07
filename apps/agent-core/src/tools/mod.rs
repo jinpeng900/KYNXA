@@ -1,10 +1,10 @@
 pub(crate) mod approval_grant;
 pub mod contracts;
+pub mod discovery;
+pub mod effects;
 mod gateway_attachment_read;
 pub(crate) mod gateway_workspace_changes;
 pub(crate) mod gateway_workspace_terminal;
-pub mod discovery;
-pub mod effects;
 pub mod intent;
 pub(crate) mod local_files;
 pub mod observations;
@@ -45,8 +45,6 @@ mod system_prompt;
 
 use serde_json::Value;
 
-/// Shared pure tool rules never dispatch host operations or change permissions.
-/// 共用的纯工具规则不派发宿主操作，也不更改权限。
 pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     if operation.starts_with("tools.localPath.") {
         return Ok(service_error::envelope(local_files::path_operation(
@@ -100,32 +98,32 @@ pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
 }
 pub mod browser;
 pub mod configuration;
-pub mod gateway;
-mod gateway_document_read;
-mod gateway_image;
 mod document_packages;
-mod gateway_document_create;
-pub(crate) mod gateway_workspace_preview;
-pub(crate) mod gateway_workspace_media;
-pub(crate) mod gateway_workspace_workbench;
-pub(crate) mod gateway_workspace_transcription;
+pub mod gateway;
 pub(crate) mod gateway_browser;
 mod gateway_browser_permissions;
-mod gateway_mcp;
-mod gateway_mcp_oauth;
-mod gateway_extension_install;
-mod gateway_tool_memory;
-mod gateway_semantic;
-mod tool_semantic;
-mod gateway_experience;
-pub(crate) mod gateway_skill_authoring;
-mod gateway_mcp_budget;
 mod gateway_deepseek_search;
-mod gateway_search;
+mod gateway_document_create;
+mod gateway_document_read;
+mod gateway_experience;
+mod gateway_extension_install;
+mod gateway_image;
+pub(crate) mod gateway_mcp;
+mod gateway_mcp_budget;
+mod gateway_mcp_oauth;
 pub(crate) mod gateway_process;
+mod gateway_search;
+mod gateway_semantic;
+pub(crate) mod gateway_skill_authoring;
+mod gateway_tool_memory;
 pub(crate) mod gateway_web;
-mod gateway_web_snapshot;
 mod gateway_web_proxy;
+mod gateway_web_snapshot;
+pub(crate) mod gateway_workspace_media;
+pub(crate) mod gateway_workspace_preview;
+pub(crate) mod gateway_workspace_transcription;
+pub(crate) mod gateway_workspace_workbench;
+mod tool_semantic;
 
 pub fn execute_source_io(
     operation: &str,

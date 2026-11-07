@@ -5,7 +5,6 @@ using System.Text.Json;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Reads authorized previews and attaches the isolated browser to the Rust tool session.
 /// 读取授权预览，并将独立浏览器接入 Rust 工具会话；不直接读取工作区文件。
 /// </summary>
 public sealed class WorkspacePreviewApiClient : IDisposable
@@ -97,14 +96,12 @@ public sealed class WorkspacePreviewApiClient : IDisposable
     }
 
     /// <summary>
-    /// Loads an already authorized original for the local document renderer, with a bounded response body.
     /// 为本地文档渲染器读取已授权原件，限制响应体大小，不向页面开放任意网关地址。
     /// </summary>
     public async Task<byte[]> ReadDocumentContentAsync(Uri address, CancellationToken cancellationToken)
         => (await ReadContentAsync(address, 256 * 1024 * 1024, cancellationToken)).Bytes;
 
     /// <summary>
-    /// Resolve Markdown images through gateway authorization, never a page-controlled filesystem or network request.
     /// Markdown 图片由网关授权及取回，不让页面直接访问磁盘或任意网络。
     /// </summary>
     public async Task<(byte[] Bytes, string ContentType)> ReadImageContentAsync(Guid conversationId, string path,
@@ -128,8 +125,7 @@ public sealed class WorkspacePreviewApiClient : IDisposable
 
     private async Task<(byte[] Bytes, string ContentType)> ReadContentAsync(Uri address, int maximumBytes, CancellationToken cancellationToken)
     {
-        // Match the gateway's source limit; each format separately checks expanded package capacity.
-        // 原件上限与网关保持一致；各格式再单独核验解包容量，不沿用 DOCX 限额拦截演示稿和表格。
+        // 原件上限与网关保持一致；各格式再单独检查解包容量，不沿用 DOCX 限额拦截演示稿和表格。
         var root = _http.BaseAddress ?? ModelGatewayService.Address;
         string[] segments = address.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         bool attachment = segments is ["api", "conversations", var conversationId, "attachments", var attachmentId, "content"]

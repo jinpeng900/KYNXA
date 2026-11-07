@@ -1,4 +1,3 @@
-//! Explicit URL imports reuse the public-web transport and preserve a frozen, source-bound snapshot.
 //! 明确导入链接复用公共网页传输，保留带来源身份的固定快照，不自动抓取整个网站。
 
 use crate::{
@@ -32,8 +31,7 @@ fn mapped(error: crate::gateway_contract::GatewayError) -> ContractError {
     gateway::error(&error.message, code, error.status)
 }
 
-/// MIME and magic select a parser; URL suffixes alone never turn binary content into plain text.
-/// MIME 与魔数选择解析器，不能仅靠 URL 后缀把二进制内容当成普通文本。
+/// MIME 与魔数选择解析器，不只看 URL 后缀。
 fn filename(download: &crate::tools::gateway_web::PublicDownload) -> PathBuf {
     let declared = download
         .final_url
@@ -79,7 +77,6 @@ fn filename(download: &crate::tools::gateway_web::PublicDownload) -> PathBuf {
     let magic = if bytes.starts_with(b"%PDF-") {
         Some("pdf")
     } else if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
-        // Recognize Office/ebook ZIP containers before the general archive decoder, without expanding their bodies.
         // 只检查目录识别 Office 或电子书 ZIP 容器，再决定使用文档还是通用归档解析器。
         if let Ok(archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
             let names = archive
@@ -105,8 +102,7 @@ fn filename(download: &crate::tools::gateway_web::PublicDownload) -> PathBuf {
             Some("zip")
         }
     } else if bytes.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) {
-        // Compound magic is shared by DOC, PPT and XLS; only the actual root stream identifies the family.
-        // DOC、PPT、XLS 共用 CFB 魔数；依据真实根流选择解析器，不把一种 Office 文档误当另一种。
+        // DOC、PPT、XLS 共用 CFB 魔数，依据真实根流选择解析器。
         cfb::CompoundFile::open(std::io::Cursor::new(bytes))
             .ok()
             .and_then(|document| {
@@ -189,7 +185,6 @@ pub(crate) fn scan(
         }
         crate::storage::sqlite_store::cancelled()?;
         let requested = requested.as_str().unwrap();
-        // Validate each exact user-selected URL through the same policy as web.fetch; no secondary client or scope expansion.
         // 每个用户选择的 URL 走 web.fetch 同一策略，不增加第二个 HTTP 客户端或扩展抓取范围。
         let result = (|| {
             let normalized =

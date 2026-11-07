@@ -9,7 +9,6 @@ struct Collection {
     rows: BTreeMap<u64, (String, String)>,
 }
 
-/// SDK Map/Set compatibility keeps original JSON bytes, while native collections own all entries.
 /// SDK Map/Set 兼容层保留原始 JSON 字节；全部条目由原生集合拥有，适配层不复制权威状态。
 #[derive(Default)]
 pub struct SourceCollections {

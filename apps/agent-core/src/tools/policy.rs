@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 
-// Descriptor annotations and model explanations never grant execution authority.
 // 描述符注解和模型理由不授予执行权限；审批事件的身份与生命周期仍由宿主适配器管理。
 pub(super) fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
     match operation {
@@ -38,8 +37,7 @@ pub(super) fn calculate(operation: &str, arguments: &Value) -> Result<Value, Str
     Ok(json!(!approved_without_prompt))
 }
 
-/// Read-only recovery uses declared builtin semantics, never name suffixes or model/MCP annotations.
-/// 只读恢复依据内置工具的明确业务语义；不依据名称后缀、模型说明或外部 MCP 注解放行。
+/// 只读恢复依据内置工具的明确业务含义；不依据名称后缀、模型说明或外部 MCP 注解放行。
 pub fn is_read_only(name: &str) -> bool {
     DESKTOP_OBSERVATIONS.contains(&name)
         || PARALLEL_READS.contains(&name)
@@ -48,10 +46,9 @@ pub fn is_read_only(name: &str) -> bool {
         || can_parallel(&json!({"name":name}))
 }
 
-/// Reading a delivery is observational; recording its acceptance or revision changes formal task state.
-/// 读取交付属于观察；记录接纳或退回会修改正式任务状态，不能伪装成只读回执。
+/// 读取交付属于观察；记录接纳或退回会修改正式任务状态。
 pub fn is_read_only_call(name: &str, arguments: &Value) -> bool {
-    is_read_only(name) && !(name=="task.result" && arguments["review"].is_object())
+    is_read_only(name) && !(name == "task.result" && arguments["review"].is_object())
 }
 
 #[cfg(test)]
@@ -246,6 +243,7 @@ const BROWSER_OBSERVATIONS: &[&str] = &[
     "browser.wait",
 ];
 const PARALLEL_READS: &[&str] = &[
+    "training.inspect",
     "image.read",
     "skill.validate",
     "mcp.task.status",
@@ -269,12 +267,12 @@ const PARALLEL_READS: &[&str] = &[
 ];
 
 const READ_TOOLS: &[&str] = &[
+    "training.inspect",
     "media.transcribe",
     "image.read",
     "image.retain",
     "attachment.read",
     "artifact.open",
-    // Current-task metadata changes no external state and needs no additional approval.
     // 当前任务的展示元信息不改变外部状态，不增加单独审批。
     "task.describe",
     "task.status",
@@ -314,6 +312,7 @@ const READ_TOOLS: &[&str] = &[
     "terminal.workspace.read",
 ];
 const REVERSIBLE_TOOLS: &[&str] = &[
+    "training.manage",
     "task.delegate",
     "task.control",
     "filesystem.write",

@@ -1,4 +1,3 @@
-//! Durable work identities, separate from replaceable agents and execution attempts.
 //! 持久工作身份与可更换的代理、执行尝试分离；这些类型不授予工具权限。
 
 use serde::{Deserialize, Serialize};
@@ -71,7 +70,6 @@ pub struct TaskUsage {
     pub model_duration_ms: u64,
     #[serde(default)]
     pub tool_duration_ms: u64,
-    /// Effective wall time, measured once by this task's executor; descendant costs remain separate.
     /// 本任务执行者独立测量的有效墙钟；后代模型／工具成本仍单独聚合，不重复累计并行时间。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_duration_ms: Option<u64>,
@@ -84,7 +82,8 @@ impl TaskUsage {
                 .max_known_tokens
                 .is_some_and(|limit| self.input_tokens.saturating_add(self.output_tokens) >= limit)
             || budget.max_execution_ms.is_some_and(|limit| {
-                self.active_duration_ms.is_some_and(|active| active >= limit)
+                self.active_duration_ms
+                    .is_some_and(|active| active >= limit)
             })
     }
     pub(crate) fn add(&mut self, delta: &Self) {
@@ -157,7 +156,6 @@ pub struct AttemptToken {
     pub execution_version: u64,
 }
 
-/// Caller-proven implicit budget floors are applied only inside the fenced takeover transaction.
 /// 调用方核实的隐式预算下限，只在带版本校验的接管事务内应用。
 #[derive(Clone, Debug)]
 pub struct TaskAttemptBudgetExtension {
@@ -272,7 +270,6 @@ pub enum ModelReservationState {
     Released,
 }
 
-/// Provider counters and explicitly separated client observations; no response bodies or credentials.
 /// 供应商计数与明确分离的网关观测；缺失保持未知，不保留响应正文或凭据。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -287,8 +284,7 @@ pub struct ProviderTokenUsage {
     pub client_metrics: Option<ModelRequestClientMetrics>,
 }
 
-/// Observed once per original dispatch and recovered with its existing reservation, never by replay.
-/// 每次原始派发只观测一次，随已有预约恢复；不能为补计量重发模型或重做操作。
+/// 每次原始派发只观测一次，随已有预约恢复，补计量时不重发模型或重做操作。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRequestClientMetrics {

@@ -41,7 +41,6 @@
     input.placeholder = translated('findTextPlaceholder'); input.setAttribute('aria-label', translated('findText'));
     for (const [button, key] of [[previous, 'findTextPrevious'], [next, 'findTextNext'], [close, 'findTextClose']]) {
       button.setAttribute('aria-label', translated(key));
-      // Keep keyboard hints in the bar instead of creating another floating native tooltip.
       // 键盘提示留在搜索栏内，避免增加悬空的原生提示气泡。
       button.removeAttribute('title');
     }
@@ -154,13 +153,11 @@
         || owner !== match.messageId || !match.body.contains(range.startContainer) || !match.body.contains(range.endContainer)) return false;
     const firstElement = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
     const lastElement = range.endContainer.nodeType === Node.TEXT_NODE ? range.endContainer.parentElement : range.endContainer;
-    // Only semantic hidden controls/bodies are excluded. Clipped code and closed source details remain searchable.
-    // 只排除语义上隐藏的控件和正文；裁切代码及关闭的源码详情仍可搜索。
+    // 只排除含义上隐藏的控件和正文；裁切代码及关闭的源码详情仍可搜索。
     if (!eligibleElement(firstElement, match.body, validation.elements) || !eligibleElement(lastElement, match.body, validation.elements)) return false;
     const selectedText = range.startContainer === range.endContainer && range.startContainer.nodeType === Node.TEXT_NODE
       ? range.startContainer.data.slice(range.startOffset, range.endOffset) : range.toString();
     if (selectedText === match.text) return true;
-    // Range text includes hidden math branches and omits BR. Use the exact index rules on an inert clone.
     // Range 文本包含隐藏数学分支且省略 BR；离线克隆必须复用索引规则，以验证相同的逻辑正文。
     const fragment = range.cloneContents(), walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
       { acceptNode: acceptSearchNode });
@@ -181,10 +178,8 @@
   }
   function refresh(immediate = false, force = false, verified = false) {
     if (!open) return;
-    // Reuse one validation cache per refresh; unchanged prose keeps its painted ranges during a background scan.
     // 每次刷新复用一份校验缓存，后台扫描期间保留未变化正文的高亮，并移除已经失效的范围。
     if (!immediate && !force && !verified) retainPublished();
-    // A render only marks the in-flight scan dirty. Query/navigation changes still cancel immediately.
     // 渲染只把进行中的扫描标为待刷新；关键词或会话导航变化仍立即取消旧扫描。
     if (!immediate && !force && searching) {
       if (scanning) needsRefresh = true;
@@ -205,7 +200,6 @@
       const bodies = [...document.querySelectorAll('#messages .message-body')].filter(body => !body.closest('[hidden]'));
       let bodyIndex = 0, bodyPosition = 0, walker = null, group = null, groupNumber = 0, searchGroup = null, expression = null, pieceIndex = 0;
       const results = [];
-      // Unicode ignore-case matching leaves offsets in the original string, including length-changing case folds.
       // Unicode 忽略大小写匹配直接返回原字符串偏移，不依靠可能改变字符长度的大小写转换。
       const pattern = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const beginGroupSearch = current => {
@@ -225,7 +219,6 @@
                 results.push({ range: created.range, body: searchGroup.body, messageId: searchGroup.messageId, group: searchGroup.number,
                   offset: match.index, length: match[0].length, text: match[0] });
               } catch {
-                // Detached BR parents or shortened nodes can invalidate an endpoint during a render.
                 // 渲染时脱离的 BR 父节点或缩短的文本可能使端点失效，由下一轮扫描恢复。
                 needsRefresh = true;
               }
@@ -235,7 +228,6 @@
           }
           if (!walker) {
             if (bodyIndex >= bodies.length) {
-              // A stream may replace nodes between work slices. Publish only still-valid literal ranges.
               // 流式输出可能在分片之间替换节点；仅发布仍连接且字面内容一致的范围。
               const validation = { bodies: new Map(), elements: new WeakMap() };
               matches = results.filter(match => currentMatch(match, validation));
@@ -267,7 +259,6 @@
       };
       tick();
     };
-    // Preserve an existing deadline so a continuous stream cannot postpone search indefinitely.
     // 保留已有刷新期限，避免持续流式输出把查找一直推迟到回复结束。
     refreshDueAtMs = dueAtMs; refreshTimer = setTimeout(startSearch, Math.max(0, dueAtMs - performance.now()));
   }
@@ -289,7 +280,6 @@
     if (diagram) window.kynxaDiagrams?.revealSource(diagram);
     for (let ancestor = element; ancestor && ancestor.id !== 'messages'; ancestor = ancestor.parentElement)
       if (ancestor.tagName === 'DETAILS') ancestor.open = true;
-    // Reveal wide code/table matches inside their own scrollers before moving the page vertically.
     // 先在代码或表格自己的滚动容器内展示横向匹配，再移动页面纵向位置。
     for (let ancestor = element; ancestor && ancestor.id !== 'messages'; ancestor = ancestor.parentElement) {
       if (!ancestor.matches('pre,.table-scroll')) continue;
@@ -302,7 +292,6 @@
     const barBounds = bar.getBoundingClientRect(), safeTop = barBounds.bottom + 16;
     let top = Math.min(maximumScroll, Math.max(0, documentTop - Math.max(safeTop, Math.min(innerHeight * .35, innerHeight - 80))));
     const predictedTop = documentTop - top;
-    // Keep the find bar anchored at the top. Only explicit navigation to an occluded first-screen match needs a small inset.
     // 搜索栏固定在顶部；仅在主动定位被遮挡的首屏匹配时补上必要的顶部避让，不随匹配跳到右下角。
     if (predictedTop < barBounds.bottom + 8 && predictedTop + rect.height > barBounds.top - 8
         && rect.left < barBounds.right + 8 && rect.right > barBounds.left - 8) {
@@ -317,7 +306,6 @@
   input.addEventListener('input', () => { query = input.value; requestedMatch = null; index = -1; refresh(false, true); });
   input.addEventListener('compositionstart', () => { composing = true; });
   input.addEventListener('compositionend', () => { composing = false; });
-  // A blur may end/cancel native composition without another key reaching this field.
   // 失焦可能由原生输入法结束或取消组词，清理局部状态；按键自身的 isComposing 仍阻止误导航。
   input.addEventListener('blur', () => { composing = false; });
   for (const button of [previous, next, close]) button.addEventListener('pointerdown', event => {
@@ -334,7 +322,6 @@
       if (event.shiftKey) hooks.searchConversations?.(); else show();
     } else if (open && event.key === 'Escape' && !document.querySelector('.mermaid-viewer[open]')) {
       event.preventDefault(); event.stopImmediatePropagation();
-      // Dismiss the foreground menu before the search surface underneath it.
       // 优先关闭搜索栏上方的表格菜单，下一次 Escape 才关闭搜索。
       if (!window.kynxaTables?.dismissMenu()) hide();
     } else if (open && !document.querySelector('.mermaid-viewer[open]') && !event.ctrlKey && !event.metaKey && !event.altKey

@@ -1,5 +1,4 @@
-//! Optional rebuildable caches share the existing hardware authority and independent observers.
-//! 可重建缓存复用现有硬件授额；共享计算的各个观察者独立取消，缓存不足直接走原链路。
+//! 可重建缓存复用现有硬件额度；共享计算的各个观察者独立取消，缓存不足直接走原链路。
 
 use super::{
     cache::ByteLru,
@@ -102,27 +101,50 @@ fn hardware_headroom(snapshot: &Value, approved: usize) -> HardwareHeadroom {
             .map(|_| number_bytes(&snapshot["memory"]["availableBytes"])),
         approved_cache_bytes: approved,
         queued: snapshot["queuedRequests"].as_f64().unwrap_or(0.0) > 0.0,
-        // Only explicit local foreground measurements qualify; model/provider latency is excluded.
-        // 仅采纳明确的本地前台反馈，不把供应商网络耗时或模型思考耗时当作界面延迟。
+        // 只采纳明确的本地前台反馈，供应商网络耗时和模型思考耗时不算界面延迟。
         foreground_latency_micros: snapshot["feedback"]["foregroundLatencyMs"]
             .as_f64()
             .filter(|n| n.is_finite() && *n > 0.0)
-            .map(|n| (n * 1000.0).min(u64::MAX as f64) as u64),
+            .map(|n| (n * 1000.0) as u64),
     }
 }
 
-/// Reuse the existing memory thresholds, excluding queue/CPU demand and untrusted missing telemetry.
-/// 复用已有内存阈值；队列或CPU准入需求不等于缺内存，缺失或不可信观测不触发模型卸载。
-pub(crate) fn confirmed_memory_pressure(snapshot:&Value)->bool {
-    let valid_pair=|total:&Value,free:&Value| total.as_f64().zip(free.as_f64()).is_some_and(|(total,free)|
-        total.is_finite() && total>0.0 && total<usize::MAX as f64 && free.is_finite() && free>=0.0 && free<=total);
-    let accounting=valid_pair(&snapshot["accounting"]["capacityMemoryBytes"],&snapshot["accounting"]["availableMemoryBytes"]);
-    let physical=valid_pair(&snapshot["memory"]["totalBytes"],&snapshot["memory"]["availableBytes"]);
-    if !accounting && !physical {return false;}
-    let mut headroom=hardware_headroom(snapshot,0);
-    if accounting {headroom.capacity_bytes=number_bytes(&snapshot["accounting"]["capacityMemoryBytes"]);}
-    else {headroom.available_bytes=headroom.capacity_bytes;}
-    if !physical {headroom.physical_total_bytes=None;headroom.physical_available_bytes=None;}
+/// 复用已有内存阈值；队列或 CPU 准入需求不算缺内存，缺失或不可信观测不触发模型卸载。
+pub(crate) fn confirmed_memory_pressure(snapshot: &Value) -> bool {
+    let valid_pair = |total: &Value, free: &Value| {
+        total
+            .as_f64()
+            .zip(free.as_f64())
+            .is_some_and(|(total, free)| {
+                total.is_finite()
+                    && total > 0.0
+                    && total < usize::MAX as f64
+                    && free.is_finite()
+                    && free >= 0.0
+                    && free <= total
+            })
+    };
+    let accounting = valid_pair(
+        &snapshot["accounting"]["capacityMemoryBytes"],
+        &snapshot["accounting"]["availableMemoryBytes"],
+    );
+    let physical = valid_pair(
+        &snapshot["memory"]["totalBytes"],
+        &snapshot["memory"]["availableBytes"],
+    );
+    if !accounting && !physical {
+        return false;
+    }
+    let mut headroom = hardware_headroom(snapshot, 0);
+    if accounting {
+        headroom.capacity_bytes = number_bytes(&snapshot["accounting"]["capacityMemoryBytes"]);
+    } else {
+        headroom.available_bytes = headroom.capacity_bytes;
+    }
+    if !physical {
+        headroom.physical_total_bytes = None;
+        headroom.physical_available_bytes = None;
+    }
     headroom.memory_pressured()
 }
 
@@ -133,10 +155,10 @@ pub(crate) fn configure_cache_limit(name: &'static str, limit: Option<usize>) {
     let mut retired = None;
     if let Ok(mut state) = MEMORY.get_or_init(Default::default).lock() {
         if state.controller.manual_limit(kind, limit) {
-            state.epoch = state.epoch.saturating_add(1);
+            state.epoch += 1;
             state.refreshing = false;
             if let Some(slot) = state.slots.get_mut(name) {
-                slot.generation = slot.generation.saturating_add(1);
+                slot.generation += 1;
                 if let Some(limit) = limit {
                     slot.desired = slot.desired.min(limit);
                     if limit == 0 {
@@ -151,14 +173,11 @@ pub(crate) fn configure_cache_limit(name: &'static str, limit: Option<usize>) {
     }
     drop(retired);
 }
-/// Record only local lookup/coordination work, never cloud TTFT or whole model execution.
 /// 仅记录本地查找和协调开销，不录入云端首字时间或整个模型执行时长。
 pub(crate) fn record_local_foreground_latency(elapsed: Duration) {
     if let Some(state) = MEMORY.get() {
         if let Ok(mut state) = state.try_lock() {
-            state
-                .controller
-                .latency(elapsed.as_micros().min(u64::MAX as u128) as u64);
+            state.controller.latency(elapsed.as_micros() as u64);
         }
     }
 }
@@ -268,7 +287,7 @@ async fn refresh_memory(service: Arc<hardware::ResourceService>, runtime: tokio:
         state
             .controller
             .total_limit(environment_limit("KYNXA_CACHE_TOTAL_MIB"));
-        let now = state.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let now = state.started.elapsed().as_millis() as u64;
         state.controller.update(now, hardware);
         let targets = CacheKind::ALL.map(|kind| (kind, state.controller.target(kind)));
         let mut plans = Vec::new();
@@ -325,8 +344,7 @@ async fn refresh_memory(service: Arc<hardware::ResourceService>, runtime: tokio:
             else {
                 continue;
             };
-            // Resizing is pure memory work under the publication lock; no admission wait holds this lock.
-            // 容量与真实授额在发布锁内一起更新；授额等待已在锁外完成，旧请求不能覆盖新收缩。
+            // 容量与真实额度在发布锁内一起更新，额度等待已在锁外完成，旧请求不覆盖新收缩。
             resize_cache(kind, target);
             slot.grant.replace(grant)
         };
@@ -351,15 +369,14 @@ fn retire_slot(kind: CacheKind, generation: u64) {
         else {
             return;
         };
-        slot.generation = slot.generation.saturating_add(1);
+        slot.generation += 1;
         (slot.reclaim)();
         slot.grant.take()
     };
     drop(retired);
 }
 
-/// Targets adapt globally; only existing, already-approved grants are visible to a foreground lookup.
-/// 三类目标统一自适应，前台仅使用现有已批准授额；缓存不足旁路原链路，不排队、不结束长任务。
+/// 三类目标统一自适应，前台仅使用现有已批准额度；缓存不足旁路原链路，不排队、不结束长任务。
 pub(crate) fn cache_memory_limit(name: &'static str, seed_bytes: usize, reclaim: fn()) -> usize {
     let Some(kind) = CacheKind::from_name(name) else {
         return 0;
@@ -414,14 +431,13 @@ pub(crate) fn memory_grant(name: &'static str) -> Option<Arc<MemoryGrant>> {
         .clone()
 }
 
-/// Reclamation never releases a worker's grant until its real computation has returned.
-/// 回收只清理可重建值，活动工作者持有授额直到真实计算返回，不清会话、任务或正式检索数据。
+/// 回收只清理可重建值，活动工作者持有额度直到真实计算返回，不清会话、任务或正式检索数据。
 pub(crate) fn reclaim_memory(_reason: &'static str) {
     let retired = {
         let Some(mut state) = MEMORY.get().and_then(|state| state.lock().ok()) else {
             return;
         };
-        state.epoch = state.epoch.saturating_add(1);
+        state.epoch += 1;
         state.refreshing = false;
         state.last_refresh = Instant::now();
         state.controller.reclaimed();
@@ -429,7 +445,7 @@ pub(crate) fn reclaim_memory(_reason: &'static str) {
             .slots
             .values_mut()
             .map(|slot| {
-                slot.generation = slot.generation.saturating_add(1);
+                slot.generation += 1;
                 slot.desired = 0;
                 (slot.reclaim)();
                 slot.grant.take()
@@ -578,8 +594,7 @@ impl<V: Send + Sync + 'static> FlightCache<V> {
         if caller_cancel.load(Ordering::Acquire) {
             return Err(cancelled());
         }
-        // Thread stacks are admitted too; full optional capacity bypasses cache without rejecting inference.
-        // 共享工作线程栈也计入缓存授额；可选额度不足只旁路缓存，不拒绝必要推理。
+        // 共享工作线程栈也计入缓存额度；可选额度不足只旁路缓存，不拒绝必要推理。
         const STACK_BYTES: usize = 2 * 1024 * 1024;
         let charge = input_bytes
             .saturating_add(key.capacity())
@@ -604,7 +619,7 @@ impl<V: Send + Sync + 'static> FlightCache<V> {
                 .cloned()
             {
                 flight.observers.fetch_add(1, Ordering::AcqRel);
-                state.coalesced = state.coalesced.saturating_add(1);
+                state.coalesced += 1;
                 (flight, false, state.values.generation())
             } else {
                 if charge > state.capacity.saturating_sub(state.pending_bytes) {
@@ -792,12 +807,21 @@ mod tests {
         let owner_calls = calls.clone();
         let owner = std::thread::spawn(move || {
             owner_cache.compute(
-                "query-flight".into(), 8, Arc::new(AtomicBool::new(false)), None, false,
+                "query-flight".into(),
+                8,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                false,
                 move |_| {
                     owner_calls.fetch_add(1, Ordering::SeqCst);
                     entered.send(()).unwrap();
                     release.recv_timeout(Duration::from_secs(2)).unwrap();
-                    publisher.insert_generation("ready:cpu".into(), Arc::new(37usize), 8, generation);
+                    publisher.insert_generation(
+                        "ready:cpu".into(),
+                        Arc::new(37usize),
+                        8,
+                        generation,
+                    );
                     Ok(Some((37usize, 8)))
                 },
             )
@@ -806,7 +830,11 @@ mod tests {
         let waiter_cache = cache.clone();
         let waiter = std::thread::spawn(move || {
             waiter_cache.compute(
-                "query-flight".into(), 8, Arc::new(AtomicBool::new(false)), None, false,
+                "query-flight".into(),
+                8,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                false,
                 |_| panic!("an active query must be shared even without retaining its flight key"),
             )
         });
@@ -818,7 +846,9 @@ mod tests {
         finish.send(()).unwrap();
         for thread in [owner, waiter] {
             match thread.join().unwrap().unwrap() {
-                Lookup::Value { value: Some(value), .. } => assert_eq!(*value, 37),
+                Lookup::Value {
+                    value: Some(value), ..
+                } => assert_eq!(*value, 37),
                 _ => panic!("both query observers must receive the original computed value"),
             }
         }
@@ -957,20 +987,22 @@ mod model_retirement_pressure_tests {
     use super::*;
     #[test]
     fn model_retirement_requires_trusted_memory_pressure_not_just_admission_or_queueing() {
-        let mut snapshot=json!({"accounting":{"capacityMemoryBytes":16000,"availableMemoryBytes":12000},
+        let mut snapshot = json!({"accounting":{"capacityMemoryBytes":16000,"availableMemoryBytes":12000},
             "memory":{"totalBytes":32000,"availableBytes":18000},"queuedRequests":20});
         assert!(!confirmed_memory_pressure(&snapshot));
-        snapshot["budget"]=json!({"memoryBytes":320000000});
+        snapshot["budget"] = json!({"memoryBytes":320000000});
         assert!(!confirmed_memory_pressure(&snapshot));
-        snapshot["memory"]["availableBytes"]=json!(100);
+        snapshot["memory"]["availableBytes"] = json!(100);
         assert!(confirmed_memory_pressure(&snapshot));
-        snapshot["memory"]["availableBytes"]=json!(18000);
-        snapshot["accounting"]["availableMemoryBytes"]=json!(100);
+        snapshot["memory"]["availableBytes"] = json!(18000);
+        snapshot["accounting"]["availableMemoryBytes"] = json!(100);
         assert!(confirmed_memory_pressure(&snapshot));
-        snapshot["accounting"]["availableMemoryBytes"]=Value::Null;
-        snapshot["memory"]["availableBytes"]=json!(-1);
+        snapshot["accounting"]["availableMemoryBytes"] = Value::Null;
+        snapshot["memory"]["availableBytes"] = json!(-1);
         assert!(!confirmed_memory_pressure(&snapshot));
         assert!(!confirmed_memory_pressure(&Value::Null));
-        assert!(!confirmed_memory_pressure(&json!({"memory":{"totalBytes":1e100,"availableBytes":0}})));
+        assert!(!confirmed_memory_pressure(
+            &json!({"memory":{"totalBytes":1e100,"availableBytes":0}})
+        ));
     }
 }

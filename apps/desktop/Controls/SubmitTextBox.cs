@@ -8,7 +8,6 @@ using Windows.UI.Core;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Confirms a single-line form without treating an IME candidate or repeated Enter as submission.
 /// 为单行表单提供确认，避免将输入法选字或长按回车误判为提交。
 /// </summary>
 public sealed class SubmitTextBox : TextBox
@@ -39,7 +38,6 @@ public sealed class SubmitTextBox : TextBox
     private void CompositionEnded(TextBox sender, TextCompositionEndedEventArgs args)
     {
         _composing = false;
-        // Some IMEs end composition before forwarding the Enter that accepted their candidate.
         // 某些输入法会先结束组合输入，再转发用于确认候选文字的回车。
         _suppressEnter = true;
     }

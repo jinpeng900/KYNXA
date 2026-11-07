@@ -57,7 +57,6 @@ function Get-KynxaBuildSignature {
         $entries.Add($relative + '|' + $(if ($file.Exists) { [string]$file.Length + '|' + $file.LastWriteTimeUtc.Ticks } else { 'missing' }))
     }
     $entries.Sort([StringComparer]::Ordinal)
-    # Compare source metadata and options; do not reread models, archives or compiler caches on every Run.
     # 比较源码元信息与选项；每次 Run 不重读模型、资源归档或编译器缓存。
     $text = ($entries -join "`n") + "`n" + ($Values -join "`n")
     $hasher = [Security.Cryptography.SHA256]::Create()
@@ -95,9 +94,7 @@ function Invoke-KynxaBuildCommand {
     $start = [Diagnostics.ProcessStartInfo]::new($FilePath)
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
-    # Rebuild module paths for the child's PowerShell version, including nested MSBuild calls.
     # 按子进程的 PowerShell 版本重建模块路径，兼容 MSBuild 嵌套调用。
-    # Clear only the child's inherited paths; preserve the caller's environment and caches.
     # 仅清除子进程继承的路径，保留调用者环境和缓存。
     $start.EnvironmentVariables.Remove('PSModulePath')
     $start.WorkingDirectory = $WorkingDirectory
@@ -142,7 +139,6 @@ function Invoke-KynxaBuildCommand {
         }
     }
     finally {
-        # An interrupted build owns this process tree; release it before another run acquires the project lock.
         # 中断构建时仅清理本次持有的子进程树，再释放项目构建锁；已完成缓存保留。
         if (-not $process.HasExited) {
             & (Join-Path $env:SystemRoot 'System32/taskkill.exe') /PID $process.Id /T /F | Out-Null
@@ -204,9 +200,7 @@ function Update-KynxaDesktopLayout {
     $identity = $manifest.SelectSingleNode('//*[local-name()="Identity"]')
     $installed = Get-AppxPackage -Name $identity.Name | Select-Object -First 1
     $installedLocation = if ($installed) { [string]$installed.InstallLocation } else { '' }
-    # Keep an existing development registration inside this checkout; never overwrite another checkout or signed install.
     # 复用本项目已有开发包注册目录；不覆盖其他项目副本或正式安装包。
-    # Removed checkouts can leave registration metadata without an installation path; use an isolated identity instead.
     # 已删除源码可能留下无安装路径的注册信息；转用独立开发身份，不复用失效目录。
     if ($installed -and $installed.IsDevelopmentMode -and -not [string]::IsNullOrWhiteSpace($installedLocation) -and
         $installedLocation.StartsWith($RepositoryRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -221,13 +215,15 @@ function Update-KynxaDesktopLayout {
     foreach ($process in @(Get-Process -Name KYNXA.Desktop -ErrorAction SilentlyContinue)) {
         if ($process.Path -and $process.Path.StartsWith($applicationRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
             [void]$process.CloseMainWindow()
-            if (-not $process.WaitForExit(5000)) { throw 'Close the current KYNXA window before updating its build files.' }
+            # A window hidden in the tray ignores the close request; this is a local development build, so stop it directly.
+            # 隐藏到托盘的窗口不响应关闭请求；这是本机开发版，直接结束。
+            if (-not $process.WaitForExit(5000)) { Stop-Process -Id $process.Id -Force }
         }
     }
     foreach ($process in @(Get-Process -Name kynxa-gateway -ErrorAction SilentlyContinue)) {
         if ($process.Path -and $process.Path.StartsWith($applicationRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
             & (Join-Path $env:SystemRoot 'System32/taskkill.exe') /PID $process.Id /T /F | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'The previous development gateway could not be stopped for its update.' }
+            if (-not $process.WaitForExit(5000)) { throw 'The previous development gateway could not be stopped for its update.' }
         }
     }
     $files = @($recipe.SelectNodes('//*[local-name()="AppxPackagedFile"]'))
@@ -241,7 +237,6 @@ function Update-KynxaDesktopLayout {
         $source = [Uri]::UnescapeDataString($file.GetAttribute('Include'))
         $copy.Add(@($source, $target))
     }
-    # Batch file metadata/copies in .NET; avoid tens of thousands of PowerShell filesystem cmdlet calls.
     # 用 .NET 批量比较并复制变更文件，避免对数万资源反复执行 PowerShell 文件系统命令。
     if (-not ('Kynxa.Build.LayoutCopy' -as [type])) {
         Add-Type -TypeDefinition @'
@@ -261,6 +256,13 @@ namespace Kynxa.Build {
 '@
     }
     [Kynxa.Build.LayoutCopy]::Copy([string[][]]$copy.ToArray())
+    # 早期自包含布局留下的运行时文件会遮挡框架包，导致 WinUI 启动崩溃。
+    $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($pair in $copy) { [void]$expected.Add([IO.Path]::GetFileName($pair[1])) }
+    foreach ($file in [IO.Directory]::GetFiles($applicationRoot)) {
+        $name = [IO.Path]::GetFileName($file)
+        if ($name -match '\.(dll|winmd|pri)$|^workloads\..*json$|^RestartAgent\.exe$' -and -not $expected.Contains($name)) { [IO.File]::Delete($file) }
+    }
     $embed = Join-Path $Layout.intermediate 'embed'
     if ([IO.Directory]::Exists($embed)) {
         foreach ($path in [IO.Directory]::EnumerateFiles($embed, '*.xbf', 'AllDirectories')) {
@@ -295,7 +297,11 @@ function Start-KynxaDesktopBuild {
         Add-AppxPackage -Path $candidate
     }
     $package = Get-AppxPackage -Name $identity.Name | Select-Object -First 1
-    # A matching folder can still retain an older package graph and fail WinRT activation after an update.
+    # 开发版相同版本不能重复注册，依赖丢失时须先解除注册，并保留数据。
+    if ($package -and $manifest.SelectNodes('//*[local-name()="PackageDependency"]').Count -and -not @($package.Dependencies).Count) {
+        Remove-AppxPackage -Package $package.PackageFullName -PreserveApplicationData
+        $package = $null
+    }
     # 目录相同仍可能保留旧包依赖图；版本变化须更新注册，避免更新后 WinRT 类激活失败。
     if (-not $package -or $package.InstallLocation -ne $root -or [version]$package.Version -ne [version]$identity.Version) {
         Add-AppxPackage -Register -Path (Join-Path $root 'AppxManifest.xml')
@@ -309,13 +315,21 @@ function Start-KynxaDesktopBuild {
     $helper = Join-Path $PSScriptRoot 'LaunchDesktop.ps1'
     $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ' + (ConvertTo-KynxaProcessArgument $helper) + ' -PlanPath ' + (ConvertTo-KynxaProcessArgument $planPath)
     Invoke-CommandInDesktopPackage -PackageFamilyName $package.PackageFamilyName -AppId App `
-        -Command (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -Args $arguments -PreventBreakaway
+        -Command (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -Args $arguments
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     while (-not [IO.File]::Exists($plan.receipt) -and $deadline.Elapsed.TotalSeconds -lt 20) { Start-Sleep -Milliseconds 100 }
     if (-not [IO.File]::Exists($plan.receipt)) { throw "Desktop launch did not complete. See $StateDirectory." }
     $receipt = Get-Content -LiteralPath $plan.receipt -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $receipt.started) { throw $receipt.error }
-    Write-Host "软件已启动，进程 $($receipt.processId)。"
+    # 进程启动不等于软件可用，须等到窗口出现。
+    $deadline.Restart()
+    while ($deadline.Elapsed.TotalSeconds -lt 30) {
+        $process = Get-Process -Id $receipt.processId -ErrorAction SilentlyContinue
+        if (-not $process) { throw "软件启动后立即退出（进程 $($receipt.processId)）。请查看 Windows 事件查看器的应用程序日志。" }
+        if ($process.MainWindowHandle -ne [IntPtr]::Zero) { Write-Host "软件已启动，进程 $($receipt.processId)。"; return }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "软件进程仍在运行，但 30 秒内没有出现窗口（进程 $($receipt.processId)）。"
 }
 
 Export-ModuleMember -Function Read-KynxaBuildState, Save-KynxaBuildState, Get-KynxaBuildSignature, Invoke-KynxaBuildStage, Invoke-KynxaBuildCommand, Test-KynxaNuGetAssets, Get-KynxaDesktopLayout, Update-KynxaDesktopLayout, Start-KynxaDesktopBuild

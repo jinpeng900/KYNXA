@@ -11,7 +11,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-# Nested MSBuild PowerShell invocations may not auto-load the inbox utility module.
 # 嵌套 MSBuild PowerShell 调用可能不会自动加载系统工具模块。
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1') -Force
@@ -66,7 +65,6 @@ if ($Action -eq 'Export') {
     $sourcePaths = [Collections.Generic.List[string]]::new()
     $sourcePaths.AddRange([IO.File]::ReadAllLines([IO.Path]::GetFullPath($FileListPath), $utf8))
     if ($Profile -eq 'Full') {
-        # The transcription runtime has its own verified inventory.
         # 转录运行时使用独立清单，完整资源包也必须包含。
         $sourcePaths.AddRange([IO.File]::ReadAllLines((Join-Path $SourceRoot 'transcription-files.txt'), $utf8))
     }
@@ -79,7 +77,6 @@ if ($Action -eq 'Export') {
         }
         $relativePath = $sourcePath.Substring($SourceRoot.TrimEnd('\', '/').Length + 1).Replace('\', '/')
         if (-not $relativePath.StartsWith('runtime/', [StringComparison]::Ordinal)) { throw 'Only runtime payload files belong in a resource pack.' }
-        # Old verified inventories may still mention the retired model; never re-export its weights.
         # 旧的已验证清单可能仍列出被移除模型；不再把其权重带入新资源包。
         if ($relativePath.StartsWith($removedRerankerPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
         $payload[$relativePath] = Get-ResourcePackPath $SourceRoot $relativePath
@@ -143,7 +140,6 @@ else {
         }
         $manifest = $manifestText | ConvertFrom-Json
         if ($manifest.schemaVersion -ne 1 -or $manifest.runtimeIdentifier -ne 'win-x64' -or $manifest.profile -notin @('Full', 'Core')) { throw 'Unsupported resource pack manifest.' }
-        # Reuse the verified E5/runtime portion of older packs without extracting their retired BGE payload.
         # 旧资源包仍可复用已验证的 E5 与运行依赖，但不再提取已移除的 BGE 载荷。
         $manifest.versions = @($manifest.versions | Where-Object { $_.path -ne 'native-assets/reranker.json' })
         $manifest.files = @($manifest.files | Where-Object { -not $_.path.StartsWith($removedRerankerPrefix, [StringComparison]::OrdinalIgnoreCase) })
@@ -154,7 +150,6 @@ else {
             $semanticHash = if ($version.Count -eq 1 -and $version[0].PSObject.Properties['semanticSha256']) { [string]$version[0].semanticSha256 } else { '' }
             if ($version.Count -eq 1 -and -not $semanticHash -and
                 -not (Test-KynxaConfigHash -Path (Join-Path $PSScriptRoot $current.path) -ExpectedHash $version[0].sha256)) {
-                # Verify older packs against their hash-bound source configuration, never a guessed version.
                 # 用哈希绑定的原配置核验旧包，不猜测兼容版本。
                 $configEntries = @{'native-assets/native-runtime.json'='runtime/native/licenses/native-runtime-manifest.json';
                     'native-assets/embedding.json'='runtime/embedding/builtin-multilingual/manifest.json';
@@ -181,7 +176,6 @@ else {
         }
         $componentInput = Get-KynxaResourceInputHash -Paths @($PSCommandPath,
             (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1')) -Values @($manifestText)
-        # Inspect and import share entry/schema checks; neither needs to decompress binary payloads here.
         # 预检与导入共用目录及结构检查，此阶段不解压二进制载荷。
         $resourceScopes = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         if ($Action -in @('Inspect', 'Import')) {
@@ -217,7 +211,6 @@ else {
         }
         $preparedFiles = if ($VerifyResources) { $null } else { Get-KynxaPreparedFileCache -Root $DestinationRoot -Component 'resource-pack' }
         if (-not $VerifyResources) {
-            # A component already verified in this cache can also satisfy the pack's exact expected file identity.
             # 同一缓存中已验证的组件可复用，但仍须匹配本包要求的摘要、大小与修改时间。
             foreach ($component in @('native-assets', 'mcp', 'office')) {
                 $componentFiles = Get-KynxaPreparedFileCache -Root $DestinationRoot -Component $component
@@ -226,7 +219,6 @@ else {
                 }
             }
         }
-        # Validate old caches in one native batch; later runs compare metadata only.
         # 旧缓存先做一次原生批量校验，后续只比较元数据。
         if (Test-KynxaResourceFiles -Root $DestinationRoot -Files @($manifest.files) -Cache $preparedFiles) {
             [IO.File]::WriteAllText((Join-Path $DestinationRoot 'resource-pack.json'), ($manifest | ConvertTo-Json -Depth 8), $utf8)
@@ -235,7 +227,6 @@ else {
             Write-Output "Resource pack reused: $(@($manifest.files).Count) verified files; no extraction."
             return
         }
-        # Extract only listed files and commit each file after its size and digest pass.
         # 只提取白名单文件；每份文件完成大小与摘要校验后才替换目标，既有有效文件保持可用。
         $fileCount = @($manifest.files).Count
         Write-Host "[Resources] Importing $fileCount fixed files from the $($manifest.profile) pack."

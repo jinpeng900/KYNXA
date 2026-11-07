@@ -51,8 +51,7 @@ fn projection(value: &Value) -> Result<Value, String> {
     Ok(json!({"context":context, "tokenCount":tokens, "maxInputTokens":maximum, "version":version}))
 }
 
-/// Token fitting changes only body ranges; metadata is never promoted into cited original text.
-/// token 拟合只改变正文分块范围；投影元信息绝不升级成可引用原文。
+/// token 拟合只改变正文分块范围，映射元信息不算可引用原文。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     if operation == "retrieval.token-projection" {
         return projection(&args["value"]);

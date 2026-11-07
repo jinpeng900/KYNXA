@@ -96,8 +96,7 @@ async fn observation_read(
     }).await.unwrap_or_else(|_|Err(ModelError::new("LOCAL_MODEL_OBSERVATION_TIMEOUT","本地模型观测超时。",504)))
 }
 
-/// Read only bounded localhost telemetry; all trust, resource interpretation and cache decisions stay native.
-/// 只读取有界 localhost 遥测；信任、资源解释及缓存决策均沿原有原生规则。
+/// 只读取限量 localhost 遥测；信任、资源解释及缓存决策均沿原有原生规则。
 pub async fn observe_local(
     connection: &Value,
     model: &str,
@@ -107,8 +106,7 @@ pub async fn observe_local(
     observe_local_with_refresh(connection, model, context_tokens, cancellation, false).await
 }
 
-/// Preparation completion requires a new server observation, not the pre-load cache entry.
-/// 准备完成必须重新观察服务，不能用预载前的缓存冒充模型已经驻留。
+/// 准备完成后重新观察服务，预载前的缓存不算模型已驻留。
 pub async fn observe_local_fresh(
     connection: &Value,
     model: &str,
@@ -265,8 +263,6 @@ fn connection_contract(operation: &str, args: Value) -> Result<Value, ModelError
     Ok(value)
 }
 
-/// Read and atomically replace connection settings through formal storage.
-/// 经正式存储读取并原子替换连接配置。
 pub struct ModelConfigStore {
     home: PathBuf,
 }
@@ -339,7 +335,6 @@ impl ModelConfigStore {
             .filter(|_| result["found"] == true)
             .map(str::to_owned))
     }
-    /// Remove one connection under the existing writer gate, preserving all other providers and credentials.
     /// 复用已有写入锁移除单个连接，保留其他供应商及其凭据。
     pub async fn remove(&self, provider_id: &str) -> Result<(), ModelError> {
         let _save = SAVE_GATE
@@ -350,8 +345,13 @@ impl ModelConfigStore {
             "models.connections.removePlan",
             json!({"document":self.document().await?,"providerId":provider_id}),
         )?;
-        let bytes = serde_json::to_vec_pretty(&plan["document"])
-            .map_err(|_| ModelError::new("MODEL_CONFIGURATION_WRITE_FAILED", "模型配置无法编码。", 500))?;
+        let bytes = serde_json::to_vec_pretty(&plan["document"]).map_err(|_| {
+            ModelError::new(
+                "MODEL_CONFIGURATION_WRITE_FAILED",
+                "模型配置无法编码。",
+                500,
+            )
+        })?;
         let home = self.home.clone();
         tokio::task::spawn_blocking(move || {
             crate::storage::managed_files::atomic_write(
@@ -362,8 +362,20 @@ impl ModelConfigStore {
             )
         })
         .await
-        .map_err(|_| ModelError::new("MODEL_CONFIGURATION_WRITE_FAILED", "模型配置保存任务未完成。", 500))?
-        .map_err(|_| ModelError::new("MODEL_CONFIGURATION_WRITE_FAILED", "模型配置保存失败；原记录已保留。", 500))?;
+        .map_err(|_| {
+            ModelError::new(
+                "MODEL_CONFIGURATION_WRITE_FAILED",
+                "模型配置保存任务未完成。",
+                500,
+            )
+        })?
+        .map_err(|_| {
+            ModelError::new(
+                "MODEL_CONFIGURATION_WRITE_FAILED",
+                "模型配置保存失败；原记录已保留。",
+                500,
+            )
+        })?;
         Ok(())
     }
 
@@ -448,8 +460,7 @@ pub fn validate_connection(mut input: Value, require_models: bool) -> Result<Val
     )
 }
 
-/// Drain bounded discovery-error bodies to reuse the connection; do not parse them or generate content.
-/// 有界读完发现错误正文以复用连接；不解析正文或发起生成。
+/// 限量读完发现错误正文以复用连接；不解析正文或发起生成。
 async fn drain_discovery_response(
     response: reqwest::Response,
     cancellation: &mut watch::Receiver<bool>,
@@ -463,14 +474,20 @@ async fn drain_discovery_response(
                 _ = gateway::cancelled(cancellation) => return Err(ModelError::cancelled()),
                 chunk = stream.next() => chunk,
             };
-            let Some(chunk) = chunk else { return Ok(true); };
-            let Ok(chunk) = chunk else { return Ok(false); };
+            let Some(chunk) = chunk else {
+                return Ok(true);
+            };
+            let Ok(chunk) = chunk else {
+                return Ok(false);
+            };
             consumed_bytes = consumed_bytes.saturating_add(chunk.len());
             if consumed_bytes > 64 * 1024 {
                 return Ok(false);
             }
         }
-    }).await.unwrap_or(Ok(false))
+    })
+    .await
+    .unwrap_or(Ok(false))
 }
 
 pub async fn discover_models(
@@ -570,8 +587,15 @@ pub async fn handle_models(
         ("DELETE", path) if path.starts_with("/api/models/connections/") => Some(
             async {
                 let provider_id = path.strip_prefix("/api/models/connections/").unwrap();
-                if !regex::Regex::new("^[a-z][a-z0-9-]{1,39}$").unwrap().is_match(provider_id) {
-                    return Err(ModelError::new("INVALID_MODEL_CONNECTION", "模型连接标识无效。", 400));
+                if !regex::Regex::new("^[a-z][a-z0-9-]{1,39}$")
+                    .unwrap()
+                    .is_match(provider_id)
+                {
+                    return Err(ModelError::new(
+                        "INVALID_MODEL_CONNECTION",
+                        "模型连接标识无效。",
+                        400,
+                    ));
                 }
                 store.remove(provider_id).await?;
                 Ok((200, json!({"deleted":true,"providerId":provider_id})))
@@ -641,8 +665,7 @@ mod tests {
         let original = serde_json::to_vec(&json!({"version":1,"providers":providers})).unwrap();
         let path = root.join("connections.json");
         std::fs::write(&path, &original).unwrap();
-        // Exercise the actual public handler, not a manually reconstructed desktop fixture.
-        // 调用真实公共处理器，避免手写桌面样例掩盖原生列表投影缺陷。
+        // 调用真实公共处理器，避免手写桌面样例掩盖原生列表映射缺陷。
         let (status, response) = handle_models("GET", "/api/models", Value::Null, &root)
             .await
             .unwrap()
@@ -694,31 +717,71 @@ mod tests {
     }
     #[tokio::test]
     async fn delete_connection_removes_only_its_credentials_and_is_idempotent() {
-        let root = std::env::temp_dir().join(format!("kynxa-model-delete-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kynxa-model-delete-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let store = ModelConfigStore::new(&root);
-        for (id, key) in [("delete-fixture", "synthetic-deleted-key"), ("keep-fixture", "synthetic-retained-key")] {
+        for (id, key) in [
+            ("delete-fixture", "synthetic-deleted-key"),
+            ("keep-fixture", "synthetic-retained-key"),
+        ] {
             store.save(json!({"providerId":id,"displayName":id,"baseUrl":"https://api.example.invalid/v1",
                 "protocol":"openai-completions","models":["fixture-model"],"apiKey":key})).await.unwrap();
         }
         let endpoint = "/api/models/connections/delete-fixture";
         for _ in 0..2 {
-            let (status, receipt) = handle_models("DELETE", endpoint, Value::Null, &root).await.unwrap().unwrap();
+            let (status, receipt) = handle_models("DELETE", endpoint, Value::Null, &root)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(status, 200);
-            assert_eq!(receipt, json!({"deleted":true,"providerId":"delete-fixture"}));
+            assert_eq!(
+                receipt,
+                json!({"deleted":true,"providerId":"delete-fixture"})
+            );
         }
-        assert!(store.connection_for("delete-fixture").await.unwrap().is_none());
-        assert_eq!(store.connection_for("keep-fixture").await.unwrap().unwrap()["apiKey"], "synthetic-retained-key");
-        let (_, public) = handle_models("GET", "/api/models", Value::Null, &root).await.unwrap().unwrap();
+        assert!(
+            store
+                .connection_for("delete-fixture")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.connection_for("keep-fixture").await.unwrap().unwrap()["apiKey"],
+            "synthetic-retained-key"
+        );
+        let (_, public) = handle_models("GET", "/api/models", Value::Null, &root)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(public["providers"].as_array().unwrap().len(), 1);
         assert_eq!(public["providers"][0]["providerId"], "keep-fixture");
         assert!(public["providers"][0].get("apiKey").is_none());
         assert!(!public.to_string().contains("synthetic-"));
-        assert!(!std::fs::read_to_string(root.join("connections.json")).unwrap().contains("synthetic-deleted-key"));
+        assert!(
+            !std::fs::read_to_string(root.join("connections.json"))
+                .unwrap()
+                .contains("synthetic-deleted-key")
+        );
         let previous = std::fs::read(root.join("connections.json")).unwrap();
-        assert_eq!(handle_models("DELETE", "/api/models/connections/keep-fixture/extra", Value::Null, &root)
-            .await.unwrap().unwrap_err().code, "INVALID_MODEL_CONNECTION");
-        assert_eq!(std::fs::read(root.join("connections.json")).unwrap(), previous);
+        assert_eq!(
+            handle_models(
+                "DELETE",
+                "/api/models/connections/keep-fixture/extra",
+                Value::Null,
+                &root
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "INVALID_MODEL_CONNECTION"
+        );
+        assert_eq!(
+            std::fs::read(root.join("connections.json")).unwrap(),
+            previous
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

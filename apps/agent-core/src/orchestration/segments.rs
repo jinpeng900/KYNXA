@@ -12,7 +12,6 @@ fn integer(value: &Value, minimum: u64, maximum: u64) -> bool {
         .is_some_and(|value| value >= minimum && value <= maximum)
 }
 
-/// Public bodies are transported as original UTF-16 by the adapter; native metadata owns ordering and timing.
 /// 公开正文由适配器按原始 UTF-16 传输；原生元信息拥有顺序和计时状态。
 #[derive(Default)]
 pub struct SegmentState {
@@ -121,7 +120,11 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
                 if !item["object"].as_bool().unwrap_or(false)
                     || !ids.insert(id)
                     || !orders.insert(order)
-                    || !integer(&item["round"], 1, crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64)
+                    || !integer(
+                        &item["round"],
+                        1,
+                        crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64,
+                    )
                     || round <= previous_round
                     || !integer(&item["order"], 0, MAX_SEGMENT_ORDER)
                     || previous_order.is_some_and(|previous| order <= previous)

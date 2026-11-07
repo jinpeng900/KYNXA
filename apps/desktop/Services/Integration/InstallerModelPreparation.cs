@@ -4,7 +4,6 @@ using System.Text.Json.Nodes;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Submits the user's installer selection to the normal Rust model manager after startup.
 /// 启动后由 Rust 管理器下载安装器中勾选的模型，进度显示在模型设置页。
 /// </summary>
 internal static class InstallerModelPreparation
@@ -35,7 +34,6 @@ internal static class InstallerModelPreparation
                 model = snapshot.Models.FirstOrDefault(item => item.Id == modelId);
                 if (model is null)
                 {
-                    // Explicit deletion cancels the installer selection instead of reinstalling it on the next launch.
                     // 用户删除模型即取消安装意向，下次启动不再下载。
                     request["status"] = "paused";
                     await SaveAsync(requestPath, request).ConfigureAwait(false);
@@ -62,7 +60,6 @@ internal static class InstallerModelPreparation
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or HttpRequestException or OperationCanceledException)
         {
-            // Keep the accepted intent for the next launch; a failed optional download never blocks chat.
             // 保留已授权安装意向供下次启动接续；可选下载失败不阻塞界面和对话。
             System.Diagnostics.Debug.WriteLine($"Installer-selected model: {error.Message}");
             if (request is null) return;

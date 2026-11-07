@@ -116,7 +116,6 @@ internal static class HostTerminalVisibleRunner
                     {
                         exitCode = eventPayload.GetProperty("exitCode").GetInt32();
                         windowVisibleAtCompletion = eventPayload.GetProperty("windowVisibleAtCompletion").GetBoolean();
-                        // Authoritative completion precedes optional preview publication and display hold.
                         // 先记录正式执行完成，再发布可选预览或等待窗口展示结束。
                         commandCompleted = true;
                         commandCompletedAtMs = elapsed.ElapsedMilliseconds;

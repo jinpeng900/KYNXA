@@ -50,13 +50,10 @@ internal static class HostTerminalVisibleWorker
             var processStartInfo = new ProcessStartInfo(HostTerminalRunner.ShellPath(request.Shell!))
             {
                 WorkingDirectory = request.Cwd!, UseShellExecute = false, CreateNoWindow = false
-                // No redirection: the shell and its children inherit genuine console input/output.
                 // 不重定向输入输出，让 shell 及其子进程继承真实控制台。
             };
             if (request.Shell == "cmd")
             {
-                // CMD /s /c parses its outer quotes itself; argv escaping would insert literal
-                // backslashes before the script's executable quotes and prevent command startup.
                 // CMD /s /c 自行解析外层引号；argv 转义会在脚本可执行路径的引号前插入字面反斜杠，导致命令无法启动。
                 processStartInfo.Arguments = " /d /s /c \"" + request.Script! + "\"";
             }

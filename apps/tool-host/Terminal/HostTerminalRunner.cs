@@ -52,14 +52,11 @@ internal static class HostTerminalRunner
             {
                 BasicLimitInformation = new JobBasicLimitInformation
                 {
-                    // Kill-on-close applies even if the gateway or this helper is terminated.
-                    // No child can break out of the job; a process starts suspended until assignment.
                     // 网关或辅助进程终止时关闭作业也会结束进程树；子进程不能脱离作业，完成归属前保持挂起。
                     LimitFlags = 0x2000 | 0x8, ActiveProcessLimit = MaximumProcesses
                 }
             };
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set host terminal job limits");
-            // Bound retained logs without stopping the command; completion follows its real exit.
             // 只限制保留日志，不终止命令；是否完成以真实退出为准。
             var output = new BoundedOutput(jobHandle, shell == "cmd", truncateOnOverflow: true);
             var (stdout, stderr) = StartHostShell(shell, request.Script!, cwd, jobHandle, ref processInformation, output, cancellationToken);
@@ -80,13 +77,11 @@ internal static class HostTerminalRunner
                 if (elapsed.ElapsedMilliseconds >= request.TimeoutMs) { timedOut = true; break; }
                 await Task.Delay(10);
             }
-            // Kill surviving descendants after both interrupted and normal shell completion.
             // shell 无论中断还是正常完成，都终止仍存活的子孙进程。
             Check(TerminateJobObject(jobHandle, timedOut ? 124u : 125u), "Terminate host terminal process tree");
             await WaitForEmptyJobAsync(jobHandle);
             Check(GetExitCodeProcess(processInformation.Process, out uint exitCode), "Read host terminal exit code");
             await Task.WhenAll(stdout, stderr);
-            // Log retention is independent of a negotiated background job's observed completion.
             // 已协商后台作业的日志保留上限不改变已观测到的正常完成事实。
             bool completed = normalExit;
             return new
@@ -124,7 +119,6 @@ internal static class HostTerminalRunner
         if (request.Operation is not ("host_terminal" or "host_terminal_visible" or "host_terminal_job") ||
             (request.Operation == "host_terminal_visible" && !request.Visible) || request.Shell is not ("cmd" or "powershell"))
             throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "The host terminal accepts only cmd or powershell.");
-        // Background jobs have a distinct negotiated operation; normal calls keep their short lifetime.
         // 后台任务使用单独协商的操作，普通调用仍保留较短生命周期与完整进程树清理。
         if ((request.Operation == "host_terminal_job") != request.BackgroundJob || request.BackgroundJob && request.Visible)
             throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "Background jobs must use their hidden dedicated operation.");
@@ -151,7 +145,7 @@ internal static class HostTerminalRunner
         ref ProcessInformation processInformation, BoundedOutput output, CancellationToken cancellationToken)
     {
         IntPtr stdoutRead = IntPtr.Zero, stdoutWrite = IntPtr.Zero, stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
-        IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero, attributeList = IntPtr.Zero, handlesBuffer = IntPtr.Zero, environmentBlock = IntPtr.Zero;
+        IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero, attributeList = IntPtr.Zero, handlesBuffer = IntPtr.Zero, environmentBlock = IntPtr.Zero, breakawayPolicy = IntPtr.Zero;
         bool resumed = false;
         try
         {
@@ -163,14 +157,18 @@ internal static class HostTerminalRunner
             Check(SetHandleInformation(stderrRead, 1, 0), "Protect host stderr reader");
             Check(SetHandleInformation(stdinWrite, 1, 0), "Protect host stdin writer");
             UIntPtr size = UIntPtr.Zero;
-            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
             attributeList = Marshal.AllocHGlobal(checked((int)size.ToUInt64()));
-            Check(InitializeProcThreadAttributeList(attributeList, 1, 0, ref size), "Initialize host process attributes");
+            Check(InitializeProcThreadAttributeList(attributeList, 2, 0, ref size), "Initialize host process attributes");
             handlesBuffer = Marshal.AllocHGlobal(IntPtr.Size * 3);
             Marshal.WriteIntPtr(handlesBuffer, stdoutWrite);
             Marshal.WriteIntPtr(handlesBuffer, IntPtr.Size, stderrWrite);
             Marshal.WriteIntPtr(handlesBuffer, IntPtr.Size * 2, stdinRead);
             Check(UpdateProcThreadAttribute(attributeList, 0, (IntPtr)0x20002, handlesBuffer, (UIntPtr)(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero), "Set host inherited handle allowlist");
+            // 打包进程加载 DLL 时不查 PATH，会让 MinGW 这类工具静默失败；宿主命令按普通用户进程运行，未打包版本不受影响。
+            breakawayPolicy = Marshal.AllocHGlobal(sizeof(uint));
+            Marshal.WriteInt32(breakawayPolicy, DesktopAppBreakawayEnableProcessTree);
+            Check(UpdateProcThreadAttribute(attributeList, 0, (IntPtr)ProcThreadAttributeDesktopAppPolicy, breakawayPolicy, (UIntPtr)sizeof(uint), IntPtr.Zero, IntPtr.Zero), "Set host desktop app policy");
             var startup = new StartupInfoEx
             {
                 AttributeList = attributeList,
@@ -191,12 +189,9 @@ internal static class HostTerminalRunner
                 : QuoteArgument(executable) + " -NoProfile -NonInteractive -Command " + QuoteArgument(powershellWrapper);
             if (arguments.Length >= 32767)
                 throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "The effective shell command line exceeds the Windows limit.");
-            // Parse the script separately to preserve leading using/param syntax.
-            // A per-child source variable avoids expanding 16K quoted scripts on the command line.
             // 独立解析脚本以保留开头的 using/param；各子进程用独有源变量，避免命令行展开 16K 引号脚本。
             if (shell == "powershell") environmentBlock = Marshal.StringToHGlobalUni(BuildEnvironment(sourceVariable, script));
             cancellationToken.ThrowIfCancellationRequested();
-            // Host execution preserves the application's environment, including user-configured application PATH.
             // 宿主执行保留应用环境，包括用户配置的应用 PATH。
             Check(CreateProcessW(executable, new StringBuilder(arguments), IntPtr.Zero, IntPtr.Zero, true,
                 CreateSuspended | ExtendedStartupInfoPresent | CreateNoWindow | (environmentBlock != IntPtr.Zero ? CreateUnicodeEnvironment : 0),
@@ -224,6 +219,7 @@ internal static class HostTerminalRunner
             Close(ref stdinRead); Close(ref stdinWrite);
             if (attributeList != IntPtr.Zero) { DeleteProcThreadAttributeList(attributeList); Marshal.FreeHGlobal(attributeList); }
             if (handlesBuffer != IntPtr.Zero) Marshal.FreeHGlobal(handlesBuffer);
+            if (breakawayPolicy != IntPtr.Zero) Marshal.FreeHGlobal(breakawayPolicy);
             if (environmentBlock != IntPtr.Zero) Marshal.FreeHGlobal(environmentBlock);
         }
     }
@@ -292,7 +288,6 @@ internal static class HostTerminalRunner
             using var stream = new FileStream(new SafeFileHandle(handle, ownsHandle: true), FileAccess.Read);
             using var stored = new MemoryStream();
             using var line = new MemoryStream();
-            // Keep the most recent overflow bytes too: build and test failures are usually at the end of the log.
             // 同时保留最近的超量输出：构建与测试失败通常出现在日志末尾。
             byte[] tail = new byte[TailBytes];
             long tailWritten = 0;
@@ -316,7 +311,6 @@ internal static class HostTerminalRunner
                     line.Position = 0;
                 }
                 PublishDelta(channel, decoded.ToString());
-                // Keep draining full background logs; ordinary calls retain their output-limit policy.
                 // 后台日志满后仍排空管道；普通调用沿用原输出超限策略。
                 if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0 && !truncateOnOverflow)
                     TerminateJobObject(jobHandle, 126);
@@ -329,7 +323,6 @@ internal static class HostTerminalRunner
             byte[] recent = new byte[kept];
             for (int index = 0; index < kept; index++)
                 recent[index] = tail[(tailWritten - kept + index) % TailBytes];
-            // Start the tail at a line boundary so a split multibyte character is not shown.
             // 尾部从行边界开始，避免显示被截断的多字节字符。
             int start = tailWritten > TailBytes ? Array.IndexOf(recent, (byte)'\n') + 1 : 0;
             if (start <= 0 || start >= kept) start = 0;
@@ -389,9 +382,7 @@ internal static class HostTerminalRunner
             catch (DecoderFallbackException) { result.Append(oem.GetString(bytes, start, count)); }
             start = end + 1;
         }
-        // Mixed encodings and OEM bytes also valid as UTF-8 are ambiguous.
-        // Record the per-line policy without claiming lossless decoding of arbitrary bytes.
-        // 行内混合编码或同时符合 UTF-8 的 OEM 字节有歧义；回执注明逐行策略，不保证任意字节无损解码。
+        // 行内混合编码或同时符合 UTF-8 的 OEM 字节有歧义；结果注明逐行策略，不保证任意字节无损解码。
         return result.ToString();
     }
 

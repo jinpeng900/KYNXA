@@ -1,12 +1,11 @@
-//! Settings, source registration and persistent indexing jobs share the existing data layout.
 //! 配置、资料登记与持久索引任务沿用现有数据布局。
 
 use super::gateway_index;
+pub(crate) use super::gateway_tools::retire_memory_sources;
+pub(crate) use super::gateway_tools::should_prepare_request;
 pub use super::gateway_tools::{
     final_validate, handle_tool, prepare_request, project_evidence_result, release_task,
 };
-pub(crate) use super::gateway_tools::should_prepare_request;
-pub(crate) use super::gateway_tools::retire_memory_sources;
 use crate::gateway_contract::GatewayConfig;
 use crate::storage::{
     self, ContractError,
@@ -42,8 +41,7 @@ fn indexing_gate(root: &Path) -> Result<Arc<IndexingGate>, ContractError> {
     Ok(gates.entry(root.to_path_buf()).or_default().clone())
 }
 
-/// Recover old jobs before the first new job; a delayed startup cannot retire current workers.
-/// 首次创建新作业前结算旧作业，延迟启动不能把本次运行的作业判为中断。
+/// 首次创建新作业前结算旧作业，延迟启动的本次作业不算中断。
 fn ensure_jobs_recovered(config: &GatewayConfig) -> Result<(), ContractError> {
     let gate = indexing_gate(&config.data_root)?;
     let mut recovered = gate
@@ -64,40 +62,82 @@ struct BackgroundOwner {
 }
 static BACKGROUND: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<BackgroundOwner>>>> =
     OnceLock::new();
-struct ActiveProject { id: Option<String>, pending: bool, state: &'static str }
+struct ActiveProject {
+    id: Option<String>,
+    pending: bool,
+    state: &'static str,
+}
 struct InventorySnapshot {
     inputs: String,
     roots: Vec<std::path::PathBuf>,
     checked: std::time::Instant,
     files: Value,
 }
-static ACTIVE_PROJECTS: OnceLock<Mutex<HashMap<std::path::PathBuf, ActiveProject>>> = OnceLock::new();
+static ACTIVE_PROJECTS: OnceLock<Mutex<HashMap<std::path::PathBuf, ActiveProject>>> =
+    OnceLock::new();
 
 pub fn activate_project(config: &GatewayConfig, project: Option<&str>) -> Value {
-    let mut active = ACTIVE_PROJECTS.get_or_init(Default::default).lock().unwrap();
-    let entry = active.entry(config.data_root.clone()).or_insert(ActiveProject { id:None, pending:false, state:"idle" });
+    let mut active = ACTIVE_PROJECTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    let entry = active
+        .entry(config.data_root.clone())
+        .or_insert(ActiveProject {
+            id: None,
+            pending: false,
+            state: "idle",
+        });
     if entry.id.as_deref() != project || entry.state == "idle" {
         entry.id = project.map(str::to_owned);
-        entry.pending = project.is_some(); entry.state = if entry.pending {"queued"}else{"idle"};
+        entry.pending = project.is_some();
+        entry.state = if entry.pending { "queued" } else { "idle" };
     }
     json!({"projectId":entry.id,"state":entry.state,"queued":entry.pending})
 }
 
 fn maintain_active_project(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
     let project = {
-        let mut active = ACTIVE_PROJECTS.get_or_init(Default::default).lock().unwrap();
-        let Some(entry) = active.get_mut(&config.data_root).filter(|entry| entry.pending) else { return; };
-        entry.pending = false; entry.state = "preparing"; entry.id.clone()
+        let mut active = ACTIVE_PROJECTS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap();
+        let Some(entry) = active
+            .get_mut(&config.data_root)
+            .filter(|entry| entry.pending)
+        else {
+            return;
+        };
+        entry.pending = false;
+        entry.state = "preparing";
+        entry.id.clone()
     };
     let ready = (|| -> Result<bool, ContractError> {
-        let Some(project) = project.as_deref() else { return Ok(false); };
+        let Some(project) = project.as_deref() else {
+            return Ok(false);
+        };
         let settings = effective(config, Some(project))?;
-        if settings["local"]["enabled"] == false || settings["local"]["semantic"] == "off"
-            || settings["projectIndexing"]["mountedFolder"] != true { return Ok(false); }
+        if settings["local"]["enabled"] == false
+            || settings["local"]["semantic"] == "off"
+            || settings["projectIndexing"]["mountedFolder"] != true
+        {
+            return Ok(false);
+        }
         super::gateway_embedding::warm(config, &settings["local"], stop.clone())
     })();
-    if let Some(entry) = ACTIVE_PROJECTS.get().unwrap().lock().unwrap().get_mut(&config.data_root).filter(|entry| entry.id == project) {
-        entry.state = match ready { Ok(true) => "ready", Ok(false) => "idle", Err(_) => "deferred" };
+    if let Some(entry) = ACTIVE_PROJECTS
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .get_mut(&config.data_root)
+        .filter(|entry| entry.id == project)
+    {
+        entry.state = match ready {
+            Ok(true) => "ready",
+            Ok(false) => "idle",
+            Err(_) => "deferred",
+        };
     }
 }
 struct PendingMemory {
@@ -141,22 +181,25 @@ fn schedule_scope(root: &Path, scope: &str, id: &str) -> bool {
     false
 }
 
-/// Enqueue only an identity; the existing maintenance owner performs all storage and inference work.
 /// 仅排入聊天身份；现有后台维护执行正文读取与推理，前台保存不等待嵌入模型。
 pub(crate) fn enqueue_conversation_semantic(config: &GatewayConfig, conversation: &str) {
     if !schedule_scope(&config.data_root, "message", conversation) {
-        if let Some(owner) = BACKGROUND.get().and_then(|owners| owners.lock().ok())
-            .and_then(|owners| owners.get(&config.data_root).cloned()) {
+        if let Some(owner) = BACKGROUND
+            .get()
+            .and_then(|owners| owners.lock().ok())
+            .and_then(|owners| owners.get(&config.data_root).cloned())
+        {
             owner.chat_scan_pending.store(true, Ordering::Release);
         }
     }
 }
 
-/// Retain original message provenance; never concatenate distinct source bodies.
-/// 保留原消息来源，不拼接不同来源正文。
 pub(crate) fn conversation_message_sources(chat: &str, messages: &[Value]) -> Vec<Value> {
-    let users = messages.iter().filter(|message| message["Role"] == "user")
-        .filter_map(|message| message["Id"].as_str()).collect::<HashSet<_>>();
+    let users = messages
+        .iter()
+        .filter(|message| message["Role"] == "user")
+        .filter_map(|message| message["Id"].as_str())
+        .collect::<HashSet<_>>();
     messages.iter().filter(|message| {
         message["Status"] == "completed"
             && message["Content"].as_str().is_some_and(|text| !text.trim().is_empty())
@@ -183,11 +226,20 @@ pub(crate) fn conversation_message_sources(chat: &str, messages: &[Value]) -> Ve
 }
 
 fn conversation_index_scopes(catalog: &Value) -> Vec<Value> {
-    catalog["Chats"].as_array().into_iter().flatten()
-        .chain(catalog["Projects"].as_array().into_iter().flatten()
-            .flat_map(|project| project["Chats"].as_array().into_iter().flatten()))
+    catalog["Chats"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(
+            catalog["Projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|project| project["Chats"].as_array().into_iter().flatten()),
+        )
         .filter_map(|chat| chat["Id"].as_str())
-        .map(|id| json!({"scope":"message","scopeId":id})).collect()
+        .map(|id| json!({"scope":"message","scopeId":id}))
+        .collect()
 }
 pub(crate) fn temporary_index_failure(code: &str) -> bool {
     matches!(
@@ -274,7 +326,6 @@ fn maintenance_attempt(
                             .filter_map(Value::as_str)
                             .any(temporary_index_failure)
                     })
-                // Use scanner failure classes so a timeout cannot permanently stall unchanged files.
                 // 沿用扫描器故障分类，避免一次超时永久卡住未变文件。
                 || job["coverage"]["failures"]
                     .as_array()
@@ -338,8 +389,7 @@ fn maintain_memory(config: &GatewayConfig, cancel: &Arc<AtomicBool>) -> Result<(
             }
         };
         if let Err(error) = result {
-            // Keep transient work bounded/retryable and preserve unrelated scopes.
-            // 暂时性工作有界重试，删除或失败不影响其他范围。
+            // 暂时性工作限量重试，删除或失败不影响其他范围。
             if temporary_index_failure(error.code()) && !cancel.load(Ordering::Acquire) {
                 item.ready_at = std::time::Instant::now() + retry_delay(item.attempt);
                 item.attempt = item.attempt.saturating_add(1).min(10);
@@ -362,14 +412,13 @@ fn maintain_deleted_chats(
     cancel: &Arc<AtomicBool>,
     cursor: &mut usize,
 ) -> Result<(), ContractError> {
-    let catalog = gateway::load_catalog(&config.data_root)?;
+    let catalog = gateway::read_catalog(&config.data_root)?;
     let deleted = catalog["Tombstones"].as_array().unwrap();
     if deleted.is_empty() {
         *cursor = 0;
         return Ok(());
     }
-    // Rotate bounded cleanup batches to serve later tombstones without blocking foreground work.
-    // 有界轮转清理删除记录，避免遗漏后续项或阻塞前台。
+    // 限量轮转清理删除记录，避免遗漏后续项或阻塞前台。
     let count = deleted.len().min(16);
     let start = *cursor % deleted.len();
     let mut failure = None;
@@ -394,9 +443,10 @@ fn maintain_deleted_chats(
 pub(crate) fn retire_chat_index_work(root: &Path, conversation: &str) {
     if let Some(pending) = MEMORY_PENDING.get() {
         if let Some(queue) = pending.lock().unwrap().get_mut(root) {
-            queue
-                .retain(|item| !["chat", "message"].contains(&item.scope.as_str())
-                    || !item.id.eq_ignore_ascii_case(conversation));
+            queue.retain(|item| {
+                !["chat", "message"].contains(&item.scope.as_str())
+                    || !item.id.eq_ignore_ascii_case(conversation)
+            });
         }
     }
 }
@@ -406,9 +456,11 @@ fn maintain_conversation_scope(
     conversation: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), ContractError> {
-    let catalog = gateway::load_catalog(&config.data_root)?;
-    let relation = storage::catalog::apply("storage.catalog.relationship",
-        &json!({"current":catalog,"id":conversation}))?;
+    let catalog = gateway::read_catalog(&config.data_root)?;
+    let relation = storage::catalog::apply(
+        "storage.catalog.relationship",
+        &json!({"current":catalog,"id":conversation}),
+    )?;
     let settings = effective(config, relation["projectId"].as_str())?;
     let messages = gateway::read_model_messages(&config.data_root, conversation)?;
     let sources = conversation_message_sources(conversation, &messages);
@@ -416,26 +468,39 @@ fn maintain_conversation_scope(
         gateway_index::publish(config, batch)?;
     }
     let scope = format!("chat:{}", conversation.to_ascii_lowercase());
-    let keep = sources.iter().filter_map(|source| source["sourceId"].as_str()).collect::<HashSet<_>>();
+    let keep = sources
+        .iter()
+        .filter_map(|source| source["sourceId"].as_str())
+        .collect::<HashSet<_>>();
     let mut after = Value::Null;
     loop {
-        let page = storage::sqlite_queries::apply("storage.index.listSources",
-            &gateway_index::arguments(config,
-                json!({"scopes":[scope],"sourceType":"message","afterSourceId":after})))?;
+        let page = storage::sqlite_queries::apply(
+            "storage.index.listSources",
+            &gateway_index::arguments(
+                config,
+                json!({"scopes":[scope],"sourceType":"message","afterSourceId":after}),
+            ),
+        )?;
         let rows = page["rows"].as_array().unwrap();
         for row in rows {
             if !keep.contains(row["sourceId"].as_str().unwrap_or("")) {
-                gateway_index::remove(config, row["sourceId"].as_str().unwrap(), &json!([scope]), false)?;
+                gateway_index::remove(
+                    config,
+                    row["sourceId"].as_str().unwrap(),
+                    &json!([scope]),
+                    false,
+                )?;
             }
         }
         after = page["nextSourceId"].clone();
-        if rows.len() < 256 { break; }
+        if rows.len() < 256 {
+            break;
+        }
     }
     if settings["local"]["enabled"] == false || settings["local"]["semantic"] == "off" {
         return Ok(());
     }
-    // Bound maintenance visits; reuse vectors and requeue remaining sources.
-    // 维护分次有界执行，复用已有向量，剩余来源回原队列。
+    // 维护分次限量执行，复用已有向量，剩余来源回原队列。
     let mut generated = 0;
     for source in &sources {
         if cancel.load(Ordering::Acquire) {
@@ -448,8 +513,7 @@ fn maintain_conversation_scope(
             enqueue_conversation_semantic(config, conversation);
             break;
         }
-        // publish_prepared checks the live catalog under its transaction; deleted chats cannot be resurrected.
-        // 发布事务重新检查当前聊天目录；后台推理期间删除的聊天不能重新写回索引。
+        // 发布事务重新检查当前聊天目录，后台推理期间删除的聊天不写回索引。
         gateway_index::publish_semantic(config, source, &settings["local"], cancel)?;
         generated += 1;
     }
@@ -573,7 +637,6 @@ fn embedding_prewarm_identity(config: &GatewayConfig, local: &Value) -> String {
     )
 }
 
-/// Warm up separately from indexing, using shared inference ownership and background leases.
 /// 预热独立于索引，复用推理所有者和后台租约；资源不足时延后。
 fn run_embedding_prewarm(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
     if !wait_background(stop, std::time::Duration::from_secs(2)) {
@@ -607,14 +670,13 @@ fn run_embedding_prewarm(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
                     complete = true;
                 } else {
                     match super::gateway_embedding::warm(config, local, stop.clone()) {
-                        // Do not download at startup; retry on asset/config changes, not idle eviction.
                         // 启动不下载资产，资产或配置变化时重试，不因空闲回收循环重载。
                         Ok(_) => complete = true,
                         Err(error) if temporary_index_failure(error.code()) => {
                             let delay =
                                 std::time::Duration::from_secs((5u64 << attempt.min(5)).min(120));
                             next = std::time::Instant::now() + delay;
-                            attempt = attempt.saturating_add(1);
+                            attempt += 1;
                             super::gateway_embedding::waiting_retry(config, local, delay);
                         }
                         Err(_) => complete = true,
@@ -683,7 +745,6 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
             let mut inventories: HashMap<String, InventorySnapshot> = HashMap::new();
             let mut watches = super::gateway_watch::WatchSet::default();
             let mut deleted_cursor = 0;
-            // Discover through the existing watcher and coalesce queued preparation without delaying startup.
             // 现有 watcher 负责发现并合并准备队列，启动不等待全部记忆准备。
             let mut startup_memory =
                 storage::gateway_memory::startup_index_scopes(&config.data_root, &shared.stop)
@@ -700,29 +761,59 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 let _ = gateway_index::maintain_ann(&config, &shared.stop);
                 let cycle = (|| -> Result<(), ContractError> {
                     if shared.chat_scan_pending.swap(false, Ordering::AcqRel) {
-                        if let Ok(catalog) = gateway::load_catalog(&config.data_root) {
-                            let queued = startup_memory.iter().filter_map(|entry| {
-                                Some((entry["scope"].as_str()?.to_owned(), entry["scopeId"].as_str()?.to_owned()))
-                            }).collect::<HashSet<_>>();
-                            startup_memory.extend(conversation_index_scopes(&catalog).into_iter()
-                                .filter(|entry| !queued.contains(&("message".to_owned(),
-                                    entry["scopeId"].as_str().unwrap_or("").to_owned()))));
+                        if let Ok(catalog) = gateway::read_catalog(&config.data_root) {
+                            let queued = startup_memory
+                                .iter()
+                                .filter_map(|entry| {
+                                    Some((
+                                        entry["scope"].as_str()?.to_owned(),
+                                        entry["scopeId"].as_str()?.to_owned(),
+                                    ))
+                                })
+                                .collect::<HashSet<_>>();
+                            startup_memory.extend(
+                                conversation_index_scopes(&catalog)
+                                    .into_iter()
+                                    .filter(|entry| {
+                                        !queued.contains(&(
+                                            "message".to_owned(),
+                                            entry["scopeId"].as_str().unwrap_or("").to_owned(),
+                                        ))
+                                    }),
+                            );
                         }
                     }
                     enqueue_startup_memory(&config.data_root, &mut startup_memory);
                     maintain_memory(&config, &shared.stop)?;
-                    let catalog = gateway::load_catalog(&config.data_root)?;
-                    let roots = catalog["Projects"].as_array().unwrap().iter()
-                        .filter(|project| project["IsArchived"] != true && project["IsFolderlessWorkspace"] != true)
+                    let catalog = gateway::read_catalog(&config.data_root)?;
+                    let roots = catalog["Projects"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|project| {
+                            project["IsArchived"] != true
+                                && project["IsFolderlessWorkspace"] != true
+                        })
                         .filter_map(|project| storage::workspace_mounts::relationship(project).ok())
-                        .flat_map(|relation| relation["mounts"].as_array().cloned().unwrap_or_default())
-                        .filter_map(|mount| mount["path"].as_str().filter(|path| !path.is_empty()).map(std::path::PathBuf::from))
+                        .flat_map(|relation| {
+                            relation["mounts"].as_array().cloned().unwrap_or_default()
+                        })
+                        .filter_map(|mount| {
+                            mount["path"]
+                                .as_str()
+                                .filter(|path| !path.is_empty())
+                                .map(std::path::PathBuf::from)
+                        })
                         .collect::<Vec<_>>();
                     watches.reconcile(&roots);
                     let changed_roots = watches.take();
-                    // Preserve invalidation even while a project already has an indexing job in flight.
                     // 已有索引任务时仍保留根目录失效状态，避免取走通知后延迟至下一轮低频核对。
-                    inventories.retain(|_, snapshot| !snapshot.roots.iter().any(|root| changed_roots.contains(root)));
+                    inventories.retain(|_, snapshot| {
+                        !snapshot
+                            .roots
+                            .iter()
+                            .any(|root| changed_roots.contains(root))
+                    });
                     let jobs = job_plan(&config, "read", json!({}))?["document"]["jobs"]
                         .as_array()
                         .unwrap()
@@ -769,22 +860,48 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                             })
                             .transpose()?;
                         let mounts = if settings["projectIndexing"]["mountedFolder"] == true {
-                            relation.as_ref().and_then(|relation| relation["mounts"].as_array()).cloned().unwrap_or_default()
-                        } else { Vec::new() };
-                        let mount_paths = mounts.iter().filter_map(|mount| mount["path"].as_str().map(std::path::PathBuf::from)).collect::<Vec<_>>();
+                            relation
+                                .as_ref()
+                                .and_then(|relation| relation["mounts"].as_array())
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        let mount_paths = mounts
+                            .iter()
+                            .filter_map(|mount| {
+                                mount["path"].as_str().map(std::path::PathBuf::from)
+                            })
+                            .collect::<Vec<_>>();
                         let inputs = gateway_index::hash(&json!([settings, relation]).to_string());
-                        let refresh = inventories.get(&key).is_none_or(|snapshot| snapshot.inputs != inputs
-                            || snapshot.checked.elapsed() >= std::time::Duration::from_secs(300)
-                            || mount_paths.iter().any(|root| !watches.watched(root)));
+                        let refresh = inventories.get(&key).is_none_or(|snapshot| {
+                            snapshot.inputs != inputs
+                                || snapshot.checked.elapsed() >= std::time::Duration::from_secs(300)
+                                || mount_paths.iter().any(|root| !watches.watched(root))
+                        });
                         if refresh {
                             let mut files = Vec::new();
                             for mount in &mounts {
-                                let Some(path) = mount["path"].as_str().filter(|path| !path.is_empty()) else { continue; };
-                                files.push(json!({"mountId":mount["id"],"path":path,"inventory":inventory(
-                                    &config, path, &settings["local"]["indexing"], &shared.stop)?}));
+                                let Some(path) =
+                                    mount["path"].as_str().filter(|path| !path.is_empty())
+                                else {
+                                    continue;
+                                };
+                                files.push(
+                                    json!({"mountId":mount["id"],"path":path,"inventory":inventory(
+                                    &config, path, &settings["local"]["indexing"], &shared.stop)?}),
+                                );
                             }
-                            inventories.insert(key.clone(), InventorySnapshot { inputs, roots:mount_paths,
-                                checked:std::time::Instant::now(), files:json!(files) });
+                            inventories.insert(
+                                key.clone(),
+                                InventorySnapshot {
+                                    inputs,
+                                    roots: mount_paths,
+                                    checked: std::time::Instant::now(),
+                                    files: json!(files),
+                                },
+                            );
                         }
                         let files = &inventories[&key].files;
                         let sources = knowledge["sources"]
@@ -830,7 +947,7 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 if let Err(error) = cycle {
                     let _ = error;
                 }
-// Resident E5 weights are reclaimed only by the pressure path after thirty idle minutes.
+                // Resident E5 weights are reclaimed only by the pressure path after thirty idle minutes.
                 // E5 驻留权重仅在资源紧张且空闲三十分钟后回收，周期维护不再反复卸载。
                 for _ in 0..300 {
                     if shared.stop.load(Ordering::Acquire) {
@@ -840,13 +957,21 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                         break;
                     }
                     if watches.pending() {
-                        // Coalesce editor save/rename bursts before one incremental source pass.
                         // 编辑器保存及重命名通常形成事件簇，合并短窗口后执行一次增量来源扫描。
                         std::thread::sleep(std::time::Duration::from_millis(250));
                         break;
                     }
-                    if ACTIVE_PROJECTS.get().and_then(|active|active.lock().ok())
-                        .is_some_and(|active|active.get(&config.data_root).is_some_and(|entry|entry.pending)) { break; }
+                    if ACTIVE_PROJECTS
+                        .get()
+                        .and_then(|active| active.lock().ok())
+                        .is_some_and(|active| {
+                            active
+                                .get(&config.data_root)
+                                .is_some_and(|entry| entry.pending)
+                        })
+                    {
+                        break;
+                    }
                     if MEMORY_PENDING
                         .get()
                         .and_then(|pending| pending.lock().ok())
@@ -866,12 +991,16 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
         })
         .map_err(|_| {
             owner.stop.store(true, Ordering::Release);
-            if let Some(worker) = owner.embedding_worker.lock().unwrap().take() { let _ = worker.join(); }
+            if let Some(worker) = owner.embedding_worker.lock().unwrap().take() {
+                let _ = worker.join();
+            }
             gateway::error("后台维护线程未启动。", "RETRIEVAL_JOB_START_FAILED", 503)
         })?;
     *owner.worker.lock().unwrap() = Some(worker);
     workers.insert(data_root, owner);
-    Ok(json!({"started":true,"reconcileIntervalMs":30000,"nativeWatch":cfg!(windows),"inventoryFallbackIntervalMs":300000}))
+    Ok(
+        json!({"started":true,"reconcileIntervalMs":30000,"nativeWatch":cfg!(windows),"inventoryFallbackIntervalMs":300000}),
+    )
 }
 pub fn stop_background(config: &GatewayConfig) -> Value {
     gateway_index::stop_ann_background(config);
@@ -894,8 +1023,7 @@ pub fn stop_background(config: &GatewayConfig) -> Value {
     storage::gateway_memory::stop_candidates(&config.data_root);
     json!({"stopping":true,"cancelRequested":true})
 }
-/// Maintenance joins every writer before the desktop copies authoritative files.
-/// 维护状态在桌面复制正式文件前等待所有写入者退出；仅请求取消不能表示迁移就绪。
+/// 维护状态在桌面复制正式文件前等待所有写入者退出，仅请求取消还不算迁移就绪。
 pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
     stop_background(config);
     let owner = BACKGROUND
@@ -904,9 +1032,15 @@ pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
         .map_err(|_| gateway::error("后台维护锁失效。", "RETRIEVAL_BUSY", 503))?
         .remove(&config.data_root);
     if let Some(owner) = owner {
-        if let Some(worker) = owner.embedding_worker.lock()
-            .map_err(|_| gateway::error("预热线程状态失效。", "RETRIEVAL_BUSY", 503))?.take() {
-            worker.join().map_err(|_| gateway::error("检索预热线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503))?;
+        if let Some(worker) = owner
+            .embedding_worker
+            .lock()
+            .map_err(|_| gateway::error("预热线程状态失效。", "RETRIEVAL_BUSY", 503))?
+            .take()
+        {
+            worker.join().map_err(|_| {
+                gateway::error("检索预热线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503)
+            })?;
         }
         if let Some(worker) = owner
             .worker
@@ -931,9 +1065,12 @@ pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
             .map_err(|_| gateway::error("索引线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503))?;
     }
     storage::gateway_memory::drain_candidates(&config.data_root)?;
-    if let Some(active) = ACTIVE_PROJECTS.get() { active.lock().unwrap().remove(&config.data_root); }
+    if let Some(active) = ACTIVE_PROJECTS.get() {
+        active.lock().unwrap().remove(&config.data_root);
+    }
     if let Some(gates) = BACKGROUND_GATES.get() {
-        gates.lock()
+        gates
+            .lock()
             .map_err(|_| gateway::error("索引队列状态失效。", "RETRIEVAL_BUSY", 503))?
             .remove(&config.data_root);
     }
@@ -944,7 +1081,9 @@ fn nested_mount(root: &str, candidate: &str) -> bool {
         let root = root.replace('/', "\\").to_lowercase();
         let candidate = candidate.replace('/', "\\").to_lowercase();
         Path::new(&candidate) != Path::new(&root) && Path::new(&candidate).starts_with(&root)
-    } else { Path::new(candidate) != Path::new(root) && Path::new(candidate).starts_with(root) }
+    } else {
+        Path::new(candidate) != Path::new(root) && Path::new(candidate).starts_with(root)
+    }
 }
 
 fn inventory(
@@ -1208,8 +1347,7 @@ pub fn import(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         })?;
         Ok(receipt)
     })();
-    // Discard only snapshots not published by this import; duplicate detection may retain an older source.
-    // 仅清理本次尚未发布的快照；去重可能选择已有资料，不能留下新建但未登记的文件。
+    // 只清理本次尚未发布的快照；去重可能选择已有资料，新建但未登记的文件要删除。
     let retained = result
         .as_ref()
         .ok()
@@ -1330,7 +1468,8 @@ pub fn bind_work(
         let mut next = catalog.clone();
         if plan["changed"] == true {
             let index = plan["projectIndex"].as_u64().unwrap() as usize;
-            next["Projects"][index] = storage::workspace_mounts::bind_default(&next["Projects"][index], &folder)?;
+            next["Projects"][index] =
+                storage::workspace_mounts::bind_default(&next["Projects"][index], &folder)?;
             next["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
             gateway::commit_catalog(&config.data_root, &next, digest, &[], &[])?;
         }
@@ -1500,7 +1639,7 @@ fn run_index(
     let mut discovered = 0;
     let mut incomplete = false;
     let mut failures = Vec::new();
-    let catalog = gateway::load_catalog(&config.data_root)?;
+    let catalog = gateway::read_catalog(&config.data_root)?;
     let existing = gateway_index::cached_work_sources(config, &scope)?;
     let mut observations = Vec::new();
     let mut reused_files = 0u64;
@@ -1510,103 +1649,161 @@ fn run_index(
             &json!({"current":catalog,"id":project_id}),
         )?;
         if settings["projectIndexing"]["mountedFolder"] == true {
-          let mounts = project["mounts"].as_array().cloned().unwrap_or_else(|| vec![json!({"path":project["folderPath"]})]);
-          let mut remaining_files = settings["local"]["indexing"]["maximumFiles"].as_u64().unwrap_or(20000);
-          let mut remaining_bytes = settings["local"]["indexing"]["maximumTotalBytes"].as_u64().unwrap_or(512*1024*1024);
-          let legacy_roots = existing.values().flatten().filter(|source| source["locator"]["mountId"].is_null())
-              .filter_map(|source| source["locator"]["root"].as_str()).collect::<HashSet<_>>();
-          for mount in &mounts {
-            let root = mount["path"].as_str().unwrap_or("");
-            if root.is_empty() { continue; }
-            if mounts.iter().filter_map(|other| other["path"].as_str())
-                .any(|other| legacy_roots.contains(other) && nested_mount(other, root)) { continue; }
-            if remaining_files == 0 || remaining_bytes == 0 { incomplete = true; break; }
-            let mut scan_limits = settings["local"]["indexing"].clone();
-            // Assign overlaps to the most specific mount; share one project-wide output budget.
-            // 重叠文件归最具体挂载根，全部挂载共用项目输出额度。
-            scan_limits["mountExcludedRoots"] = json!(mounts.iter().filter_map(|other| other["path"].as_str())
-                .filter(|other| !legacy_roots.contains(root) && nested_mount(root, other)).collect::<Vec<_>>());
-            scan_limits["scopeBudget"] = json!({"files":remaining_files,"bytes":remaining_bytes});
-            let reusable = existing.iter().filter_map(|(path, sources)| {
-                let sources = sources.iter().filter(|source| source["bindingRevision"] == settings["projectIndexing"]["bindingRevision"]
-                    && source["locator"]["root"] == root && gateway_index::mounted_root(&project, &source["locator"]).is_ok()).cloned().collect::<Vec<_>>();
-                (!sources.is_empty()).then_some((path.clone(), sources))
-            }).collect::<HashMap<_, _>>();
-            let report = scan_each_cached(
-                config,
-                root,
-                &scan_limits,
-                cancel,
-                &reusable,
-                |mut source| {
-                    let reused = source["_indexReused"] == true;
-                    source.as_object_mut().unwrap().remove("_indexReused");
-                    let mut identity = vec![
-                        json!("work-file"),
-                        json!(project_id),
-                        json!(root),
-                        source["locator"]["relativePath"].clone(),
-                    ];
-                    if let Some(window) = source["locator"].get("fileWindow") {
-                        identity.push(window["startOffset"].clone());
-                    } else if source["locator"]["extraction"]["pageWindow"].is_object() {
-                        identity.push(json!("pdf-page"));
-                        identity.push(
-                            source["locator"]["extraction"]["pageWindow"]["startPage"].clone(),
-                        );
-                    } else if source["locator"]["archive"].is_object() {
-                        identity.push(json!("archive-part"));
-                        identity.push(source["locator"]["archive"]["part"].clone());
-                    }
-                    if !reused { source["sourceId"] = json!(gateway_index::hash(&json!(identity).to_string())); }
-                    source["scopeKey"] = json!(scope);
-                    source["sourceType"] = json!("work-file");
-                    source["bindingRevision"] =
-                        settings["projectIndexing"]["bindingRevision"].clone();
-                    if !reused {
-                        let prior = existing.get(source["locator"]["path"].as_str().unwrap_or("")).and_then(|sources| sources.iter().find(|previous|
-                            previous["sourceId"] == source["sourceId"] && previous["contentHash"] == source["contentHash"]
-                                && previous["sourceRevision"] == source["sourceRevision"] && previous["bindingRevision"] == source["bindingRevision"]
-                                && gateway_index::mounted_root(&project, &previous["locator"]).is_ok()));
-                        if let Some(prior) = prior {
-                            // Keep valid legacy derivation IDs when first adding file observations; reuse vectors.
-                            // 首次补录文件信息时保留有效旧派生身份，复用已有向量。
-                            source["locator"] = prior["locator"].clone();
-                        } else if !mount["id"].is_null() {
-                            source["locator"]["mountId"] = mount["id"].clone();
-                            source["locator"]["mountBindingRevision"] = mount["bindingRevision"].clone();
+            let mounts = project["mounts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![json!({"path":project["folderPath"]})]);
+            let mut remaining_files = settings["local"]["indexing"]["maximumFiles"]
+                .as_u64()
+                .unwrap_or(20000);
+            let mut remaining_bytes = settings["local"]["indexing"]["maximumTotalBytes"]
+                .as_u64()
+                .unwrap_or(512 * 1024 * 1024);
+            let legacy_roots = existing
+                .values()
+                .flatten()
+                .filter(|source| source["locator"]["mountId"].is_null())
+                .filter_map(|source| source["locator"]["root"].as_str())
+                .collect::<HashSet<_>>();
+            for mount in &mounts {
+                let root = mount["path"].as_str().unwrap_or("");
+                if root.is_empty() {
+                    continue;
+                }
+                if mounts
+                    .iter()
+                    .filter_map(|other| other["path"].as_str())
+                    .any(|other| legacy_roots.contains(other) && nested_mount(other, root))
+                {
+                    continue;
+                }
+                if remaining_files == 0 || remaining_bytes == 0 {
+                    incomplete = true;
+                    break;
+                }
+                let mut scan_limits = settings["local"]["indexing"].clone();
+                // 重叠文件归最具体挂载根，全部挂载共用项目输出额度。
+                scan_limits["mountExcludedRoots"] = json!(
+                    mounts
+                        .iter()
+                        .filter_map(|other| other["path"].as_str())
+                        .filter(|other| !legacy_roots.contains(root) && nested_mount(root, other))
+                        .collect::<Vec<_>>()
+                );
+                scan_limits["scopeBudget"] =
+                    json!({"files":remaining_files,"bytes":remaining_bytes});
+                let reusable = existing
+                    .iter()
+                    .filter_map(|(path, sources)| {
+                        let sources = sources
+                            .iter()
+                            .filter(|source| {
+                                source["bindingRevision"]
+                                    == settings["projectIndexing"]["bindingRevision"]
+                                    && source["locator"]["root"] == root
+                                    && gateway_index::mounted_root(&project, &source["locator"])
+                                        .is_ok()
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        (!sources.is_empty()).then_some((path.clone(), sources))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let report = scan_each_cached(
+                    config,
+                    root,
+                    &scan_limits,
+                    cancel,
+                    &reusable,
+                    |mut source| {
+                        let reused = source["_indexReused"] == true;
+                        source.as_object_mut().unwrap().remove("_indexReused");
+                        let mut identity = vec![
+                            json!("work-file"),
+                            json!(project_id),
+                            json!(root),
+                            source["locator"]["relativePath"].clone(),
+                        ];
+                        if let Some(window) = source["locator"].get("fileWindow") {
+                            identity.push(window["startOffset"].clone());
+                        } else if source["locator"]["extraction"]["pageWindow"].is_object() {
+                            identity.push(json!("pdf-page"));
+                            identity.push(
+                                source["locator"]["extraction"]["pageWindow"]["startPage"].clone(),
+                            );
+                        } else if source["locator"]["archive"].is_object() {
+                            identity.push(json!("archive-part"));
+                            identity.push(source["locator"]["archive"]["part"].clone());
                         }
-                        gateway_index::publish(config, &[source.clone()])?;
-                    } else { reused_files += 1; }
-                    seen.insert(source["sourceId"].as_str().unwrap().to_string());
-                    count += 1;
-                    source.as_object_mut().unwrap().remove("text");
-                    observations.push(source.clone());
-                    queued.push(source);
-                    if count % 16 == 0 {
-                        job_update(
-                            config,
-                            id,
-                            json!({"completedSources":count,"totalSources":count,"reusedSources":reused_files,"phase":"lexical"}),
-                        )?;
-                    }
-                    Ok(())
-                },
-            )?;
-            remaining_files = remaining_files.saturating_sub(report["publishedSources"].as_u64().unwrap_or(0));
-            remaining_bytes = remaining_bytes.saturating_sub(report["publishedTextBytes"].as_u64().unwrap_or(0));
-            failed += report["failedFiles"].as_u64().unwrap_or(0);
-            discovered += report["scannedFiles"].as_u64().unwrap_or(count);
-            incomplete |= report["incomplete"] == true;
-            failures.extend(
-                report["failures"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .take(1000)
-                    .cloned(),
-            );
-          }
+                        if !reused {
+                            source["sourceId"] =
+                                json!(gateway_index::hash(&json!(identity).to_string()));
+                        }
+                        source["scopeKey"] = json!(scope);
+                        source["sourceType"] = json!("work-file");
+                        source["bindingRevision"] =
+                            settings["projectIndexing"]["bindingRevision"].clone();
+                        if !reused {
+                            let prior = existing
+                                .get(source["locator"]["path"].as_str().unwrap_or(""))
+                                .and_then(|sources| {
+                                    sources.iter().find(|previous| {
+                                        previous["sourceId"] == source["sourceId"]
+                                            && previous["contentHash"] == source["contentHash"]
+                                            && previous["sourceRevision"]
+                                                == source["sourceRevision"]
+                                            && previous["bindingRevision"]
+                                                == source["bindingRevision"]
+                                            && gateway_index::mounted_root(
+                                                &project,
+                                                &previous["locator"],
+                                            )
+                                            .is_ok()
+                                    })
+                                });
+                            if let Some(prior) = prior {
+                                // 首次补录文件信息时保留有效旧派生身份，复用已有向量。
+                                source["locator"] = prior["locator"].clone();
+                            } else if !mount["id"].is_null() {
+                                source["locator"]["mountId"] = mount["id"].clone();
+                                source["locator"]["mountBindingRevision"] =
+                                    mount["bindingRevision"].clone();
+                            }
+                            gateway_index::publish(config, &[source.clone()])?;
+                        } else {
+                            reused_files += 1;
+                        }
+                        seen.insert(source["sourceId"].as_str().unwrap().to_string());
+                        count += 1;
+                        source.as_object_mut().unwrap().remove("text");
+                        observations.push(source.clone());
+                        queued.push(source);
+                        if count % 16 == 0 {
+                            job_update(
+                                config,
+                                id,
+                                json!({"completedSources":count,"totalSources":count,"reusedSources":reused_files,"phase":"lexical"}),
+                            )?;
+                        }
+                        Ok(())
+                    },
+                )?;
+                remaining_files = remaining_files
+                    .saturating_sub(report["publishedSources"].as_u64().unwrap_or(0));
+                remaining_bytes = remaining_bytes
+                    .saturating_sub(report["publishedTextBytes"].as_u64().unwrap_or(0));
+                failed += report["failedFiles"].as_u64().unwrap_or(0);
+                discovered += report["scannedFiles"].as_u64().unwrap_or(count);
+                incomplete |= report["incomplete"] == true;
+                failures.extend(
+                    report["failures"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .take(1000)
+                        .cloned(),
+                );
+            }
         }
     }
     gateway_index::observe_files(config, &observations)?;
@@ -1657,7 +1854,6 @@ fn run_index(
         id,
         json!({"completedSources":count,"totalSources":count,"reusedSources":reused_files,"phase":"semantic"}),
     )?;
-    // Incomplete scans retain unseen sources; complete scans revoke deletions before embedding.
     // 未完整扫描时保留未见来源，完整扫描后先撤销删除内容再向量化。
     if failed == 0 && !incomplete {
         let mut after = Value::Null;
@@ -1765,18 +1961,19 @@ fn finish_semantic(
         if settings["local"]["semantic"] == "off" {
             continue;
         }
-        // Reuse complete vectors after lexical version checks without decoding documents again.
-        // 词法发布已核验版本且向量完整时，直接复用，不重复解析文档。
-        let receipt = gateway_index::reuse_semantic(config, &source, &settings["local"])
-            .and_then(|cached| match cached {
-                Some(cached) if source["sourceType"] != "work-file" => Ok(cached),
-                Some(cached) if source.get("fileMetadata").is_some() => {
-                    observe_queued_file(&source, cancel)?;
-                    Ok(cached)
+        // 词法发布已检查版本且向量完整时，直接复用，不重复解析文档。
+        let receipt =
+            gateway_index::reuse_semantic(config, &source, &settings["local"]).and_then(|cached| {
+                match cached {
+                    Some(cached) if source["sourceType"] != "work-file" => Ok(cached),
+                    Some(cached) if source.get("fileMetadata").is_some() => {
+                        observe_queued_file(&source, cancel)?;
+                        Ok(cached)
+                    }
+                    _ => load_queued(config, &source, settings, cancel).and_then(|source| {
+                        gateway_index::publish_semantic(config, &source, &settings["local"], cancel)
+                    }),
                 }
-                _ => load_queued(config, &source, settings, cancel).and_then(|source| {
-                    gateway_index::publish_semantic(config, &source, &settings["local"], cancel)
-                }),
             });
         match receipt {
             Ok(receipt) => {
@@ -1796,8 +1993,15 @@ fn finish_semantic(
         }
     }
     coverage["semantic"] = json!(semantic);
-    let scope = settings["projectId"].as_str().map(|id|format!("project:{id}")).unwrap_or_else(||"user".into());
-    let ann_queued = if semantic > 0 { gateway_index::prepare_scope_ann(config, &scope, &settings["local"]).unwrap_or(0) } else { 0 };
+    let scope = settings["projectId"]
+        .as_str()
+        .map(|id| format!("project:{id}"))
+        .unwrap_or_else(|| "user".into());
+    let ann_queued = if semantic > 0 {
+        gateway_index::prepare_scope_ann(config, &scope, &settings["local"]).unwrap_or(0)
+    } else {
+        0
+    };
     Ok(
         json!({"completedSources":count,"totalSources":count,"failed":failed+pending+u64::from(incomplete),"semantic":{"requested":settings["local"]["semantic"]!="off","profileId":profile,"totalChunks":total_chunks,"vectorChunks":vector_chunks,"cachedChunks":cached_chunks,"skippedSources":pending,"skippedChunks":0,"diagnosticCodes":codes.into_iter().take(8).collect::<Vec<_>>(),"state":if settings["local"]["semantic"]=="off"{"disabled"}else if pending>0&&semantic==0{"unavailable"}else if pending>0{"partial"}else{"complete"}},
         "annQueued":ann_queued,"coverage":coverage}),
@@ -1932,11 +2136,21 @@ fn scan_each_cached(
     let mut options = limits.clone();
     options["root"] = json!(path);
     options["maximumBytes"] = limits["maximumTotalBytes"].clone();
-    if let Some(files) = limits["scopeBudget"]["files"].as_u64() { options["maximumFiles"] = json!(files); }
-    if let Some(bytes) = limits["scopeBudget"]["bytes"].as_u64() { options["maximumBytes"] = json!(bytes); }
+    if let Some(files) = limits["scopeBudget"]["files"].as_u64() {
+        options["maximumFiles"] = json!(files);
+    }
+    if let Some(bytes) = limits["scopeBudget"]["bytes"].as_u64() {
+        options["maximumBytes"] = json!(bytes);
+    }
     options["allowPartial"] = json!(true);
     options["excludedRoots"] = json!([config.data_root, config.data_home, config.extension_root]);
-    options["excludedRoots"].as_array_mut().unwrap().extend(limits["mountExcludedRoots"].as_array().into_iter().flatten().cloned());
+    options["excludedRoots"].as_array_mut().unwrap().extend(
+        limits["mountExcludedRoots"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
     scanner
         .apply(
             "source.reading.scanOpen",
@@ -1966,19 +2180,38 @@ fn scan_each_cached(
         if next["failed"] == true || next["missing"] == true {
             continue;
         }
-        if let Some(cached) = existing.get(next["path"].as_str().unwrap_or("")).filter(|sources| {
-            !sources.is_empty() && sources.iter().all(|source| source["fileMetadata"] == next["metadata"]
-                && source["scanLimitsSignature"] == limits_signature && source["cachedTextBytes"].is_u64()
-                && source["fileMetadata"].is_object() && source["locator"]["extraction"]["complete"] != false
-                && !source["locator"]["archive"].is_object())
-        }) {
-            scanner.apply("source.reading.scanObserved", &json!({"reused":true,"size":next["metadata"]["sizeBytes"]}), &token)
-                .map_err(|failure| gateway::error(&failure.message, "RETRIEVAL_SCAN_FAILED", 422))?;
+        if let Some(cached) = existing
+            .get(next["path"].as_str().unwrap_or(""))
+            .filter(|sources| {
+                !sources.is_empty()
+                    && sources.iter().all(|source| {
+                        source["fileMetadata"] == next["metadata"]
+                            && source["scanLimitsSignature"] == limits_signature
+                            && source["cachedTextBytes"].is_u64()
+                            && source["fileMetadata"].is_object()
+                            && source["locator"]["extraction"]["complete"] != false
+                            && !source["locator"]["archive"].is_object()
+                    })
+            })
+        {
+            scanner
+                .apply(
+                    "source.reading.scanObserved",
+                    &json!({"reused":true,"size":next["metadata"]["sizeBytes"]}),
+                    &token,
+                )
+                .map_err(|failure| {
+                    gateway::error(&failure.message, "RETRIEVAL_SCAN_FAILED", 422)
+                })?;
             for source in cached {
                 let admitted = scanner.apply("source.reading.scanPublish", &json!({"textBytes":source["cachedTextBytes"],"size":next["metadata"]["sizeBytes"]}), &token)
                     .map_err(|failure| gateway::error(&failure.message, "RETRIEVAL_SCAN_LIMIT", 422))?;
-                if admitted == false { break 'files; }
-                let mut source = source.clone(); source["_indexReused"] = json!(true); consume(source)?;
+                if admitted == false {
+                    break 'files;
+                }
+                let mut source = source.clone();
+                source["_indexReused"] = json!(true);
+                consume(source)?;
             }
             continue;
         }
@@ -2196,7 +2429,9 @@ pub fn handle(
     if path == "/api/retrieval/activate" && method == "POST" {
         return Some((|| {
             let project = body["projectId"].as_str();
-            if let Some(project) = project { storage::identity(&json!(project))?; }
+            if let Some(project) = project {
+                storage::identity(&json!(project))?;
+            }
             Ok((202, activate_project(config, project)))
         })());
     }
@@ -2372,13 +2607,19 @@ mod gateway_tests {
         ];
         let sources = conversation_message_sources(&chat, &messages);
         assert_eq!(sources.len(), 3);
-        let answer = sources.iter().find(|source| source["locator"]["messageId"] == reply).unwrap();
+        let answer = sources
+            .iter()
+            .find(|source| source["locator"]["messageId"] == reply)
+            .unwrap();
         assert_eq!(answer["text"], text);
         assert_eq!(answer["locator"]["ReplyTo"], user);
         assert_eq!(answer["locator"]["OriginUserMessageId"], user);
         assert_eq!(answer["locator"]["role"], "assistant");
         let prepared = gateway_index::prepare_source(answer, None).unwrap();
-        assert_eq!(prepared["chunks"].as_array().unwrap().last().unwrap()["endOffset"], text.encode_utf16().count());
+        assert_eq!(
+            prepared["chunks"].as_array().unwrap().last().unwrap()["endOffset"],
+            text.encode_utf16().count()
+        );
         let mut edited = messages.clone();
         edited[2]["Content"] = json!("Updated final answer");
         let changed = conversation_message_sources(&chat, &edited);
@@ -2394,7 +2635,10 @@ mod gateway_tests {
         enqueue_conversation_semantic(&workspace.config, &chat);
         enqueue_conversation_semantic(&workspace.config, &chat);
         enqueue_conversation_semantic(&workspace.config, &other);
-        schedule_memory(&workspace.config.data_root, &json!({"scope":"chat","scopeId":chat}));
+        schedule_memory(
+            &workspace.config.data_root,
+            &json!({"scope":"chat","scopeId":chat}),
+        );
         {
             let queues = MEMORY_PENDING.get().unwrap().lock().unwrap();
             assert_eq!(queues[&workspace.config.data_root].len(), 3);
@@ -2412,22 +2656,46 @@ mod gateway_tests {
         let workspace = Workspace::new();
         let chat = gateway::new_id();
         let reply = gateway::new_id();
-        gateway::ensure_conversation(&workspace.config.data_root, &chat, "Background chat fixture").unwrap();
+        gateway::ensure_conversation(
+            &workspace.config.data_root,
+            &chat,
+            "Background chat fixture",
+        )
+        .unwrap();
         gateway::upsert_message(&workspace.config.data_root, &chat, &json!({
             "Id":reply,"Role":"assistant","Status":"completed","Content":"background vector source needle"})).unwrap();
         let mut configured = settings::apply("storage.settings.defaults", &json!({})).unwrap();
         configured["local"]["semantic"] = json!("off");
-        gateway::commit_json(&workspace.config.data_root,
-            &workspace.config.data_root.join("Retrieval/settings.json"), &configured, None, 8*1024*1024).unwrap();
+        gateway::commit_json(
+            &workspace.config.data_root,
+            &workspace.config.data_root.join("Retrieval/settings.json"),
+            &configured,
+            None,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         maintain_conversation_scope(&workspace.config, &chat, &cancel).unwrap();
         let scopes = json!([format!("chat:{chat}")]);
-        let indexed = gateway_index::search(&workspace.config, &json!({"query":"needle","scopeKeys":scopes})).unwrap();
+        let indexed = gateway_index::search(
+            &workspace.config,
+            &json!({"query":"needle","scopeKeys":scopes}),
+        )
+        .unwrap();
         assert!(!indexed["items"].as_array().unwrap().is_empty());
-        gateway::upsert_message(&workspace.config.data_root, &chat, &json!({
-            "Id":reply,"Status":"streaming","Content":"Unsettled replacement"})).unwrap();
+        gateway::upsert_message(
+            &workspace.config.data_root,
+            &chat,
+            &json!({
+            "Id":reply,"Status":"streaming","Content":"Unsettled replacement"}),
+        )
+        .unwrap();
         maintain_conversation_scope(&workspace.config, &chat, &cancel).unwrap();
-        let retired = gateway_index::search(&workspace.config, &json!({"query":"needle","scopeKeys":scopes})).unwrap();
+        let retired = gateway_index::search(
+            &workspace.config,
+            &json!({"query":"needle","scopeKeys":scopes}),
+        )
+        .unwrap();
         assert!(retired["items"].as_array().unwrap().is_empty());
     }
     struct Workspace {
@@ -2479,24 +2747,34 @@ mod gateway_tests {
         )
         .unwrap();
 
-        // Hold real background initialization until HTTP-style job creation has reached its transaction.
         // 让真实后台初始化晚于新作业事务，固定复现 HTTP 就绪后首次创建的竞争顺序。
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
         let startup_config = workspace.config.clone();
         let startup = tokio::task::spawn_blocking(move || {
             entered.send(()).unwrap();
-            blocked.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            blocked
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             start_background(&startup_config)
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), entering)
-            .await.unwrap().unwrap();
-        let created = job_plan(&workspace.config, "create", json!({"resumeAutomatic":false,
+            .await
+            .unwrap()
+            .unwrap();
+        let created = job_plan(
+            &workspace.config,
+            "create",
+            json!({"resumeAutomatic":false,
             "job":{"jobId":new_id,"projectId":null,"status":"queued",
-                "completedSources":0,"totalSources":0,"createdAt":gateway::now()}})).unwrap();
+                "completedSources":0,"totalSources":0,"createdAt":gateway::now()}}),
+        )
+        .unwrap();
         assert_eq!(created["jobId"], new_id);
-        assert_eq!(job_plan(&workspace.config, "get", json!({"jobId":old_id})).unwrap()["error"],
-            "INDEX_JOB_INTERRUPTED");
+        assert_eq!(
+            job_plan(&workspace.config, "get", json!({"jobId":old_id})).unwrap()["error"],
+            "INDEX_JOB_INTERRUPTED"
+        );
         release.send(()).unwrap();
         assert_eq!(startup.await.unwrap().unwrap()["started"], true);
         assert_eq!(start_background(&workspace.config).unwrap()["reused"], true);
@@ -2508,13 +2786,17 @@ mod gateway_tests {
         assert!(*gate.recovered.lock().unwrap());
         let cleanup = workspace.config.clone();
         tokio::task::spawn_blocking(move || drain_background(&cleanup))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         let reloaded_gate = indexing_gate(root).unwrap();
         assert!(!Arc::ptr_eq(&gate, &reloaded_gate));
         assert!(!*reloaded_gate.recovered.lock().unwrap());
         ensure_jobs_recovered(&workspace.config).unwrap();
-        assert_eq!(job_plan(&workspace.config, "get", json!({"jobId":new_id})).unwrap()["error"],
-            "INDEX_JOB_INTERRUPTED");
+        assert_eq!(
+            job_plan(&workspace.config, "get", json!({"jobId":new_id})).unwrap()["error"],
+            "INDEX_JOB_INTERRUPTED"
+        );
         drain_background(&workspace.config).unwrap();
     }
 
@@ -2529,19 +2811,30 @@ mod gateway_tests {
         let create = json!({"resumeAutomatic":false,"job":{"jobId":gateway::new_id(),
             "projectId":null,"status":"queued","completedSources":0,"totalSources":0,
             "createdAt":gateway::now()}});
-        assert_eq!(job_plan(&workspace.config, "create", create.clone()).unwrap_err().code(),
-            "UNSUPPORTED_RETRIEVAL_SCHEMA");
+        assert_eq!(
+            job_plan(&workspace.config, "create", create.clone())
+                .unwrap_err()
+                .code(),
+            "UNSUPPORTED_RETRIEVAL_SCHEMA"
+        );
         let gate = indexing_gate(root).unwrap();
         assert!(!*gate.recovered.lock().unwrap());
         let (unchanged, hash) = gateway::read_json(root, &path, 16 * 1024 * 1024).unwrap();
         assert_eq!(unchanged.unwrap(), invalid);
-        gateway::commit_json(root, &path, &json!({"schemaVersion":1,"jobs":[]}),
-            hash.as_deref(), 16 * 1024 * 1024).unwrap();
-        // A running corpus worker owns only execution, so admission does not wait for its whole scan.
+        gateway::commit_json(
+            root,
+            &path,
+            &json!({"schemaVersion":1,"jobs":[]}),
+            hash.as_deref(),
+            16 * 1024 * 1024,
+        )
+        .unwrap();
         // 正在扫描的作业只持执行锁，新作业准入不必等待整次扫描结束。
         let _execution = gate.execution.lock().unwrap();
-        assert_eq!(job_plan(&workspace.config, "create", create.clone()).unwrap()["jobId"],
-            create["job"]["jobId"]);
+        assert_eq!(
+            job_plan(&workspace.config, "create", create.clone()).unwrap()["jobId"],
+            create["job"]["jobId"]
+        );
         assert!(*gate.recovered.lock().unwrap());
         drop(_execution);
         drain_background(&workspace.config).unwrap();
@@ -2557,24 +2850,69 @@ mod gateway_tests {
         let limits = storage::settings::apply("storage.settings.defaults", &json!({})).unwrap()["local"]["indexing"].clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let mut cache: HashMap<String, Vec<Value>> = HashMap::new();
-        scan_each(&workspace.config, folder.to_str().unwrap(), &limits, &cancel, |source| {
-            cache.entry(source["locator"]["path"].as_str().unwrap().to_owned()).or_default().push(source); Ok(())
-        }).unwrap();
+        scan_each(
+            &workspace.config,
+            folder.to_str().unwrap(),
+            &limits,
+            &cancel,
+            |source| {
+                cache
+                    .entry(source["locator"]["path"].as_str().unwrap().to_owned())
+                    .or_default()
+                    .push(source);
+                Ok(())
+            },
+        )
+        .unwrap();
         std::fs::write(folder.join("b.txt"), "changed beta with a different size").unwrap();
         let mut observed = Vec::new();
-        let report = scan_each_cached(&workspace.config, folder.to_str().unwrap(), &limits, &cancel, &cache, |source| { observed.push(source); Ok(()) }).unwrap();
+        let report = scan_each_cached(
+            &workspace.config,
+            folder.to_str().unwrap(),
+            &limits,
+            &cancel,
+            &cache,
+            |source| {
+                observed.push(source);
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(report["fileReads"], 1);
         assert_eq!(report["reusedFiles"], 1);
-        assert_eq!(observed.iter().filter(|source| source["_indexReused"] == true).count(), 1);
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|source| source["_indexReused"] == true)
+                .count(),
+            1
+        );
         assert_eq!(report["publishedSources"], 2);
         let mut bounded = limits;
         bounded["scopeBudget"] = json!({"files":1,"bytes":1024});
         let mut published = 0;
-        let report = scan_each_cached(&workspace.config, folder.to_str().unwrap(), &bounded, &cancel, &cache, |_| { published += 1; Ok(()) }).unwrap();
+        let report = scan_each_cached(
+            &workspace.config,
+            folder.to_str().unwrap(),
+            &bounded,
+            &cancel,
+            &cache,
+            |_| {
+                published += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(published, 1);
         assert_eq!(report["incomplete"], true);
-        assert!(nested_mount(folder.to_str().unwrap(), folder.join("nested").to_str().unwrap()));
-        assert!(!nested_mount(folder.to_str().unwrap(), folder.with_file_name("增量 文件2").to_str().unwrap()));
+        assert!(nested_mount(
+            folder.to_str().unwrap(),
+            folder.join("nested").to_str().unwrap()
+        ));
+        assert!(!nested_mount(
+            folder.to_str().unwrap(),
+            folder.with_file_name("增量 文件2").to_str().unwrap()
+        ));
     }
     #[test]
     fn scanner_honors_partial_limits_and_publishes_actual_text() {
@@ -2833,9 +3171,11 @@ mod gateway_tests {
             match storage::sqlite_index::apply("storage.index.retireChat", &args) {
                 Ok(result) => break result,
                 Err(error) if error.code() == "RETRIEVAL_SEARCH_TIMEOUT" => {
-                    // Concurrent test I/O may exhaust one real 100 ms batch; retry its rolled-back work.
                     // 并行测试 I/O 可能耗尽单批真实的 100 毫秒，重试已回滚批次，不放宽生产期限。
-                    assert!(std::time::Instant::now() < cleanup_deadline, "chat cleanup made no bounded progress: {error:?}");
+                    assert!(
+                        std::time::Instant::now() < cleanup_deadline,
+                        "chat cleanup made no bounded progress: {error:?}"
+                    );
                     std::thread::yield_now();
                 }
                 Err(error) => panic!("unexpected cleanup failure: {error:?}"),
@@ -3034,13 +3374,31 @@ mod gateway_tests {
         assert_eq!(report["semantic"]["cachedChunks"], 1);
         assert_eq!(report["failed"], 0);
         source["sourceRevision"] = json!(2);
-        assert!(gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"]).unwrap().is_none());
+        assert!(
+            gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"])
+                .unwrap()
+                .is_none()
+        );
         source["sourceRevision"] = json!(1);
         source["contentHash"] = json!("c".repeat(64));
-        assert!(gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"]).unwrap().is_none());
-        gateway_index::remove(&workspace.config, "cached-document", &json!(["user"]), false).unwrap();
+        assert!(
+            gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"])
+                .unwrap()
+                .is_none()
+        );
+        gateway_index::remove(
+            &workspace.config,
+            "cached-document",
+            &json!(["user"]),
+            false,
+        )
+        .unwrap();
         source["contentHash"] = prepared["source"]["contentHash"].clone();
-        assert!(gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"]).unwrap().is_none());
+        assert!(
+            gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"])
+                .unwrap()
+                .is_none()
+        );
     }
     #[test]
     fn startup_memory_joins_existing_queue_and_indexes_confirmed_scopes_without_cold_models() {

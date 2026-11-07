@@ -14,7 +14,6 @@ public sealed class QueuedPromptMoveEventArgs(QueuedPrompt prompt, int offset) :
 }
 
 /// <summary>
-/// Displays pending messages above the composer; the shell owns dispatch and task continuation.
 /// 在输入区上方显示等待消息；发送及任务接续仍由主界面流程负责。
 /// </summary>
 public sealed class ConversationPromptQueue : UserControl
@@ -77,7 +76,6 @@ public sealed class ConversationPromptQueue : UserControl
                 _rows.Add(message.Id, row);
             }
             row.Prompt = message;
-            // Keep existing editors and selection while queue membership or execution state changes.
             // 队列及执行状态更新时复用编辑器和选区，不重建已存在的行。
             int currentIndex = _items.Children.IndexOf(row.Surface);
             if (currentIndex != index)

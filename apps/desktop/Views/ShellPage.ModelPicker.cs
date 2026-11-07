@@ -58,7 +58,6 @@ public sealed partial class ShellPage
             _hasLoadedModelCatalog = true;
             if (_selectedModel is not null)
             {
-                // Match stable identities after a connection rename; clear only after an authoritative successful read.
                 // 连接改名后仍按稳定身份匹配；只有成功读取权威列表后才清除失效选择。
                 var currentChoice = _availableModels.FirstOrDefault(choice =>
                     choice.ProviderId == _selectedModel.ProviderId && choice.ModelId == _selectedModel.ModelId);
@@ -76,7 +75,6 @@ public sealed partial class ShellPage
         catch (Exception error)
         {
             if (_chatClosing || cancellation.IsCancellationRequested || !ReferenceEquals(_modelPickerRefresh, cancellation)) return false;
-            // Keep the last successful catalog and selection; report failure without exposing connection details.
             // 保留最近成功读取的列表和选择；明确报告失败，不显示连接内部信息。
             _modelCatalogErrorKey = error is OperationCanceledException
                 ? "读取模型连接超时，请重试。"
@@ -105,7 +103,6 @@ public sealed partial class ShellPage
 
     private void UpdateModelPickerLabel()
     {
-        // Keep the composer's label stable during refresh; loading and failures remain on the dedicated status control.
         // 刷新时保持输入区标签稳定；读取进度与失败信息继续由独立状态控件呈现。
         SelectedModelLabel.Text = _selectedModel?.Name ?? UiText.Get("模型选择");
         string modelLabel = _selectedModel is null ? UiText.Get("模型选择")
@@ -278,8 +275,7 @@ public sealed partial class ShellPage
         AutomationProperties.SetLiveSetting(empty, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         Grid.SetRow(empty, 2);
         body.Children.Add(empty);
-        // The row is a presentation projection; selection and persistence still use the original stable choice.
-        // 列表行只是展示投影；选择和保存仍使用原始稳定模型身份。
+        // 列表行只是展示映射；选择和保存仍使用原始稳定模型身份。
         var choices = _availableModels.Select(choice => new ModelPickerRow(choice,
             choice.ProviderId == _selectedModel?.ProviderId && choice.ModelId == _selectedModel?.ModelId)).ToArray();
         Grid? menuContent = null;
@@ -307,7 +303,6 @@ public sealed partial class ShellPage
                 errorPanel?.Measure(measureSize);
                 double preferredHeight = search.DesiredSize.Height + footer.DesiredSize.Height + 9
                     + (errorPanel?.DesiredSize.Height ?? 0) + PickerMenu.MeasureListHeight(models, menuContent.Width, empty);
-                // Filtering resizes the list to at most four complete rows; the footer keeps its own space.
                 // 筛选后按最多四条完整结果调整列表高度，底部操作始终单独保留空间。
                 menuContent.Height = Math.Min(Math.Max(0, root.Size.Height - 32), preferredHeight);
             }
@@ -376,7 +371,6 @@ public sealed partial class ShellPage
         try { await ModelGatewayService.WarmUpModelsAsync(choice.ProviderId, choice.ModelId).ConfigureAwait(false); }
         catch (Exception error)
         {
-            // Selection stays usable; optional preparation must not prevent a real model request.
             // 保留已选模型；后台准备失败不能阻止后续正式调用。
             System.Diagnostics.Debug.WriteLine($"Selected model preparation: {error.GetType().Name}");
         }

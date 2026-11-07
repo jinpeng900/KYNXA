@@ -1,7 +1,5 @@
-//! Word 97+ text follows the FIB, live CLX pieces and declared story CP ranges.
 //! Word 97+ 正文按 FIB、活动 CLX 片段及故事 CP 范围读取，不扫描残留历史字符串。
 //!
-//! Format references: MS-DOC §§ 2.3, 2.5.1–2.5.15, 2.8.35, 2.9.38 and 2.9.73.
 //! 格式依据为上述微软公开结构；压缩片段是八位 Unicode 与规定映射，不按安装语言猜编码。
 
 use super::{CompoundDocument, range, u16_at, u32_at};
@@ -33,7 +31,6 @@ struct WordFib {
     lcb_clx: usize,
 }
 
-/// Counts navigate the variable-length FIB; unknown generations are never guessed.
 /// 根据计数跳过变长 FIB 子结构；未知代际明确拒绝，不把截短头部当成零值继续。
 fn read_fib(word: &[u8], limits: &Value) -> Result<WordFib, ContractError> {
     if u16_at(word, 0)? != 0xa5ec {
@@ -95,7 +92,6 @@ fn read_fib(word: &[u8], limits: &Value) -> Result<WordFib, ContractError> {
     if stories[0].0 == 0 {
         return Err(failure("DOCUMENT_TEXT_UNAVAILABLE"));
     }
-    // Extra final paragraph lies outside every story and is not displayed or indexed.
     // 其他故事存在时最后额外段落位于所有故事之外，不显示、不索引。
     let character_count =
         total_characters + usize::from(stories[1..].iter().any(|(count, _)| *count != 0));
@@ -159,8 +155,7 @@ fn piece_table<'a>(
     Ok(table)
 }
 
-/// MS-DOC compressed Unicode deliberately differs from a guessed ANSI/GBK codepage.
-/// MS-DOC 八位压缩 Unicode 使用固定映射；中文正文应来自 UTF-16 片段，不能按 GBK 猜解。
+/// MS-DOC 八位压缩 Unicode 使用固定映射，中文正文来自 UTF-16 片段，不按 GBK 猜解。
 fn compressed_unit(byte: u8) -> u16 {
     match byte {
         0x82 => 0x201a,
@@ -251,8 +246,7 @@ fn read_characters(
     Ok(units)
 }
 
-/// Only cached field results are projected; no field instruction, macro or link is executed.
-/// 仅投影已经保存的域结果；不执行域指令、宏或链接，也不把指令当成正文证据。
+/// 只映射已经保存的域结果；域指令、宏和链接不执行，也不算正文证据。
 fn append_story(
     output: &mut DocumentText,
     units: &[u16],

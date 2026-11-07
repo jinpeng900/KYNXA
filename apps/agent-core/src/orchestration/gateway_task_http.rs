@@ -1,5 +1,4 @@
-//! Task HTTP is a scoped projection of the existing Hub, never a second task store.
-//! 任务 HTTP 是现有 Hub 的范围投影，不另建任务状态存储。
+//! 任务 HTTP 是现有 Hub 的范围映射，不另建任务状态存储。
 
 use super::gateway_runtime::{GatewayRuntime, checked_id};
 use crate::{
@@ -46,39 +45,75 @@ async fn execute(
     let chat = conversation.clone();
     let usage_read = path == "/api/usage/summary";
     let relationship = tokio::task::spawn_blocking(move || {
-        // Usage polling reads saved ownership without repairing unrelated layouts on every refresh.
         // 用量轮询只读取正式归属，不在每次刷新时触发其他聊天的布局修复。
-        if usage_read { data::current_relationship(&root, &chat) }
-        else { data::relationship(&root, &chat) }
+        if usage_read {
+            data::current_relationship(&root, &chat)
+        } else {
+            data::relationship(&root, &chat)
+        }
     })
-        .await
-        .map_err(|_| GatewayError::new("TASK_SCOPE_UNAVAILABLE", "任务范围读取失败。", 500))??;
+    .await
+    .map_err(|_| GatewayError::new("TASK_SCOPE_UNAVAILABLE", "任务范围读取失败。", 500))??;
     let project = relationship["projectId"].as_str();
     if path == "/api/usage/summary" {
-        if method != "GET" { return Err(GatewayError::new("METHOD_NOT_ALLOWED", "用量统计仅支持读取。", 405)); }
+        if method != "GET" {
+            return Err(GatewayError::new(
+                "METHOD_NOT_ALLOWED",
+                "用量统计仅支持读取。",
+                405,
+            ));
+        }
         let selected_project = parameter(query, "projectId");
-        if selected_project.is_some() && selected_project != project { return Err(denied()); }
-        let mut summary = runtime.tasks.usage_summary(
-            if selected_project.is_some() { None } else { Some(&conversation) }, selected_project).await?;
-        // Keep the authorized chat identity even when the user explicitly selects its whole work.
-        // 用户显式选择整个工作时仍回传已核验的聊天身份，不允许借其他工作ID扩大查询范围。
+        if selected_project.is_some() && selected_project != project {
+            return Err(denied());
+        }
+        let mut summary = runtime
+            .tasks
+            .usage_summary(
+                if selected_project.is_some() {
+                    None
+                } else {
+                    Some(&conversation)
+                },
+                selected_project,
+            )
+            .await?;
+        // 用户显式选择整个工作时仍回传已检查的聊天身份，不允许借其他工作ID扩大查询范围。
         summary["conversationId"] = Value::String(conversation);
-        summary["projectId"] = project.map(|id| Value::String(id.to_owned())).unwrap_or(Value::Null);
+        summary["projectId"] = project
+            .map(|id| Value::String(id.to_owned()))
+            .unwrap_or(Value::Null);
         return Ok((200, summary));
     }
     if path == "/api/tasks/recoverable" && method == "GET" {
-        if parameter(query, "projectId") != project { return Err(denied()); }
-        let limit = parameter(query, "limit").and_then(|value| value.parse::<usize>().ok()).unwrap_or(50).clamp(1, 100);
-        return runtime.tasks.recoverable(&conversation, project, parameter(query, "afterTaskId"), limit)
-            .await.map(|value| (200, value));
-    }
-    if path == "/api/tasks/paused" && method == "GET" {
-        // Recovery always stays in the exact saved chat, even when its ordinary sidebar lists the whole work.
-        // 恢复始终限定当前正式聊天；普通侧栏可列整个工作的语义不被更改。
         if parameter(query, "projectId") != project {
             return Err(denied());
         }
-        return runtime.tasks.paused(&conversation, project).await.map(|value| (200, value));
+        let limit = parameter(query, "limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(50)
+            .clamp(1, 100);
+        return runtime
+            .tasks
+            .recoverable(
+                &conversation,
+                project,
+                parameter(query, "afterTaskId"),
+                limit,
+            )
+            .await
+            .map(|value| (200, value));
+    }
+    if path == "/api/tasks/paused" && method == "GET" {
+        // 恢复始终限定当前正式聊天；普通侧栏可列整个工作的含义不被更改。
+        if parameter(query, "projectId") != project {
+            return Err(denied());
+        }
+        return runtime
+            .tasks
+            .paused(&conversation, project)
+            .await
+            .map(|value| (200, value));
     }
     if path == "/api/tasks" && method == "GET" {
         let selected_project = parameter(query, "projectId");
@@ -110,8 +145,7 @@ async fn execute(
         "taskId",
     )?;
     if method == "GET" && parts.get(1).copied() == Some("stream") {
-        // The stream gate validates the exact root scope; the runtime then checks the current attempt.
-        // 流入口只核验当前根任务范围；运行时随后核验执行者，不为重连读取完整诊断历史。
+        // 流入口只检查当前根任务范围；运行时随后检查执行者，不为重连读取完整诊断历史。
         let task = runtime.tasks.metadata(&task_id).await?;
         if task.scope.conversation_id != conversation || task.parent_task_id.is_some() {
             return Err(denied());

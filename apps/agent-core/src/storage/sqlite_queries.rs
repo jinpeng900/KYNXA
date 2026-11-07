@@ -208,8 +208,7 @@ fn vector_status(connection: &Connection, scopes: &[Value]) -> ContractResult {
     )
 }
 
-/// Authorize scoped SQL and reference freshness in one snapshot before exposing text.
-/// 同一快照内核验范围与引用新鲜度，授权后才返回原文。
+/// 同一快照内检查范围与引用新鲜度，授权后才返回原文。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if [
         "storage.index.vectorCacheStats",
@@ -344,7 +343,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             Ok(json!({"source": source, "chunk": chunk}))
         }
         "storage.index.removeCoverage" => {
-            // This operation is deliberately routed as an actual write transaction by its adapter.
             // 此操作由适配层明确作为实际写事务调用，清理仅限授权覆盖行。
             let mut values = vec![sql_text(text(arguments, "sourceId"))];
             values.extend(parameters(&scopes));

@@ -1,4 +1,3 @@
-//! Workbook values and formulas remain source text, never executable spreadsheet instructions.
 //! 工作簿数值与公式只作为来源文字，不执行公式、宏或外部数据链接。
 
 use super::gateway_office_documents::{DocumentPackage, DocumentText, cancelled, failure};
@@ -64,9 +63,8 @@ fn append_cell(
     Ok(())
 }
 
-/// Legacy BIFF dimensions are bounded before Calamine reserves a dense range.
 /// 在 Calamine 根据旧 BIFF 维度预留稠密数组之前检查额度，避免小文件声明巨量空格网格。
-fn preflight_xls(
+pub(crate) fn preflight_xls(
     bytes: &[u8],
     limits: &Value,
     cancel: &Arc<AtomicBool>,
@@ -175,8 +173,7 @@ fn u32_at(bytes: &[u8], position: usize) -> Result<u32, ContractError> {
     Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 
-/// Binary XLSB record lengths and shared-string indexes are checked before the library borrows them.
-/// 调用库读取 XLSB 前核验二进制记录长度及共享字符串索引，避免畸形记录越界。
+/// 调用库读取 XLSB 前检查二进制记录长度及共享字符串索引，避免畸形记录越界。
 fn preflight_xlsb(
     package: &mut DocumentPackage<'_>,
     cancel: &Arc<AtomicBool>,
@@ -415,8 +412,7 @@ pub(crate) fn decode(
             }
         }
         "ods" => {
-            // The shared container path also rejects encrypted manifests before extracting sheet XML.
-            // 共用容器路径先拒绝加密 manifest，再提取表格 XML，不能绕过文档加密校验。
+            // 共用容器路径先拒绝加密 manifest，再提取表格 XML。
             return super::gateway_office_documents::open_document(
                 "ods", bytes, limits, cancel, digest,
             );

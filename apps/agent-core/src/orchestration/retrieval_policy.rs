@@ -17,8 +17,6 @@ fn metadata_mismatch(expected: &Value, result: &Value) -> bool {
         })
 }
 
-/// Retrieval policy validates live SDK receipts without substituting similarity for dependency proof.
-/// 检索策略核验实时 SDK 回执，不把相似性替换为依赖关系证明。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "orchestration.retrievalGapValid" => Ok(json!(
@@ -56,7 +54,6 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
             ))
         }
         "orchestration.retrievalRerankerExecution" => {
-            // Legacy callers receive a disabled profile; lightweight fusion is always local.
             // 旧调用方收到停用配置；轻量融合无需模型、设备准入或额外下载。
             Ok(json!({"profileId":null,"method":"rank-rrf-structured"}))
         }

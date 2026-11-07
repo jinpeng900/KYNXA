@@ -1,6 +1,6 @@
-//! Native request lifecycle and invocation-bound approval; no second storage or tool ledger.
-//! 原生请求生命周期与绑定调用的审批；不另建正式存储或工具账本。
+//! 原生请求生命周期与绑定调用的审批；不另建正式存储或工具记录。
 
+use crate::tools::approval_grant::{ApprovalScope, TaskApprovalGrants};
 use crate::{
     gateway_contract::{GatewayConfig, GatewayError, new_id, now_iso8601},
     models::gateway_config::ModelConfigStore,
@@ -9,7 +9,6 @@ use crate::{
     tools::gateway::{GatewayToolContext, ToolRuntime},
 };
 use serde_json::{Value, json};
-use crate::tools::approval_grant::{ApprovalScope, TaskApprovalGrants};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -33,17 +32,22 @@ const STREAM_BATCH_DELAY: Duration = Duration::from_millis(32);
 const STREAM_BATCH_BYTES: usize = 32 * 1024;
 const STREAM_BATCH_EVENTS: usize = 128;
 
-/// Only transport failures authorize unattended execution recovery; invalid inputs need a user retry.
 /// 仅网络传输故障允许无人值守恢复；参数及其他执行失败等待用户继续。
 pub(crate) fn automatic_network_recovery(code: &str) -> bool {
-    matches!(code, "MODEL_NETWORK_FAILED" | "MODEL_RESPONSE_READ_FAILED"
-        | "MODEL_RESPONSE_TIMEOUT" | "MODEL_IDLE_TIMEOUT" | "MODEL_STREAM_INCOMPLETE")
+    matches!(
+        code,
+        "MODEL_NETWORK_FAILED"
+            | "MODEL_RESPONSE_READ_FAILED"
+            | "MODEL_RESPONSE_TIMEOUT"
+            | "MODEL_IDLE_TIMEOUT"
+            | "MODEL_STREAM_INCOMPLETE"
+    )
 }
 
-/// Execution may stop normally; only cancellation or transport loss interrupts the reply.
 /// 执行可以正常收尾；仅用户取消或网络中断将回复标为中断。
 pub(crate) fn reply_interrupted(code: &str, cancelled: bool) -> bool {
-    cancelled || matches!(code, "ABORT_ERR" | "TASK_PAUSED" | "TASK_CANCELLED")
+    cancelled
+        || matches!(code, "ABORT_ERR" | "TASK_PAUSED" | "TASK_CANCELLED")
         || automatic_network_recovery(code)
 }
 
@@ -54,19 +58,27 @@ struct StreamEmission {
     scheduled: bool,
 }
 
-/// Use only saved generation time and a real monotonic start, never a message creation date.
 /// 仅使用已保存的生成用时与真实单调起点，不根据消息创建日期推算工作时间。
 pub(crate) fn generation_elapsed_ms(base: Option<u64>, started: Option<Instant>) -> Option<u64> {
     if base.is_none() && started.is_none() {
         return None;
     }
-    Some(base.unwrap_or(0).saturating_add(
-        started.map_or(0, |start| start.elapsed().as_millis().min(MAXIMUM_SAFE_ELAPSED_MS as u128) as u64),
-    ).min(MAXIMUM_SAFE_ELAPSED_MS))
+    Some(
+        base.unwrap_or(0)
+            .saturating_add(started.map_or(0, |start| {
+                start
+                    .elapsed()
+                    .as_millis()
+                    .min(MAXIMUM_SAFE_ELAPSED_MS as u128) as u64
+            }))
+            .min(MAXIMUM_SAFE_ELAPSED_MS),
+    )
 }
 
 fn saved_generation_elapsed(value: &Value) -> Option<u64> {
-    value.as_u64().filter(|elapsed| *elapsed <= MAXIMUM_SAFE_ELAPSED_MS)
+    value
+        .as_u64()
+        .filter(|elapsed| *elapsed <= MAXIMUM_SAFE_ELAPSED_MS)
 }
 
 #[derive(Default)]
@@ -141,16 +153,13 @@ pub struct RequestRun {
     observed_context_limits: std::sync::Mutex<Value>,
     pub created: Instant,
     pub resource_wait_ms: AtomicU64,
-    /// Persisted active wall time before this attempt; parallel descendants never add to this clock.
-    /// 本次尝试前已持久化的有效墙钟；并行子任务不会重复计入此时钟。
+    /// 本次尝试前已保存的有效墙钟，并行子任务只计一次。
     pub active_duration_base_ms: u64,
-    /// Restored background work yields new model admission to current user interaction.
     /// 后台恢复任务在新增模型准入时让出当前用户交互的优先位置。
     pub is_background_recovery: AtomicBool,
 }
 impl RequestRun {
-    /// Reuse the current replay projection across reattachment; offline time is never added.
-    /// 复用现有回放投影恢复计时；离线与暂停等待不计入已生成用时。
+    /// 复用现有回放映射恢复计时；离线与暂停等待不计入已生成用时。
     pub(crate) async fn restore_generation_timing(&self, saved: Option<u64>) -> Option<u64> {
         let _emission = self.emission.lock().await;
         let mut replay = self.replay.lock().await;
@@ -164,13 +173,15 @@ impl RequestRun {
         elapsed
     }
 
-    /// Freeze the existing projection when execution yields, independently of visible text segments.
-    /// 执行让出时冻结现有计时投影，不依赖是否发布了可见文字分段。
+    /// 执行让出时冻结现有计时映射，不依赖是否发布了可见文字分段。
     pub(crate) async fn freeze_generation_timing(&self, settled: Option<u64>) {
         let elapsed = settled.or(self.replay.lock().await.generation.elapsed());
         if let Some(elapsed) = elapsed {
-            self.emit(json!({"type":"generation_timing","generationElapsedMs":elapsed,
-                "generationActive":false})).await;
+            self.emit(
+                json!({"type":"generation_timing","generationElapsedMs":elapsed,
+                "generationActive":false}),
+            )
+            .await;
         }
     }
 
@@ -178,20 +189,25 @@ impl RequestRun {
         self.replay.lock().await.generation.elapsed()
     }
 
-    /// Model-step retries share learned limits only while the verified connection identity stays unchanged.
-    /// 仅在核验连接身份不变时跨模型步骤复用已学额度；请求重建不能恢复已被拒绝的预算。
     pub(crate) fn observed_model_limits(&self, origin: &str) -> Value {
         let observed = self.observed_context_limits.lock().unwrap();
-        if observed["origin"].as_str() == Some(origin) { observed["limits"].clone() } else { Value::Null }
+        if observed["origin"].as_str() == Some(origin) {
+            observed["limits"].clone()
+        } else {
+            Value::Null
+        }
     }
 
     pub(crate) fn retain_model_limits(&self, origin: &str, limits: &Value) {
         let mut observed = self.observed_context_limits.lock().unwrap();
-        let previous = if observed["origin"].as_str() == Some(origin) { &observed["limits"] } else { &Value::Null };
+        let previous = if observed["origin"].as_str() == Some(origin) {
+            &observed["limits"]
+        } else {
+            &Value::Null
+        };
         *observed = json!({"origin":origin,"limits":crate::models::recovery::retain_numeric_limits(previous, limits)});
     }
 
-    /// Resource admission is suspended execution, not time spent running the accepted task.
     /// 资源准入等待属于执行挂起，不消耗已接受任务的实际执行时限。
     pub fn active_elapsed(&self, start: Instant) -> Duration {
         start.elapsed().saturating_sub(Duration::from_millis(
@@ -200,18 +216,26 @@ impl RequestRun {
     }
 
     pub(crate) fn effective_active_ms(&self) -> u64 {
-        self.active_duration_base_ms.saturating_add(self.active_elapsed(self.created).as_millis() as u64)
+        self.active_duration_base_ms
+            .saturating_add(self.active_elapsed(self.created).as_millis() as u64)
     }
 
-    /// A checkpoint advances the current attempt's monotonic wall-time high-water only once.
-    /// 检查点只推进当前尝试的单调墙钟高水位；重复保存不会重复计时。
     pub(crate) async fn checkpoint_active_duration(&self) -> Result<(), GatewayError> {
-        let Some(journal) = &self.journal else { return Ok(()); };
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
         let repository = journal.repository().clone();
         let token = journal.token().clone();
         let elapsed = self.active_elapsed(self.created).as_millis() as u64;
         tokio::task::spawn_blocking(move || repository.record_active_duration(&token, elapsed))
-            .await.map_err(|_| GatewayError::new("TASK_CLOCK_SAVE_FAILED", "任务有效时长保存暂不可用，进度仍保留。", 503))??;
+            .await
+            .map_err(|_| {
+                GatewayError::new(
+                    "TASK_CLOCK_SAVE_FAILED",
+                    "任务有效时长保存暂不可用，进度仍保留。",
+                    503,
+                )
+            })??;
         Ok(())
     }
 
@@ -222,7 +246,6 @@ impl RequestRun {
         self.cancellation.send_replace(true);
     }
 
-    /// Keep the journal's original event IDs across transient storage pressure.
     /// 临时存储拥塞时保留原日志事件 ID，不重新入队或重派副作用。
     async fn flush_journal(
         &self,
@@ -232,8 +255,7 @@ impl RequestRun {
         let mut delay = Duration::from_millis(100);
         let mut waiting_since = None;
         let result = loop {
-            // A displayed delta is a durable promise too: enqueueing alone cannot acknowledge it.
-            // 可见正文增量同样承诺可恢复；仅入内存队列不能作为提交确认或推进回放水位。
+            // 可见正文增量也要可恢复；只入内存队列不算提交确认。
             match journal.flush().await {
                 Ok(()) => break Ok(()),
                 Err(error)
@@ -246,7 +268,6 @@ impl RequestRun {
                     if *cancellation.borrow() || self.suspending.load(Ordering::Acquire) {
                         break Err(error);
                     }
-                    // Flush owns stable event IDs; retrying storage never repeats a model or tool call.
                     // flush 持有稳定事件 ID；存储重试不重复模型请求或工具调用，用户取消仍立即唤醒。
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {},
@@ -258,10 +279,8 @@ impl RequestRun {
             }
         };
         if let Some(started) = waiting_since {
-            self.resource_wait_ms.fetch_add(
-                started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                Ordering::AcqRel,
-            );
+            self.resource_wait_ms
+                .fetch_add(started.elapsed().as_millis() as u64, Ordering::AcqRel);
         }
         result
     }
@@ -274,14 +293,18 @@ impl RequestRun {
     ) -> Result<(), GatewayError> {
         loop {
             match journal.emit_control(kind, durable) {
-                Err(error) if error.code == "TASK_EVENT_BACKPRESSURE" => self.flush_journal(journal).await?,
+                Err(error) if error.code == "TASK_EVENT_BACKPRESSURE" => {
+                    self.flush_journal(journal).await?
+                }
                 result => return result,
             }
         }
     }
 
     async fn flush_stream(&self, emission: &mut StreamEmission) -> Result<(), GatewayError> {
-        if emission.pending.is_empty() { return Ok(()); }
+        if emission.pending.is_empty() {
+            return Ok(());
+        }
         if let Some(journal) = &self.journal {
             if let Err(error) = self.flush_journal(journal).await {
                 journal.remember_persistence_error(error.clone());
@@ -297,11 +320,13 @@ impl RequestRun {
     }
 
     fn schedule_stream(&self, emission: &mut StreamEmission) -> bool {
-        if emission.scheduled { return true; }
-        let Some(owner) = self.stream_owner.get().and_then(Weak::upgrade) else { return false; };
+        if emission.scheduled {
+            return true;
+        }
+        let Some(owner) = self.stream_owner.get().and_then(Weak::upgrade) else {
+            return false;
+        };
         emission.scheduled = true;
-        // Own this bounded drain until it finishes; no asynchronous Drop or detached per-token writers.
-        // 持有本次有界排空任务直到结束；不靠异步 Drop，也不逐 token 创建写入者。
         tokio::spawn(async move {
             let mut cancellation = owner.cancellation.subscribe();
             if !*cancellation.borrow() {
@@ -322,22 +347,36 @@ impl RequestRun {
     }
 
     pub async fn emit(&self, event: Value) {
-        // Large provider chunks are split on UTF-8 boundaries, never replaced by an empty archive marker.
-        // 供应商大块正文按UTF-8边界拆分；已发布的任何字符都不能被空归档标记替代。
-        if matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta")) {
-            if let Some(delta) = event["delta"].as_str().filter(|delta| delta.len() > 16 * 1024 || event.to_string().len() > 32 * 1024) {
+        // 供应商大块正文按 UTF-8 边界拆分，已发布字符都保留。
+        if matches!(
+            event["type"].as_str(),
+            Some("text_delta" | "reasoning_delta")
+        ) {
+            if let Some(delta) = event["delta"]
+                .as_str()
+                .filter(|delta| delta.len() > 16 * 1024 || event.to_string().len() > 32 * 1024)
+            {
                 let mut start: usize = 0;
                 while start < delta.len() {
                     let mut end = start.saturating_add(16 * 1024).min(delta.len());
-                    while !delta.is_char_boundary(end) { end -= 1; }
+                    while !delta.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     let mut portion = event.clone();
                     portion["delta"] = json!(&delta[start..end]);
                     while portion.to_string().len() > 32 * 1024 && end > start + 1 {
-                        let first_character_end = start + delta[start..].chars().next().unwrap().len_utf8();
-                        if end <= first_character_end { break; }
+                        let first_character_end =
+                            start + delta[start..].chars().next().unwrap().len_utf8();
+                        if end <= first_character_end {
+                            break;
+                        }
                         end = start + (end - start) / 2;
-                        while end > start && !delta.is_char_boundary(end) { end -= 1; }
-                        if end == start { end = start + delta[start..].chars().next().unwrap().len_utf8(); }
+                        while end > start && !delta.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        if end == start {
+                            end = start + delta[start..].chars().next().unwrap().len_utf8();
+                        }
                         portion["delta"] = json!(&delta[start..end]);
                     }
                     self.emit_one(portion).await;
@@ -351,39 +390,53 @@ impl RequestRun {
 
     async fn emit_one(&self, mut event: Value) {
         let mut emission = self.emission.lock().await;
-        if self.finished.load(Ordering::Acquire) { return; }
-        // Remote task handles are private recovery evidence, never an unrecognized desktop stream event.
-        // 远端任务句柄属于私有恢复证据，不能作为桌面无法识别的新事件进入聊天流。
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
         if event["type"] == "mcp_task_checkpoint" {
             if let Some(journal) = &self.journal {
                 event["conversationId"] = json!(self.conversation_id);
                 event["requestId"] = json!(self.request_id);
-                if self.flush_stream(&mut emission).await.is_err() { return; }
+                if self.flush_stream(&mut emission).await.is_err() {
+                    return;
+                }
                 if !journal.is_released() {
-                    if self.enqueue_event(journal, "mcp_task_checkpoint", &event).await.is_ok() {
+                    if self
+                        .enqueue_event(journal, "mcp_task_checkpoint", &event)
+                        .await
+                        .is_ok()
+                    {
                         let _ = self.flush_journal(journal).await;
                     }
                 }
             }
             return;
         }
-        // Bound unpublished bytes before admission; storage pressure stalls this producer, not the task.
         // 入队前限制未发布字节；存储拥塞只对当前生产者施加背压，不中断任务。
         if emission.bytes >= STREAM_BATCH_BYTES || emission.pending.len() >= STREAM_BATCH_EVENTS {
-            if self.flush_stream(&mut emission).await.is_err() { return; }
+            if self.flush_stream(&mut emission).await.is_err() {
+                return;
+            }
         }
         let mut replay = self.replay.lock().await;
-        let is_delta = matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta"));
-        let first_delta = is_delta && replay.content.is_empty() && replay.reasoning.is_empty()
+        let is_delta = matches!(
+            event["type"].as_str(),
+            Some("text_delta" | "reasoning_delta")
+        );
+        let first_delta = is_delta
+            && replay.content.is_empty()
+            && replay.reasoning.is_empty()
             && emission.pending.is_empty();
         event["conversationId"] = json!(self.conversation_id);
         event["requestId"] = json!(self.request_id);
         event["createdAt"] = json!(now_iso8601());
         event["eventSequence"] = json!(replay.sequence + emission.pending.len() as u64 + 1);
         if event["replyMessageId"].is_null() {
-            event["replyMessageId"] = replay.reply_anchor.as_ref()
+            event["replyMessageId"] = replay
+                .reply_anchor
+                .as_ref()
                 .map(|anchor| anchor["replyMessageId"].clone())
-                .unwrap_or_else(||json!(self.request_id));
+                .unwrap_or_else(|| json!(self.request_id));
         }
         if event["type"] == "generation_timing" {
             if let (Some(elapsed), Some(active)) = (
@@ -394,17 +447,20 @@ impl RequestRun {
             }
         } else if terminal_event(&event) {
             if let Some(elapsed) = saved_generation_elapsed(&event["durationMs"])
-                .or_else(|| replay.generation.elapsed()) {
+                .or_else(|| replay.generation.elapsed())
+            {
                 replay.generation.set(elapsed, false);
             }
         }
-        if matches!(event["type"].as_str(), Some("generation_timing" | "reply_anchor" | "content_snapshot"))
-            || terminal_event(&event) {
+        if matches!(
+            event["type"].as_str(),
+            Some("generation_timing" | "reply_anchor" | "content_snapshot")
+        ) || terminal_event(&event)
+        {
             replay.generation.project(&mut event);
         }
         drop(replay);
-        // Persist compact deltas and formal references; never re-encode the growing full reply per token.
-        // 持久化小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
+        // 保存小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
         if let Some(journal) = &self.journal {
             if event["taskId"].is_null() {
                 event["taskId"] = json!(journal.task_id());
@@ -412,12 +468,19 @@ impl RequestRun {
             event["rootRequestTaskId"] = json!(journal.task_id());
             let mut durable = if terminal_event(&event) {
                 json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":event["replyMessageId"],"taskCompletion":event["taskCompletion"]})
-            } else if matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta")) {
+            } else if matches!(
+                event["type"].as_str(),
+                Some("text_delta" | "reasoning_delta")
+            ) {
                 event.clone()
             } else if event["type"] == "assistant_segment" {
                 let mut segment = event["segment"].clone();
-                let empty = segment["content"].as_str() == Some("") && segment["reasoning"].as_str() == Some("");
-                if let Some(fields) = segment.as_object_mut() { fields.remove("content"); fields.remove("reasoning"); }
+                let empty = segment["content"].as_str() == Some("")
+                    && segment["reasoning"].as_str() == Some("");
+                if let Some(fields) = segment.as_object_mut() {
+                    fields.remove("content");
+                    fields.remove("reasoning");
+                }
                 segment["emptyAtEmission"] = json!(empty);
                 json!({"type":"assistant_segment","segmentId":segment["id"],"phase":segment["phase"],"status":segment["status"],"segment":segment})
             } else if event.to_string().len() <= 24 * 1024 {
@@ -425,9 +488,13 @@ impl RequestRun {
             } else {
                 json!({"type":event["type"],"conversationId":self.conversation_id,"requestId":self.request_id,"toolCallId":event["tool"]["toolCallId"],"resultRef":event["tool"]["resultRef"],"archived":true})
             };
-            // Preserve the original stream identity even when a control body uses a compact reference.
-            // 控制正文采用精简引用时也保留原请求、回复与流序号；恢复不得猜归属或从零复用序号。
-            for field in ["conversationId", "requestId", "replyMessageId", "eventSequence"] {
+            // 控制正文采用精简引用时也保留原请求、回复与流序号。
+            for field in [
+                "conversationId",
+                "requestId",
+                "replyMessageId",
+                "eventSequence",
+            ] {
                 durable[field] = event[field].clone();
             }
             if !journal.is_released() {
@@ -439,11 +506,9 @@ impl RequestRun {
                     )
                     .await
                 {
-                    // Ownership/invariant failures stay diagnostic; they are never forged into a user cancellation.
                     // 执行权或不变量错误继续保留诊断，不伪装成用户取消；后续派发仍须通过正式日志围栏。
                     journal.remember_persistence_error(error);
-                    // Never publish an uncommitted event; cancellation/ownership recovery retains the journal.
-                    // 未提交事件不能发布；取消或执行权恢复保留原日志，不伪造已交付内容或终态。
+                    // 未提交的事件不发布；取消或执行权恢复时保留原日志。
                     return;
                 }
             }
@@ -451,11 +516,14 @@ impl RequestRun {
         emission.bytes += event.to_string().len();
         emission.pending.push_back(event);
         let scheduled = self.journal.is_some() && self.schedule_stream(&mut emission);
-        // First output and control boundaries are immediate; later deltas share one committed batch.
         // 首次输出与控制边界立即提交，后续增量共用一次已确认批次。
-        if !is_delta || first_delta || self.journal.is_none()
-            || *self.cancellation.borrow() || self.suspending.load(Ordering::Acquire)
-            || emission.bytes >= STREAM_BATCH_BYTES || emission.pending.len() >= STREAM_BATCH_EVENTS
+        if !is_delta
+            || first_delta
+            || self.journal.is_none()
+            || *self.cancellation.borrow()
+            || self.suspending.load(Ordering::Acquire)
+            || emission.bytes >= STREAM_BATCH_BYTES
+            || emission.pending.len() >= STREAM_BATCH_EVENTS
             || !scheduled
         {
             let _ = self.flush_stream(&mut emission).await;
@@ -463,14 +531,16 @@ impl RequestRun {
     }
 
     async fn publish_event(&self, event: Value) {
-        // Publish replay watermarks only after persistence has stopped waiting.
-        // 持久化等待结束后才推进回放水位，避免新观察者提前终结或跳过尚未发布的事件。
+        // 保存等待结束后才推进回放位置，新观察者才不会跳过未发布的事件。
         let mut replay = self.replay.lock().await;
-        let mut final_result = if terminal_event(&event) { Some(self.result.lock().await) } else { None };
+        let mut final_result = if terminal_event(&event) {
+            Some(self.result.lock().await)
+        } else {
+            None
+        };
         replay.sequence = event["eventSequence"].as_u64().unwrap();
         if event["type"] == "reply_anchor" {
-            // A new reply changes only replay/display ownership; the durable task journal keeps earlier receipts.
-            // 新回复仅切换回放与展示归属；正式任务日志继续保留此前调用回执。
+            // 新回复仅切换回放与展示归属；正式任务日志继续保留此前调用结果。
             replay.content.clear();
             replay.reasoning.clear();
             replay.active_segment = None;
@@ -515,8 +585,7 @@ impl RequestRun {
                     };
                 }
                 Some("content_snapshot") => {
-                    // Recovery may replace a reply projection before new deltas; later observers need that same base.
-                    // 恢复可在新增量前替换回复投影；后续观察者必须取得相同的正文基线。
+                    // 恢复可在新增量前替换回复映射，后续观察者要取得相同的正文基线。
                     replay.content = event["content"].as_str().unwrap_or("").to_owned();
                     replay.reasoning = event["reasoning"].as_str().unwrap_or("").to_owned();
                 }
@@ -531,7 +600,6 @@ impl RequestRun {
                 }
                 _ => {}
             }
-            // Preserve protocol boundaries, never an unbounded journal of token or terminal-output events.
             // 保留协议边界，不无限记录 token 或终端输出事件；重放不增加执行或权限事实。
             if !matches!(
                 event["type"].as_str(),
@@ -554,8 +622,7 @@ impl RequestRun {
                 replay.active_segment = None;
             }
         }
-        // Publish the final reply before waking either HTTP reader; emit/finish cannot leave a lost wakeup.
-        // 唤醒 HTTP 读取者前发布最终结果；emit/finish 之间不能出现漏唤醒窗口。
+        // 唤醒 HTTP 读取者前发布最终结果，emit 和 finish 之间才不会漏唤醒。
         if let Some(result) = final_result.as_mut() {
             **result = Some(event.clone());
             *self.finished_at.lock().unwrap() = Some(Instant::now());
@@ -567,7 +634,6 @@ impl RequestRun {
         self.emit(result).await;
     }
 
-    /// A transport handshake belongs to this connection, not to the replayed task history.
     /// 传输握手属于当前连接，不依赖回放中是否还保留任务最初的开始事件。
     pub(crate) async fn stream_started(&self) -> Value {
         let replay = self.replay.lock().await;
@@ -575,9 +641,15 @@ impl RequestRun {
             "requestId":self.request_id,"replyMessageId":replay.reply_anchor.as_ref()
                 .map(|anchor|&anchor["replyMessageId"]).unwrap_or(&Value::Null),
             "createdAt":now_iso8601(),"status":"queued","toolStreamProtocol":3});
-        if event["replyMessageId"].is_null() { event["replyMessageId"] = json!(self.request_id); }
-        if let Some(task_id) = self.journal.as_ref().map(|journal| journal.task_id())
-            .or(self.accepted_task_id.as_deref()) {
+        if event["replyMessageId"].is_null() {
+            event["replyMessageId"] = json!(self.request_id);
+        }
+        if let Some(task_id) = self
+            .journal
+            .as_ref()
+            .map(|journal| journal.task_id())
+            .or(self.accepted_task_id.as_deref())
+        {
             event["taskId"] = json!(task_id);
             event["rootRequestTaskId"] = json!(task_id);
         }
@@ -594,7 +666,10 @@ impl RequestRun {
                 409,
             ));
         }
-        let reply_message_id = replay.reply_anchor.as_ref().map(|anchor| anchor["replyMessageId"].clone())
+        let reply_message_id = replay
+            .reply_anchor
+            .as_ref()
+            .map(|anchor| anchor["replyMessageId"].clone())
             .unwrap_or_else(|| json!(self.request_id));
         let mut events: VecDeque<Value> = replay
             .controls
@@ -618,7 +693,7 @@ impl RequestRun {
         }
         let terminal = events.back().filter(|event| terminal_event(event)).cloned();
         if let Some(anchor) = &replay.reply_anchor {
-            if !events.iter().any(|event|event["type"]=="reply_anchor") {
+            if !events.iter().any(|event| event["type"] == "reply_anchor") {
                 let mut anchor = anchor.clone();
                 replay.generation.project(&mut anchor);
                 events.push_front(anchor);
@@ -645,7 +720,10 @@ impl RequestRun {
     }
 
     #[cfg(test)]
-    fn auxiliary_with_capacity(conversation: &str, capacity: usize) -> Result<Arc<Self>, GatewayError> {
+    fn auxiliary_with_capacity(
+        conversation: &str,
+        capacity: usize,
+    ) -> Result<Arc<Self>, GatewayError> {
         let (cancellation, _) = watch::channel(false);
         let (events, _) = broadcast::channel(capacity);
         let cancellation_key = new_id();
@@ -682,19 +760,26 @@ impl RequestRun {
 
     #[cfg(test)]
     pub(crate) fn test_run(capacity: usize) -> Arc<Self> {
-        Self::auxiliary_with_capacity(&new_id(), capacity).expect("isolated request cancellation registry")
+        Self::auxiliary_with_capacity(&new_id(), capacity)
+            .expect("isolated request cancellation registry")
     }
 
     #[cfg(test)]
     pub(crate) fn test_run_at_sequence(capacity: usize, sequence: u64) -> Arc<Self> {
         let mut run = Self::test_run(capacity);
-        Arc::get_mut(&mut run).unwrap().replay = Mutex::new(ReplayState { sequence, ..Default::default() });
+        Arc::get_mut(&mut run).unwrap().replay = Mutex::new(ReplayState {
+            sequence,
+            ..Default::default()
+        });
         run
     }
 }
 
 #[derive(Clone, Copy, Default)]
-struct ApprovalDecision { approved: bool, scope: ApprovalScope }
+struct ApprovalDecision {
+    approved: bool,
+    scope: ApprovalScope,
+}
 struct LiveTaskApproval {
     conversation_id: String,
     bindings: TaskApprovalGrants,
@@ -739,21 +824,45 @@ pub struct GatewayRuntime {
 }
 impl GatewayRuntime {
     pub(crate) fn live_task_run(&self, task_id: &str) -> Option<Arc<RequestRun>> {
-        self.task_runs.lock().ok().and_then(|runs| runs.get(task_id).and_then(Weak::upgrade))
+        self.task_runs
+            .lock()
+            .ok()
+            .and_then(|runs| runs.get(task_id).and_then(Weak::upgrade))
             .filter(|run| !run.finished.load(Ordering::Acquire))
     }
-    /// Reuse live ancestor attempts to renew operational slices without weakening explicit cost caps.
-    /// 复用仍有效的祖先尝试续展运行预算，不改变明确的费用/token上限，也不创建新账本。
-    pub(crate) fn budget_journals(&self, run: &RequestRun) -> Result<Vec<Arc<super::gateway_task_journal::TaskJournal>>, GatewayError> {
-        let Some(own) = &run.journal else { return Ok(Vec::new()); };
+    /// 复用仍有效的祖先尝试续展运行预算，费用和 token 上限不变。
+    pub(crate) fn budget_journals(
+        &self,
+        run: &RequestRun,
+    ) -> Result<Vec<Arc<super::gateway_task_journal::TaskJournal>>, GatewayError> {
+        let Some(own) = &run.journal else {
+            return Ok(Vec::new());
+        };
         let mut result = vec![own.clone()];
-        let registered = self.task_journals.lock().map_err(|_| GatewayError::new("TASK_JOURNAL_REGISTRY_FAILED", "任务预算状态暂不可用。", 503))?;
+        let registered = self.task_journals.lock().map_err(|_| {
+            GatewayError::new(
+                "TASK_JOURNAL_REGISTRY_FAILED",
+                "任务预算状态暂不可用。",
+                503,
+            )
+        })?;
         let mut parent = own.load_current()?.parent_task_id;
         let mut visited = std::collections::HashSet::new();
         while let Some(id) = parent {
-            if !visited.insert(id.clone()) { return Err(GatewayError::new("TASK_DEPENDENCY_CYCLE", "任务关系异常，已有进度保留。", 409)); }
-            let Some(journal) = registered.iter().filter_map(Weak::upgrade)
-                .find(|journal| journal.task_id() == id && journal.check_dispatch_fence().is_ok()) else { break; };
+            if !visited.insert(id.clone()) {
+                return Err(GatewayError::new(
+                    "TASK_DEPENDENCY_CYCLE",
+                    "任务关系异常，已有进度保留。",
+                    409,
+                ));
+            }
+            let Some(journal) = registered
+                .iter()
+                .filter_map(Weak::upgrade)
+                .find(|journal| journal.task_id() == id && journal.check_dispatch_fence().is_ok())
+            else {
+                break;
+            };
             parent = journal.load_current()?.parent_task_id;
             result.push(journal);
         }
@@ -785,10 +894,10 @@ impl GatewayRuntime {
         runtime
     }
 
-    /// Cleanup owns only expiring model copies; it neither retains the runtime nor delays startup.
-    /// 清理仅接管可过期的模型图像副本，不延长网关生命周期，也不阻塞启动。
     fn schedule_image_cleanup(self: &Arc<Self>) {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else { return; };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let runtime = Arc::downgrade(self);
         let mut cancellation = self.background_cancellation.subscribe();
         handle.spawn(async move {
@@ -798,13 +907,22 @@ impl GatewayRuntime {
                     _ = tokio::time::sleep(delay) => {},
                     _ = cancellation.changed() => break,
                 }
-                if *cancellation.borrow() { break; }
-                let Some(runtime) = runtime.upgrade() else { break; };
+                if *cancellation.borrow() {
+                    break;
+                }
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
                 let root = runtime.config.data_root.clone();
                 drop(runtime);
                 let _ = tokio::task::spawn_blocking(move || {
-                    data::cleanup_expired_model_images(&root, chrono::Utc::now().timestamp_millis(), 256)
-                }).await;
+                    data::cleanup_expired_model_images(
+                        &root,
+                        chrono::Utc::now().timestamp_millis(),
+                        256,
+                    )
+                })
+                .await;
             }
         });
     }
@@ -819,8 +937,7 @@ impl GatewayRuntime {
         gate
     }
 
-    /// Health is delivered first; optional local extensions start later without joining startup readiness.
-    /// 先交付健康就绪；可选本地扩展延后启动，不加入软件启动等待，也不继承工作目录权限。
+    /// 先交付健康就绪，可选本地扩展延后启动。
     pub fn schedule_extension_prewarm(self: &Arc<Self>) {
         if self
             .extension_prewarm_scheduled
@@ -834,16 +951,13 @@ impl GatewayRuntime {
             if *cancellation.borrow() {
                 return;
             }
-            // Prefer model connection/loading before optional MCP work; none of this joins the UI readiness wait.
             // 模型连接与装载优先于可选 MCP；整个准备过程不加入界面就绪或消息发送等待。
-            // An empty selection reuses the saved choice, or observes unselected local models without loading them.
             // 空选择沿用已有明确选择；尚未收到选择时，本地模型只观察不加载，API 连接无需空等桌面。
             let _ = runtime.prepare_models(Value::Null).await;
             runtime
                 .model_preparation
                 .wait_idle(cancellation.clone(), Duration::from_secs(90))
                 .await;
-            // Delay only optional extensions; the model connection has already started independently.
             // 仅延后可选扩展，模型连接已独立开始准备。
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(3)) => {},
@@ -910,7 +1024,8 @@ impl GatewayRuntime {
         input: Value,
         original_message_raw: Option<String>,
     ) -> Result<Arc<RequestRun>, GatewayError> {
-        self.begin_with_priority(input, original_message_raw, false).await
+        self.begin_with_priority(input, original_message_raw, false)
+            .await
     }
     async fn begin_with_priority(
         self: &Arc<Self>,
@@ -922,17 +1037,24 @@ impl GatewayRuntime {
         let conversation = checked_id(&input["conversationId"], "conversationId")?;
         let attachments = input.get("attachmentIds").filter(|value| !value.is_null());
         if let Some(attachments) = attachments {
-            let ids = attachments.as_array().filter(|ids| ids.len() <= 128)
+            let ids = attachments
+                .as_array()
+                .filter(|ids| ids.len() <= 128)
                 .ok_or_else(|| GatewayError::new("INVALID_CHAT_REQUEST", "附件列表无效。", 400))?;
             let mut seen = std::collections::HashSet::new();
             for id in ids {
                 if !seen.insert(checked_id(id, "attachmentId")?) {
-                    return Err(GatewayError::new("INVALID_CHAT_REQUEST", "附件 ID 重复。", 400));
+                    return Err(GatewayError::new(
+                        "INVALID_CHAT_REQUEST",
+                        "附件 ID 重复。",
+                        400,
+                    ));
                 }
             }
         }
         if !input["message"].as_str().is_some_and(|text| {
-            (!text.trim().is_empty() || attachments.is_some_and(|ids| ids.as_array().is_some_and(|ids| !ids.is_empty())))
+            (!text.trim().is_empty()
+                || attachments.is_some_and(|ids| ids.as_array().is_some_and(|ids| !ids.is_empty())))
                 && text.encode_utf16().count() <= 2 * 1024 * 1024
         }) {
             return Err(GatewayError::new(
@@ -993,7 +1115,11 @@ impl GatewayRuntime {
         let mut runs = self.runs.lock().await;
         Self::retain_recent_completed_runs(&mut runs);
         if let Some(existing) = runs.get(&request_id) {
-            if !background { existing.is_background_recovery.store(false, Ordering::Release); }
+            if !background {
+                existing
+                    .is_background_recovery
+                    .store(false, Ordering::Release);
+            }
             if existing.conversation_id != conversation || existing.fingerprint != fingerprint {
                 return Err(GatewayError::new(
                     "CHAT_REQUEST_CONFLICT",
@@ -1001,8 +1127,7 @@ impl GatewayRuntime {
                     409,
                 ));
             }
-            // A queued durable continuation outranks its settled transport cache.
-            // 正式任务已排队续作时，旧传输完成缓存不能代替新的执行。
+            // 正式任务已排队续作时，以新的执行为准。
             let continued = if existing.finished.load(Ordering::Acquire) {
                 existing
                     .journal
@@ -1027,13 +1152,27 @@ impl GatewayRuntime {
             runs.remove(&request_id);
         }
         drop(runs);
-        if self.pending_pauses.lock().await.get(&request_id)
-            .is_some_and(|pending| pending.conversation_id != conversation) {
-            return Err(GatewayError::new("TASK_SCOPE_DENIED", "暂停请求不属于当前聊天。", 403));
+        if self
+            .pending_pauses
+            .lock()
+            .await
+            .get(&request_id)
+            .is_some_and(|pending| pending.conversation_id != conversation)
+        {
+            return Err(GatewayError::new(
+                "TASK_SCOPE_DENIED",
+                "暂停请求不属于当前聊天。",
+                403,
+            ));
         }
-        // Reserve before accepting persistent work; concurrent starts cannot bypass active admission.
-        // 持久接受任务前预留活动名额；并发新请求不能越过准入，完成缓存不占执行名额。
-        let queue_full = || GatewayError::new("CHAT_QUEUE_FULL", "当前任务队列已满，已有任务继续运行。", 429);
+        // 持久接受任务前预留活动名额；完成缓存不占执行名额。
+        let queue_full = || {
+            GatewayError::new(
+                "CHAT_QUEUE_FULL",
+                "当前任务队列已满，已有任务继续运行。",
+                429,
+            )
+        };
         let request_slot = match self.request_slots.clone().try_acquire_owned() {
             Ok(slot) => Some(slot),
             Err(_) => {
@@ -1043,10 +1182,15 @@ impl GatewayRuntime {
                 let completed = tokio::task::spawn_blocking(move || {
                     crate::storage::task_repository::TaskRepository::open(&root)?
                         .find_by_request_id(&conversation, &request_id)
-                }).await.map_err(|_| GatewayError::new("TASK_LOOKUP_FAILED", "已保存任务暂不可读取。", 503))??
-                    .is_some_and(|task| task.state == TaskState::Completed);
-                if !completed { return Err(queue_full()); }
-                // Completed work is reconstructed read-only; acceptance still checks its saved fingerprint and scope.
+                })
+                .await
+                .map_err(|_| {
+                    GatewayError::new("TASK_LOOKUP_FAILED", "已保存任务暂不可读取。", 503)
+                })??
+                .is_some_and(|task| task.state == TaskState::Completed);
+                if !completed {
+                    return Err(queue_full());
+                }
                 // 已完成任务仅重建只读回复；原接受入口仍核对保存的指纹与范围，不获得新执行资格。
                 None
             }
@@ -1058,16 +1202,25 @@ impl GatewayRuntime {
             &fingerprint,
         )
         .await?;
-        // Acceptance and an early window-exit pause share this request gate; no model starts between them.
         // 接受与窗口退出暂停共用请求锁；正式接受后先保存暂停，再考虑模型派发。
         let pending_pause = self.pending_pauses.lock().await.remove(&request_id);
         if pending_pause.is_some() || *self.background_cancellation.borrow() {
             self.pause_accepted_task(task).await?;
-            return Err(GatewayError::new("TASK_CONTROLLED", "任务已暂停，输入和进度已保存。", 409));
+            return Err(GatewayError::new(
+                "TASK_CONTROLLED",
+                "任务已暂停，输入和进度已保存。",
+                409,
+            ));
         }
         use crate::storage::task_repository::TaskState;
-        if request_slot.is_none() && task.state != TaskState::Completed { return Err(queue_full()); }
-        let request_slot = if task.state == TaskState::Completed { None } else { request_slot };
+        if request_slot.is_none() && task.state != TaskState::Completed {
+            return Err(queue_full());
+        }
+        let request_slot = if task.state == TaskState::Completed {
+            None
+        } else {
+            request_slot
+        };
         if matches!(
             task.state,
             TaskState::Paused | TaskState::Cancelled | TaskState::Failed | TaskState::Partial
@@ -1109,9 +1262,11 @@ impl GatewayRuntime {
             stream_owner: Default::default(),
             native_cancellation,
             cancellation_key,
-            // The ledger high-water includes every published event and survives a new execution attempt.
-            // 账本水位覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
-            replay: Mutex::new(ReplayState { sequence:task.event_sequence, ..Default::default() }),
+            // 记录位置覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
+            replay: Mutex::new(ReplayState {
+                sequence: task.event_sequence,
+                ..Default::default()
+            }),
             finished: AtomicBool::new(false),
             finished_at: Default::default(),
             suspending: AtomicBool::new(false),
@@ -1155,26 +1310,48 @@ impl GatewayRuntime {
 
     fn retain_recent_completed_runs_at(runs: &mut HashMap<String, Arc<RequestRun>>, now: Instant) {
         let finished_at = |run: &RequestRun| run.finished_at.lock().unwrap().unwrap_or(run.created);
-        runs.retain(|_, run| !run.finished.load(Ordering::Acquire)
-            || now.saturating_duration_since(finished_at(run)) < COMPLETED_REQUEST_RETENTION);
-        let mut completed: Vec<_> = runs.iter()
+        runs.retain(|_, run| {
+            !run.finished.load(Ordering::Acquire)
+                || now.saturating_duration_since(finished_at(run)) < COMPLETED_REQUEST_RETENTION
+        });
+        let mut completed: Vec<_> = runs
+            .iter()
             .filter(|(_, run)| run.finished.load(Ordering::Acquire))
             .map(|(id, run)| (id.clone(), finished_at(run)))
             .collect();
         completed.sort_unstable_by_key(|(_, finished)| *finished);
         let excess = completed.len().saturating_sub(MAXIMUM_COMPLETED_REQUESTS);
-        for (id, _) in completed.into_iter().take(excess) { runs.remove(&id); }
+        for (id, _) in completed.into_iter().take(excess) {
+            runs.remove(&id);
+        }
     }
-    /// Pause this root and its children through formal task control, including acceptance in flight.
     /// 通过正式任务控制暂停当前根任务与子任务，也覆盖仍在接受中的退出请求。
-    pub async fn pause(self: &Arc<Self>, conversation: &str, request: &str, task_id: Option<&str>) -> Result<Value, GatewayError> {
+    pub async fn pause(
+        self: &Arc<Self>,
+        conversation: &str,
+        request: &str,
+        task_id: Option<&str>,
+    ) -> Result<Value, GatewayError> {
         let conversation = checked_id(&json!(conversation), "conversationId")?;
         let request = checked_id(&json!(request), "requestId")?;
-        let task_id = task_id.map(|id| checked_id(&json!(id), "taskId")).transpose()?;
+        let task_id = task_id
+            .map(|id| checked_id(&json!(id), "taskId"))
+            .transpose()?;
         let gate = self.conversation_gate(&format!("accept:{request}")).await;
         let _acceptance = gate.lock().await;
-        if task_id.is_none() && self.runs.lock().await.get(&request).is_some_and(|run| run.conversation_id != conversation) {
-            return Err(GatewayError::new("TASK_SCOPE_DENIED", "暂停请求不属于当前聊天。", 403));
+        if task_id.is_none()
+            && self
+                .runs
+                .lock()
+                .await
+                .get(&request)
+                .is_some_and(|run| run.conversation_id != conversation)
+        {
+            return Err(GatewayError::new(
+                "TASK_SCOPE_DENIED",
+                "暂停请求不属于当前聊天。",
+                403,
+            ));
         }
         let task = if let Some(id) = task_id.as_deref() {
             Some(self.tasks.metadata(id).await?)
@@ -1185,12 +1362,20 @@ impl GatewayRuntime {
             tokio::task::spawn_blocking(move || {
                 crate::storage::task_repository::TaskRepository::open(&root)?
                     .find_by_request_id(&saved_conversation, &saved_request)
-            }).await.map_err(|_| GatewayError::new("TASK_LOOKUP_FAILED", "已保存任务暂不可读取。", 503))??
+            })
+            .await
+            .map_err(|_| GatewayError::new("TASK_LOOKUP_FAILED", "已保存任务暂不可读取。", 503))??
         };
         if let Some(task) = task {
-            if task.scope.conversation_id != conversation || task.parent_task_id.is_some()
-                || task_id.is_none() && task.request_id != request {
-                return Err(GatewayError::new("TASK_SCOPE_DENIED", "只能暂停本聊天的对应主任务。", 403));
+            if task.scope.conversation_id != conversation
+                || task.parent_task_id.is_some()
+                || task_id.is_none() && task.request_id != request
+            {
+                return Err(GatewayError::new(
+                    "TASK_SCOPE_DENIED",
+                    "只能暂停本聊天的对应主任务。",
+                    403,
+                ));
             }
             self.pending_pauses.lock().await.remove(&request);
             return self.pause_accepted_task(task).await;
@@ -1198,28 +1383,54 @@ impl GatewayRuntime {
         let mut pending = self.pending_pauses.lock().await;
         if let Some(existing) = pending.get(&request) {
             if existing.conversation_id != conversation {
-                return Err(GatewayError::new("TASK_SCOPE_DENIED", "暂停请求不属于当前聊天。", 403));
+                return Err(GatewayError::new(
+                    "TASK_SCOPE_DENIED",
+                    "暂停请求不属于当前聊天。",
+                    403,
+                ));
             }
         } else {
             pending.retain(|_, intent| intent.expires > Instant::now());
             if pending.len() >= MAXIMUM_PENDING_PAUSES {
-                return Err(GatewayError::new("CHAT_PAUSE_QUEUE_FULL", "接受中的暂停请求过多，请重试。", 429));
+                return Err(GatewayError::new(
+                    "CHAT_PAUSE_QUEUE_FULL",
+                    "接受中的暂停请求过多，请重试。",
+                    429,
+                ));
             }
         }
-        pending.insert(request, PendingPause { conversation_id: conversation, expires: Instant::now() + PENDING_PAUSE_RETENTION });
+        pending.insert(
+            request,
+            PendingPause {
+                conversation_id: conversation,
+                expires: Instant::now() + PENDING_PAUSE_RETENTION,
+            },
+        );
         Ok(json!({"paused":true,"pendingAcceptance":true}))
     }
 
-    async fn pause_accepted_task(&self, mut task: crate::storage::task_repository::TaskRecord) -> Result<Value, GatewayError> {
+    async fn pause_accepted_task(
+        &self,
+        mut task: crate::storage::task_repository::TaskRecord,
+    ) -> Result<Value, GatewayError> {
         use crate::storage::task_repository::TaskControl;
         for attempt in 0..2 {
-            // Settled replies need no state rewrite; duplicate exit notifications remain idempotent.
-            // 已结算回复无需改写状态；重复退出通知也不重开任务或重复执行。
+            // 已结算回复无需改写状态，重复退出通知直接忽略。
             if task.state == TaskState::Paused || task.state.is_terminal() {
-                return Ok(json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":task.state}));
+                return Ok(
+                    json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":task.state}),
+                );
             }
-            match self.tasks.control(&task.task_id, task.version, TaskControl::Pause).await {
-                Ok(value) => return Ok(json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":value["task"]["state"]})),
+            match self
+                .tasks
+                .control(&task.task_id, task.version, TaskControl::Pause)
+                .await
+            {
+                Ok(value) => {
+                    return Ok(
+                        json!({"paused":true,"pendingAcceptance":false,"taskId":task.task_id,"state":value["task"]["state"]}),
+                    );
+                }
                 Err(error) if attempt == 0 && error.code == "TASK_CONFLICT" => {
                     task = self.tasks.metadata(&task.task_id).await?;
                 }
@@ -1271,8 +1482,7 @@ impl GatewayRuntime {
         replay.generation.project(&mut status);
         Some(status)
     }
-    /// Reattach only to an already accepted request in this exact conversation.
-    /// 仅重新连接当前聊天中已接受的原请求；观察不创建任务，也不重复发送用户消息。
+    /// 仅重新连接当前聊天中已接受的原请求，只观察。
     pub async fn observe_request(
         &self,
         conversation: &str,
@@ -1286,8 +1496,7 @@ impl GatewayRuntime {
             .cloned()
             .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404))
     }
-    /// Attach to an existing task execution; observing a stream never starts or replays an operation.
-    /// 连接已有任务执行，观察事件流不启动模型，也不重放操作；等待恢复执行者登记有界。
+    /// 连接已有任务执行，只观察事件流；等待恢复执行者登记有上限。
     pub async fn observe_task(
         &self,
         task_id: &str,
@@ -1306,17 +1515,21 @@ impl GatewayRuntime {
             if let Some(run) = self.runs.lock().await.get(&task.request_id).cloned() {
                 let owns_attempt = run.journal.as_ref().is_some_and(|journal| {
                     journal.task_id() == task.task_id
-                        && task.current_attempt_id.as_deref() == Some(journal.token().attempt_id.as_str())
+                        && task.current_attempt_id.as_deref()
+                            == Some(journal.token().attempt_id.as_str())
                         && task.execution_version == journal.token().execution_version
                 });
-                if task.state != TaskState::Queued && owns_attempt
+                if task.state != TaskState::Queued
+                    && owns_attempt
                     && run.conversation_id == conversation
                 {
                     return Ok(run);
                 }
             }
-            if !matches!(task.state, TaskState::Queued | TaskState::Running | TaskState::WaitingChildren)
-                || Instant::now() >= deadline
+            if !matches!(
+                task.state,
+                TaskState::Queued | TaskState::Running | TaskState::WaitingChildren
+            ) || Instant::now() >= deadline
             {
                 return Err(GatewayError::new(
                     "TASK_STREAM_NOT_READY",
@@ -1327,7 +1540,6 @@ impl GatewayRuntime {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    /// Child agents have independent execution/cancellation, while retaining the parent's permission scope.
     /// 子代理拥有独立执行和取消身份，权限范围仍由父任务确定。
     fn register_journal(
         &self,
@@ -1351,16 +1563,22 @@ impl GatewayRuntime {
         journal: Arc<super::gateway_task_journal::TaskJournal>,
     ) -> Result<Arc<RequestRun>, GatewayError> {
         self.register_journal(&journal)?;
-        let background = task.parent_task_id.as_deref().and_then(|id| self.task_runs.lock().ok()
-            .and_then(|runs| runs.get(id).and_then(Weak::upgrade)))
+        let background = task
+            .parent_task_id
+            .as_deref()
+            .and_then(|id| {
+                self.task_runs
+                    .lock()
+                    .ok()
+                    .and_then(|runs| runs.get(id).and_then(Weak::upgrade))
+            })
             .is_some_and(|parent| parent.is_background_recovery.load(Ordering::Acquire));
         let cancellation_key = new_id();
         let (cancellation, _) = watch::channel(false);
         let (events, _) = broadcast::channel(256);
         let run = Arc::new(RequestRun {
             conversation_id: task.scope.conversation_id.clone(),
-            // Child request deduplication keys may be namespaced; formal receipt ownership requires a stable UUID.
-            // 子任务查重键可以带命名空间；正式工具回执使用稳定 task UUID，恢复时不换身份，也不伪造主聊天消息。
+            // 子任务查重键可以带命名空间；正式工具结果使用稳定 task UUID，恢复时身份不变。
             request_id: task.task_id.clone(),
             fingerprint: String::new(),
             original_message_raw: None,
@@ -1377,7 +1595,10 @@ impl GatewayRuntime {
             events,
             emission: Default::default(),
             stream_owner: Default::default(),
-            replay: Mutex::new(ReplayState { sequence:task.event_sequence, ..Default::default() }),
+            replay: Mutex::new(ReplayState {
+                sequence: task.event_sequence,
+                ..Default::default()
+            }),
             finished: AtomicBool::new(false),
             finished_at: Default::default(),
             suspending: AtomicBool::new(false),
@@ -1397,18 +1618,22 @@ impl GatewayRuntime {
         Ok(run)
     }
     pub async fn cancel_task_worker(&self, task_id: &str) {
-        let run = self.task_runs.lock().ok().and_then(|runs|runs.get(task_id).and_then(Weak::upgrade));
+        let run = self
+            .task_runs
+            .lock()
+            .ok()
+            .and_then(|runs| runs.get(task_id).and_then(Weak::upgrade));
         if let Some(run) = run {
             run.cancel();
             self.retire_terminal_approvals(&run).await;
         }
     }
-    /// Interrupt only the current model turn; executing tools and the task lifetime keep their own cancellation.
     /// 只打断当前模型轮次；执行中的工具与整个任务继续使用原取消生命周期。
     pub fn signal_task_steering(&self, task_id: &str) {
         if let Ok(runs) = self.task_runs.lock() {
             if let Some(run) = runs.get(task_id).and_then(Weak::upgrade) {
-                run.steering.send_modify(|sequence| *sequence = sequence.saturating_add(1));
+                run.steering
+                    .send_modify(|sequence| *sequence = sequence.saturating_add(1));
             }
         }
     }
@@ -1434,15 +1659,22 @@ impl GatewayRuntime {
         self.begin_with_priority(input, original, background).await
     }
 
-    /// Explicit continuation retires only a settled projection; checkpoints and receipts remain.
-    /// 明确续作只退役已结算的内存投影，检查点和执行回执保持不变。
-    pub(crate) async fn retire_revised_projection(&self, task: &crate::storage::task_repository::TaskRecord) -> Result<(), GatewayError> {
+    /// 明确续作只退役已结算的内存映射，检查点和执行结果保持不变。
+    pub(crate) async fn retire_revised_projection(
+        &self,
+        task: &crate::storage::task_repository::TaskRecord,
+    ) -> Result<(), GatewayError> {
         let mut runs = self.runs.lock().await;
         if let Some(run) = runs.get(&task.request_id) {
             if run.conversation_id != task.scope.conversation_id
                 || run.accepted_task_id.as_deref() != Some(task.task_id.as_str())
-                || !run.finished.load(Ordering::Acquire) {
-                return Err(GatewayError::new("TASK_REVISION_WAITING", "原任务投影仍在结算，已有进度保持不变。", 409));
+                || !run.finished.load(Ordering::Acquire)
+            {
+                return Err(GatewayError::new(
+                    "TASK_REVISION_WAITING",
+                    "原任务投影仍在结算，已有进度保持不变。",
+                    409,
+                ));
             }
             runs.remove(&task.request_id);
         }
@@ -1477,8 +1709,13 @@ impl GatewayRuntime {
             permission_mode: permission.to_owned(),
             conversation_id: conversation.to_owned(),
             project_id: relationship["projectId"].as_str().map(str::to_owned),
-            authorized_roots: relationship["mounts"].as_array().into_iter().flatten()
-                .filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).chain(std::iter::once(workdir)).collect(),
+            authorized_roots: relationship["mounts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|mount| mount["path"].as_str().map(PathBuf::from))
+                .chain(std::iter::once(workdir))
+                .collect(),
             cancellation,
             runtime: self.tools.clone(),
             config,
@@ -1488,7 +1725,6 @@ impl GatewayRuntime {
         };
         let config = self.config.clone();
         let project = context.project_id.clone();
-        // Independent preparation shares this request's lifetime; await both before publishing its context.
         // 独立准备共享本次请求生命周期，两项均完成后再发布上下文，不额外创建后台任务。
         let (saved, retrieval) = tokio::join!(
             crate::tools::gateway::get_config(&context),
@@ -1502,54 +1738,115 @@ impl GatewayRuntime {
         saved["bindingSnapshot"] = crate::storage::workspace_mounts::snapshot(&relationship);
         saved["workspaceMounts"] = relationship["mounts"].clone();
         saved["defaultMountId"] = relationship["defaultMountId"].clone();
-        saved["retrieval"] = retrieval
-            .map_err(|_| GatewayError::new("RETRIEVAL_WORKER_FAILED", "检索设置读取失败。", 500))??;
+        saved["retrieval"] = retrieval.map_err(|_| {
+            GatewayError::new("RETRIEVAL_WORKER_FAILED", "检索设置读取失败。", 500)
+        })??;
         context.config = saved;
         Ok(context)
     }
-    /// Live permission belongs to the durable task, never a replaceable request/reply ID.
     /// 活动授权归属持久任务；暂停可复用，终态和取消失效，重启不从历史文字恢复授权。
     fn task_approval_binding(run: &RequestRun, receipt: &Value) -> Option<(String, String)> {
-        if run.finished.load(Ordering::Acquire) || *run.cancellation.borrow() { return None; }
+        if run.finished.load(Ordering::Acquire) || *run.cancellation.borrow() {
+            return None;
+        }
         let journal = run.journal.as_ref()?;
         let task = journal.check_dispatch_fence().ok()?;
-        if task.state.is_terminal() || task.state == crate::storage::task_repository::TaskState::Paused
-            || task.scope.conversation_id != run.conversation_id { return None; }
+        if task.state.is_terminal()
+            || task.state == crate::storage::task_repository::TaskState::Paused
+            || task.scope.conversation_id != run.conversation_id
+        {
+            return None;
+        }
         let fingerprint = receipt["invocation"]["taskApproval"]["fingerprint"].as_str()?;
-        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) { return None; }
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
         Some((journal.task_id().into(), fingerprint.into()))
     }
 
     pub(crate) async fn retire_terminal_approvals(&self, run: &RequestRun) {
-        let Some(journal) = &run.journal else { return; };
-        // Read formal state outside the approval lock; a paused attempt is deliberately retained.
+        let Some(journal) = &run.journal else {
+            return;
+        };
         // 正式状态读取不持审批锁；暂停尝试故意保留授权，只有真实终态才回收。
-        if journal.load_current().is_ok_and(|task| task.state.is_terminal()) {
+        if journal
+            .load_current()
+            .is_ok_and(|task| task.state.is_terminal())
+        {
             self.approvals.lock().await.tasks.remove(journal.task_id());
         }
     }
 
     pub async fn await_approval(
-        &self, run: &Arc<RequestRun>, call: &Value, receipt: &Value, round: u64, order: u64, task_deadline: Instant,
+        &self,
+        run: &Arc<RequestRun>,
+        call: &Value,
+        receipt: &Value,
+        round: u64,
+        order: u64,
+        task_deadline: Instant,
     ) -> Result<bool, GatewayError> {
-        self.await_approval_until(run, call, receipt, round, order, task_deadline, Instant::now()+Duration::from_secs(300)).await
+        self.await_approval_until(
+            run,
+            call,
+            receipt,
+            round,
+            order,
+            task_deadline,
+            Instant::now() + Duration::from_secs(300),
+        )
+        .await
     }
     async fn await_approval_until(
-        &self, run: &Arc<RequestRun>, call: &Value, receipt: &Value, round: u64, order: u64,
-        task_deadline: Instant, approval_deadline: Instant,
+        &self,
+        run: &Arc<RequestRun>,
+        call: &Value,
+        receipt: &Value,
+        round: u64,
+        order: u64,
+        task_deadline: Instant,
+        approval_deadline: Instant,
     ) -> Result<bool, GatewayError> {
-        self.await_bound_approval(run, run, call, receipt, round, order, task_deadline, approval_deadline).await
+        self.await_bound_approval(
+            run,
+            run,
+            call,
+            receipt,
+            round,
+            order,
+            task_deadline,
+            approval_deadline,
+        )
+        .await
     }
     pub async fn await_child_approval(
-        &self, parent: &Arc<RequestRun>, child: &Arc<RequestRun>, call: &Value, receipt: &Value,
-        round: u64, order: u64, task_deadline: Instant,
+        &self,
+        parent: &Arc<RequestRun>,
+        child: &Arc<RequestRun>,
+        call: &Value,
+        receipt: &Value,
+        round: u64,
+        order: u64,
+        task_deadline: Instant,
     ) -> Result<bool, GatewayError> {
-        self.await_bound_approval(child, parent, call, receipt, round, order, task_deadline, Instant::now()+Duration::from_secs(300)).await
+        self.await_bound_approval(
+            child,
+            parent,
+            call,
+            receipt,
+            round,
+            order,
+            task_deadline,
+            Instant::now() + Duration::from_secs(300),
+        )
+        .await
     }
     async fn approval_owner_finished(run: &RequestRun) {
-        let mut events=run.events.subscribe();
+        let mut events = run.events.subscribe();
         loop {
-            if run.finished.load(Ordering::Acquire) { return; }
+            if run.finished.load(Ordering::Acquire) {
+                return;
+            }
             match events.recv().await {
                 Ok(event) if terminal_event(&event) => return,
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -1558,43 +1855,88 @@ impl GatewayRuntime {
         }
     }
     async fn await_bound_approval(
-        &self, owner: &Arc<RequestRun>, display: &Arc<RequestRun>, call: &Value, receipt: &Value,
-        round: u64, order: u64, task_deadline: Instant, approval_deadline: Instant,
+        &self,
+        owner: &Arc<RequestRun>,
+        display: &Arc<RequestRun>,
+        call: &Value,
+        receipt: &Value,
+        round: u64,
+        order: u64,
+        task_deadline: Instant,
+        approval_deadline: Instant,
     ) -> Result<bool, GatewayError> {
         let expires = task_deadline.min(approval_deadline);
-        let deadline_code = if task_deadline <= approval_deadline { "TOOL_RUN_TIMEOUT" } else { "TOOL_APPROVAL_EXPIRED" };
-        if Instant::now() >= expires { return Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408)); }
-        if *owner.cancellation.borrow() || *display.cancellation.borrow() || owner.finished.load(Ordering::Acquire) || display.finished.load(Ordering::Acquire) { return Ok(false); }
+        let deadline_code = if task_deadline <= approval_deadline {
+            "TOOL_RUN_TIMEOUT"
+        } else {
+            "TOOL_APPROVAL_EXPIRED"
+        };
+        if Instant::now() >= expires {
+            return Err(GatewayError::new(
+                deadline_code,
+                "审批或任务有效期已结束，操作未派发。",
+                408,
+            ));
+        }
+        if *owner.cancellation.borrow()
+            || *display.cancellation.borrow()
+            || owner.finished.load(Ordering::Acquire)
+            || display.finished.load(Ordering::Acquire)
+        {
+            return Ok(false);
+        }
         self.retire_terminal_approvals(owner).await;
         let binding = Self::task_approval_binding(owner, receipt);
         if let Some((task_id, fingerprint)) = &binding {
             let mut approvals = self.approvals.lock().await;
             if let Some(task) = approvals.tasks.get_mut(task_id) {
-                if task.conversation_id == owner.conversation_id && task.bindings.contains(task_id, fingerprint) {
+                if task.conversation_id == owner.conversation_id
+                    && task.bindings.contains(task_id, fingerprint)
+                {
                     task.touched = Instant::now();
                     return Ok(true);
                 }
             }
         }
-        let id = receipt["invocation"]["id"].as_str().ok_or_else(||GatewayError::new("INVALID_APPROVAL_RECEIPT", "审批回执无效。", 500))?.to_owned();
+        let id = receipt["invocation"]["id"]
+            .as_str()
+            .ok_or_else(|| GatewayError::new("INVALID_APPROVAL_RECEIPT", "审批回执无效。", 500))?
+            .to_owned();
         let (sender, receiver) = oneshot::channel();
         let mut owner_cancel = owner.cancellation.subscribe();
         let mut display_cancel = display.cancellation.subscribe();
-        self.approvals.lock().await.pending.insert(id.clone(), Approval {
-            conversation:display.conversation_id.clone(), request:display.request_id.clone(), call:call["id"].as_str().unwrap_or("").into(),
-            response:sender, owner:Arc::downgrade(owner), task_binding:binding.clone(), expires, deadline_code,
-        });
+        self.approvals.lock().await.pending.insert(
+            id.clone(),
+            Approval {
+                conversation: display.conversation_id.clone(),
+                request: display.request_id.clone(),
+                call: call["id"].as_str().unwrap_or("").into(),
+                response: sender,
+                owner: Arc::downgrade(owner),
+                task_binding: binding.clone(),
+                expires,
+                deadline_code,
+            },
+        );
         let child = !Arc::ptr_eq(owner, display);
-        let task_id = owner.journal.as_ref().map(|journal|journal.task_id());
-        let description = if binding.is_none() { "当前调用不具备有效任务范围，仅可单次批准。" }
-            else if receipt["invocation"]["taskApproval"]["kind"] == "same-file-write" { "本任务内允许写入同一文件；每次仍校验当前文件哈希。暂停后保留，重启后需重新批准。" }
-            else { "本任务内允许相同工具、参数与工作范围；更换目标或配置需再次批准。暂停后保留，重启后需重新批准。" };
+        let task_id = owner.journal.as_ref().map(|journal| journal.task_id());
+        let description = if binding.is_none() {
+            "当前调用不具备有效任务范围，仅可单次批准。"
+        } else if receipt["invocation"]["taskApproval"]["kind"] == "same-file-write" {
+            "本任务内允许写入同一文件；每次仍校验当前文件哈希。暂停后保留，重启后需重新批准。"
+        } else {
+            "本任务内允许相同工具、参数与工作范围；更换目标或配置需再次批准。暂停后保留，重启后需重新批准。"
+        };
         display.emit(json!({"type":if child{"task_approval_required"}else{"approval_required"},"taskId":task_id,
             "tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,
             "summary":if child{"子任务等待授权"}else{"等待授权"},"round":round,"order":order,
             "taskApprovalAvailable":binding.is_some(),"taskApprovalDescription":description}})).await;
         let waiting_started = Instant::now();
-        let decision = if *owner_cancel.borrow() || *display_cancel.borrow() || owner.finished.load(Ordering::Acquire) || display.finished.load(Ordering::Acquire) {
+        let decision = if *owner_cancel.borrow()
+            || *display_cancel.borrow()
+            || owner.finished.load(Ordering::Acquire)
+            || display.finished.load(Ordering::Acquire)
+        {
             Ok(ApprovalDecision::default())
         } else {
             tokio::select! {
@@ -1609,49 +1951,151 @@ impl GatewayRuntime {
             }
         };
         self.approvals.lock().await.pending.remove(&id);
-        owner.resource_wait_ms.fetch_add(waiting_started.elapsed().as_millis() as u64, Ordering::AcqRel);
-        let cancelled = *owner.cancellation.borrow() || *display.cancellation.borrow() || owner.finished.load(Ordering::Acquire) || display.finished.load(Ordering::Acquire);
-        let approved = decision.as_ref().is_ok_and(|decision|decision.approved) && !cancelled;
-        let scope = decision.as_ref().map_or("once",|decision|decision.scope.as_str());
-        let code = decision.as_ref().err().map(|error|error.code.as_str()).or_else(||if cancelled{Some("TOOL_APPROVAL_CANCELLED")}else if !approved{Some("TOOL_APPROVAL_DENIED")}else{None});
+        owner.resource_wait_ms.fetch_add(
+            waiting_started.elapsed().as_millis() as u64,
+            Ordering::AcqRel,
+        );
+        let cancelled = *owner.cancellation.borrow()
+            || *display.cancellation.borrow()
+            || owner.finished.load(Ordering::Acquire)
+            || display.finished.load(Ordering::Acquire);
+        let approved = decision.as_ref().is_ok_and(|decision| decision.approved) && !cancelled;
+        let scope = decision
+            .as_ref()
+            .map_or("once", |decision| decision.scope.as_str());
+        let code = decision
+            .as_ref()
+            .err()
+            .map(|error| error.code.as_str())
+            .or_else(|| {
+                if cancelled {
+                    Some("TOOL_APPROVAL_CANCELLED")
+                } else if !approved {
+                    Some("TOOL_APPROVAL_DENIED")
+                } else {
+                    None
+                }
+            });
         let closed = json!({"type":"approval_closed","taskId":task_id,"approvalId":id,"toolCallId":call["id"],"approved":approved,"scope":scope,"code":code});
         display.emit(closed.clone()).await;
-        if child { let mut compatible=closed;compatible["type"]=json!("task_approval_closed");display.emit(compatible).await; }
+        if child {
+            let mut compatible = closed;
+            compatible["type"] = json!("task_approval_closed");
+            display.emit(compatible).await;
+        }
         self.retire_terminal_approvals(owner).await;
-        decision.map(|_|approved)
+        decision.map(|_| approved)
     }
     pub async fn approve(&self, body: &Value) -> Result<Value, GatewayError> {
-        let id = body["approvalId"].as_str().or_else(||body["id"].as_str()).unwrap_or("");
-        let scope = ApprovalScope::parse(body.get("scope").filter(|value|!value.is_null()).map(|value|value.as_str().unwrap_or("invalid")))
-            .map_err(|message|GatewayError::new("INVALID_APPROVAL_SCOPE",message,400))?;
+        let id = body["approvalId"]
+            .as_str()
+            .or_else(|| body["id"].as_str())
+            .unwrap_or("");
+        let scope = ApprovalScope::parse(
+            body.get("scope")
+                .filter(|value| !value.is_null())
+                .map(|value| value.as_str().unwrap_or("invalid")),
+        )
+        .map_err(|message| GatewayError::new("INVALID_APPROVAL_SCOPE", message, 400))?;
         let mut approvals = self.approvals.lock().await;
-        let pending = approvals.pending.get(id).ok_or_else(||GatewayError::new("APPROVAL_NOT_FOUND","审批已失效或不存在。",404))?;
-        for (key, expected) in [("conversationId",pending.conversation.as_str()),("requestId",pending.request.as_str()),("toolCallId",pending.call.as_str())] {
-            if body[key].as_str()!=Some(expected) { return Err(GatewayError::new("APPROVAL_SCOPE_MISMATCH","审批范围不匹配。",409)); }
-        }
-        if Instant::now()>=pending.expires { let code=pending.deadline_code;approvals.pending.remove(id);return Err(GatewayError::new(code,"审批或任务有效期已结束，操作未派发。",408)); }
-        let approved=body["approved"].as_bool().or_else(||body["allow"].as_bool()).ok_or_else(||GatewayError::new("INVALID_APPROVAL","审批决定无效。",400))?;
-        if scope==ApprovalScope::Task && pending.task_binding.is_none() { return Err(GatewayError::new("TASK_APPROVAL_UNAVAILABLE","当前调用只能单次批准。",400)); }
-        let pending=approvals.pending.remove(id).unwrap();drop(approvals);
-        let owner=pending.owner.upgrade().filter(|run|!run.finished.load(Ordering::Acquire)&&!*run.cancellation.borrow())
-            .ok_or_else(||GatewayError::new("APPROVAL_NOT_FOUND","任务已暂停、结束或取消，本次审批已关闭。",404))?;
-        let mut granted_task=None;
-        if approved && scope==ApprovalScope::Task {
-            let (task_id,fingerprint)=pending.task_binding.as_ref().unwrap();
-            let journal=owner.journal.as_ref().ok_or_else(||GatewayError::new("TASK_APPROVAL_UNAVAILABLE","当前调用没有持久任务身份。",409))?;
-            let current=journal.check_dispatch_fence()?;
-            if current.state.is_terminal() || current.state==crate::storage::task_repository::TaskState::Paused || journal.task_id()!=task_id {
-                return Err(GatewayError::new("APPROVAL_NOT_FOUND","任务授权范围已失效。",409));
+        let pending = approvals
+            .pending
+            .get(id)
+            .ok_or_else(|| GatewayError::new("APPROVAL_NOT_FOUND", "审批已失效或不存在。", 404))?;
+        for (key, expected) in [
+            ("conversationId", pending.conversation.as_str()),
+            ("requestId", pending.request.as_str()),
+            ("toolCallId", pending.call.as_str()),
+        ] {
+            if body[key].as_str() != Some(expected) {
+                return Err(GatewayError::new(
+                    "APPROVAL_SCOPE_MISMATCH",
+                    "审批范围不匹配。",
+                    409,
+                ));
             }
-            let mut approvals=self.approvals.lock().await;
-            if approvals.tasks.len()>=256 && !approvals.tasks.contains_key(task_id) {
-                if let Some(old)=approvals.tasks.iter().min_by_key(|(_,task)|task.touched).map(|(id,_)|id.clone()) { approvals.tasks.remove(&old); }
-            }
-            let task=approvals.tasks.entry(task_id.clone()).or_insert_with(||LiveTaskApproval{conversation_id:owner.conversation_id.clone(),bindings:Default::default(),touched:Instant::now()});
-            task.bindings.allow(task_id,fingerprint);task.touched=Instant::now();granted_task=Some(task_id.clone());
         }
-        let _=pending.response.send(ApprovalDecision{approved,scope});
-        Ok(json!({"approved":approved,"approvalId":id,"toolCallId":pending.call,"scope":scope.as_str(),"taskId":granted_task}))
+        if Instant::now() >= pending.expires {
+            let code = pending.deadline_code;
+            approvals.pending.remove(id);
+            return Err(GatewayError::new(
+                code,
+                "审批或任务有效期已结束，操作未派发。",
+                408,
+            ));
+        }
+        let approved = body["approved"]
+            .as_bool()
+            .or_else(|| body["allow"].as_bool())
+            .ok_or_else(|| GatewayError::new("INVALID_APPROVAL", "审批决定无效。", 400))?;
+        if scope == ApprovalScope::Task && pending.task_binding.is_none() {
+            return Err(GatewayError::new(
+                "TASK_APPROVAL_UNAVAILABLE",
+                "当前调用只能单次批准。",
+                400,
+            ));
+        }
+        let pending = approvals.pending.remove(id).unwrap();
+        drop(approvals);
+        let owner = pending
+            .owner
+            .upgrade()
+            .filter(|run| !run.finished.load(Ordering::Acquire) && !*run.cancellation.borrow())
+            .ok_or_else(|| {
+                GatewayError::new(
+                    "APPROVAL_NOT_FOUND",
+                    "任务已暂停、结束或取消，本次审批已关闭。",
+                    404,
+                )
+            })?;
+        let mut granted_task = None;
+        if approved && scope == ApprovalScope::Task {
+            let (task_id, fingerprint) = pending.task_binding.as_ref().unwrap();
+            let journal = owner.journal.as_ref().ok_or_else(|| {
+                GatewayError::new(
+                    "TASK_APPROVAL_UNAVAILABLE",
+                    "当前调用没有持久任务身份。",
+                    409,
+                )
+            })?;
+            let current = journal.check_dispatch_fence()?;
+            if current.state.is_terminal()
+                || current.state == crate::storage::task_repository::TaskState::Paused
+                || journal.task_id() != task_id
+            {
+                return Err(GatewayError::new(
+                    "APPROVAL_NOT_FOUND",
+                    "任务授权范围已失效。",
+                    409,
+                ));
+            }
+            let mut approvals = self.approvals.lock().await;
+            if approvals.tasks.len() >= 256 && !approvals.tasks.contains_key(task_id) {
+                if let Some(old) = approvals
+                    .tasks
+                    .iter()
+                    .min_by_key(|(_, task)| task.touched)
+                    .map(|(id, _)| id.clone())
+                {
+                    approvals.tasks.remove(&old);
+                }
+            }
+            let task = approvals
+                .tasks
+                .entry(task_id.clone())
+                .or_insert_with(|| LiveTaskApproval {
+                    conversation_id: owner.conversation_id.clone(),
+                    bindings: Default::default(),
+                    touched: Instant::now(),
+                });
+            task.bindings.allow(task_id, fingerprint);
+            task.touched = Instant::now();
+            granted_task = Some(task_id.clone());
+        }
+        let _ = pending.response.send(ApprovalDecision { approved, scope });
+        Ok(
+            json!({"approved":approved,"approvalId":id,"toolCallId":pending.call,"scope":scope.as_str(),"taskId":granted_task}),
+        )
     }
     pub async fn active_requests(&self) -> usize {
         let unfinished = self
@@ -1667,8 +2111,7 @@ impl GatewayRuntime {
             .saturating_add(self.tasks.active_workers().unwrap_or(usize::MAX))
     }
 
-    /// The router must first close its maintenance gate; no new request may enter while roots drain.
-    /// 路由必须先关闭维护入口；根目录结算期间不得进入新请求。
+    /// 路由先关闭维护入口，根目录结算期间不进新请求。
     pub async fn quiesce_storage(&self) -> Result<(), GatewayError> {
         if self.active_requests().await != 0 {
             return Err(GatewayError::new(
@@ -1682,7 +2125,6 @@ impl GatewayRuntime {
         self.model_preparation.shutdown().await;
         crate::models::gateway_local_models::shutdown(&self.config.data_home).await?;
         crate::models::gateway_local_engine::shutdown_for(&self.config.data_home).await;
-        // Released attempts may still own a batched writer; drain it before moving the root.
         // 已释放的尝试可能仍拥有批量写入者；移动根目录前等待其实际退场。
         let journals = self
             .task_journals
@@ -1759,13 +2201,16 @@ impl GatewayRuntime {
 
     fn check_admission(&self) -> Result<(), GatewayError> {
         if *self.background_cancellation.borrow() {
-            return Err(GatewayError::new("GATEWAY_SHUTTING_DOWN", "软件正在退出，已有任务与回执正在保存。", 503));
+            return Err(GatewayError::new(
+                "GATEWAY_SHUTTING_DOWN",
+                "软件正在退出，已有任务与回执正在保存。",
+                503,
+            ));
         }
         Ok(())
     }
 
-    /// Request cancellation without dropping workers that still own execution receipts.
-    /// 请求取消，但不丢弃仍持有执行回执的 Worker。
+    /// 请求取消，但不丢弃仍持有执行结果的 Worker。
     pub(crate) async fn interrupt_for_shutdown(&self) {
         self.close_admission();
         self.tasks.shutdown().await;
@@ -1773,15 +2218,26 @@ impl GatewayRuntime {
         for run in runs {
             if !run.finished.load(Ordering::Acquire) {
                 run.suspending.store(true, Ordering::Release);
-                // Pause the owned tree together so explicit resume can restore its paused descendants.
                 // 同时暂停所属任务树，明确恢复时才能接回这些暂停的子任务。
                 if let Some(journal) = &run.journal {
                     for attempt in 0..2 {
-                        let Ok(task) = journal.load_current() else { break; };
-                        if task.state.is_terminal() || task.state == TaskState::Paused { break; }
-                        match journal.repository().control(journal.task_id(), task.version,
-                            crate::storage::task_repository::TaskControl::Pause) {
-                            Err(error) if attempt == 0 && matches!(error.code(), "TASK_CONFLICT" | "TASK_VERSION_CONFLICT") => {},
+                        let Ok(task) = journal.load_current() else {
+                            break;
+                        };
+                        if task.state.is_terminal() || task.state == TaskState::Paused {
+                            break;
+                        }
+                        match journal.repository().control(
+                            journal.task_id(),
+                            task.version,
+                            crate::storage::task_repository::TaskControl::Pause,
+                        ) {
+                            Err(error)
+                                if attempt == 0
+                                    && matches!(
+                                        error.code(),
+                                        "TASK_CONFLICT" | "TASK_VERSION_CONFLICT"
+                                    ) => {}
                             _ => break,
                         }
                     }
@@ -1798,14 +2254,28 @@ impl GatewayRuntime {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         if let Err(error) = self.tasks.quiesce().await {
-            eprintln!("{}", json!({"code":error.code,"gatewayShutdown":"task-drain"}));
+            eprintln!(
+                "{}",
+                json!({"code":error.code,"gatewayShutdown":"task-drain"})
+            );
         }
-        let journals = self.task_journals.lock().ok().map(|journals| {
-            journals.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
-        }).unwrap_or_default();
+        let journals = self
+            .task_journals
+            .lock()
+            .ok()
+            .map(|journals| {
+                journals
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for journal in journals {
             if let Err(error) = journal.drain_background().await {
-                eprintln!("{}", json!({"code":error.code,"gatewayShutdown":"journal-drain"}));
+                eprintln!(
+                    "{}",
+                    json!({"code":error.code,"gatewayShutdown":"journal-drain"})
+                );
             }
         }
         self.model_preparation.shutdown().await;
@@ -1836,10 +2306,20 @@ impl GatewayRuntime {
         .await;
         let _ = tokio::task::spawn_blocking(crate::models::gateway_inference::shutdown_idle).await;
         let root = self.config.data_root.clone();
-        match tokio::task::spawn_blocking(move || crate::storage::sqlite_connections::drain_root(&root)).await {
-            Ok(Ok(())) => {},
-            Ok(Err(error)) => eprintln!("{}", json!({"code":error.code(),"gatewayShutdown":"database-drain"})),
-            Err(error) => eprintln!("{}", json!({"gatewayShutdown":"database-drain","error":error.to_string()})),
+        match tokio::task::spawn_blocking(move || {
+            crate::storage::sqlite_connections::drain_root(&root)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!(
+                "{}",
+                json!({"code":error.code(),"gatewayShutdown":"database-drain"})
+            ),
+            Err(error) => eprintln!(
+                "{}",
+                json!({"gatewayShutdown":"database-drain","error":error.to_string()})
+            ),
         }
         if let Some(service) = crate::resources::gateway::global() {
             service.close().await;
@@ -1861,13 +2341,24 @@ mod generation_timing_tests {
 
     #[test]
     fn execution_blockers_do_not_interrupt_reply_delivery() {
-        for code in ["TASK_AUTHORIZATION_REQUIRED", "TASK_CAPABILITY_UNAVAILABLE",
-            "TASK_CONTINUATION_NO_PROGRESS", "TASK_COMPLETION_REVIEW_INVALID", "MODEL_NOT_CONFIGURED"] {
+        for code in [
+            "TASK_AUTHORIZATION_REQUIRED",
+            "TASK_CAPABILITY_UNAVAILABLE",
+            "TASK_CONTINUATION_NO_PROGRESS",
+            "TASK_COMPLETION_REVIEW_INVALID",
+            "MODEL_NOT_CONFIGURED",
+        ] {
             assert!(!reply_interrupted(code, false), "{code}");
             assert!(reply_interrupted(code, true), "{code}");
         }
-        for code in ["ABORT_ERR", "TASK_PAUSED", "TASK_CANCELLED", "MODEL_NETWORK_FAILED",
-            "MODEL_RESPONSE_TIMEOUT", "MODEL_STREAM_INCOMPLETE"] {
+        for code in [
+            "ABORT_ERR",
+            "TASK_PAUSED",
+            "TASK_CANCELLED",
+            "MODEL_NETWORK_FAILED",
+            "MODEL_RESPONSE_TIMEOUT",
+            "MODEL_STREAM_INCOMPLETE",
+        ] {
             assert!(reply_interrupted(code, false), "{code}");
         }
     }
@@ -1878,7 +2369,10 @@ mod generation_timing_tests {
         assert_eq!(generation_elapsed_ms(Some(12_345), None), Some(12_345));
         let started = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         assert!(generation_elapsed_ms(Some(12_345), Some(started)).unwrap() >= 14_345);
-        assert_eq!(generation_elapsed_ms(Some(u64::MAX), Some(started)), Some(MAXIMUM_SAFE_ELAPSED_MS));
+        assert_eq!(
+            generation_elapsed_ms(Some(u64::MAX), Some(started)),
+            Some(MAXIMUM_SAFE_ELAPSED_MS)
+        );
     }
 
     #[tokio::test]
@@ -1886,24 +2380,50 @@ mod generation_timing_tests {
         let run = RequestRun::test_run(8);
         run.emit(json!({"type":"started","status":"queued"})).await;
         let before = run.recovery(0).await.unwrap();
-        assert!(before.events.iter().all(|event| event["generationElapsedMs"].is_null()));
+        assert!(
+            before
+                .events
+                .iter()
+                .all(|event| event["generationElapsedMs"].is_null())
+        );
 
-        run.emit(json!({"type":"generation_timing","generationElapsedMs":12_000,
-            "generationActive":true})).await;
+        run.emit(
+            json!({"type":"generation_timing","generationElapsedMs":12_000,
+            "generationActive":true}),
+        )
+        .await;
         let reply = new_id();
         run.emit(json!({"type":"reply_anchor","replyMessageId":reply,
-            "userMessageId":new_id()})).await;
+            "userMessageId":new_id()}))
+            .await;
         let recovered = run.recovery(0).await.unwrap();
-        assert!(!recovered.events.iter().any(|event| event["type"] == "assistant_segment"));
+        assert!(
+            !recovered
+                .events
+                .iter()
+                .any(|event| event["type"] == "assistant_segment")
+        );
         for kind in ["reply_anchor", "content_snapshot"] {
-            let event = recovered.events.iter().find(|event| event["type"] == kind).unwrap();
+            let event = recovered
+                .events
+                .iter()
+                .find(|event| event["type"] == kind)
+                .unwrap();
             assert_eq!(event["replyMessageId"], reply);
             assert!(event["generationElapsedMs"].as_u64().unwrap() >= 12_000);
             assert_eq!(event["generationActive"], true);
         }
         let caught_up = run.recovery(recovered.through).await.unwrap();
-        let timing = caught_up.events.iter().find(|event| event["type"] == "generation_timing").unwrap();
-        assert!(timing["createdAt"].as_str().is_some_and(|value| !value.is_empty()));
+        let timing = caught_up
+            .events
+            .iter()
+            .find(|event| event["type"] == "generation_timing")
+            .unwrap();
+        assert!(
+            timing["createdAt"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
         assert!(timing["generationElapsedMs"].as_u64().unwrap() >= 12_000);
         assert_eq!(timing["generationActive"], true);
     }
@@ -1913,7 +2433,8 @@ mod generation_timing_tests {
         let mut run = RequestRun::test_run(4);
         let task_id = new_id();
         Arc::get_mut(&mut run).unwrap().accepted_task_id = Some(task_id.clone());
-        run.finish(json!({"type":"completed","content":"saved response","reasoning":""})).await;
+        run.finish(json!({"type":"completed","content":"saved response","reasoning":""}))
+            .await;
         let started = run.stream_started().await;
         assert_eq!(started["type"], "started");
         assert_eq!(started["conversationId"], run.conversation_id);
@@ -1926,17 +2447,31 @@ mod generation_timing_tests {
     #[tokio::test]
     async fn generation_timing_freezes_and_restores_without_counting_offline_time() {
         let run = RequestRun::test_run(8);
-        assert_eq!(run.restore_generation_timing(Some(21_000)).await, Some(21_000));
+        assert_eq!(
+            run.restore_generation_timing(Some(21_000)).await,
+            Some(21_000)
+        );
         assert_eq!(run.replay.lock().await.generation.elapsed(), Some(21_000));
         assert!(run.replay.lock().await.generation.started.is_none());
-        run.emit(json!({"type":"generation_timing","generationElapsedMs":21_000,
-            "generationActive":true})).await;
+        run.emit(
+            json!({"type":"generation_timing","generationElapsedMs":21_000,
+            "generationActive":true}),
+        )
+        .await;
         run.freeze_generation_timing(Some(22_000)).await;
         assert_eq!(run.replay.lock().await.generation.elapsed(), Some(22_000));
-        assert_eq!(run.restore_generation_timing(Some(20_000)).await, Some(22_000));
-        run.finish(json!({"type":"completed","durationMs":22_500})).await;
+        assert_eq!(
+            run.restore_generation_timing(Some(20_000)).await,
+            Some(22_000)
+        );
+        run.finish(json!({"type":"completed","durationMs":22_500}))
+            .await;
         let recovered = run.recovery(0).await.unwrap();
-        let snapshot = recovered.events.iter().find(|event| event["type"] == "content_snapshot").unwrap();
+        let snapshot = recovered
+            .events
+            .iter()
+            .find(|event| event["type"] == "content_snapshot")
+            .unwrap();
         assert_eq!(snapshot["generationElapsedMs"], 22_500);
         assert_eq!(snapshot["generationActive"], false);
         assert_eq!(run.replay.lock().await.generation.elapsed(), Some(22_500));
@@ -1950,12 +2485,24 @@ mod approval_tests {
     #[test]
     fn model_recovery_retains_narrowed_limits_only_for_the_original_connection() {
         let run = RequestRun::test_run(4);
-        run.retain_model_limits("origin-a", &json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":4800}));
-        run.retain_model_limits("origin-a", &json!({"contextWindowTokens":16384,"estimatedInputBudgetTokens":3600}));
-        assert_eq!(run.observed_model_limits("origin-a"), json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":3600}));
+        run.retain_model_limits(
+            "origin-a",
+            &json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":4800}),
+        );
+        run.retain_model_limits(
+            "origin-a",
+            &json!({"contextWindowTokens":16384,"estimatedInputBudgetTokens":3600}),
+        );
+        assert_eq!(
+            run.observed_model_limits("origin-a"),
+            json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":3600})
+        );
         assert!(run.observed_model_limits("origin-b").is_null());
         run.retain_model_limits("origin-b", &json!({"contextWindowTokens":32768}));
-        assert_eq!(run.observed_model_limits("origin-b"), json!({"contextWindowTokens":32768}));
+        assert_eq!(
+            run.observed_model_limits("origin-b"),
+            json!({"contextWindowTokens":32768})
+        );
         assert!(run.observed_model_limits("origin-a").is_null());
     }
 
@@ -1977,21 +2524,39 @@ mod approval_tests {
 
     fn request_fingerprint(input: &Value) -> String {
         use sha2::{Digest, Sha256};
-        let units = input["message"].as_str().unwrap().encode_utf16()
-            .flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+        let units = input["message"]
+            .as_str()
+            .unwrap()
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
         crate::retrieval::gateway_index::hash(
-            &json!([input, format!("{:x}", Sha256::digest(units))]).to_string())
+            &json!([input, format!("{:x}", Sha256::digest(units))]).to_string(),
+        )
     }
 
-    async fn completed_request_fixture(runtime: &GatewayRuntime, include_reply: bool) -> (Value, String) {
+    async fn completed_request_fixture(
+        runtime: &GatewayRuntime,
+        include_reply: bool,
+    ) -> (Value, String) {
         let input = json!({"conversationId":new_id(),"requestId":new_id(),
             "userMessageId":new_id(),"message":"hello"});
         let fingerprint = request_fingerprint(&input);
-        let task = super::super::gateway_task_input::accept(&runtime.config, &input, None, &fingerprint)
-            .await.unwrap();
+        let task =
+            super::super::gateway_task_input::accept(&runtime.config, &input, None, &fingerprint)
+                .await
+                .unwrap();
         let journal = super::super::gateway_task_journal::TaskJournal::start_existing(
-            &runtime.config.data_root, &task, "completed-request-fixture", 30_000).unwrap();
-        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+            &runtime.config.data_root,
+            &task,
+            "completed-request-fixture",
+            30_000,
+        )
+        .unwrap();
+        journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         data::upsert_message(&runtime.config.data_root, input["conversationId"].as_str().unwrap(),
             &json!({"Id":input["userMessageId"],"Role":"user","Status":"completed","Content":"hello"})).unwrap();
         if include_reply {
@@ -2040,24 +2605,42 @@ mod approval_tests {
             "userMessageId":new_id(),"message":"Create the requested report"});
         let conversation = input["conversationId"].as_str().unwrap();
         let request = input["requestId"].as_str().unwrap();
-        assert_eq!(runtime.pause(conversation, request, None).await.unwrap(),
-            json!({"paused":true,"pendingAcceptance":true}));
+        assert_eq!(
+            runtime.pause(conversation, request, None).await.unwrap(),
+            json!({"paused":true,"pendingAcceptance":true})
+        );
         let error = runtime.begin(input.clone()).await.err().unwrap();
         assert_eq!(error.code, "TASK_CONTROLLED");
-        let repository = crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root).unwrap();
-        let task = repository.find_by_request_id(conversation, request).unwrap().unwrap();
+        let repository =
+            crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root)
+                .unwrap();
+        let task = repository
+            .find_by_request_id(conversation, request)
+            .unwrap()
+            .unwrap();
         assert_eq!(task.state, TaskState::Paused);
         assert!(task.input_reference.is_some());
         assert_eq!(task.usage.model_requests, 0);
         assert!(repository.operations(&task.task_id).unwrap().is_empty());
         assert_eq!(runtime.execution_tasks.load(Ordering::Acquire), 0);
-        assert_eq!(runtime.begin(input.clone()).await.err().unwrap().code, "TASK_CONTROLLED");
-        let duplicate = runtime.pause(conversation, request, Some(&task.task_id)).await.unwrap();
+        assert_eq!(
+            runtime.begin(input.clone()).await.err().unwrap().code,
+            "TASK_CONTROLLED"
+        );
+        let duplicate = runtime
+            .pause(conversation, request, Some(&task.task_id))
+            .await
+            .unwrap();
         assert_eq!(duplicate["taskId"], task.task_id);
         assert_eq!(duplicate["pendingAcceptance"], false);
-        assert_eq!(repository.load(&task.task_id).unwrap().version, task.version);
+        assert_eq!(
+            repository.load(&task.task_id).unwrap().version,
+            task.version
+        );
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(repository); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(repository);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2067,22 +2650,59 @@ mod approval_tests {
         let run = durable_run(&runtime);
         let journal = run.journal.as_ref().unwrap();
         let id = new_id();
-        journal.record_operation(&OperationIntent { operation_id:id.clone(),tool_call_id:new_id(),
-            tool_name:"filesystem.read".into(),input_sha256:"a".repeat(64),input_reference:None,
-            effect:OperationEffect::Observation }).unwrap();
+        journal
+            .record_operation(&OperationIntent {
+                operation_id: id.clone(),
+                tool_call_id: new_id(),
+                tool_name: "filesystem.read".into(),
+                input_sha256: "a".repeat(64),
+                input_reference: None,
+                effect: OperationEffect::Observation,
+            })
+            .unwrap();
         journal.dispatch_operation(&id).unwrap();
-        journal.finish_operation(&id, OperationState::Succeeded, Some(json!({"resultId":"saved-result"})), None).unwrap();
-        let checkpoint = journal.checkpoint_from_chat(&new_id(), &run.request_id, None,
-            json!({"next":"continue remaining requirement"})).await.unwrap();
-        runtime.task_runs.lock().unwrap().insert(journal.task_id().to_owned(), Arc::downgrade(&run));
+        journal
+            .finish_operation(
+                &id,
+                OperationState::Succeeded,
+                Some(json!({"resultId":"saved-result"})),
+                None,
+            )
+            .unwrap();
+        let checkpoint = journal
+            .checkpoint_from_chat(
+                &new_id(),
+                &run.request_id,
+                None,
+                json!({"next":"continue remaining requirement"}),
+            )
+            .await
+            .unwrap();
+        runtime
+            .task_runs
+            .lock()
+            .unwrap()
+            .insert(journal.task_id().to_owned(), Arc::downgrade(&run));
         let before = journal.load_current().unwrap();
-        assert_eq!(runtime.pause(&new_id(), &run.request_id, Some(journal.task_id())).await.unwrap_err().code,
-            "TASK_SCOPE_DENIED");
+        assert_eq!(
+            runtime
+                .pause(&new_id(), &run.request_id, Some(journal.task_id()))
+                .await
+                .unwrap_err()
+                .code,
+            "TASK_SCOPE_DENIED"
+        );
         assert_eq!(journal.load_current().unwrap().version, before.version);
-        // A restored observer can have a new reply request; the original root identity remains authoritative.
         // 恢复观察可使用新回复请求号；原根任务身份仍是暂停目标。
         let observer_request = new_id();
-        let paused = runtime.pause(&run.conversation_id, &observer_request, Some(journal.task_id())).await.unwrap();
+        let paused = runtime
+            .pause(
+                &run.conversation_id,
+                &observer_request,
+                Some(journal.task_id()),
+            )
+            .await
+            .unwrap();
         assert_eq!(paused["paused"], true);
         assert_eq!(paused["taskId"], journal.task_id());
         assert_eq!(journal.load_current().unwrap().state, TaskState::Paused);
@@ -2090,15 +2710,33 @@ mod approval_tests {
         let operations = journal.repository().operations(journal.task_id()).unwrap();
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].state, OperationState::Succeeded);
-        assert_eq!(operations[0].result_reference.as_ref().unwrap()["resultId"], "saved-result");
-        assert_eq!(journal.latest_checkpoint().unwrap().unwrap().checkpoint_id, checkpoint.checkpoint_id);
+        assert_eq!(
+            operations[0].result_reference.as_ref().unwrap()["resultId"],
+            "saved-result"
+        );
+        assert_eq!(
+            journal.latest_checkpoint().unwrap().unwrap().checkpoint_id,
+            checkpoint.checkpoint_id
+        );
         let version = journal.load_current().unwrap().version;
-        runtime.pause(&run.conversation_id, &run.request_id, Some(journal.task_id())).await.unwrap();
+        runtime
+            .pause(
+                &run.conversation_id,
+                &run.request_id,
+                Some(journal.task_id()),
+            )
+            .await
+            .unwrap();
         assert_eq!(journal.load_current().unwrap().version, version);
         assert_eq!(runtime.execution_tasks.load(Ordering::Acquire), 0);
-        journal.finish(TaskState::Paused, Some("fixture-paused")).await.unwrap();
+        journal
+            .finish(TaskState::Paused, Some("fixture-paused"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2111,19 +2749,23 @@ mod approval_tests {
         runs.insert(active.request_id.clone(), active.clone());
         let mut long_running = RequestRun::test_run(4);
         Arc::get_mut(&mut long_running).unwrap().created = created;
-        long_running.finish(json!({"type":"completed","content":"saved long work"})).await;
+        long_running
+            .finish(json!({"type":"completed","content":"saved long work"}))
+            .await;
         runs.insert(long_running.request_id.clone(), long_running.clone());
         let expired = RequestRun::test_run(4);
-        expired.finish(json!({"type":"completed","content":"expired projection"})).await;
+        expired
+            .finish(json!({"type":"completed","content":"expired projection"}))
+            .await;
         *expired.finished_at.lock().unwrap() = Some(created);
         runs.insert(expired.request_id.clone(), expired.clone());
         for _ in 0..MAXIMUM_COMPLETED_REQUESTS {
             let run = RequestRun::test_run(4);
-            run.finish(json!({"type":"completed","content":"recent result"})).await;
+            run.finish(json!({"type":"completed","content":"recent result"}))
+                .await;
             *run.finished_at.lock().unwrap() = Some(recent);
             runs.insert(run.request_id.clone(), run);
         }
-        // Keep the long task recent; its start time must not expire a newly completed reply.
         // 长任务刚完成仍应保留；任务很早开始不代表新完成的回复已经过期。
         *long_running.finished_at.lock().unwrap() = Some(observed);
         GatewayRuntime::retain_recent_completed_runs_at(&mut runs, observed);
@@ -2131,7 +2773,10 @@ mod approval_tests {
         assert!(runs.contains_key(&active.request_id));
         assert!(runs.contains_key(&long_running.request_id));
         assert!(!runs.contains_key(&expired.request_id));
-        assert_eq!(expired.result.lock().await.as_ref().unwrap()["content"], "expired projection");
+        assert_eq!(
+            expired.result.lock().await.as_ref().unwrap()["content"],
+            "expired projection"
+        );
     }
 
     #[tokio::test]
@@ -2139,8 +2784,13 @@ mod approval_tests {
         let (runtime, root) = runtime();
         for _ in 0..MAXIMUM_COMPLETED_REQUESTS {
             let run = RequestRun::test_run(4);
-            run.finish(json!({"type":"completed","content":"cached result"})).await;
-            runtime.runs.lock().await.insert(run.request_id.clone(), run);
+            run.finish(json!({"type":"completed","content":"cached result"}))
+                .await;
+            runtime
+                .runs
+                .lock()
+                .await
+                .insert(run.request_id.clone(), run);
         }
         assert_eq!(runtime.active_requests().await, 0);
         let mut permits = Vec::new();
@@ -2154,10 +2804,15 @@ mod approval_tests {
         assert_eq!(runtime.active_requests().await, MAXIMUM_ACTIVE_REQUESTS);
         drop(permits.pop());
         let accepted = runtime.begin(request).await.err().unwrap();
-        assert_eq!(accepted.code, "INVALID_PERMISSION_MODE",
-            "available active admission must reach validation even with 64 cached completions");
-        assert_eq!(runtime.request_slots.available_permits(), 1,
-            "failed acceptance must release its provisional admission");
+        assert_eq!(
+            accepted.code, "INVALID_PERMISSION_MODE",
+            "available active admission must reach validation even with 64 cached completions"
+        );
+        assert_eq!(
+            runtime.request_slots.available_permits(),
+            1,
+            "failed acceptance must release its provisional admission"
+        );
         drop(permits);
         assert_eq!(runtime.active_requests().await, 0);
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
@@ -2172,17 +2827,30 @@ mod approval_tests {
         let input = json!({"conversationId":cached.conversation_id,"requestId":cached.request_id,
             "userMessageId":new_id(),"message":"hello"});
         Arc::get_mut(&mut cached).unwrap().fingerprint = request_fingerprint(&input);
-        cached.finish(json!({"type":"completed","content":"saved successful response"})).await;
-        runtime.runs.lock().await.insert(cached.request_id.clone(), cached.clone());
-        let held = runtime.request_slots.clone().acquire_many_owned(MAXIMUM_ACTIVE_REQUESTS as u32)
-            .await.unwrap();
+        cached
+            .finish(json!({"type":"completed","content":"saved successful response"}))
+            .await;
+        runtime
+            .runs
+            .lock()
+            .await
+            .insert(cached.request_id.clone(), cached.clone());
+        let held = runtime
+            .request_slots
+            .clone()
+            .acquire_many_owned(MAXIMUM_ACTIVE_REQUESTS as u32)
+            .await
+            .unwrap();
         let observed = runtime.begin(input.clone()).await.unwrap();
         assert!(Arc::ptr_eq(&observed, &cached));
         assert_eq!(runtime.execution_tasks.load(Ordering::Acquire), 0);
         assert_eq!(runtime.request_slots.available_permits(), 0);
         let mut changed = input;
         changed["message"] = json!("different content");
-        assert_eq!(runtime.begin(changed).await.err().unwrap().code, "CHAT_REQUEST_CONFLICT");
+        assert_eq!(
+            runtime.begin(changed).await.err().unwrap().code,
+            "CHAT_REQUEST_CONFLICT"
+        );
         drop(held);
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -2193,14 +2861,22 @@ mod approval_tests {
         let (runtime, root) = runtime();
         let (input, task_id) = completed_request_fixture(&runtime, true).await;
         assert!(runtime.runs.lock().await.is_empty());
-        let held = runtime.request_slots.clone().acquire_many_owned(MAXIMUM_ACTIVE_REQUESTS as u32)
-            .await.unwrap();
+        let held = runtime
+            .request_slots
+            .clone()
+            .acquire_many_owned(MAXIMUM_ACTIVE_REQUESTS as u32)
+            .await
+            .unwrap();
         let run = runtime.begin(input.clone()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !run.finished.load(Ordering::Acquire) || runtime.execution_tasks.load(Ordering::Acquire) != 0 {
+            while !run.finished.load(Ordering::Acquire)
+                || runtime.execution_tasks.load(Ordering::Acquire) != 0
+            {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let result = run.result.lock().await.clone().unwrap();
         assert_eq!(result["type"], "completed", "{result}");
         assert_eq!(result["reused"], true);
@@ -2208,13 +2884,18 @@ mod approval_tests {
         assert!(run.journal.is_none());
         assert_eq!(run.stream_started().await["taskId"], task_id);
         assert_eq!(runtime.request_slots.available_permits(), 0);
-        let repository = crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root).unwrap();
+        let repository =
+            crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root)
+                .unwrap();
         let task = repository.load(&task_id).unwrap();
         assert_eq!(task.state, TaskState::Completed);
         assert_eq!(task.usage.model_requests, 0);
         let mut changed = input;
         changed["message"] = json!("changed content");
-        assert_eq!(runtime.begin(changed).await.err().unwrap().code, "CHAT_REQUEST_CONFLICT");
+        assert_eq!(
+            runtime.begin(changed).await.err().unwrap().code,
+            "CHAT_REQUEST_CONFLICT"
+        );
         drop(held);
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(repository);
@@ -2227,19 +2908,32 @@ mod approval_tests {
     async fn completed_request_without_saved_reply_never_dispatches_new_work() {
         let (runtime, root) = runtime();
         let (input, task_id) = completed_request_fixture(&runtime, false).await;
-        let held = runtime.request_slots.clone().acquire_many_owned(MAXIMUM_ACTIVE_REQUESTS as u32)
-            .await.unwrap();
+        let held = runtime
+            .request_slots
+            .clone()
+            .acquire_many_owned(MAXIMUM_ACTIVE_REQUESTS as u32)
+            .await
+            .unwrap();
         let run = runtime.begin(input).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !run.finished.load(Ordering::Acquire) || runtime.execution_tasks.load(Ordering::Acquire) != 0 {
+            while !run.finished.load(Ordering::Acquire)
+                || runtime.execution_tasks.load(Ordering::Acquire) != 0
+            {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let result = run.result.lock().await.clone().unwrap();
-        assert_eq!(result["type"], "error", "{result}");
-        assert_eq!(result["code"], "CHAT_COMPLETED_REPLY_UNAVAILABLE", "{result}");
+        assert_eq!(result["type"], "completed", "{result}");
+        assert_eq!(
+            result["code"], "CHAT_COMPLETED_REPLY_UNAVAILABLE",
+            "{result}"
+        );
         assert_eq!(runtime.request_slots.available_permits(), 0);
-        let repository = crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root).unwrap();
+        let repository =
+            crate::storage::task_repository::TaskRepository::open(&runtime.config.data_root)
+                .unwrap();
         let task = repository.load(&task_id).unwrap();
         assert_eq!(task.state, TaskState::Completed);
         assert_eq!(task.usage.model_requests, 0);
@@ -2258,43 +2952,98 @@ mod approval_tests {
         let (runtime, root) = runtime();
         let run = durable_run(&runtime);
         let journal = run.journal.as_ref().unwrap();
-        let reply = new_id(); let segment = new_id();
+        let reply = new_id();
+        let segment = new_id();
         let mut wire = run.events.subscribe();
-        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":new_id()})).await;
+        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":new_id()}))
+            .await;
         run.emit(json!({"type":"assistant_segment","segment":{"id":segment,"phase":"commentary","status":"streaming","round":1,"order":1,"content":"","reasoning":""}})).await;
         let text = "金色 🏰\n\0".repeat(4000);
-        run.emit(json!({"type":"text_delta","segmentId":segment,"delta":text})).await;
-        run.emit(json!({"type":"reasoning_delta","segmentId":segment,"delta":"saved visible reasoning"})).await;
-        run.emit(json!({"type":"task_progress","phase":"working"})).await;
-        let committed = journal.repository().read_events(journal.task_id(),0,512).unwrap();
-        let mut published_text = String::new(); let mut first_delta = None;
+        run.emit(json!({"type":"text_delta","segmentId":segment,"delta":text}))
+            .await;
+        run.emit(
+            json!({"type":"reasoning_delta","segmentId":segment,"delta":"saved visible reasoning"}),
+        )
+        .await;
+        run.emit(json!({"type":"task_progress","phase":"working"}))
+            .await;
+        let committed = journal
+            .repository()
+            .read_events(journal.task_id(), 0, 512)
+            .unwrap();
+        let mut published_text = String::new();
+        let mut first_delta = None;
         while let Ok(event) = wire.try_recv() {
             if event["type"] == "text_delta" {
                 first_delta.get_or_insert(event["eventSequence"].as_u64().unwrap());
                 published_text.push_str(event["delta"].as_str().unwrap());
-                let saved = committed.iter().find(|saved|saved.payload["eventSequence"] == event["eventSequence"]
-                    && saved.payload["requestId"] == run.request_id).expect("broadcast requires committed original observation");
-                assert_eq!(saved.payload["delta"],event["delta"]);
+                let saved = committed
+                    .iter()
+                    .find(|saved| {
+                        saved.payload["eventSequence"] == event["eventSequence"]
+                            && saved.payload["requestId"] == run.request_id
+                    })
+                    .expect("broadcast requires committed original observation");
+                assert_eq!(saved.payload["delta"], event["delta"]);
             }
         }
-        assert_eq!(published_text,text);
-        let full = journal.repository().stream_projection(journal.task_id(),&run.request_id,&reply,0).unwrap();
-        assert_eq!(full["complete"],true); assert_eq!(full["content"],text);
-        assert_eq!(full["reasoning"],"saved visible reasoning");
-        let suffix = journal.repository().stream_projection(journal.task_id(),&run.request_id,&reply,first_delta.unwrap()).unwrap();
-        assert_eq!(suffix["baseContent"].as_str().unwrap().to_owned()+suffix["content"].as_str().unwrap(),text);
-        assert!(journal.repository().stream_projection(journal.task_id(),&new_id(),&reply,0).is_err());
-        let connection = crate::storage::sqlite_connections::acquire(&runtime.config.data_root,
-            &runtime.config.data_root.join("Agent/tasks.sqlite"),30_000).unwrap();
+        assert_eq!(published_text, text);
+        let full = journal
+            .repository()
+            .stream_projection(journal.task_id(), &run.request_id, &reply, 0)
+            .unwrap();
+        assert_eq!(full["complete"], true);
+        assert_eq!(full["content"], text);
+        assert_eq!(full["reasoning"], "saved visible reasoning");
+        let suffix = journal
+            .repository()
+            .stream_projection(
+                journal.task_id(),
+                &run.request_id,
+                &reply,
+                first_delta.unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            suffix["baseContent"].as_str().unwrap().to_owned()
+                + suffix["content"].as_str().unwrap(),
+            text
+        );
+        assert!(
+            journal
+                .repository()
+                .stream_projection(journal.task_id(), &new_id(), &reply, 0)
+                .is_err()
+        );
+        let connection = crate::storage::sqlite_connections::acquire(
+            &runtime.config.data_root,
+            &runtime.config.data_root.join("Agent/tasks.sqlite"),
+            30_000,
+        )
+        .unwrap();
         let compressed: i64 = connection.query_row("SELECT count(*) FROM task_events WHERE task_id=? AND json_extract(document,'$.streamEncoding')='zlib-task-event-v1'",
             [journal.task_id()],|row|row.get(0)).unwrap();
-        assert!(compressed>0,"real ledger stores lossless compact stream records");
+        assert!(
+            compressed > 0,
+            "real ledger stores lossless compact stream records"
+        );
         drop(connection);
-        assert_eq!(journal.load_current().unwrap().usage.model_requests,0);
-        assert!(journal.repository().operations(journal.task_id()).unwrap().is_empty());
-        journal.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
+        assert_eq!(journal.load_current().unwrap().usage.model_requests, 0);
+        assert!(
+            journal
+                .repository()
+                .operations(journal.task_id())
+                .unwrap()
+                .is_empty()
+        );
+        journal
+            .finish(TaskState::Partial, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2307,31 +3056,56 @@ mod approval_tests {
         let first = wire.recv().await.unwrap();
         let initial_batches = journal.committed_event_batches();
         for index in 0..12 {
-            run.emit(json!({"type":"text_delta","delta":format!("-{index}")})).await;
+            run.emit(json!({"type":"text_delta","delta":format!("-{index}")}))
+                .await;
         }
-        assert_eq!(run.published_stream_sequence().await, first["eventSequence"].as_u64().unwrap());
-        assert!(wire.try_recv().is_err(), "queued bytes are not a published promise");
+        assert_eq!(
+            run.published_stream_sequence().await,
+            first["eventSequence"].as_u64().unwrap()
+        );
+        assert!(
+            wire.try_recv().is_err(),
+            "queued bytes are not a published promise"
+        );
         assert_eq!(journal.pending_event_ids().len(), 12);
         let ids = journal.pending_event_ids();
-        run.finish(json!({"type":"completed","content":"first-0-1-2-3-4-5-6-7-8-9-10-11"})).await;
-        assert_eq!(journal.committed_event_batches() - initial_batches, 1,
-            "sequential provider emits and the terminal share one actual repository transaction");
-        let saved = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
+        run.finish(json!({"type":"completed","content":"first-0-1-2-3-4-5-6-7-8-9-10-11"}))
+            .await;
+        assert_eq!(
+            journal.committed_event_batches() - initial_batches,
+            1,
+            "sequential provider emits and the terminal share one actual repository transaction"
+        );
+        let saved = journal
+            .repository()
+            .read_events(journal.task_id(), 0, 512)
+            .unwrap();
         let mut previous = first["eventSequence"].as_u64().unwrap();
         for index in 0..13 {
             let event = wire.recv().await.unwrap();
             previous += 1;
             assert_eq!(event["eventSequence"], previous);
-            let stored = saved.iter().find(|saved| saved.payload["eventSequence"] == previous).unwrap();
-            if index < 12 { assert_eq!(stored.event_id, ids[index]); }
+            let stored = saved
+                .iter()
+                .find(|saved| saved.payload["eventSequence"] == previous)
+                .unwrap();
+            if index < 12 {
+                assert_eq!(stored.event_id, ids[index]);
+            }
             assert_eq!(terminal_event(&event), index == 12);
         }
         assert_eq!(run.recovery(0).await.unwrap().through, previous);
-        run.emit(json!({"type":"text_delta","delta":"must not follow completion"})).await;
+        run.emit(json!({"type":"text_delta","delta":"must not follow completion"}))
+            .await;
         assert!(wire.try_recv().is_err());
-        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2343,16 +3117,24 @@ mod approval_tests {
         run.emit(json!({"type":"text_delta","delta":"saved"})).await;
         let first = wire.recv().await.unwrap();
         let through = first["eventSequence"].as_u64().unwrap();
-        let blocker = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        let blocker =
+            rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite"))
+                .unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        run.emit(json!({"type":"reasoning_delta","delta":"known reason"})).await;
-        run.emit(json!({"type":"text_delta","delta":" tail 🏰"})).await;
+        run.emit(json!({"type":"reasoning_delta","delta":"known reason"}))
+            .await;
+        run.emit(json!({"type":"text_delta","delta":" tail 🏰"}))
+            .await;
         let ids = journal.pending_event_ids();
         assert_eq!(ids.len(), 2);
         run.cancel();
         tokio::time::timeout(Duration::from_secs(1), async {
-            while run.emission.try_lock().is_ok() { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while run.emission.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let recovery = run.recovery(0).await.unwrap();
         assert_eq!(recovery.through, through);
         assert!(wire.try_recv().is_err());
@@ -2360,23 +3142,50 @@ mod approval_tests {
         blocker.execute_batch("ROLLBACK").unwrap();
         drop(blocker);
         for (index, id) in ids.iter().enumerate() {
-            let event = tokio::time::timeout(Duration::from_secs(5), wire.recv()).await.unwrap().unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), wire.recv())
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(event["eventSequence"], through + index as u64 + 1);
-            let committed = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
-            let stored = committed.iter().filter(|saved| saved.event_id == *id).collect::<Vec<_>>();
+            let committed = journal
+                .repository()
+                .read_events(journal.task_id(), 0, 512)
+                .unwrap();
+            let stored = committed
+                .iter()
+                .filter(|saved| saved.event_id == *id)
+                .collect::<Vec<_>>();
             assert_eq!(stored.len(), 1);
             assert_eq!(stored[0].payload["delta"], event["delta"]);
         }
         let task = journal.load_current().unwrap();
-        journal.repository().control(journal.task_id(), task.version,
-            crate::storage::task_repository::TaskControl::Pause).unwrap();
-        journal.finish(TaskState::Paused, Some("fixture-paused")).await.unwrap();
-        run.finish(json!({"type":"interrupted","content":"saved tail 🏰"})).await;
+        journal
+            .repository()
+            .control(
+                journal.task_id(),
+                task.version,
+                crate::storage::task_repository::TaskControl::Pause,
+            )
+            .unwrap();
+        journal
+            .finish(TaskState::Paused, Some("fixture-paused"))
+            .await
+            .unwrap();
+        run.finish(json!({"type":"interrupted","content":"saved tail 🏰"}))
+            .await;
         assert!(terminal_event(&wire.recv().await.unwrap()));
         assert!(run.finished.load(Ordering::Acquire));
-        assert!(journal.repository().operations(journal.task_id()).unwrap().is_empty());
+        assert!(
+            journal
+                .repository()
+                .operations(journal.task_id())
+                .unwrap()
+                .is_empty()
+        );
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2385,29 +3194,55 @@ mod approval_tests {
         let run = durable_run(&runtime);
         let journal = run.journal.as_ref().unwrap();
         let mut wire = run.events.subscribe();
-        let blocker = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        let blocker =
+            rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite"))
+                .unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         let operation = run.clone();
         let emitting = tokio::spawn(async move {
-            operation.emit(json!({"type":"text_delta","delta":"accepted before disconnect"})).await;
+            operation
+                .emit(json!({"type":"text_delta","delta":"accepted before disconnect"}))
+                .await;
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while journal.pending_event_ids().is_empty() { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while journal.pending_event_ids().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let ids = journal.pending_event_ids();
         emitting.abort();
         assert!(emitting.await.unwrap_err().is_cancelled());
         assert_eq!(run.published_stream_sequence().await, 0);
         blocker.execute_batch("ROLLBACK").unwrap();
         drop(blocker);
-        let event = tokio::time::timeout(Duration::from_secs(5), wire.recv()).await.unwrap().unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), wire.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(event["delta"], "accepted before disconnect");
-        let saved = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
-        assert_eq!(saved.iter().filter(|saved| saved.event_id == ids[0]).count(), 1);
-        run.finish(json!({"type":"completed","content":"accepted before disconnect"})).await;
-        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        let saved = journal
+            .repository()
+            .read_events(journal.task_id(), 0, 512)
+            .unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .filter(|saved| saved.event_id == ids[0])
+                .count(),
+            1
+        );
+        run.finish(json!({"type":"completed","content":"accepted before disconnect"}))
+            .await;
+        journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2418,15 +3253,31 @@ mod approval_tests {
         let mut wire = run.events.subscribe();
         run.emit(json!({"type":"text_delta","delta":"first"})).await;
         let _ = wire.recv().await.unwrap();
-        run.emit(json!({"type":"text_delta","delta":" retained tail"})).await;
+        run.emit(json!({"type":"text_delta","delta":" retained tail"}))
+            .await;
         drop(run);
-        let event = tokio::time::timeout(Duration::from_secs(5), wire.recv()).await.unwrap().unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), wire.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(event["delta"], " retained tail");
-        let saved = journal.repository().read_events(journal.task_id(), 0, 512).unwrap();
-        assert!(saved.iter().any(|saved| saved.payload["delta"] == event["delta"]));
-        journal.finish(TaskState::Partial, Some("fixture-complete")).await.unwrap();
+        let saved = journal
+            .repository()
+            .read_events(journal.task_id(), 0, 512)
+            .unwrap();
+        assert!(
+            saved
+                .iter()
+                .any(|saved| saved.payload["delta"] == event["delta"])
+        );
+        journal
+            .finish(TaskState::Partial, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(journal); drop(runtime); std::fs::remove_dir_all(root).unwrap();
+        drop(journal);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2438,13 +3289,28 @@ mod approval_tests {
             "recoveryHandle":{"kind":"mcp-task","taskId":"remote-owned-id"}})).await;
         let replay = run.recovery(0).await.unwrap();
         assert_eq!(replay.through, 0);
-        assert!(replay.events.iter().all(|event| event["type"] != "mcp_task_checkpoint"));
+        assert!(
+            replay
+                .events
+                .iter()
+                .all(|event| event["type"] != "mcp_task_checkpoint")
+        );
         let journal = run.journal.as_ref().unwrap();
-        let checkpoints = journal.repository().recovery_receipts(journal.task_id()).unwrap();
-        assert!(checkpoints.iter().any(|event| event.kind == "mcp_task_checkpoint"
-            && event.payload["operationId"] == "round-1:remote-write"
-            && event.payload["requestId"] == run.request_id));
-        journal.finish(TaskState::Partial, Some("fixture-complete")).await.unwrap();
+        let checkpoints = journal
+            .repository()
+            .recovery_receipts(journal.task_id())
+            .unwrap();
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event.kind == "mcp_task_checkpoint"
+                    && event.payload["operationId"] == "round-1:remote-write"
+                    && event.payload["requestId"] == run.request_id)
+        );
+        journal
+            .finish(TaskState::Partial, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(run);
         drop(runtime);
@@ -2456,28 +3322,42 @@ mod approval_tests {
         use crate::storage::task_repository::TaskState;
         let (runtime, root) = runtime();
         let run = durable_run(&runtime);
-        let blocker = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        let blocker =
+            rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite"))
+                .unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         let operation = run.clone();
         let finishing = tokio::spawn(async move {
-            operation.finish(json!({"type":"completed","content":"durable final","reasoning":""})).await;
+            operation
+                .finish(json!({"type":"completed","content":"durable final","reasoning":""}))
+                .await;
         });
         tokio::time::timeout(Duration::from_secs(1), async {
             while run.emission.try_lock().is_ok() {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let replay = tokio::time::timeout(Duration::from_millis(100), run.recovery(0)).await;
         let prematurely_finished = run.finished.load(Ordering::Acquire);
         blocker.execute_batch("ROLLBACK").unwrap();
         drop(blocker);
-        tokio::time::timeout(Duration::from_secs(5), finishing).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), finishing)
+            .await
+            .unwrap()
+            .unwrap();
         let replay = replay.unwrap().unwrap();
         assert_eq!(replay.through, 0);
         assert!(replay.events.is_empty());
         assert!(!prematurely_finished);
         assert!(run.finished.load(Ordering::Acquire));
-        run.journal.as_ref().unwrap().finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        run.journal
+            .as_ref()
+            .unwrap()
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(run);
         drop(runtime);
@@ -2490,13 +3370,25 @@ mod approval_tests {
         let (runtime, root) = runtime();
         let run = durable_run(&runtime);
         let journal = run.journal.as_ref().unwrap();
-        let first = journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        let first = journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         assert!(journal.is_released());
-        let repeated = journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        let repeated = journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         assert_eq!(first.version, repeated.version);
         assert_eq!(first.execution_version, repeated.execution_version);
-        assert_eq!(journal.finish(TaskState::WaitingVerification, Some("different-outcome")).await.unwrap_err().code,
-            "TASK_FINAL_STATE_CONFLICT");
+        assert_eq!(
+            journal
+                .finish(TaskState::WaitingVerification, Some("different-outcome"))
+                .await
+                .unwrap_err()
+                .code,
+            "TASK_FINAL_STATE_CONFLICT"
+        );
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(run);
         drop(runtime);
@@ -2506,12 +3398,19 @@ mod approval_tests {
     #[tokio::test]
     async fn recovery_snapshot_remains_the_base_of_later_reconnect_deltas() {
         let run = RequestRun::test_run(16);
-        run.emit(json!({"type":"text_delta","delta":"superseded content"})).await;
-        run.emit(json!({"type":"reply_anchor","replyMessageId":new_id(),"userMessageId":new_id()})).await;
+        run.emit(json!({"type":"text_delta","delta":"superseded content"}))
+            .await;
+        run.emit(json!({"type":"reply_anchor","replyMessageId":new_id(),"userMessageId":new_id()}))
+            .await;
         run.emit(json!({"type":"content_snapshot","content":"preserved progress","reasoning":"preserved reasoning"})).await;
-        run.emit(json!({"type":"text_delta","delta":" and continuation"})).await;
+        run.emit(json!({"type":"text_delta","delta":" and continuation"}))
+            .await;
         let replay = run.recovery(0).await.unwrap();
-        let snapshot = replay.events.iter().find(|event| event["type"] == "content_snapshot").unwrap();
+        let snapshot = replay
+            .events
+            .iter()
+            .find(|event| event["type"] == "content_snapshot")
+            .unwrap();
         assert_eq!(snapshot["content"], "preserved progress and continuation");
         assert_eq!(snapshot["reasoning"], "preserved reasoning");
         assert!(!*run.cancellation.borrow());
@@ -2526,7 +3425,10 @@ mod approval_tests {
         let journal = run.journal.as_ref().unwrap();
         let mut queued = 0;
         loop {
-            match journal.emit_control("fixture.pending", &json!({"index":queued,"padding":"x".repeat(16 * 1024)})) {
+            match journal.emit_control(
+                "fixture.pending",
+                &json!({"index":queued,"padding":"x".repeat(16 * 1024)}),
+            ) {
                 Ok(()) => queued += 1,
                 Err(error) => {
                     assert_eq!(error.code, "TASK_EVENT_BACKPRESSURE");
@@ -2548,15 +3450,29 @@ mod approval_tests {
         let mut progress = 0;
         let mut saved_pending = 0;
         loop {
-            let events = journal.repository().read_events(journal.task_id(), after, 512).unwrap();
-            if events.is_empty() { break; }
+            let events = journal
+                .repository()
+                .read_events(journal.task_id(), after, 512)
+                .unwrap();
+            if events.is_empty() {
+                break;
+            }
             after = events.last().unwrap().sequence;
-            progress += events.iter().filter(|event| event.kind == "task_progress").count();
-            saved_pending += events.iter().filter(|event| event.kind == "fixture.pending").count();
+            progress += events
+                .iter()
+                .filter(|event| event.kind == "task_progress")
+                .count();
+            saved_pending += events
+                .iter()
+                .filter(|event| event.kind == "fixture.pending")
+                .count();
         }
         assert_eq!(progress, 1);
         assert_eq!(saved_pending, queued);
-        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(run);
         drop(runtime);
@@ -2569,29 +3485,63 @@ mod approval_tests {
         let run = durable_run(&runtime);
         let journal = run.journal.as_ref().unwrap();
         let task_id = journal.task_id().to_owned();
-        runtime.runs.lock().await.insert(run.request_id.clone(), run.clone());
-        data::ensure_conversation(&runtime.config.data_root, &run.conversation_id, "Reconnect fixture").unwrap();
+        runtime
+            .runs
+            .lock()
+            .await
+            .insert(run.request_id.clone(), run.clone());
+        data::ensure_conversation(
+            &runtime.config.data_root,
+            &run.conversation_id,
+            "Reconnect fixture",
+        )
+        .unwrap();
         runtime.tasks.metadata(&task_id).await.unwrap();
-        // An unreadable diagnostic artifact must not enter the live stream's permission/attempt check.
-        // 无法读取的诊断成果不应参与活动回复的范围与执行者核验；原记录仍保留供独立诊断。
-        let connection = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        // 无法读取的诊断成果不参与活动回复的检查，原记录仍保留。
+        let connection =
+            rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite"))
+                .unwrap();
         connection.execute(
             "INSERT INTO task_artifacts(task_id,artifact_id,fingerprint,document) VALUES(?,?,?,?)",
             rusqlite::params![&task_id, new_id(), "fixture", "{}"],
         ).unwrap();
         drop(connection);
         assert!(runtime.tasks.detail(&task_id).await.is_err());
-        let attached = tokio::time::timeout(Duration::from_secs(5), runtime.observe_task(&task_id, &run.conversation_id))
-            .await.unwrap().unwrap();
+        let attached = tokio::time::timeout(
+            Duration::from_secs(5),
+            runtime.observe_task(&task_id, &run.conversation_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(Arc::ptr_eq(&run, &attached));
-        assert_eq!(runtime.observe_task(&task_id, &new_id()).await.err().unwrap().code, "TASK_SCOPE_DENIED");
+        assert_eq!(
+            runtime
+                .observe_task(&task_id, &new_id())
+                .await
+                .err()
+                .unwrap()
+                .code,
+            "TASK_SCOPE_DENIED"
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = crate::gateway::router(runtime.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        let response = tokio::time::timeout(Duration::from_secs(5), reqwest::Client::new()
-            .get(format!("http://{address}/api/tasks/{task_id}/stream?conversationId={}", run.conversation_id))
-            .send()).await.unwrap().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            reqwest::Client::new()
+                .get(format!(
+                    "http://{address}/api/tasks/{task_id}/stream?conversationId={}",
+                    run.conversation_id
+                ))
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         drop(response);
@@ -2599,7 +3549,10 @@ mod approval_tests {
         assert_eq!(journal.load_current().unwrap().usage.model_requests, 0);
         assert!(!*run.cancellation.borrow());
         server.abort();
-        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        journal
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(attached);
         drop(run);
@@ -2612,48 +3565,107 @@ mod approval_tests {
         use crate::storage::task_repository::TaskState;
         let (runtime, root) = runtime();
         let run = durable_run(&runtime);
-        runtime.runs.lock().await.insert(run.request_id.clone(), run.clone());
+        runtime
+            .runs
+            .lock()
+            .await
+            .insert(run.request_id.clone(), run.clone());
         let reply = new_id();
         let user_message = new_id();
         run.emit(json!({"type":"started"})).await;
         run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":user_message,"supersededReplyMessageId":run.request_id})).await;
-        run.emit(json!({"type":"text_delta","segmentId":"fixture-segment","delta":"saved progress"})).await;
+        run.emit(
+            json!({"type":"text_delta","segmentId":"fixture-segment","delta":"saved progress"}),
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = crate::gateway::router(runtime.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let client = reqwest::Client::new();
-        let query = format!("conversationId={}&requestId={}", run.conversation_id, run.request_id);
-        let status: Value = client.get(format!("http://{address}/api/chat/status?{query}"))
-            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        let query = format!(
+            "conversationId={}&requestId={}",
+            run.conversation_id, run.request_id
+        );
+        let status: Value = client
+            .get(format!("http://{address}/api/chat/status?{query}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         assert_eq!(status["status"], "running");
         assert_eq!(status["replyAnchor"]["replyMessageId"], reply);
         assert_eq!(status["replyAnchor"]["userMessageId"], user_message);
-        let stream = client.get(format!("http://{address}/api/chat/stream?{query}"))
-            .send().await.unwrap().error_for_status().unwrap();
+        let stream = client
+            .get(format!("http://{address}/api/chat/stream?{query}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
         assert_eq!(stream.headers()["content-type"], "text/event-stream");
         drop(stream);
         tokio::task::yield_now().await;
         assert!(!*run.cancellation.borrow());
         assert!(!run.finished.load(Ordering::Acquire));
         for endpoint in ["status", "stream"] {
-            let response = client.get(format!("http://{address}/api/chat/{endpoint}?conversationId={}&requestId={}", new_id(), run.request_id))
-                .send().await.unwrap();
+            let response = client
+                .get(format!(
+                    "http://{address}/api/chat/{endpoint}?conversationId={}&requestId={}",
+                    new_id(),
+                    run.request_id
+                ))
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status().as_u16(), 404);
         }
         run.finish(json!({"type":"completed","content":"saved progress","reasoning":"","replyMessageId":reply,"taskCompletion":{"completionState":"complete"}})).await;
-        let body = client.get(format!("http://{address}/api/chat/stream?{query}"))
-            .send().await.unwrap().error_for_status().unwrap().text().await.unwrap();
+        let body = client
+            .get(format!("http://{address}/api/chat/stream?{query}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
         assert!(body.contains("content_snapshot"));
         assert!(body.contains("saved progress"));
-        let status: Value = client.get(format!("http://{address}/api/chat/status?{query}"))
-            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        let status: Value = client
+            .get(format!("http://{address}/api/chat/status?{query}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         assert_eq!(status["status"], "completed");
         assert_eq!(status["result"]["replyMessageId"], reply);
-        assert!(Arc::ptr_eq(&run, &runtime.observe_request(&run.conversation_id, &run.request_id).await.unwrap()));
+        assert!(Arc::ptr_eq(
+            &run,
+            &runtime
+                .observe_request(&run.conversation_id, &run.request_id)
+                .await
+                .unwrap()
+        ));
         assert_eq!(runtime.runs.lock().await.len(), 1);
         server.abort();
-        run.journal.as_ref().unwrap().finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        run.journal
+            .as_ref()
+            .unwrap()
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
         drop(run);
         drop(runtime);
@@ -2661,58 +3673,193 @@ mod approval_tests {
     }
 
     #[tokio::test]
-    async fn task_scope_authorization_survives_pause_and_new_request_but_not_a_different_task_or_terminal_state() {
-        use crate::storage::task_repository::{TaskControl,TaskState};
-        let (runtime,root)=runtime();let run=durable_run(&runtime);let mut events=run.events.subscribe();
-        let receipt=json!({"invocation":{"id":new_id(),"taskApproval":{"fingerprint":"f".repeat(64),"kind":"same-file-write"}}});
-        let call=json!({"id":"scoped-call","name":"filesystem.write","arguments":{"path":"report.md"}});
-        let waiting={let runtime=runtime.clone();let run=run.clone();let receipt=receipt.clone();let call=call.clone();
-            tokio::spawn(async move{runtime.await_approval(&run,&call,&receipt,1,1,Instant::now()+Duration::from_secs(10)).await})};
-        let required=loop { let event=events.recv().await.unwrap();if event["type"]=="approval_required" {break event;} };
-        assert_eq!(required["tool"]["taskApprovalAvailable"],true);
+    async fn task_scope_authorization_survives_pause_and_new_request_but_not_a_different_task_or_terminal_state()
+     {
+        use crate::storage::task_repository::{TaskControl, TaskState};
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let mut events = run.events.subscribe();
+        let receipt = json!({"invocation":{"id":new_id(),"taskApproval":{"fingerprint":"f".repeat(64),"kind":"same-file-write"}}});
+        let call =
+            json!({"id":"scoped-call","name":"filesystem.write","arguments":{"path":"report.md"}});
+        let waiting = {
+            let runtime = runtime.clone();
+            let run = run.clone();
+            let receipt = receipt.clone();
+            let call = call.clone();
+            tokio::spawn(async move {
+                runtime
+                    .await_approval(
+                        &run,
+                        &call,
+                        &receipt,
+                        1,
+                        1,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+            })
+        };
+        let required = loop {
+            let event = events.recv().await.unwrap();
+            if event["type"] == "approval_required" {
+                break event;
+            }
+        };
+        assert_eq!(required["tool"]["taskApprovalAvailable"], true);
         let response=runtime.approve(&json!({"approvalId":receipt["invocation"]["id"],"conversationId":run.conversation_id,"requestId":run.request_id,
             "toolCallId":"scoped-call","approved":true,"scope":"task"})).await.unwrap();
-        let task_id=run.journal.as_ref().unwrap().task_id().to_owned();assert_eq!(response["taskId"],task_id);assert_eq!(response["scope"],"task");
+        let task_id = run.journal.as_ref().unwrap().task_id().to_owned();
+        assert_eq!(response["taskId"], task_id);
+        assert_eq!(response["scope"], "task");
         assert!(waiting.await.unwrap().unwrap());
-        let closed=loop {let event=events.recv().await.unwrap();if event["type"]=="approval_closed" {break event;} };
-        assert_eq!(closed["approvalId"],receipt["invocation"]["id"]);assert_eq!(closed["scope"],"task");assert_eq!(closed["approved"],true);
+        let closed = loop {
+            let event = events.recv().await.unwrap();
+            if event["type"] == "approval_closed" {
+                break event;
+            }
+        };
+        assert_eq!(closed["approvalId"], receipt["invocation"]["id"]);
+        assert_eq!(closed["scope"], "task");
+        assert_eq!(closed["approved"], true);
         assert_eq!(runtime.approve(&json!({"approvalId":receipt["invocation"]["id"],"conversationId":run.conversation_id,"requestId":run.request_id,
             "toolCallId":"scoped-call","approved":true,"scope":"task"})).await.unwrap_err().code,"APPROVAL_NOT_FOUND");
-        assert!(runtime.await_approval(&run,&call,&receipt,2,1,Instant::now()+Duration::from_secs(1)).await.unwrap());
-        let foreign=durable_run(&runtime);
-        let foreign_binding=GatewayRuntime::task_approval_binding(&foreign,&receipt).unwrap();
-        assert!(!runtime.approvals.lock().await.tasks[&task_id].bindings.contains(&foreign_binding.0,&foreign_binding.1));
-        foreign.journal.as_ref().unwrap().finish(TaskState::Completed,Some("fixture-complete")).await.unwrap();
-        let journal=run.journal.as_ref().unwrap();
+        assert!(
+            runtime
+                .await_approval(
+                    &run,
+                    &call,
+                    &receipt,
+                    2,
+                    1,
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .await
+                .unwrap()
+        );
+        let foreign = durable_run(&runtime);
+        let foreign_binding = GatewayRuntime::task_approval_binding(&foreign, &receipt).unwrap();
+        assert!(
+            !runtime.approvals.lock().await.tasks[&task_id]
+                .bindings
+                .contains(&foreign_binding.0, &foreign_binding.1)
+        );
+        foreign
+            .journal
+            .as_ref()
+            .unwrap()
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
+        let journal = run.journal.as_ref().unwrap();
         journal.flush().await.unwrap();
-        let current=journal.load_current().unwrap();
-        journal.repository().control(&task_id,current.version,TaskControl::Pause).unwrap();
-        journal.finish(TaskState::Paused,Some("fixture-pause")).await.unwrap();
-        run.cancel();runtime.retire_terminal_approvals(&run).await;assert!(runtime.approvals.lock().await.tasks.contains_key(&task_id));
-        let paused=journal.load_current().unwrap();assert_eq!(paused.state,TaskState::Paused);
-        let queued=journal.repository().control(&task_id,paused.version,TaskControl::Resume).unwrap();
-        let next=super::super::gateway_task_journal::TaskJournal::start_existing(&runtime.config.data_root,&queued,"approval-resume",60_000).unwrap();
-        let mut resumed=RequestRun::test_run(16);{let value=Arc::get_mut(&mut resumed).unwrap();value.conversation_id=run.conversation_id.clone();value.journal=Some(next);}
-        assert_ne!(resumed.request_id,run.request_id);
-        assert!(runtime.await_approval(&resumed,&call,&receipt,3,1,Instant::now()+Duration::from_secs(1)).await.unwrap());
-        resumed.journal.as_ref().unwrap().finish(TaskState::Completed,Some("fixture-complete")).await.unwrap();
-        runtime.retire_terminal_approvals(&resumed).await;assert!(!runtime.approvals.lock().await.tasks.contains_key(&task_id));
-        assert!(GatewayRuntime::task_approval_binding(&resumed,&receipt).is_none());
+        let current = journal.load_current().unwrap();
+        journal
+            .repository()
+            .control(&task_id, current.version, TaskControl::Pause)
+            .unwrap();
+        journal
+            .finish(TaskState::Paused, Some("fixture-pause"))
+            .await
+            .unwrap();
+        run.cancel();
+        runtime.retire_terminal_approvals(&run).await;
+        assert!(runtime.approvals.lock().await.tasks.contains_key(&task_id));
+        let paused = journal.load_current().unwrap();
+        assert_eq!(paused.state, TaskState::Paused);
+        let queued = journal
+            .repository()
+            .control(&task_id, paused.version, TaskControl::Resume)
+            .unwrap();
+        let next = super::super::gateway_task_journal::TaskJournal::start_existing(
+            &runtime.config.data_root,
+            &queued,
+            "approval-resume",
+            60_000,
+        )
+        .unwrap();
+        let mut resumed = RequestRun::test_run(16);
+        {
+            let value = Arc::get_mut(&mut resumed).unwrap();
+            value.conversation_id = run.conversation_id.clone();
+            value.journal = Some(next);
+        }
+        assert_ne!(resumed.request_id, run.request_id);
+        assert!(
+            runtime
+                .await_approval(
+                    &resumed,
+                    &call,
+                    &receipt,
+                    3,
+                    1,
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .await
+                .unwrap()
+        );
+        resumed
+            .journal
+            .as_ref()
+            .unwrap()
+            .finish(TaskState::Completed, Some("fixture-complete"))
+            .await
+            .unwrap();
+        runtime.retire_terminal_approvals(&resumed).await;
+        assert!(!runtime.approvals.lock().await.tasks.contains_key(&task_id));
+        assert!(GatewayRuntime::task_approval_binding(&resumed, &receipt).is_none());
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
-        drop(events);drop(foreign);drop(resumed);drop(run);drop(runtime);std::fs::remove_dir_all(root).unwrap();
+        drop(events);
+        drop(foreign);
+        drop(resumed);
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn cancelled_inline_approval_emits_close_without_finishing_the_reply_or_dispatching() {
-        let (runtime,root)=runtime();let run=RequestRun::test_run(16);let mut events=run.events.subscribe();
-        let receipt=json!({"invocation":{"id":new_id()}});let call=json!({"id":"cancel-call","name":"terminal.host.run","arguments":{}});
-        let waiting={let runtime=runtime.clone();let run=run.clone();let receipt=receipt.clone();
-            tokio::spawn(async move{runtime.await_approval(&run,&call,&receipt,1,1,Instant::now()+Duration::from_secs(10)).await})};
-        loop {if events.recv().await.unwrap()["type"]=="approval_required" {break;}}
-        run.cancel();assert!(!waiting.await.unwrap().unwrap());
-        let closed=loop{let event=events.recv().await.unwrap();if event["type"]=="approval_closed"{break event;}};
-        assert_eq!(closed["approvalId"],receipt["invocation"]["id"]);assert_eq!(closed["toolCallId"],"cancel-call");assert_eq!(closed["approved"],false);
-        assert_eq!(closed["code"],"TOOL_APPROVAL_CANCELLED");assert!(!run.finished.load(Ordering::Acquire));
-        assert!(runtime.approvals.lock().await.pending.is_empty());std::fs::remove_dir_all(root).unwrap();
+        let (runtime, root) = runtime();
+        let run = RequestRun::test_run(16);
+        let mut events = run.events.subscribe();
+        let receipt = json!({"invocation":{"id":new_id()}});
+        let call = json!({"id":"cancel-call","name":"terminal.host.run","arguments":{}});
+        let waiting = {
+            let runtime = runtime.clone();
+            let run = run.clone();
+            let receipt = receipt.clone();
+            tokio::spawn(async move {
+                runtime
+                    .await_approval(
+                        &run,
+                        &call,
+                        &receipt,
+                        1,
+                        1,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+            })
+        };
+        loop {
+            if events.recv().await.unwrap()["type"] == "approval_required" {
+                break;
+            }
+        }
+        run.cancel();
+        assert!(!waiting.await.unwrap().unwrap());
+        let closed = loop {
+            let event = events.recv().await.unwrap();
+            if event["type"] == "approval_closed" {
+                break event;
+            }
+        };
+        assert_eq!(closed["approvalId"], receipt["invocation"]["id"]);
+        assert_eq!(closed["toolCallId"], "cancel-call");
+        assert_eq!(closed["approved"], false);
+        assert_eq!(closed["code"], "TOOL_APPROVAL_CANCELLED");
+        assert!(!run.finished.load(Ordering::Acquire));
+        assert!(runtime.approvals.lock().await.pending.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

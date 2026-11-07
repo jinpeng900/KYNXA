@@ -62,8 +62,7 @@ fn visible_console(value: &Value, hold: u64) -> bool {
         && value["stderr"] == ""
 }
 
-/// Native runners own admission, request and receipt rules; actual ToolHost IPC stays with runtime handles.
-/// 原生执行器拥有准入、请求与回执规则；实际 ToolHost 通信保留在运行时句柄边界。
+/// 原生执行器拥有准入、请求与结果规则；实际 ToolHost 通信保留在运行时句柄边界。
 #[derive(Default)]
 pub struct RunnerState {
     pending: usize,
@@ -200,53 +199,7 @@ impl RunnerState {
                 }
                 Ok(Value::Null)
             }
-            "runner.hostRequest" => {
-                let input = &arguments["input"];
-                let background = input["backgroundJob"] == true;
-                let visible = input["visible"] == true;
-                if !["cmd", "powershell"].contains(&string(&input["shell"]))
-                    || !input["script"].is_string()
-                    || js_trim(string(&input["script"])).is_empty()
-                    || string(&input["script"]).encode_utf16().count() > 16384
-                    || string(&input["script"]).contains('\0')
-                    || !integer(
-                        &input["timeoutMs"],
-                        100,
-                        if background { 21600000 } else { 120000 },
-                    )
-                {
-                    return Err(failure(
-                        "HOST_TERMINAL_INVALID_REQUEST",
-                        "本机终端的命令或超时参数无效。",
-                    ));
-                }
-                if !input["visible"].is_boolean()
-                    || !input["backgroundJob"].is_boolean()
-                    || background && visible
-                    || input
-                        .get("keepOpenMs")
-                        .is_some_and(|value| !visible || !integer(value, 0, 30000))
-                {
-                    return Err(failure(
-                        "HOST_TERMINAL_INVALID_REQUEST",
-                        "本机终端窗口参数无效。",
-                    ));
-                }
-                let cwd = input["cwd"].as_str().unwrap_or("");
-                if !input["cwd"].is_string()
-                    || arguments["cwdAbsolute"] != true
-                    || cwd.starts_with(r"\\")
-                    || cwd.contains(['\0', '\r', '\n'])
-                {
-                    return Err(failure(
-                        "HOST_TERMINAL_INVALID_WORKSPACE",
-                        "本机终端需要有效的绝对本地目录。",
-                    ));
-                }
-                Ok(
-                    json!({"holdMs":input["keepOpenMs"].as_u64().unwrap_or(if visible{5000}else{0}),"operation":if background{"host_terminal_job"}else if visible{"host_terminal_visible"}else{"host_terminal"},"maximumWaitMs":input["timeoutMs"].as_u64().unwrap()+10000}),
-                )
-            }
+            "runner.hostRequest" => self.apply_runner_host_request(arguments),
             "runner.hostPath" => {
                 let binding = &arguments["binding"];
                 if binding["path"] != arguments["cwd"]
@@ -295,56 +248,7 @@ impl RunnerState {
                 }
                 Ok(Value::Null)
             }
-            "runner.hostResult" => {
-                let value = &arguments["value"];
-                if !host_envelope(value) {
-                    return Err(ServiceError::new(
-                        "HOST_TERMINAL_INVALID_RESULT",
-                        "本机终端回执无效。",
-                        502,
-                    ));
-                }
-                if value["completed"] == true {
-                    let identity = value["shell"] == arguments["shell"]
-                        && value["cwd"] == arguments["cwd"]
-                        && value["exitCode"].as_i64().is_some()
-                        && value["stdout"].is_string()
-                        && value["stderr"].is_string()
-                        && value["activeProcessesAfterExit"] == 0
-                        && !truthy(&value["error"]);
-                    let visible = arguments["visible"] == true;
-                    let window = if visible {
-                        visible_console(value, arguments["holdMs"].as_u64().unwrap_or(0))
-                    } else {
-                        value["visibleRequested"] != true
-                    };
-                    if !identity || !window {
-                        return Ok(
-                            json!({"overrides":{"nativeReportedCompleted":true,"completed":false,"outcome":"unknown","message":if !identity{"本机终端完成回执未通过身份核验，请检查实际结果，不要自动重做。"}else{"本机终端窗口回执未通过核验，请检查实际结果，不要自动重做。"}},"isError":true,"status":"unknown","code":"HOST_TERMINAL_INVALID_RESULT"}),
-                        );
-                    }
-                    return Ok(json!({"isError":value["exitCode"]!=0}));
-                }
-                if value["outcome"] == "unknown" {
-                    return Ok(
-                        json!({"isError":true,"status":"unknown","code":if truthy(&value["cancelled"]){"TOOL_CANCELLED"}else if truthy(&value["timedOut"]){"TOOL_TIMED_OUT"}else if truthy(&value["outputLimitExceeded"]){"HOST_TERMINAL_OUTPUT_LIMIT"}else{"HOST_TERMINAL_OUTCOME_UNKNOWN"}}),
-                    );
-                }
-                return Err(ServiceError::new(
-                    if matches(
-                        r"^HOST_TERMINAL_[A-Z0-9_]+$",
-                        string(&value["error"]["code"]),
-                    ) {
-                        string(&value["error"]["code"])
-                    } else {
-                        "HOST_TERMINAL_INVALID_RESULT"
-                    },
-                    value["error"]["message"]
-                        .as_str()
-                        .unwrap_or("本机终端未返回执行回执。"),
-                    502,
-                ));
-            }
+            "runner.hostResult" => self.apply_runner_host_result(arguments),
             "runner.desktopCapabilities" => {
                 let value = &arguments["value"];
                 if !desktop_envelope(value)
@@ -432,8 +336,10 @@ impl RunnerState {
             "runner.sandboxVerified" => Ok(json!(self.verified_sandbox)),
             "runner.sandboxResourceLimits" => {
                 let controls = &arguments["capabilities"]["resourceControls"];
-                if controls["version"] != 1 || controls["cpuRateControl"] != true
-                    || controls["maxJobMemoryBytes"].as_u64().unwrap_or(0) < SANDBOX_JOB_MEMORY_BYTES
+                if controls["version"] != 1
+                    || controls["cpuRateControl"] != true
+                    || controls["maxJobMemoryBytes"].as_u64().unwrap_or(0)
+                        < SANDBOX_JOB_MEMORY_BYTES
                 {
                     return Err(ServiceError::new(
                         "SANDBOX_RESOURCE_CONTROLS_UNAVAILABLE",
@@ -441,10 +347,18 @@ impl RunnerState {
                         503,
                     ));
                 }
-                let local_threads = arguments["logicalCpuThreads"].as_u64().unwrap_or(1).clamp(1, 4096);
-                let maximum_threads = controls["maxCpuThreads"].as_u64().unwrap_or(local_threads).clamp(1, 4096);
-                Ok(json!({"version":1,"cpuThreads":2u64.min(local_threads).min(maximum_threads),
-                    "jobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES}))
+                let local_threads = arguments["logicalCpuThreads"]
+                    .as_u64()
+                    .unwrap_or(1)
+                    .clamp(1, 4096);
+                let maximum_threads = controls["maxCpuThreads"]
+                    .as_u64()
+                    .unwrap_or(local_threads)
+                    .clamp(1, 4096);
+                Ok(
+                    json!({"version":1,"cpuThreads":2u64.min(local_threads).min(maximum_threads),
+                    "jobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES}),
+                )
             }
             "runner.sandboxAllocatedResources" => {
                 let requested = &arguments["requested"];
@@ -454,7 +368,11 @@ impl RunnerState {
                     || !integer(&requested["cpuThreads"], 1, 4096)
                     || requested["jobMemoryBytes"] != SANDBOX_JOB_MEMORY_BYTES
                     || allocation["status"] != "granted"
-                    || !integer(&allocation["cpuThreads"], 1, requested["cpuThreads"].as_u64().unwrap_or(0))
+                    || !integer(
+                        &allocation["cpuThreads"],
+                        1,
+                        requested["cpuThreads"].as_u64().unwrap_or(0),
+                    )
                     || memory < SANDBOX_HELPER_MEMORY_BYTES + 64 * 1024 * 1024
                     || memory > SANDBOX_HELPER_MEMORY_BYTES + SANDBOX_JOB_MEMORY_BYTES
                 {
@@ -464,8 +382,7 @@ impl RunnerState {
                         503,
                     ));
                 }
-                // The helper also needs admission; its allowance is not part of the child job's memory ceiling.
-                // 助手自身也需预约；该预算不计入子作业内存上限，不能把整个授予值传给沙箱。
+                // 助手自身也需预约，这部分预算不计入子作业内存上限。
                 Ok(json!({"version":1,"cpuThreads":allocation["cpuThreads"],
                     "jobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES.min(memory-SANDBOX_HELPER_MEMORY_BYTES)}))
             }
@@ -515,43 +432,7 @@ impl RunnerState {
                 }
                 Ok(Value::Null)
             }
-            "runner.sandboxReceipt" => {
-                let result = &arguments["result"];
-                if result["protocolVersion"] != 1
-                    || result["sandbox"] != "appcontainer"
-                    || result["tokenVerified"] != true
-                    || result["workspaceCopy"] != true
-                    || result["activeProcessesAfterExit"] != 0
-                {
-                    return Err(failure(
-                        "SANDBOX_START_FAILED",
-                        "The native helper did not verify isolated execution and process cleanup.",
-                    ));
-                }
-                if let Some(expected) = arguments.get("resourceLimits") {
-                    let limits = &result["limits"];
-                    if expected["version"] != 1 || limits["resourceVersion"] != 1
-                        || limits["cpuRateControl"] != true
-                        || !integer(&limits["cpuRate"], 1, 10000)
-                        || limits["cpuThreads"] != expected["cpuThreads"]
-                        || limits["jobMemoryBytes"] != expected["jobMemoryBytes"]
-                        || !integer(&limits["processMemoryBytes"], 1, expected["jobMemoryBytes"].as_u64().unwrap_or(0))
-                        || !integer(&limits["processCount"], 1, 16)
-                    {
-                        return Err(ServiceError::new(
-                            "SANDBOX_RESOURCE_RECEIPT_INVALID",
-                            "沙箱回执未证明落实本次授予的 CPU 与内存限制；结果保留为待核验，不能重放。",
-                            502,
-                        ));
-                    }
-                }
-                if !truthy(&result["cancelled"]) {
-                    if let Some(stage) = result["stagingDirectory"].as_str() {
-                        self.stages.insert(stage.into());
-                    }
-                }
-                Ok(Value::Null)
-            }
+            "runner.sandboxReceipt" => self.apply_runner_sandbox_receipt(arguments),
             "runner.sandboxCancelled" => {
                 let result = &arguments["result"];
                 let cleanup = arguments["name"] == "AbortError"
@@ -609,6 +490,148 @@ impl RunnerState {
                 400,
             )),
         }
+    }
+
+    fn apply_runner_host_request(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let input = &arguments["input"];
+        let background = input["backgroundJob"] == true;
+        let visible = input["visible"] == true;
+        if !["cmd", "powershell"].contains(&string(&input["shell"]))
+            || !input["script"].is_string()
+            || js_trim(string(&input["script"])).is_empty()
+            || string(&input["script"]).encode_utf16().count() > 16384
+            || string(&input["script"]).contains('\0')
+            || !integer(
+                &input["timeoutMs"],
+                100,
+                if background { 21600000 } else { 120000 },
+            )
+        {
+            return Err(failure(
+                "HOST_TERMINAL_INVALID_REQUEST",
+                "本机终端的命令或超时参数无效。",
+            ));
+        }
+        if !input["visible"].is_boolean()
+            || !input["backgroundJob"].is_boolean()
+            || background && visible
+            || input
+                .get("keepOpenMs")
+                .is_some_and(|value| !visible || !integer(value, 0, 30000))
+        {
+            return Err(failure(
+                "HOST_TERMINAL_INVALID_REQUEST",
+                "本机终端窗口参数无效。",
+            ));
+        }
+        let cwd = input["cwd"].as_str().unwrap_or("");
+        if !input["cwd"].is_string()
+            || arguments["cwdAbsolute"] != true
+            || cwd.starts_with(r"\\")
+            || cwd.contains(['\0', '\r', '\n'])
+        {
+            return Err(failure(
+                "HOST_TERMINAL_INVALID_WORKSPACE",
+                "本机终端需要有效的绝对本地目录。",
+            ));
+        }
+        Ok(
+            json!({"holdMs":input["keepOpenMs"].as_u64().unwrap_or(if visible{5000}else{0}),"operation":if background{"host_terminal_job"}else if visible{"host_terminal_visible"}else{"host_terminal"},"maximumWaitMs":input["timeoutMs"].as_u64().unwrap()+10000}),
+        )
+    }
+
+    fn apply_runner_host_result(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let value = &arguments["value"];
+        if !host_envelope(value) {
+            return Err(ServiceError::new(
+                "HOST_TERMINAL_INVALID_RESULT",
+                "本机终端回执无效。",
+                502,
+            ));
+        }
+        if value["completed"] == true {
+            let identity = value["shell"] == arguments["shell"]
+                && value["cwd"] == arguments["cwd"]
+                && value["exitCode"].as_i64().is_some()
+                && value["stdout"].is_string()
+                && value["stderr"].is_string()
+                && value["activeProcessesAfterExit"] == 0
+                && !truthy(&value["error"]);
+            let visible = arguments["visible"] == true;
+            let window = if visible {
+                visible_console(value, arguments["holdMs"].as_u64().unwrap_or(0))
+            } else {
+                value["visibleRequested"] != true
+            };
+            if !identity || !window {
+                return Ok(
+                    json!({"overrides":{"nativeReportedCompleted":true,"completed":false,"outcome":"unknown","message":if !identity{"本机终端完成回执未通过身份核验，请检查实际结果，不要自动重做。"}else{"本机终端窗口回执未通过核验，请检查实际结果，不要自动重做。"}},"isError":true,"status":"unknown","code":"HOST_TERMINAL_INVALID_RESULT"}),
+                );
+            }
+            return Ok(json!({"isError":value["exitCode"]!=0}));
+        }
+        if value["outcome"] == "unknown" {
+            return Ok(
+                json!({"isError":true,"status":"unknown","code":if truthy(&value["cancelled"]){"TOOL_CANCELLED"}else if truthy(&value["timedOut"]){"TOOL_TIMED_OUT"}else if truthy(&value["outputLimitExceeded"]){"HOST_TERMINAL_OUTPUT_LIMIT"}else{"HOST_TERMINAL_OUTCOME_UNKNOWN"}}),
+            );
+        }
+        return Err(ServiceError::new(
+            if matches(
+                r"^HOST_TERMINAL_[A-Z0-9_]+$",
+                string(&value["error"]["code"]),
+            ) {
+                string(&value["error"]["code"])
+            } else {
+                "HOST_TERMINAL_INVALID_RESULT"
+            },
+            value["error"]["message"]
+                .as_str()
+                .unwrap_or("本机终端未返回执行回执。"),
+            502,
+        ));
+    }
+
+    fn apply_runner_sandbox_receipt(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let result = &arguments["result"];
+        if result["protocolVersion"] != 1
+            || result["sandbox"] != "appcontainer"
+            || result["tokenVerified"] != true
+            || result["workspaceCopy"] != true
+            || result["activeProcessesAfterExit"] != 0
+        {
+            return Err(failure(
+                "SANDBOX_START_FAILED",
+                "The native helper did not verify isolated execution and process cleanup.",
+            ));
+        }
+        if let Some(expected) = arguments.get("resourceLimits") {
+            let limits = &result["limits"];
+            if expected["version"] != 1
+                || limits["resourceVersion"] != 1
+                || limits["cpuRateControl"] != true
+                || !integer(&limits["cpuRate"], 1, 10000)
+                || limits["cpuThreads"] != expected["cpuThreads"]
+                || limits["jobMemoryBytes"] != expected["jobMemoryBytes"]
+                || !integer(
+                    &limits["processMemoryBytes"],
+                    1,
+                    expected["jobMemoryBytes"].as_u64().unwrap_or(0),
+                )
+                || !integer(&limits["processCount"], 1, 16)
+            {
+                return Err(ServiceError::new(
+                    "SANDBOX_RESOURCE_RECEIPT_INVALID",
+                    "沙箱回执未证明落实本次授予的 CPU 与内存限制；结果保留为待核验，不能重放。",
+                    502,
+                ));
+            }
+        }
+        if !truthy(&result["cancelled"]) {
+            if let Some(stage) = result["stagingDirectory"].as_str() {
+                self.stages.insert(stage.into());
+            }
+        }
+        Ok(Value::Null)
     }
 }
 
@@ -1176,9 +1199,8 @@ impl ProtocolState {
                 }
                 unknown["cancelled"] = json!(stop["name"] == "AbortError");
                 unknown["timedOut"] = json!(stop["code"] == "HOST_TERMINAL_TIMED_OUT");
-                unknown["message"] = json!(
-                    "命令已派发，尚未收到最终回执；保留原调用，可读取现有状态。"
-                );
+                unknown["message"] =
+                    json!("命令已派发，尚未收到最终回执；保留原调用，可读取现有状态。");
                 return Ok(json!({"action":"value","value":unknown}));
             }
             if !stop.is_null() {
@@ -1263,13 +1285,23 @@ mod resource_tests {
     #[test]
     fn sandbox_resource_plan_accounts_for_the_job_and_helper_separately() {
         let mut runner = RunnerState::default();
-        let plan = runner.apply("runner.resourcePlan", &json!({
-            "kind":"sandbox","request":{"operation":"run","resourceLimits":{"cpuThreads":1}}
-        })).unwrap();
+        let plan = runner
+            .apply(
+                "runner.resourcePlan",
+                &json!({
+                    "kind":"sandbox","request":{"operation":"run","resourceLimits":{"cpuThreads":1}}
+                }),
+            )
+            .unwrap();
         assert_eq!(plan["requirements"]["cpuThreads"], 1);
         assert_eq!(plan["requirements"]["memoryBytes"], 832 * 1024 * 1024u64);
         assert_eq!(plan["sandboxJobMemoryBytes"], SANDBOX_JOB_MEMORY_BYTES);
-        let host = runner.apply("runner.resourcePlan", &json!({"kind":"host","request":{"operation":"host_terminal_job"}})).unwrap();
+        let host = runner
+            .apply(
+                "runner.resourcePlan",
+                &json!({"kind":"host","request":{"operation":"host_terminal_job"}}),
+            )
+            .unwrap();
         assert_eq!(host["requirements"]["kind"], "background");
         assert_eq!(host["requirements"]["memoryBytes"], 64 * 1024 * 1024u64);
     }
@@ -1277,15 +1309,28 @@ mod resource_tests {
     #[test]
     fn sandbox_resource_controls_reject_legacy_helpers_and_honor_actual_grants() {
         let mut runner = RunnerState::default();
-        assert!(runner.apply("runner.sandboxResourceLimits", &json!({"capabilities":{"available":true}})).is_err());
+        assert!(
+            runner
+                .apply(
+                    "runner.sandboxResourceLimits",
+                    &json!({"capabilities":{"available":true}})
+                )
+                .is_err()
+        );
         let limits = runner.apply("runner.sandboxResourceLimits", &json!({
             "capabilities":{"resourceControls":{"version":1,"cpuRateControl":true,"maxCpuThreads":1,"maxJobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES}},
             "logicalCpuThreads":8
         })).unwrap();
         assert_eq!(limits["cpuThreads"], 1);
         assert_eq!(limits["jobMemoryBytes"], SANDBOX_JOB_MEMORY_BYTES);
-        let allocation = json!({"status":"granted","cpuThreads":1,"memoryBytes":192 * 1024 * 1024u64});
-        let granted = runner.apply("runner.sandboxAllocatedResources", &json!({"requested":limits,"allocation":allocation})).unwrap();
+        let allocation =
+            json!({"status":"granted","cpuThreads":1,"memoryBytes":192 * 1024 * 1024u64});
+        let granted = runner
+            .apply(
+                "runner.sandboxAllocatedResources",
+                &json!({"requested":limits,"allocation":allocation}),
+            )
+            .unwrap();
         assert_eq!(granted["cpuThreads"], 1);
         assert_eq!(granted["jobMemoryBytes"], 128 * 1024 * 1024u64);
         assert!(runner.apply("runner.sandboxAllocatedResources", &json!({
@@ -1301,19 +1346,46 @@ mod resource_tests {
         let mut runner = RunnerState::default();
         let expected = json!({"version":1,"cpuThreads":1,"jobMemoryBytes":128*1024*1024u64});
         let receipt = json!({"protocolVersion":1,"sandbox":"appcontainer","tokenVerified":true,
-            "workspaceCopy":true,"activeProcessesAfterExit":0,"limits":{
-                "resourceVersion":1,"cpuThreads":1,"cpuRate":2500,"cpuRateControl":true,
-                "jobMemoryBytes":128*1024*1024u64,"processMemoryBytes":128*1024*1024u64,"processCount":16
-            }});
-        assert!(runner.apply("runner.sandboxReceipt", &json!({"result":receipt,"resourceLimits":expected})).is_ok());
-        for (field, value) in [("resourceVersion", json!(0)), ("cpuThreads", json!(2)),
-            ("cpuRate", json!(10001)), ("jobMemoryBytes", json!(256*1024*1024u64)), ("cpuRateControl", json!(false))] {
+        "workspaceCopy":true,"activeProcessesAfterExit":0,"limits":{
+            "resourceVersion":1,"cpuThreads":1,"cpuRate":2500,"cpuRateControl":true,
+            "jobMemoryBytes":128*1024*1024u64,"processMemoryBytes":128*1024*1024u64,"processCount":16
+        }});
+        assert!(
+            runner
+                .apply(
+                    "runner.sandboxReceipt",
+                    &json!({"result":receipt,"resourceLimits":expected})
+                )
+                .is_ok()
+        );
+        for (field, value) in [
+            ("resourceVersion", json!(0)),
+            ("cpuThreads", json!(2)),
+            ("cpuRate", json!(10001)),
+            ("jobMemoryBytes", json!(256 * 1024 * 1024u64)),
+            ("cpuRateControl", json!(false)),
+        ] {
             let mut invalid = receipt.clone();
             invalid["limits"][field] = value;
-            assert!(runner.apply("runner.sandboxReceipt", &json!({"result":invalid,"resourceLimits":expected})).is_err(), "{field}");
+            assert!(
+                runner
+                    .apply(
+                        "runner.sandboxReceipt",
+                        &json!({"result":invalid,"resourceLimits":expected})
+                    )
+                    .is_err(),
+                "{field}"
+            );
         }
         let mut legacy = receipt;
         legacy.as_object_mut().unwrap().remove("limits");
-        assert!(runner.apply("runner.sandboxReceipt", &json!({"result":legacy,"resourceLimits":expected})).is_err());
+        assert!(
+            runner
+                .apply(
+                    "runner.sandboxReceipt",
+                    &json!({"result":legacy,"resourceLimits":expected})
+                )
+                .is_err()
+        );
     }
 }

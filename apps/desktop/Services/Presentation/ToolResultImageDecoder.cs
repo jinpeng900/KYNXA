@@ -8,7 +8,6 @@ namespace KYNXA_Desktop.Services;
 public sealed record DecodedToolImage(BitmapImage Bitmap, uint OriginalPixelWidth, uint OriginalPixelHeight);
 
 /// <summary>
-/// Shared bounded image decoding. Thumbnails limit decoded pixels as well as the archived payload.
 /// 共享的有容量上限图片解码；缩略图同时限制解码像素与归档数据量。
 /// </summary>
 public static class ToolResultImageDecoder

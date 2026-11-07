@@ -1,5 +1,4 @@
-//! Bounded archive expansion publishes ordinary sources through the existing snapshot/index pipeline.
-//! 有界展开压缩包成员，经现有快照与索引链路发布，不执行成员或创建归档声明的路径。
+//! 限量展开压缩包成员，经现有快照与索引链路发布，不执行成员或创建归档声明的路径。
 
 use crate::{
     document_formats::{self, ParserFamily},
@@ -462,8 +461,7 @@ impl<F: FnMut(Value) -> Result<(), ContractError>> Expansion<'_, F> {
     }
 }
 
-/// Include skipped TAR records in the decoded byte/time budget, without allocating their declared body size.
-/// TAR 中跳过的记录同样受展开字节与时间额度约束，不能按其声明正文大小分配内存。
+/// TAR 中跳过的记录同样受展开字节与时间额度约束，内存不按声明的正文大小分配。
 struct CappedStream<R> {
     inner: R,
     remaining: u64,
@@ -495,7 +493,6 @@ pub(crate) fn is_archive(path: &Path) -> bool {
     document_formats::detect(path).is_some_and(|format| format.family == ParserFamily::Archive)
 }
 
-/// Member names are logical identifiers only; reject both POSIX traversal and Windows device/ADS spellings.
 /// 成员名仅作为逻辑身份，拒绝 POSIX 越界与 Windows 设备名、备用数据流写法。
 fn member_name(raw: &str) -> Result<String, ContractError> {
     let normalized = raw.replace('\\', "/");
@@ -542,7 +539,6 @@ fn decoded_name(name: &str, format: &str) -> String {
         .to_string()
 }
 
-/// A failed member is recorded without rolling back successfully staged sibling documents.
 /// 单个成员失败被记录，已成功读取的同级文档仍可进入现有发布链路。
 pub(crate) fn scan(
     config: &GatewayConfig,
@@ -571,8 +567,7 @@ pub(crate) fn scan(
     scan_loaded(config, path, &bytes, metadata, settings, cancel, consume)
 }
 
-/// A URL's already-validated response uses identical member limits without inventing a local file permission.
-/// 已核验的 URL 响应复用相同成员额度，不虚构本机文件访问授权。
+/// 已检查的 URL 响应复用相同成员额度，不虚构本机文件访问授权。
 pub(crate) fn scan_bytes(
     config: &GatewayConfig,
     name: &Path,
@@ -643,7 +638,6 @@ fn scan_loaded(
     )
 }
 
-/// Re-read a mounted archive under its existing scope and reject changed containers, members or parser windows.
 /// 按原工作权限回读压缩包，并拒绝容器、成员或解析窗口变化后的旧引用。
 pub(crate) fn read_member(
     config: &GatewayConfig,

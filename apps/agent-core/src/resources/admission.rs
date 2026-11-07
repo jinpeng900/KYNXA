@@ -31,8 +31,7 @@ fn limits(options: &Value) -> Result<Value, String> {
     Ok(Value::Object(result))
 }
 
-/// Tickets belong to native settlement, so cancelling a JS promise never frees input capacity.
-/// 票据属于原生结算；取消 JS Promise 不释放输入容量，退出收据才可清空账本。
+/// 票据属于原生结算；取消 JS Promise 不释放输入容量，退出收据才可清空记录。
 #[derive(Default)]
 pub struct AdmissionState {
     limits: Value,

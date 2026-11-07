@@ -59,7 +59,6 @@ public sealed partial class ShellPage
 
     private static void SetPendingReplyMessage(PendingChatReply pending, ChatMessageState message)
     {
-        // Guidance replaces the reply row, not the running task or its existing monotonic clock.
         // 插话仅更换回复行；同一任务沿用已有单调计时，等待新输出期间也不能隐藏或归零。
         message.InheritGenerationTiming(pending.Message);
         pending.Message = message;
@@ -76,7 +75,6 @@ public sealed partial class ShellPage
     {
         if (update.ReplyMessageId is not Guid replyId || update.UserMessageId is not Guid userId
             || FindChat(pending.ConversationId).Chat is not { } chat) return;
-        // A later accepted steer owns new output; earlier output remains above it without further appends.
         // 后来的引导接收新输出，先前输出保留在上方且不再追加。
         if (pending.WaitingReplyAnchorId is Guid waiting && waiting != replyId) return;
         var old = update.SupersededReplyMessageId is Guid oldId

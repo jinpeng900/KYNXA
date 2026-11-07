@@ -45,7 +45,6 @@ public sealed partial class ShellPage
             return false;
         }
 
-        // Apply only after the atomic preference save succeeds; a failed save keeps the visible palette intact.
         // 偏好原子保存成功后再切换画刷；保存失败时保留当前可见配色。
         AppearanceService.ApplyPreferences(selected.PaletteId, selected.Mode, selected.FontSize, selected.Accent);
         return true;
@@ -76,7 +75,6 @@ public sealed partial class ShellPage
 
         private static Button BuildAppearanceActionButton(FontFamily font, string textKey, string automationId)
         {
-            // Use the regular outlined button template so settings actions remain recognizable before hover.
             // 沿用原生描边按钮模板，使设置操作在悬停前也清楚可见。
             var button = new Button
             {
@@ -199,7 +197,6 @@ public sealed partial class ShellPage
             applyAccent.Click += (_, _) => ApplyAccent();
             _accentReset = BuildAppearanceActionButton(font, "使用预设颜色", "AppearanceAccentResetButton");
             _accentReset.Click += (_, _) => Save(CurrentPreferences() with { Accent = null }, resetAccentDraft: true);
-            // TextChanging is synchronous; TextChanged can arrive after a programmatic refresh has ended.
             // TextChanging 同步执行，避免程序刷新结束后异步 TextChanged 重新标记草稿。
             _accentInput.TextChanging += (_, _) =>
             {
@@ -255,7 +252,6 @@ public sealed partial class ShellPage
             Grid.SetColumn(control, 1);
             row.Children.Add(label);
             row.Children.Add(control);
-            // Narrow content stacks the control instead of clipping translated labels or input fields.
             // 内容区变窄时改为上下排布，避免截断翻译后的标签或输入框。
             row.SizeChanged += (_, args) =>
             {
@@ -376,12 +372,10 @@ public sealed partial class ShellPage
                     ? "KynxaControlPressedBrush" : hovered ? "KynxaControlHoverBrush" : "KynxaSettingsCardBrush");
                 frame.BorderBrush = AppearanceService.GetBrush(AppearanceService.Current.IsHighContrast && selected
                     ? "KynxaFocusBrush" : selected || hovered ? "KynxaAccentTextBrush" : "KynxaDividerBrush");
-                // Reserve the same inner inset when the selected outline becomes stronger, keeping its preview still.
                 // 选中描边加粗时补偿内边距，保持预览与名称的位置不跳动。
                 frame.BorderThickness = new Thickness(selected ? 2 : 1);
                 frame.Padding = new Thickness(selected ? 9 : 10);
             }
-            // Update the visible frame directly; the native button hover background is behind this opaque card.
             // 直接更新可见卡框；原生按钮的悬停底色位于不透明卡片之后，无法单独提供反馈。
             button.PointerEntered += (_, _) => { hovered = true; RefreshFrame(); };
             button.PointerExited += (_, _) => { hovered = false; pressed = false; RefreshFrame(); };
@@ -413,7 +407,6 @@ public sealed partial class ShellPage
                 UiLocalization.Bind(_status, InfoBar.MessageProperty, errorKey);
                 _status.Severity = InfoBarSeverity.Error;
             }
-            // Keep an unapplied HEX draft through theme/font/language refreshes, including failed saves.
             // 主题、字号和语言刷新以及保存失败时，保留尚未应用的 HEX 草稿。
             if (errorKey is null && resetAccentDraft) _accentDirty = false;
             RefreshSelection(null, EventArgs.Empty);
@@ -431,7 +424,6 @@ public sealed partial class ShellPage
             {
                 bool selected = card.Palette.Id == AppearanceService.Current.Id;
                 card.RefreshFrame();
-                // Update retained preview brushes to reflect the active mode without rebuilding card controls.
                 // 仅更新已有缩略图画刷来跟随当前明暗模式，不重建配色卡控件。
                 card.UpdatePreview(AppearanceService.Current.IsHighContrast ? AppearanceService.Current :
                     AppearanceService.ResolvePalette(card.Palette, AppearanceService.Current.IsDark, null));
@@ -461,7 +453,6 @@ public sealed partial class ShellPage
         {
             double spacing = _paletteGrid.ColumnSpacing;
             int columns = Math.Clamp((int)((args.NewSize.Width + spacing) / (180 + spacing)), 1, _cards.Count);
-            // Five choices use balanced rows, while the retained cards stretch with the actual content viewport.
             // 五种配色按 1／2／3／5 列平衡换行；沿用现有卡片，并随实际内容视口伸缩。
             if (columns == 4) columns = 3;
             if (columns != _columnCount) UpdateColumns(columns);

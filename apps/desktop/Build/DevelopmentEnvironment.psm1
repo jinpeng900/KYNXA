@@ -16,7 +16,6 @@ function Invoke-KynxaEnvironmentTool {
     $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     $start.WorkingDirectory = $WorkingDirectory
     $start.Arguments = ($Arguments | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join ' '
-    # Discovery must not make a rustup shim install a toolchain or change user configuration.
     # 只读发现不能触发 rustup 自动安装或修改用户配置。
     $start.EnvironmentVariables['RUSTUP_AUTO_INSTALL'] = '0'
     $start.EnvironmentVariables['DOTNET_CLI_UI_LANGUAGE'] = 'en-US'
@@ -81,7 +80,6 @@ function Get-KynxaVisualStudio {
     }
     $vswherePath = $vswherePaths | Where-Object { [IO.File]::Exists($_) } | Select-Object -First 1
     if ($vswherePath) {
-        # Include Insiders, but prefer a complete released installation whenever one is available.
         # 发现范围包含 Insiders；有完整正式安装时优先使用正式版。
         $json = Invoke-KynxaEnvironmentTool $vswherePath @('-products', '*', '-prerelease', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-format', 'json', '-utf8') $RepositoryRoot
         if ($json) {
@@ -241,7 +239,6 @@ function Install-KynxaDevelopmentRust {
     & $tar.Source -xf $archive -C $cacheRoot "$distribution/rustc" "$distribution/cargo" "$distribution/rust-std-$script:managedRustHost" "$distribution/LICENSE-APACHE" "$distribution/LICENSE-MIT" "$distribution/COPYRIGHT"
     if ($LASTEXITCODE -ne 0) { throw 'Private Rust archive extraction failed. / 私有 Rust 归档解压失败。' }
     $toolchainRoot = Join-Path $cacheRoot 'toolchain'
-    # Install from official component manifests without shell installers or global rustup state.
     # 按官方组件清单安装，不调用 shell 安装器或全局 rustup。
     foreach ($component in @('rustc', "rust-std-$script:managedRustHost", 'cargo')) {
         $componentRoot = Join-Path $cacheRoot "$distribution/$component"

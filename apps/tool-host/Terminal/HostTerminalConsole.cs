@@ -6,7 +6,7 @@ using static KYNXA.ToolHost.NativeMethods;
 namespace KYNXA.ToolHost;
 
 /// <summary>Real console verification and bounded screen reading, never a redirected-output TTY simulation.</summary>
-/// <remarks>验证真实控制台并有界读取屏幕，不用重定向输出模拟交互终端。</remarks>
+/// <remarks>验证真实控制台并限量读取屏幕，不用重定向输出模拟交互终端。</remarks>
 internal static class HostTerminalConsole
 {
     internal const int MaximumSnapshotCharacters = 65536;
@@ -24,8 +24,6 @@ internal static class HostTerminalConsole
     {
         IntPtr ownConsole = GetConsoleWindow();
         if (IsVisible(ownConsole)) return ownConsole;
-        // Windows Terminal delegation exposes a message-only GetConsoleWindow. A unique title proves
-        // which real host window displays this console; an unrelated terminal is never accepted.
         // Windows Terminal 托管时 GetConsoleWindow 可能只返回消息窗口；通过唯一标题确认真实宿主窗口，不接受无关终端。
         IntPtr result = IntPtr.Zero;
         EnumWindows((window, _) =>
@@ -69,8 +67,6 @@ internal static class HostTerminalConsole
         for (int offset = 0; offset < Math.Min(raw.Length, (int)read); offset += columns)
             lines.Add(raw.Substring(offset, Math.Min(columns, raw.Length - offset)).TrimEnd(' ', '\0'));
         string text = string.Join('\n', lines).TrimEnd('\n');
-        // A delegated Terminal can expose only its current screen rather than historical scrollback.
-        // A cursor at the buffer bottom therefore conservatively marks possible prior-row loss.
         // 托管终端可能只暴露当前屏幕，不提供历史回滚；光标位于缓冲区底部时保守标记此前行可能丢失。
         bool truncated = startRow != 0 || information.CursorPosition.Y >= information.Size.Y - 1;
         if (text.Length > MaximumSnapshotCharacters)

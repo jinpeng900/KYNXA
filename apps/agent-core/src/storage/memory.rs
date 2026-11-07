@@ -485,8 +485,7 @@ fn instruction(args: &Value) -> ContractResult {
     )
 }
 
-/// Candidate and proposal authority stays versioned; matching a quotation never confirms a write.
-/// 候选和提案仍绑定版本；原话匹配不能自动确认写入。
+/// 候选和提案仍绑定版本，原话匹配后也要确认才写入。
 pub fn apply(operation: &str, args: &Value) -> ContractResult {
     let value = &args["value"];
     match operation {

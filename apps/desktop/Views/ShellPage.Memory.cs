@@ -34,7 +34,6 @@ public sealed partial class ShellPage
     {
         if (_memoryManagementWindow is not { } current ||
             (_settingsMemoryTargets is { } targets && targets.SequenceEqual(CurrentSettingsMemoryTargets()))) return true;
-        // Keep unfinished edits bound to their original target; never silently redirect a save.
         // 未完成编辑仍绑定原目标，不在用户不知情时改变保存范围。
         if (current.HasPendingChanges) return false;
         current.DisposeEmbedded();

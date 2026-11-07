@@ -129,7 +129,6 @@ impl CatalogState {
     }
 
     fn loadable_selection(&self, requested: &[usize]) -> Option<Vec<usize>> {
-        // Search/load stay reachable; result paging can be deferred only when it was not explicitly requested.
         // 搜索和加载始终可达；仅在未明确请求结果分页时允许延后分页定义。
         for discovery in [
             &["tool.search", "tool.load", "tool.result.read"][..],

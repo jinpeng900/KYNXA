@@ -10,7 +10,12 @@ public sealed class WorkspaceWorkbenchApiClient : IDisposable
     {
         "files.list", "files.read", "files.write", "versions.list", "versions.create", "versions.compare", "versions.restore",
         "deliverables.list", "search.conversations", "diagnostics", "templates.list", "templates.save", "templates.delete",
-        "bookmarks.list", "bookmarks.save", "bookmarks.delete", "media.transcribe", "media.cancel", "project.read", "project.save"
+        "bookmarks.list", "bookmarks.save", "bookmarks.delete", "media.transcribe", "media.cancel", "project.read", "project.save",
+        "training.capabilities", "training.datasets.list", "training.datasets.create", "training.jobs.list", "training.jobs.create",
+        "training.jobs.read", "training.jobs.start", "training.jobs.pause", "training.jobs.resume", "training.jobs.stop", "training.jobs.export", "training.jobs.predict",
+        "training.sources.preview", "training.datasets.read", "training.environment.read", "training.environment.prepare", "training.environment.cancel",
+        "training.resources.preview", "training.jobs.update", "training.jobs.cleanup.preview", "training.jobs.cleanup.apply",
+        "training.datasets.delete.preview", "training.datasets.delete.apply", "training.jobs.predict.schema", "training.jobs.trial.start", "training.jobs.trial.read", "training.jobs.trial.cancel"
     };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly HttpClient _http = GatewayHttpClient.Create(ModelGatewayService.Address, Timeout.InfiniteTimeSpan);

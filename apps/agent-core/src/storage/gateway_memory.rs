@@ -1,5 +1,4 @@
-//! Revisioned memory scopes reuse the canonical catalog and existing repository transitions.
-//! 带版本的记忆范围复用正式目录归属与既有仓储迁移规则。
+//! 带版本的记忆范围复用正式目录归属与现有仓储迁移规则。
 
 use super::{
     ContractResult,
@@ -85,7 +84,7 @@ fn candidate_content_hash(entry: &Value) -> Value {
     ))
 }
 pub(crate) fn read_index_document(root: &Path, scope: &str, id: &str) -> ContractResult {
-    let catalog = gateway::load_catalog(root)?;
+    let catalog = gateway::read_catalog(root)?;
     let (scope_id, path) = location(
         root,
         &catalog,
@@ -102,12 +101,10 @@ pub(crate) fn read_index_document(root: &Path, scope: &str, id: &str) -> Contrac
     )?;
     Ok(decorated.remove(0))
 }
-/// Discover only authorized, confirmed records at startup; persisted drafts stay outside semantic preparation.
-/// 启动仅发现合法范围的已确认记录；持久草稿和候选不进入语义准备队列。
+/// 启动仅发现合法范围的已确认记录；持久草稿和候选不进入含义准备队列。
 pub(crate) fn startup_index_scopes(root: &Path, cancel: &Arc<AtomicBool>) -> ContractResult {
-    // Snapshot only identities under the catalog lock; maintenance rechecks ownership before publication.
-    // 仅在目录锁内取得身份快照；枚举不长期阻塞前台，实际维护发布前重新核验归属。
-    let catalog = gateway::load_catalog(root)?;
+    // 仅在目录锁内取得身份快照；枚举不长期阻塞前台，实际维护发布前重新检查归属。
+    let catalog = gateway::read_catalog(root)?;
     let mut candidates = vec![("user".to_string(), "user".to_string())];
     for chat in catalog["Chats"]
         .as_array()
@@ -158,8 +155,7 @@ pub(crate) fn startup_index_scopes(root: &Path, cancel: &Arc<AtomicBool>) -> Con
                 },
             )?;
             let (_, digest) = read_scope(root, &path, &scope, &scope_id)?;
-            // Empty documents also clean a previous confirmed index; drafts are never selected for vectors.
-            // 空文件同样清理之前已确认的索引；后续语义选择始终排除草稿。
+            // 空文件同样清理之前已确认的索引；后续含义选择始终排除草稿。
             if digest.is_some() {
                 Ok(json!({"scope":scope,"scopeId":scope_id}))
             } else {
@@ -247,7 +243,6 @@ pub fn stop_candidates(root: &Path) {
         }
     }
 }
-/// A stopped owner is replaced only after its last formal capture has settled.
 /// 仅在最后一次正式候选提取结算后替换已停止的所有者，避免迁移重载与旧写入交叠。
 pub fn resume_candidates(root: &Path) -> Result<(), super::ContractError> {
     let mut owners = CANDIDATES
@@ -292,7 +287,6 @@ pub fn drain_candidates(root: &Path) -> Result<(), super::ContractError> {
     Ok(())
 }
 
-/// A saved explicit instruction grants confirmation; ordinary background proposals keep their draft boundary.
 /// 已正式保存的明确记住指令授权立即确认；普通后台建议仍保留草稿确认边界。
 pub fn capture_explicit_instruction(
     root: &Path,
@@ -305,7 +299,7 @@ pub fn capture_explicit_instruction(
     )?;
     let conversation = source["conversationId"].as_str().unwrap();
     let message_id = source["messageId"].as_str().unwrap();
-    let catalog = gateway::load_catalog(root)?;
+    let catalog = gateway::read_catalog(root)?;
     let relationship = super::catalog::apply(
         "storage.catalog.related",
         &json!({"current":catalog,"id":conversation}),
@@ -355,7 +349,6 @@ pub fn capture_explicit_instruction(
             "storage.memoryService.validateSource",
             &source_facts(root, current, &input)?,
         )?;
-        // Older captures may already hold this strict remember instruction as a draft; only that exact source may upgrade.
         // 旧提取可能已把严格记住指令保存成草稿；只迁移同一来源的 remember 候选，不接受模型推断或动作提案。
         let is_dismissed = document["dismissedSources"]
             .as_array()
@@ -427,8 +420,7 @@ pub fn capture_explicit_instruction(
     }
     Ok(result)
 }
-/// Retire queued candidates only; a running capture still verifies the formal catalog before committing.
-/// 仅撤出已删除聊天的排队候选；正在运行的提取仍在提交前核验正式目录，不影响其他聊天或共享确认记忆。
+/// 仅撤出已删除聊天的排队候选；正在运行的提取仍在提交前检查正式目录，不影响其他聊天或共享确认记忆。
 pub(crate) fn retire_chat_candidates(root: &Path, conversation: &str) -> ContractResult {
     let owner = CANDIDATES
         .get()
@@ -523,7 +515,7 @@ fn capture_candidates(
     options: &Value,
     owner: &CandidateOwner,
 ) -> ContractResult {
-    let catalog_snapshot = gateway::load_catalog(root)?;
+    let catalog_snapshot = gateway::read_catalog(root)?;
     let mut history =
         gateway::read_raw_snapshot(root, &gateway::locate(&catalog_snapshot, conversation)?)?;
     let messages = history
@@ -671,7 +663,6 @@ fn capture_candidates(
                         ));
                     }
                     history.verify()?;
-                    // A settings edit after capture invalidates this draft, including disabling while it is queued.
                     // 捕获后的设置修改使本次草稿失效，包括排队或提取过程中关闭自动候选。
                     let latest_user =
                         read_scope(root, &root.join("Memory/entries.json"), "user", "user")?.0;
@@ -826,7 +817,6 @@ fn source_facts(root: &Path, catalog: &Value, entry: &Value) -> ContractResult {
     Ok(result)
 }
 
-/// One operation groups quoted IDs by owning chat; only current user records cross into memory validation.
 /// 单次操作按来源聊天合并引文身份，只将当前用户记录交给记忆校验，跳过巨大助手快照的正文解码。
 struct SourceReads {
     users: HashMap<String, Value>,
@@ -1047,7 +1037,6 @@ pub fn context(root: &Path, conversation_id: &str) -> ContractResult {
     context_selected(root, conversation_id, None)
 }
 
-/// Validate only injected identities; unrelated memories never trigger historical source reads.
 /// 仅校验实际注入的记忆身份；无关记忆不触发历史来源读取。
 pub fn snapshot_for(context: &Value, included_ids: &Value) -> Value {
     let selected: HashSet<&str> = included_ids
@@ -1061,8 +1050,10 @@ pub fn snapshot_for(context: &Value, included_ids: &Value) -> Value {
         .into_iter()
         .flatten()
         .filter(|entry| selected.contains(entry["id"].as_str().unwrap_or("")))
-        .map(|entry| json!({"memoryId":entry["id"],"scope":entry["scope"],
-            "scopeId":entry["scopeId"],"identity":entry_identity(entry)}))
+        .map(|entry| {
+            json!({"memoryId":entry["id"],"scope":entry["scope"],
+            "scopeId":entry["scopeId"],"identity":entry_identity(entry)})
+        })
         .collect::<Vec<_>>();
     json!({"conversationId":context["conversationId"],"projectId":context["projectId"],
         "isFolderlessWorkspace":context["isFolderlessWorkspace"],"entries":entries})
@@ -1085,16 +1076,38 @@ pub fn validate_snapshot(root: &Path, conversation_id: &str, snapshot: &Value) -
         .flatten()
         .map(|entry| json!({"id":entry["id"],"identity":entry_identity(entry)}))
         .collect::<Vec<_>>();
-    memory_service::apply("storage.memoryService.snapshot", &json!({
-        "conversationId":conversation_id,"snapshot":snapshot,"current":current,"entries":entries}))
+    memory_service::apply(
+        "storage.memoryService.snapshot",
+        &json!({
+        "conversationId":conversation_id,"snapshot":snapshot,"current":current,"entries":entries}),
+    )
 }
 
+/// 读取期间文件被写入只说明读到了中间状态，重读即可，不能让这一轮对话失败。
 fn context_selected(
     root: &Path,
     conversation_id: &str,
     selected: Option<&HashSet<String>>,
 ) -> ContractResult {
-    let catalog = gateway::load_catalog(root)?;
+    const ATTEMPTS: u64 = 12;
+    for attempt in 1.. {
+        match read_context_selected(root, conversation_id, selected) {
+            Err(error) if error.code() == "MEMORY_CONFLICT" && attempt < ATTEMPTS => {
+                let wait = (25 * attempt).min(200);
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+fn read_context_selected(
+    root: &Path,
+    conversation_id: &str,
+    selected: Option<&HashSet<String>>,
+) -> ContractResult {
+    let catalog = gateway::read_catalog(root)?;
     let relationship = super::catalog::apply(
         "storage.catalog.related",
         &json!({"current":&catalog,"id":conversation_id}),
@@ -1114,9 +1127,10 @@ fn context_selected(
         let (scope_id, path) = location(root, &catalog, scope, id, Some(conversation_id))?;
         let (mut document, hash) = read_scope(root, &path, scope, &scope_id)?;
         if let Some(selected) = selected {
-            document["entries"].as_array_mut().unwrap().retain(|entry| {
-                selected.contains(entry["id"].as_str().unwrap_or(""))
-            });
+            document["entries"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|entry| selected.contains(entry["id"].as_str().unwrap_or("")));
         }
         documents.push((document, path, hash));
     }
@@ -1375,7 +1389,7 @@ pub fn handle_tool(
         )
     };
     let result = if name == "memory.read" {
-        gateway::load_catalog(root).and_then(|catalog| operation(&catalog))
+        gateway::read_catalog(root).and_then(|catalog| operation(&catalog))
     } else {
         gateway::with_catalog(root, |catalog, _| operation(catalog))
     };
@@ -1901,6 +1915,25 @@ mod candidate_transition_tests {
         fn document(&self) -> Value {
             read_index_document(&self.root, "chat", &self.chat).unwrap()
         }
+        fn remember_while_reading(&self, count: usize) -> usize {
+            let done = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    for index in 0..count {
+                        let id = self.append("user", &format!("全局记住：并发约定第 {index} 条"));
+                        capture_explicit_instruction(&self.root, &self.chat, &id).unwrap();
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
+                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                let mut reads = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    context(&self.root, &self.chat).unwrap();
+                    reads += 1;
+                }
+                reads
+            })
+        }
         fn wait(&self) -> Value {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
@@ -1985,15 +2018,28 @@ mod candidate_transition_tests {
         let snapshot = snapshot_for(&initial, &json!([id]));
         assert_eq!(snapshot["entries"].as_array().unwrap().len(), 1);
         let second = create("Use readable figure captions.", &first["revision"]);
-        assert_eq!(validate_snapshot(&fixture.root, &fixture.chat, &snapshot).unwrap()["current"], true);
-        let changed = fixture.patch(id, &second["revision"], json!({"content":"Use detailed test output."}));
+        assert_eq!(
+            validate_snapshot(&fixture.root, &fixture.chat, &snapshot).unwrap()["current"],
+            true
+        );
+        let changed = fixture.patch(
+            id,
+            &second["revision"],
+            json!({"content":"Use detailed test output."}),
+        );
         let status = validate_snapshot(&fixture.root, &fixture.chat, &snapshot).unwrap();
         assert_eq!(status["current"], false);
         assert_eq!(status["invalidSources"][0]["code"], "MEMORY_SOURCE_CHANGED");
-        let updated = snapshot_for(&context(&fixture.root, &fixture.chat).unwrap(), &json!([id]));
+        let updated = snapshot_for(
+            &context(&fixture.root, &fixture.chat).unwrap(),
+            &json!([id]),
+        );
         fixture.delete(id, &changed["revision"]);
         let deleted = validate_snapshot(&fixture.root, &fixture.chat, &updated).unwrap();
-        assert_eq!(deleted["invalidSources"][0]["code"], "MEMORY_SOURCE_UNAVAILABLE");
+        assert_eq!(
+            deleted["invalidSources"][0]["code"],
+            "MEMORY_SOURCE_UNAVAILABLE"
+        );
         assert_eq!(deleted["checked"], 1);
     }
 
@@ -2073,6 +2119,16 @@ mod candidate_transition_tests {
     }
 
     #[test]
+    fn reading_memory_while_a_remember_instruction_saves_does_not_fail() {
+        let fixture = Fixture::new();
+        assert!(fixture.remember_while_reading(25) > 0);
+        let saved = read_scope(&fixture.root, &fixture.root.join("Memory/entries.json"), "user", "user")
+            .unwrap()
+            .0;
+        assert_eq!(saved["entries"].as_array().unwrap().len(), 25);
+    }
+
+    #[test]
     fn capture_rechecks_disabled_and_changed_settings_before_draft_commit() {
         for (patch, reason) in [
             (json!({"enabled":false}), "disabled"),
@@ -2118,8 +2174,7 @@ mod candidate_transition_tests {
                 let root = root.clone();
                 let chat = chat.clone();
                 let project = project.clone();
-                // Pause capture after extraction and use another thread's real catalog transaction.
-                // 在提取完成后暂停捕获，由另一个线程执行正式目录移动，不能靠等候读取线程退出消除占用。
+                // 在提取完成后暂停捕获，由另一个线程执行正式目录移动，以此验证占用已释放。
                 let receipt = std::thread::spawn(move || {
                     let mut catalog = gateway::load_catalog(&root)?;
                     let chats = catalog["Chats"].as_array_mut().unwrap();
@@ -2256,7 +2311,10 @@ mod candidate_transition_tests {
             entries.insert(scope, saved["entry"]["id"].clone());
         }
         let same_work = context(&fixture.root, &sibling).unwrap();
-        let project_snapshot = snapshot_for(&context(&fixture.root, &fixture.chat).unwrap(), &json!([entries["project"]]));
+        let project_snapshot = snapshot_for(
+            &context(&fixture.root, &fixture.chat).unwrap(),
+            &json!([entries["project"]]),
+        );
         let sibling_snapshot = snapshot_for(&same_work, &json!([entries["project"]]));
         let same_entries = same_work["entries"].as_array().unwrap();
         assert_eq!(same_entries.len(), 2);
@@ -2306,8 +2364,16 @@ mod candidate_transition_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(validate_snapshot(&fixture.root, &fixture.chat, &project_snapshot).unwrap()["invalidSources"][0]["code"], "MEMORY_SCOPE_CHANGED");
-        assert_eq!(validate_snapshot(&fixture.root, &sibling, &sibling_snapshot).unwrap()["invalidSources"][0]["code"], "MEMORY_SOURCE_UNAVAILABLE");
+        assert_eq!(
+            validate_snapshot(&fixture.root, &fixture.chat, &project_snapshot).unwrap()["invalidSources"]
+                [0]["code"],
+            "MEMORY_SCOPE_CHANGED"
+        );
+        assert_eq!(
+            validate_snapshot(&fixture.root, &sibling, &sibling_snapshot).unwrap()["invalidSources"]
+                [0]["code"],
+            "MEMORY_SOURCE_UNAVAILABLE"
+        );
         let old_work = read_index_document(&fixture.root, "project", &first_work).unwrap();
         assert_eq!(old_work["entries"][0]["active"], false);
         assert_eq!(old_work["entries"][0]["sourceAvailable"], true);

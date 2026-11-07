@@ -77,7 +77,6 @@
       table.replaceWith(scroll); scroll.append(table);
     }
     const block = document.createElement('div'); block.className = 'table-block';
-    // One outer wrapper keeps the incremental patcher's top-level source-block correspondence.
     // 单个外层包装维持增量更新器的顶层源码块一一对应关系。
     scroll.replaceWith(block); block.append(scroll);
     const header = document.createElement('header'); header.className = 'table-block-header'; header.dataset.copyIgnore = '';
@@ -132,7 +131,6 @@
   function cellText(cell) {
     const clone = cell.cloneNode(true);
     clone.dataset.copyPlain = '';
-    // Project formulas before the shared selection serializer, avoiding duplicate KaTeX visual/mathml text.
     // 先还原公式再使用共用选区序列化器，避免复制 KaTeX 可视层与 MathML 的重复文字。
     for (const math of clone.querySelectorAll('.math[data-latex]')) {
       const source = document.createElement('span'); source.dataset.copyTex = ''; source.textContent = mathSource(math); math.replaceWith(source);
@@ -194,7 +192,6 @@
         const groupEnd = groupEnds.get(rows[rowIndex].parentElement);
         const rowSpan = cell.rowSpan === 0 ? groupEnd - rowIndex : Math.min(cell.rowSpan, groupEnd - rowIndex);
         const nextColumnCount = Math.max(columnCount, columnIndex + columnSpan);
-        // Reject pathological spans instead of allocating an unbounded matrix or silently truncating a copy.
         // 异常跨度明确复制失败，避免无限分配矩阵或静默截断复制内容。
         if (nextColumnCount > MAX_GRID_COLUMNS || nextColumnCount * rows.length > MAX_GRID_CELLS) throw new Error('table-size');
         columnCount = nextColumnCount;
@@ -250,8 +247,7 @@
     pendingCopies.delete(command?.requestId);
     if (!state || !state.block.isConnected || state.copyRequestId !== command.requestId) return;
     state.copyRequestId = null;
-    // Native acknowledgement alone confirms the clipboard write; stale requests cannot update another view.
-    // 只有原生回执确认剪贴板写入成功，过期请求不能更新另一个界面。
+    // 只有原生结果确认剪贴板写入成功，过期请求不能更新另一个界面。
     showFeedback(state, command.success === true);
   }
   function resetCopies() {

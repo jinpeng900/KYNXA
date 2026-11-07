@@ -66,7 +66,6 @@ pub fn mime_type(path: &str) -> &'static str {
 }
 
 pub fn resolve_resource(root: &Path, value: &Value) -> ServiceResult<(PathBuf, String)> {
-    // Normalize the same public drive-path form after Windows canonicalization adds an extended prefix.
     // Windows 真实路径增加扩展前缀后，统一使用相同的公开盘符路径形式比较包内路径。
     let normalized_root = absolute_path(&path_text(root));
     let root = normalized_root.as_path();
@@ -155,8 +154,14 @@ mod pagination_tests {
             assert_eq!(error.details["requestDispatched"], false);
         }
         assert_eq!(resource_page(&json!({})).unwrap(), (0, 16_000));
-        assert_eq!(resource_page(&json!({"offset":2_097_152,"limit":1})).unwrap(), (2_097_152, 1));
-        assert_eq!(resource_page(&json!(null)).unwrap_err().details["parameter"], "arguments");
+        assert_eq!(
+            resource_page(&json!({"offset":2_097_152,"limit":1})).unwrap(),
+            (2_097_152, 1)
+        );
+        assert_eq!(
+            resource_page(&json!(null)).unwrap_err().details["parameter"],
+            "arguments"
+        );
     }
 }
 
@@ -208,8 +213,7 @@ fn bounded(
         })
 }
 
-/// Validate pagination without resolving paths or reading the skill package.
-/// 分页校验不解析文件路径或读取技能包，失败不会产生副作用或改变读取位置。
+/// 分页校验不解析文件路径也不读取技能包，失败时读取位置不变。
 pub(crate) fn resource_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
     if !arguments.is_object() {
         return Err(ServiceError::new(
@@ -217,8 +221,10 @@ pub(crate) fn resource_page(arguments: &Value) -> ServiceResult<(usize, usize)> 
             "skill.resource.read 参数必须是对象。",
             400,
         )
-        .with_details(json!({"tool":"skill.resource.read","parameter":"arguments","type":"object",
-            "executed":false,"requestDispatched":false,"recoverable":true})));
+        .with_details(
+            json!({"tool":"skill.resource.read","parameter":"arguments","type":"object",
+            "executed":false,"requestDispatched":false,"recoverable":true}),
+        ));
     }
     Ok((
         bounded(&arguments["offset"], "offset", 0, 0, FILE_BYTES)? as usize,

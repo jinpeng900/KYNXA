@@ -126,8 +126,7 @@ public sealed partial class ShellPage
                     QueueWorkspaceResourceDiscovery(message.ConversationId, message.Message.Id, tool,
                         _pendingReplies.TryGetValue(message.ConversationId, out var pending) && pending.Message.Id == message.Message.Id);
             }
-        // Live receipts may precede the next message projection; an existing selection stays stable.
-        // 实时回执可能先于消息投影到达；新产物在后台加入，不抢占已有选择。
+        // 实时结果可能先于消息映射到达；新产物在后台加入，不抢占已有选择。
         items.AddRange(screenshots.Values);
         if (resources is not null) items.AddRange(resources.Items.Values.OrderBy(item => item.Order).Select(item => item.Tab));
         string? finalAnswer = ActiveMessages.LastOrDefault(message => message.Message.Role == "assistant" &&
@@ -149,8 +148,7 @@ public sealed partial class ShellPage
     {
         try
         {
-            // Historical receipts may be large; only immutable receipt reads/projection run off the UI thread.
-            // 历史回执可能很大；后台只读取及投影不可变回执，缓存和标签更新仍留在界面线程。
+            // 历史结果可能很大；后台只读取及映射不可变结果，缓存和标签更新仍留在界面线程。
             var tab = await Task.Run(async () =>
             {
                 ConversationWorkTab? discovered = null;
@@ -176,7 +174,6 @@ public sealed partial class ShellPage
             if (tab.Kind == "browser" && liveReply) resources.ActivatedWebsites.Add(tab.Key);
             if (ActiveChatId == conversation)
             {
-                // Live presentation may reveal the workspace, but must not replace a tab the user is reading.
                 // 实时展示可展开工作区，但不能换掉用户正在阅读的标签；历史恢复仍不启动浏览器。
                 if (tab.Kind == "browser" && liveReply &&
                     tool.Name is "artifact.open" or "browser.open" or "computer.launch")
@@ -186,7 +183,6 @@ public sealed partial class ShellPage
         }
         catch (Exception error) when (error is HttpRequestException or InvalidDataException or InvalidOperationException or TaskCanceledException or JsonException)
         {
-            // Preview discovery never changes task or conversation execution.
             // 预览发现失败只影响右侧展示，不改变任务和对话执行。
         }
     }
@@ -279,7 +275,6 @@ public sealed partial class ShellPage
             else if (selected.Kind == "changes") DocumentPanel.ShowChanges(ActiveChatId!.Value, selected.MountId);
             else if (selected.Kind == "browser")
             {
-                // Retain this runtime's explicit/live opening intent across layout refreshes and chat switches.
                 // 本次运行中的明确打开或实时展示跨布局刷新、聊天切换保留；历史恢复仍不自动启动。
                 DocumentPanel.ShowWebsite(ActiveChatId!.Value, selected.Target!, selected.Title,
                     activate: ResourcesFor(ActiveChatId.Value).ActivatedWebsites.Contains(selected.Key));

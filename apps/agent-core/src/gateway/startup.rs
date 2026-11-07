@@ -1,4 +1,3 @@
-//! Optional indexing starts after mandatory resource admission, without delaying HTTP readiness.
 //! 必要资源准入就绪后启动可选索引，HTTP 就绪不等待索引恢复。
 
 use crate::{
@@ -23,23 +22,22 @@ fn schedule_indexing_with(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let result = async {
-            // Reuse migration admission: old-root startup must settle before its workers are drained.
             // 复用迁移准入：旧根目录的启动须先结算，维护才能清退该目录的作业。
             let (runtime, _admission) = lifecycle.admit(false).await?;
             let config = runtime.config.clone();
             let cancellation = lifecycle.shutdown_signal();
             tokio::task::spawn_blocking(move || {
-                if *cancellation.borrow() { return Ok(()); }
+                if *cancellation.borrow() {
+                    return Ok(());
+                }
                 let result = initialize(config.clone());
                 if *cancellation.borrow() {
                     crate::retrieval::gateway::stop_background(&config);
                 }
                 result
             })
-                .await
-                .map_err(|_| {
-                    GatewayError::new("INDEX_START_FAILED", "后台资料服务未启动。", 503)
-                })?
+            .await
+            .map_err(|_| GatewayError::new("INDEX_START_FAILED", "后台资料服务未启动。", 503))?
         }
         .await;
         if let Err(error) = result {
@@ -60,22 +58,35 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_does_not_restart_optional_indexing() {
-        let root = std::env::temp_dir().join(format!("kynxa-index-exit-{}", crate::gateway_contract::new_id()));
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-index-exit-{}",
+            crate::gateway_contract::new_id()
+        ));
         let config = GatewayConfig {
-            data_root: root.join("Data"), data_home: root.join("Data/Models"),
-            extension_root: root.join("Extensions"), application_root: root.join("App"), port: 0,
-            toolhost_exe: root.join("unused-toolhost.exe"), vector_extension: root.join("unused-vec.dll"),
+            data_root: root.join("Data"),
+            data_home: root.join("Data/Models"),
+            extension_root: root.join("Extensions"),
+            application_root: root.join("App"),
+            port: 0,
+            toolhost_exe: root.join("unused-toolhost.exe"),
+            vector_extension: root.join("unused-vec.dll"),
             inference_library: root.join("unused-ort.dll"),
         };
         let lifecycle = StorageLifecycle::fixed(GatewayRuntime::new(config));
         lifecycle.begin_shutdown().await;
-        schedule_indexing_with(lifecycle, |_| panic!("indexing must not start after exit acceptance")).await.unwrap();
+        schedule_indexing_with(lifecycle, |_| {
+            panic!("indexing must not start after exit acceptance")
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn indexing_startup_allows_health_and_settles_before_storage_migration() {
-        let root = std::env::temp_dir()
-            .join(format!("kynxa-startup-{}", crate::gateway_contract::new_id()));
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-startup-{}",
+            crate::gateway_contract::new_id()
+        ));
         let config = GatewayConfig {
             data_root: root.join("Data"),
             data_home: root.join("Data/Models"),
@@ -113,7 +124,6 @@ mod tests {
         assert_eq!(ready["migrating"], false);
         assert_eq!(ready["activeRequests"], 1);
 
-        // The desktop's deny-write marker must not drain a still-starting old-root worker.
         // 桌面的拒写维护标记不能越过仍在启动的旧根目录作业，提前清退资源。
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
@@ -147,7 +157,10 @@ mod tests {
         {
             assert_eq!(health["migrating"], true);
             assert_eq!(health["migrationReady"], false);
-            assert_eq!(lifecycle.admit(false).await.err().unwrap().code, "STORAGE_MIGRATING");
+            assert_eq!(
+                lifecycle.admit(false).await.err().unwrap().code,
+                "STORAGE_MIGRATING"
+            );
         }
         assert!(!startup.is_finished());
 

@@ -15,8 +15,7 @@ public interface IMemoryApi
 }
 
 /// <summary>
-/// Gateway memory transport; the desktop does not persist memory data.
-/// 记忆 API 传输层；桌面不持久化草稿、快照或正式记忆。
+/// 记忆 API 传输层；桌面不保存草稿、快照或正式记忆。
 /// </summary>
 public sealed class MemoryApiClient : IMemoryApi, IDisposable
 {
@@ -160,7 +159,6 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
 
     private static void ValidateProvenance(MemoryEntry entry, MemoryScopeDocument document)
     {
-        // Transport validation preserves draft authority and bounds provenance shown by the editor.
         // 传输校验保留草稿确认边界，并限制编辑器展示的来源信息。
         bool invalid = entry.Status == MemoryStatuses.Draft && entry.Active == true;
         if (entry.Candidate is { } candidate)
@@ -187,8 +185,7 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
             !quote.Text.Contains('\0')) && quotes.Select(quote => quote.MessageId).Distinct().Count() == quotes.Length &&
         quotes.Any(quote => quote.MessageId == sourceMessageId);
 
-    // Validate raw provenance as well as the typed editor contract before showing confirmation actions.
-    // 展示确认操作前，同时核验原始来源字段和编辑器的强类型合同。
+    // 展示确认操作前，同时检查原始来源字段和编辑器的强类型约定。
     private static void ValidateRawProvenance(MemoryEntry entry, JsonElement rawEntry)
     {
         var candidate = Field(rawEntry, "candidate");

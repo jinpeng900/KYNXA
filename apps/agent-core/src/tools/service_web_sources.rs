@@ -51,8 +51,7 @@ fn temporal_value(value: &Value) -> Option<Value> {
     }
 }
 
-/// Preserve provider date labels as evidence; retrieval time never becomes publication time.
-/// 保留来源原有时间字段及含义；不能把本次检索时间当成文章发布日期。
+/// 保留来源原有时间字段及含义，检索时间不当发布日期。
 pub(crate) fn preserve_temporal_metadata(source: &Value, target: &mut Value) {
     for field in TEMPORAL_FIELDS {
         if target[*field].is_null() {
@@ -182,19 +181,20 @@ impl<'a> Sources<'a> {
         let mut labelled = false;
         let mut current: Option<(String, String, Vec<String>, bool, Map<String, Value>)> = None;
         let mut sources = Vec::new();
-        let finish = |current: &mut Option<(String, String, Vec<String>, bool, Map<String, Value>)>,
-                      sources: &mut Vec<(String, String, String, Value)>| {
-            if let Some((title, url, lines, _, metadata)) = current.take() {
-                if !url.is_empty() {
-                    sources.push((
-                        url,
-                        title,
-                        js_trim(&lines.join("\n")).into(),
-                        Value::Object(metadata),
-                    ));
+        let finish =
+            |current: &mut Option<(String, String, Vec<String>, bool, Map<String, Value>)>,
+             sources: &mut Vec<(String, String, String, Value)>| {
+                if let Some((title, url, lines, _, metadata)) = current.take() {
+                    if !url.is_empty() {
+                        sources.push((
+                            url,
+                            title,
+                            js_trim(&lines.join("\n")).into(),
+                            Value::Object(metadata),
+                        ));
+                    }
                 }
-            }
-        };
+            };
         for line in text
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line))
@@ -440,8 +440,7 @@ impl<'a> Sources<'a> {
     }
 }
 
-/// Native JSON results use the same URL, excerpt and deduplication rules without a second graph projection.
-/// 原生 JSON 回执复用 URL、摘录与去重规则，不再建立另一份图投影。
+/// 原生 JSON 结果复用 URL、摘录与去重规则，不再建立另一份图映射。
 pub(crate) fn normalize_result(value: &Value, maximum: usize) -> Vec<Value> {
     let mut sources = Sources {
         nodes: HashMap::new(),
@@ -493,11 +492,14 @@ mod tests {
 
     #[test]
     fn structured_sources_preserve_publication_and_modification_dates_separately() {
-        let sources = normalize_result(&json!({"results":[{
-            "url":"https://example.org/news", "title":"News", "excerpts":["Original evidence"],
-            "publishedDate":"2024-01-02", "dateModified":"2026-10-17", "age":"yesterday",
-            "fetchedAt":"2026-10-18T09:00:00Z", "unknownMetadata":"omit"
-        }]}), 6);
+        let sources = normalize_result(
+            &json!({"results":[{
+                "url":"https://example.org/news", "title":"News", "excerpts":["Original evidence"],
+                "publishedDate":"2024-01-02", "dateModified":"2026-10-17", "age":"yesterday",
+                "fetchedAt":"2026-10-18T09:00:00Z", "unknownMetadata":"omit"
+            }]}),
+            6,
+        );
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0]["publishedDate"], "2024-01-02");
         assert_eq!(sources[0]["dateModified"], "2026-10-17");
@@ -510,9 +512,12 @@ mod tests {
 
     #[test]
     fn labelled_sources_retain_dates_without_confusing_generic_date_with_publication() {
-        let sources = normalize_result(&json!({"content":[{"type":"text","text":
-            "Title: First article\nURL: https://example.org/first\nPublished Date: 2024-01-02\nLast Updated: 2026-10-17\nText: Original first evidence\n---\nTitle: Second article\nURL: https://example.org/second\nDate: 2025-03-04\nText: Original second evidence"
-        }]}), 6);
+        let sources = normalize_result(
+            &json!({"content":[{"type":"text","text":
+                "Title: First article\nURL: https://example.org/first\nPublished Date: 2024-01-02\nLast Updated: 2026-10-17\nText: Original first evidence\n---\nTitle: Second article\nURL: https://example.org/second\nDate: 2025-03-04\nText: Original second evidence"
+            }]}),
+            6,
+        );
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0]["publishedDate"], "2024-01-02");
         assert_eq!(sources[0]["updatedAt"], "2026-10-17");
@@ -523,11 +528,14 @@ mod tests {
 
     #[test]
     fn repeated_source_only_fills_missing_dates_and_missing_metadata_stays_unknown() {
-        let sources = normalize_result(&json!({"results":[
-            {"url":"https://example.org/news","publishedAt":"2024-01-02","text":"Original"},
-            {"url":"https://example.org/news","publishedAt":"2026-10-18","updatedAt":"2026-10-17"},
-            {"url":"https://example.org/undated","publishedAt":{},"age":false}
-        ]}), 6);
+        let sources = normalize_result(
+            &json!({"results":[
+                {"url":"https://example.org/news","publishedAt":"2024-01-02","text":"Original"},
+                {"url":"https://example.org/news","publishedAt":"2026-10-18","updatedAt":"2026-10-17"},
+                {"url":"https://example.org/undated","publishedAt":{},"age":false}
+            ]}),
+            6,
+        );
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0]["publishedAt"], "2024-01-02");
         assert_eq!(sources[0]["updatedAt"], "2026-10-17");
@@ -546,7 +554,8 @@ mod tests {
         let normalized = apply(
             "sources.normalize",
             &json!({"maximum":6,"graph":{"root":source,"nodes":[]}}),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(normalized[0]["publishedAt"], "2024-01-02");
         assert_eq!(normalized[0]["lastCrawledDate"], "2026-10-17");
         assert_eq!(normalized[0]["excerpt"], "Original evidence");

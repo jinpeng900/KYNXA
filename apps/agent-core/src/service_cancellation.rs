@@ -1,4 +1,3 @@
-//! Shared cancellation leases belong to request lifecycles, independent of storage and tool domains.
 //! 共享取消租约属于请求生命周期，不依赖存储或工具领域。
 
 use std::cell::RefCell;
@@ -25,8 +24,6 @@ fn valid(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_:".contains(&b))
 }
 
-/// Share cancellation tokens across workers through atomic flags only.
-/// 工作线程通过原子标记共享取消状态。
 pub struct CancellationLease {
     id: String,
     pub token: Arc<AtomicBool>,
@@ -85,12 +82,10 @@ pub fn is_cancelled() -> bool {
             .is_some_and(|token| token.load(Ordering::Acquire))
     })
 }
-/// Native inference observes the same request token as SQLite and file readers.
 /// 原生推理复用 SQLite 与文件读取所在请求的同一取消标记。
 pub fn current_token() -> Option<Arc<AtomicBool>> {
     CURRENT.with(|current| current.borrow().clone())
 }
-/// Keep the request token across native transactions and the gaps between them.
 /// 请求持续持有取消令牌，覆盖多次原生事务及其间隔。
 pub fn retain(id: &str) -> Result<(), String> {
     if !valid(id) {

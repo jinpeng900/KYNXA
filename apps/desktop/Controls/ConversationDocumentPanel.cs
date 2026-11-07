@@ -16,7 +16,6 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Cache open views within limits; inactive views yield browser resources.
 /// 限量缓存已打开视图，切换不重复解析；闲置视图让出浏览器资源。
 /// </summary>
 public sealed partial class ConversationDocumentPanel : Grid, IDisposable
@@ -39,7 +38,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     private readonly List<DocumentWork> _pendingDocuments = [];
     private int _preparingDocuments;
     private sealed record CachedDocument(WorkspacePreviewTarget Preview, bool ShowSource, string? RequestedVersion);
-    // Prepare each resource independently; selection only changes the visible view.
     // 各资源独立准备；切换标签只改变显示，不取消其他资源。
     private sealed class DocumentWork(string key, Guid conversationId, string path, string? title, bool userSelected,
         string? requestedVersion, bool changes, Guid? messageId, ChatAttachment? attachment, Guid? mountId)
@@ -259,7 +257,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
         string? version = work.Attachment.Sha256;
         if (string.IsNullOrEmpty(version) && work.Preview?.Version is { Length: 64 } acceptedVersion)
             version = acceptedVersion;
-        // Accept the returned immutable version only within the exact attachment scope.
         // 允许附件返回的不可变版本，仍严格校验同源、消息和附件路径及查询。
         string query = $"messageId={work.MessageId:D}";
         if (!string.IsNullOrEmpty(version)) query += "&version=" + Uri.EscapeDataString(version);
@@ -338,14 +335,12 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
 
     private void DispatchDocuments()
     {
-        // Hardware-scaled slots bound background work while the selected queued document goes first.
         // 按硬件分配后台额度，当前选中的排队文档优先，不让切换反复触发读取。
         int concurrency = PreparationConcurrency();
         while (!_disposed && _preparingDocuments < concurrency && _pendingDocuments.Count > 0)
         {
             var work = _pendingDocuments.FirstOrDefault(item => item.Key == _activeKey) ?? _pendingDocuments[0];
             int background = _views.Values.Count(view => !view.Closed && !view.Preparing && view.BackgroundPreparing);
-            // Bound automatic background admission, while reserving one preparation slot for the selected document.
             // 自动后台准入受硬件额度限制，同时为当前选中文档保留一个准备名额。
             if (_preparingDocuments + background >= concurrency
                 && (work.Key != _activeKey || _preparingDocuments > 0)) break;
@@ -418,7 +413,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
         _documents.Remove(key);
         if (_views.TryGetValue(key, out var view))
         {
-            // A failed controller must be recreated; reusing its failed task cannot retry initialization.
             // 初始化失败须重建控制器；复用失败任务无法真正重试，也不能重复注册旧控制器的事件。
             if (view.Initialization is { IsFaulted: true } or { IsCanceled: true }) CloseView(key);
             else view.RenderedSignature = null;
@@ -551,7 +545,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
                 catch (Exception error) when (IsDirectOfficeDocument(preview.Kind)
                     && error is DirectDocumentPreviewException or TimeoutException)
                 {
-                    // Render fallback replaces only this file's view, preserving the selected tab.
                     // 渲染回退只替换本文件视图，保留当前标签，不重复打开。
                     if (!IsLive(work)) return;
                     await RequestPdfFallbackAsync(work);
@@ -587,7 +580,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     {
         try
         {
-            // Later pages may fail after first display; merge fallback requests for the same tab.
             // 首屏显示后仍可能出错；合并同文件的转换请求，保留标签及当前选择。
             await RequestPdfFallbackAsync(work);
             if (work.Preparing) await work.Completion.Task;
@@ -730,8 +722,7 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
                 args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", "");
                 return;
             }
-            // Static mappings bypass this event; the separate host serves only the verified original.
-            // 静态映射不触发此事件；独立代理域仅提供本视图已核验的原件。
+            // 静态映射不触发此事件；独立代理域仅提供本视图已检查的原件。
             var bytes = await _api.ReadDocumentContentAsync(address, work.Cancellation.Token);
             if (!IsLive(work) || !ReferenceEquals(work.Preview, preview))
             {
@@ -766,7 +757,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     {
         var browser = view.Browser;
         _viewport.Children.Insert(0, browser);
-        // Local HTML remains an isolated document renderer, without browser automation or a native message bridge.
         // 本地 HTML 保持独立文档视图，不开放浏览器自动化或原生消息桥。
         await browser.EnsureCoreWebView2Async(await GetDocumentEnvironmentAsync(website: true));
         if (_disposed || view.Closed) return;
@@ -868,8 +858,7 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
             string? type = message.GetProperty("type").GetString();
             if (type == "ready") { view.Ready.TrySetResult(); if (ReferenceEquals(_document, view.Browser)) ApplyAppearance(); return; }
             if (!message.TryGetProperty("key", out var key) || key.GetString() is not { Length: > 0 } messageKey) return;
-            // A saved scroll reply can arrive after the user has already selected the next tab.
-            // 滚动保存回执可能晚于标签切换，仍按原标签键保存，而不是丢弃或归到新标签。
+            // 滚动保存结果可能晚于标签切换，仍按原标签键保存，而不是丢弃或归到新标签。
             if (type == "state" && message.TryGetProperty("state", out var state))
             {
                 if (messageKey == view.Key && (!message.TryGetProperty("renderId", out var stateRender)
@@ -1004,7 +993,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
         catch (Exception error) { Debug.WriteLine($"Workspace browser restore: {error.GetType().Name}"); }
     }
 
-    // A cached tab keeps its DOM, page navigation and selection; inactive WebViews are suspended when possible.
     // 缓存标签保留 DOM、翻页和选区；闲置 WebView 尽量挂起，达到硬件档位后回收最久未用的视图。
     private BrowserView GetView(string key, bool website)
     {
@@ -1047,7 +1035,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     {
         SendActiveState(view, false);
         view.Active = false; view.Browser.Opacity = 0; view.Browser.IsHitTestVisible = false;
-        // Separate first display from background completion; hidden work must not take input.
         // 首屏显示与后台完成分开；隐藏视图继续准备，但不接收输入。
         view.Browser.Visibility = view.Preparing || view.BackgroundPreparing ? Visibility.Visible : Visibility.Collapsed;
         if (!view.Preparing && !view.BackgroundPreparing) _ = SuspendAsync(view);
@@ -1138,7 +1125,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
         _clearingWebsiteData = true;
         try
         {
-            // Login data belongs to the application, while closing a tab never removes it.
             // 登录数据由整个应用共享；仅此明确操作清除，关闭标签和删除聊天不触碰登录目录。
             await CloseAllAsync();
             using var client = new ChromeWorkspaceApiClient();
@@ -1169,7 +1155,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
 
     private static Task<CoreWebView2Environment> CreateEnvironmentAsync(string folder, CoreWebView2EnvironmentOptions? options = null)
     {
-        // WebView's global folder override would otherwise merge the trusted and CDP-enabled browser processes.
         // WebView 全局目录变量会覆盖显式目录，将可信视图与开启 CDP 的浏览器混用；仅在同步创建入口暂时屏蔽。
         string? overriddenFolder = Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER");
         try
@@ -1182,7 +1167,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
 
     private static async Task<CoreWebView2Environment> GetDocumentEnvironmentAsync(bool website)
     {
-        // Create only when a document is opened; HTML keeps its separate browser profile.
         // 打开文档时才创建环境；HTML 继续使用独立的浏览器配置目录。
         var preparation = website
             ? _websiteEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspaceHtml"))
@@ -1292,7 +1276,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
             if (view.Closed || view.Active || view.Preparing || view.BackgroundPreparing || view.Browser.CoreWebView2 is not { } core) return;
             core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
             await core.TrySuspendAsync();
-            // A fast switch may select this view before its earlier suspend operation has completed.
             // 快速切回可能早于旧挂起完成；以最新选择恢复，不能让晚到的挂起冻结当前页面。
             if (!view.Closed && (view.Active || view.Preparing || view.BackgroundPreparing)) core.Resume();
         }
@@ -1322,7 +1305,6 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     private void ForgetSelectedTarget(string key)
     {
         if (_activeKey != key) return;
-        // Closing releases both the viewer and its selection identity; reopening must initialize a fresh target.
         // 关闭时同步释放视图与选中身份，避免再次打开时跳过初始化或把内部页面地址当作文件路径。
         ++_generation;
         _activeKey = _path = _title = _requestedVersion = _websiteKey = null;
@@ -1374,7 +1356,7 @@ public sealed partial class ConversationDocumentPanel : Grid, IDisposable
     }
 
     /// <summary>Wait for owned browser cleanup, including an open receipt still arriving from Rust.</summary>
-    /// <remarks>等待本视图持有的浏览器完成关闭；尚未收到启动回执的会话也纳入退出等待。</remarks>
+    /// <remarks>等待本视图持有的浏览器完成关闭；尚未收到启动结果的会话也纳入退出等待。</remarks>
     public Task CloseAllAsync()
     {
         ++_generation;

@@ -7,7 +7,6 @@ using Microsoft.UI.Xaml.Media;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Compact selectable-file cards stay inside the composer and never write conversation data.
 /// 紧凑附件卡片留在输入框内部，不直接写入正式聊天数据。
 /// </summary>
 public sealed class ConversationAttachmentDrafts : Grid
@@ -30,7 +29,6 @@ public sealed class ConversationAttachmentDrafts : Grid
         _items.Children.Clear();
         foreach (var file in files)
         {
-            // Reserve the horizontal scrollbar lane within the existing attachment height budget.
             // 在原有附件高度内为横向滚动条留槽，避免文件名被覆盖。
             var card = new Grid { Width = file.Thumbnail is null ? 174 : 112, Height = 88 };
             var surface = new Border

@@ -4,7 +4,6 @@ param([Parameter(Mandatory = $true)][string]$BundleRoot)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Import Get-Acl explicitly; Windows PowerShell may not auto-load it in nested builds.
 # 显式导入 Get-Acl 所在模块，避免 Windows PowerShell 在嵌套构建中加载失败。
 $securityModule = Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1'
 if ([IO.File]::Exists($securityModule)) {
@@ -13,7 +12,6 @@ if ([IO.File]::Exists($securityModule)) {
     throw 'Microsoft.PowerShell.Security is required to prepare the bundled browser sandbox permissions.'
 }
 
-# ZIPs lose Windows ACLs; restore sandbox read access only for bundled browser files.
 # ZIP 不保留 Windows ACL，只恢复随包浏览器文件的沙箱读取权限。
 $root = [IO.Path]::GetFullPath($BundleRoot)
 foreach ($application in @($root, (Join-Path $root 'AppX'))) {

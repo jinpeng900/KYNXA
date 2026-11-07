@@ -44,8 +44,7 @@ fn render_receipts(turns: &[(String, Vec<String>)]) -> String {
     )
 }
 
-/// Provider policy and bounded cross-turn receipts share one native source of truth.
-/// 供应商请求策略及受限跨轮回执统一由原生维护；HTTP 字段对象和旧 JSON 字节表示由适配层保留。
+/// 供应商请求策略及受限跨轮结果统一由原生维护；HTTP 字段对象和旧 JSON 字节表示由适配层保留。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.portable.appendResults" => {

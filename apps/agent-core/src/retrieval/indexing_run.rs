@@ -162,8 +162,7 @@ fn report(run: &Run) -> Value {
         "semantic": {"requested": run.requested, "profileId": run.profile_id, "state": state, "totalChunks": total, "vectorChunks": vectors, "cachedChunks": count(run,"cachedChunks"), "skippedSources": count(run,"skippedSources"), "skippedChunks": count(run,"skippedChunks"), "diagnosticCodes": run.diagnostics}})
 }
 
-/// One bounded native run owns coverage transitions, exact progress and publication/inference batch policy.
-/// 单个有界原生运行拥有覆盖状态转换、真实进度和发布及推理组批策略。
+/// 单个限量原生运行拥有覆盖状态转换、真实进度和发布及推理组批策略。
 pub fn apply(operation: &str, arguments: &Value) -> Result<Value, String> {
     if operation == "retrieval.indexer-embedding-batch" {
         return Ok(embedding_batch(arguments));

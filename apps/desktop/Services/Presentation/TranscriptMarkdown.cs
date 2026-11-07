@@ -13,7 +13,6 @@ using Markdig.Syntax.Inlines;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Renders selectable conversation HTML with deferred, source-preserving math and diagrams.
 /// 把聊天 Markdown 渲染为可选择 HTML，公式和图表延迟渲染且保留源文。
 /// </summary>
 internal static class TranscriptMarkdown
@@ -46,7 +45,6 @@ internal static class TranscriptMarkdown
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().UseMathematics()
         .UseFootnotes().UseAlertBlocks().UseAutoIdentifiers(AutoIdentifierOptions.GitHub)
-        // Preserve reply line breaks in both streaming and final HTML without rewriting source.
         // 流式与最终显示均保留回复换行，不改写原文或按编号猜测断行。
         .UseSoftlineBreakAsHardlineBreak()
         .DisableHtml().Build();
@@ -60,8 +58,6 @@ internal static class TranscriptMarkdown
     }
 
     /// <summary>
-    /// Completed top-level blocks are reused; the unfinished tail is parsed independently.
-    /// Cross-block references remain provisional until the final authoritative full render.
     /// 复用已完成顶层块，仅独立解析活动尾部；跨块引用在结束时进行正式全量渲染校正。
     /// </summary>
     internal static StreamingResult RenderStreaming(string markdown, StreamingState? previous)
@@ -73,16 +69,12 @@ internal static class TranscriptMarkdown
         string stableHtml = append && !references ? previous!.StableHtml : string.Empty;
         int stableBlocks = append && !references ? previous!.StableBlocks : 0;
         string tail = source[stableLength..];
-        // A single huge unfinished block must not repeatedly build a growing Markdown AST.
-        // Its literal source remains selectable; final rendering restores all Markdown semantics.
-        // 单个超长未完成块不能反复构建增长的 Markdown AST；先保留可选原文，结束后恢复完整语义。
+        // 单个超长未完成块不能反复构建增长的 Markdown AST；先保留可选原文，结束后恢复完整含义。
         if (tail.Length > MaximumStreamingTailCharacters)
             return new(stableHtml + "<div class=\"streaming-raw\" style=\"white-space:pre-wrap\">" + WebUtility.HtmlEncode(tail) + "</div>",
                 new(source, stableLength, stableHtml, 0, stableBlocks));
         var document = Markdown.Parse(tail, Pipeline);
         Interlocked.Increment(ref _parseCount); Interlocked.Add(ref _parsedCharacters, tail.Length);
-        // Reference definitions may alter earlier blocks. Retain their common document context
-        // and do not freeze prefixes containing reference syntax.
         // 引用定义可能改变前面的块；含引用语法时保留共同文档上下文，不冻结前缀。
         if (!references && document.Count > 1)
         {
@@ -123,7 +115,6 @@ internal static class TranscriptMarkdown
             if (renderer.IsLastInContainer) return;
             if (renderer.EnableHtmlForInline && (line.IsHard || RenderAsHardlineBreak))
             {
-                // A formatting LF after BR becomes an extra space in selected-text copying.
                 // BR 后附加的 HTML 排版换行会在选区复制中变成额外空格，故只输出换行标签。
                 renderer.Write("<br />");
                 return;
@@ -175,7 +166,6 @@ internal static class TranscriptMarkdown
                 : string.Empty;
             if (code is FencedCodeBlock mermaidFence && string.Equals(language, "mermaid", StringComparison.OrdinalIgnoreCase))
             {
-                // A cancelled or truncated final reply can still have an open fence; only a real closer permits rendering.
                 // 取消或截断的最终回复也可能没有闭合围栏；只有真正闭合后才允许渲染，源码仅作为转义文本传递。
                 bool isComplete = mermaidFence.ClosingFencedCharCount >= mermaidFence.OpeningFencedCharCount;
                 renderer.Write("<div class=\"mermaid-block\" data-mermaid-ready=\"")
@@ -189,7 +179,6 @@ internal static class TranscriptMarkdown
                 WriteFormula(renderer, source, display: true);
                 return;
             }
-            // Earlier closed blocks are complete even while later prose is streaming.
             // 前面的框已闭合时应视为完整；后面的正文仍流式生成不影响它的复制提示。
             bool codeComplete = code is FencedCodeBlock codeFence
                 ? codeFence.ClosingFencedCharCount >= codeFence.OpeningFencedCharCount
@@ -251,7 +240,6 @@ internal static class TranscriptMarkdown
             bool linked = !nested && IsSafeUrl(url);
             if (link.IsImage && IsSafeUrl(url) && !url!.StartsWith('#') && !url.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
             {
-                // Pixels cross the existing authorized preview boundary; Markdown never fetches arbitrary resources.
                 // 图片经过现有授权预览边界，Markdown 不直接请求任意网络或磁盘资源。
                 string label = string.Concat(link.Descendants<LiteralInline>().Select(item => item.Content.ToString()));
                 renderer.Write("<img class=\"markdown-image\" loading=\"lazy\" decoding=\"async\" src=\"https://kynxa-markdown-images.local/image?source=")

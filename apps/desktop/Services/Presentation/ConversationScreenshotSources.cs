@@ -12,8 +12,7 @@ public sealed record ConversationScreenshotSource(Guid ConversationId, Guid Mess
 }
 
 /// <summary>
-/// Projects completed screenshot receipts without changing formal messages or trusting model text.
-/// 只从完成的截图回执生成展示，不改变正式消息，也不信任模型描述。
+/// 只从完成的截图结果生成展示，不改变正式消息，也不信任模型描述。
 /// </summary>
 public static class ConversationScreenshotSources
 {
@@ -22,8 +21,7 @@ public static class ConversationScreenshotSources
     public const int MaximumImageBytes = 32 * 1024 * 1024;
     public const long MaximumImagePixels = 64_000_000;
 
-    // Recognize canonical capture names; loading still validates the archived image and conversation.
-    // 识别正式截图能力名称；加载阶段仍核验归档图像和聊天范围，不凭模型描述显示图片。
+    // 识别正式截图能力名称；加载阶段仍检查归档图像和聊天范围，不凭模型描述显示图片。
     public static bool IsScreenshotTool(string? name) => name is "computer.screenshot" or "browser.screenshot" ||
         (name is not null && name.StartsWith("mcp.", StringComparison.Ordinal) &&
          (name.EndsWith(".browser_take_screenshot", StringComparison.Ordinal) ||
@@ -87,7 +85,6 @@ public static class ConversationScreenshotSources
         catch (JsonException) { return null; }
     }
 
-    // Only the native browser envelope may wrap image blocks; unrelated nested JSON stays opaque.
     // 只识别原生浏览器对图像的一层包装；无关嵌套 JSON 保持不透明。
     public static bool TryGetImageBlocks(JsonElement receipt, out JsonElement blocks)
     {

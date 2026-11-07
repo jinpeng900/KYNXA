@@ -109,7 +109,6 @@ fn batch(args: &Value) -> Value {
     json!({"batchSize": rows, "batchTokenBudget": maximum.max((rows * if cpu { 384.0 } else { 128.0 }).min(65536.0))})
 }
 
-/// Batch and residency estimates are requests, never claims that a lease or GPU device was admitted.
 /// 批次与驻留估计只是需求申请，不能声称租约或 GPU 设备已经获得准入。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     Ok(match operation {

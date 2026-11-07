@@ -17,7 +17,6 @@ public sealed partial class ShellPage
         double height = WorkContextModulesHost.ActualHeight;
         double ratio = _layout.WorkTaskRatio > 0 ? Math.Clamp(_layout.WorkTaskRatio, 0.12, 0.35) : 0.25;
         TaskPanel.SetAvailableHeight(Math.Max(72, height * ratio));
-        // The native webpage owns only the remaining preview row; shell task and file rows keep their space.
         // 原生网页只使用剩余预览行，任务标题和文件标签始终保留各自的布局空间。
         WorkTaskRow.MinHeight = ActiveChatId is not null ? 34 : 0;
         WorkFileTabsRow.MinHeight = 42;
@@ -58,7 +57,6 @@ public sealed partial class ShellPage
         int number = ResourcesFor(conversation).Items.Values.Count(item => item.Tab.Kind == "terminal") + 1;
         var mount = CurrentWorkspaceMount();
         string title = $"{UiText.Get("终端")} {number}" + (mount is null ? "" : $" · {mount.Name}");
-        // A tab owns one PTY; opening another terminal must not select or replace the conversation's first session.
         // 每个标签拥有独立伪终端；再次新建不能选回或替换聊天中的第一个会话。
         AddWorkspaceTab(conversation, new($"terminal/{conversation:D}/{Guid.NewGuid():N}", "terminal", title,
             conversation.ToString("D"), MountId: mount?.Id), select: true);

@@ -48,7 +48,6 @@ fn respond(
 
 fn main() {
     let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(16);
-    // Only stdin is read; owner EOF closes the service, without inspecting other applications.
     // 仅从拥有者的 stdin 接收消息，EOF 即退出；不扫描其他软件的命令行或私有内容。
     std::thread::spawn(move || {
         let input = io::stdin();
@@ -122,13 +121,16 @@ fn main() {
             Ok(request) => request,
             Err(_) => break,
         };
-        let needs_gpu =
-            budget.has_gpu_allocation()
-                || request.method == "acquire"
-                    && request.params["gpuMemoryBytes"]
-                        .as_u64()
-                        .is_some_and(|bytes| bytes > 0);
-        let hardware = if request.method == "reconcile" { sampler.reconcile(needs_gpu) } else { sampler.snapshot(needs_gpu) };
+        let needs_gpu = budget.has_gpu_allocation()
+            || request.method == "acquire"
+                && request.params["gpuMemoryBytes"]
+                    .as_u64()
+                    .is_some_and(|bytes| bytes > 0);
+        let hardware = if request.method == "reconcile" {
+            sampler.reconcile(needs_gpu)
+        } else {
+            sampler.snapshot(needs_gpu)
+        };
         budget.reconcile_memory(sampler.memory_observations());
         budget.reconcile_gpu_memory(sampler.gpu_memory_observations());
         let result = match request.method.as_str() {
@@ -137,18 +139,25 @@ fn main() {
                     budget.release(&lease_id);
                     sampler.remove_executor(&lease_id);
                     retired_leases.push_back(lease_id);
-                    while retired_leases.len() > 128 { retired_leases.pop_front(); }
+                    while retired_leases.len() > 128 {
+                        retired_leases.pop_front();
+                    }
                 }
                 let mut snapshot = budget.snapshot(&hardware, now_ms);
                 snapshot["queuedRequests"] = json!(admission.len());
                 snapshot["executors"] = sampler.executor_snapshot();
-                if request.method == "reconcile" { snapshot["status"] = json!("reconciled"); }
+                if request.method == "reconcile" {
+                    snapshot["status"] = json!("reconciled");
+                }
                 Some(snapshot)
             }
-            "restore" => Some(match serde_json::from_value::<Vec<RestoredLease>>(request.params["leases"].clone()) {
-                Ok(leases) => budget.restore(leases),
-                Err(_) => json!({"status":"denied","reason":"RESOURCE_RESTORE_INVALID"}),
-            }),
+            "restore" => Some(
+                match serde_json::from_value::<Vec<RestoredLease>>(request.params["leases"].clone())
+                {
+                    Ok(leases) => budget.restore(leases),
+                    Err(_) => json!({"status":"denied","reason":"RESOURCE_RESTORE_INVALID"}),
+                },
+            ),
             "acquire" => match serde_json::from_value::<AllocationRequest>(request.params) {
                 Ok(allocation) => {
                     let outcome = budget.acquire(allocation.clone(), &hardware, now_ms);
@@ -185,9 +194,16 @@ fn main() {
             }
             "recoverExecutor" => {
                 let lease_id = request.params["leaseId"].as_str().unwrap_or("");
-                Some(if !budget.contains_lease(lease_id) { json!({"status":"denied","reason":"RESOURCE_LEASE_UNKNOWN"}) }
-                    else {sampler.recover_executor(lease_id.to_string(),request.params["processId"].as_u64().unwrap_or(0) as u32,
-                        request.params["startTimeMs"].as_u64().unwrap_or(0),owner_pid)})
+                Some(if !budget.contains_lease(lease_id) {
+                    json!({"status":"denied","reason":"RESOURCE_LEASE_UNKNOWN"})
+                } else {
+                    sampler.recover_executor(
+                        lease_id.to_string(),
+                        request.params["processId"].as_u64().unwrap_or(0) as u32,
+                        request.params["startTimeMs"].as_u64().unwrap_or(0),
+                        owner_pid,
+                    )
+                })
             }
             "report" => {
                 let lease_id = request.params["leaseId"].as_str().unwrap_or("");

@@ -28,8 +28,7 @@ public sealed partial class ShellPage
         {
             if (pending.Message.Status == "completed" || pending.PauseConfirmed)
             {
-                // A confirmed terminal stream or pause invalidates only this root's stale active projection.
-                // 正式流结束或暂停回执只清除该根过期的活动投影，不改其他任务和正式记录。
+                // 正式流结束或暂停结果只清除该根过期的活动映射，不改其他任务和正式记录。
                 if (pending.TaskId is Guid taskId)
                 {
                     recovery.Tasks = recovery.Tasks?.Where(task => task.TaskId != taskId).ToArray();
@@ -37,7 +36,6 @@ public sealed partial class ShellPage
                 }
                 return;
             }
-            // A departed SSE is not proof of task completion; refresh existing metadata once before admitting a new root.
             // SSE 退出不能证明任务完成；恢复现有元信息读取一次，再判断能否发送新轮。
             recovery.Finished = false; recovery.ReadFailed = false; recovery.Detail = null;
             recovery.ReadTask = ReadRunningTaskObservationAsync(recovery);
@@ -56,7 +54,6 @@ public sealed partial class ShellPage
 
     private void RecoverRunningTaskObservation(ProjectChatState? chat, Guid? projectId)
     {
-        // A departed reply cannot replace the observer owned by the newly selected chat.
         // 离开的旧回复不能替换新选中聊天的观察；校验须早于取消旧读取。
         if (chat?.Id != ActiveChatId || chat is not null &&
             (FindChat(chat.Id).Chat != chat || FindChat(chat.Id).Project?.Id != projectId)) return;
@@ -93,7 +90,6 @@ public sealed partial class ShellPage
                 if (!IsCurrentTaskRecovery(recovery)) return;
                 tasks.AddRange(page.Tasks);
                 cursor = page.HasMore ? page.NextTaskId : null;
-                // Background observation only restores live output; it never classifies messages or resumes paused roots.
                 // 后台观察只恢复活动输出，不分类消息，也不自动恢复暂停根。
                 if (tasks.Count(task => task.ParentTaskId is null && task.State is "queued" or "running") > 1) break;
             } while (cursor is not null);
@@ -132,8 +128,7 @@ public sealed partial class ShellPage
             {
                 if ((recovery.Tasks ?? []).Any(task => task.ParentTaskId is null && task.State is "queued" or "running"))
                 { recovery.Finished = true; return; }
-                // Wait for the existing history load; settled chats need no extra terminal detail or refresh.
-                // 等待既有历史加载回调；稳定聊天没有生成中的当前回复时，不额外读取终态详情或刷新。
+                // 等待现有历史加载回调；稳定聊天没有生成中的当前回复时，不额外读取终态详情或刷新。
                 if (!_historyPages.TryGetValue(recovery.Chat.Id, out var loadedHistory) ||
                     !loadedHistory.Initialized || loadedHistory.Loading) return;
                 if (!recovery.Chat.Messages.Any(message => message.Role == "assistant" &&
@@ -152,14 +147,12 @@ public sealed partial class ShellPage
             {
                 if (!_historyPages.TryGetValue(recovery.Chat.Id, out var history) || history.Loading) return;
                 recovery.Finished = true;
-                // Discovery may race completion; reload the formal reply, including partial outcomes.
                 // 发现期间任务可能结束；仅刷新正式回复，照常显示 partial，不恢复或重做操作。
                 await LoadHistoryAsync(history, "refresh");
                 if (Guid.TryParse(current.RequestId, out var requestId)
                     && FindTaskSteeringReply(recovery.Chat, requestId) is { Status: "streaming" } saved)
                 {
-                    // A saved waiting task is not generating; settle only its replaceable display projection.
-                    // 已保存的等待任务没有生成；仅结束可重建的展示状态，原文和回执保持不变。
+                    // 已保存的等待任务没有生成；仅结束可重建的展示状态，原文和结果保持不变。
                     saved.Status = "interrupted"; saved.ExecutionPhase = string.Empty;
                     for (int i = 0; i < saved.AssistantSegments.Count; i++)
                         if (saved.AssistantSegments[i].Status == "streaming")

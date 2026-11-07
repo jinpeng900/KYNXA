@@ -1,5 +1,4 @@
-//! Rebuildable protocol projections; formal history and private continuation verification remain authoritative.
-//! 可重建的协议投影缓存；正式历史与私有续传核验仍是权威来源。
+//! 可重建的协议映射缓存；正式历史与私有续传检查仍是权威来源。
 
 use std::{
     collections::VecDeque,
@@ -39,13 +38,20 @@ impl ProjectionCache {
         let reserved_bytes = size_of::<OnceLock<Self>>()
             .saturating_add(entries.capacity().saturating_mul(size_of::<Entry>()));
         Self(Mutex::new(State {
-            entries, reserved_bytes, occupied_bytes: reserved_bytes, limit_bytes, limit_entries,
+            entries,
+            reserved_bytes,
+            occupied_bytes: reserved_bytes,
+            limit_bytes,
+            limit_entries,
         }))
     }
 
     fn get(&self, version: &Version) -> Option<Arc<[u8]>> {
         let mut state = self.0.lock().ok()?;
-        let position = state.entries.iter().position(|entry| entry.version == *version)?;
+        let position = state
+            .entries
+            .iter()
+            .position(|entry| entry.version == *version)?;
         let entry = state.entries.remove(position)?;
         let projection = Arc::clone(&entry.projection);
         state.entries.push_back(entry);
@@ -64,12 +70,15 @@ impl ProjectionCache {
         }
         let projection = build()?;
         let payload_limit = self.0.lock().ok().map(|state| {
-            state.limit_bytes.saturating_sub(
-                state.reserved_bytes + ARC_OVERHEAD_BYTES,
-            )
+            state
+                .limit_bytes
+                .saturating_sub(state.reserved_bytes + ARC_OVERHEAD_BYTES)
         });
         if let Some(limit) = payload_limit {
-            let mut writer = LimitedBytes { bytes: Vec::new(), limit };
+            let mut writer = LimitedBytes {
+                bytes: Vec::new(),
+                limit,
+            };
             if serde_json::to_writer(&mut writer, &projection).is_ok() {
                 self.insert(version, Arc::from(writer.bytes.into_boxed_slice()));
             }
@@ -78,25 +87,37 @@ impl ProjectionCache {
     }
 
     fn insert(&self, version: Version, projection: Arc<[u8]>) {
-        let Ok(mut state) = self.0.lock() else { return; };
-        // Compact bytes make the shared bound include payload, reserved entries and Arc control blocks.
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
         // 紧凑字节让共享上限计入正文、预留条目槽和 Arc 控制块，不漏算 JSON 树的结构开销。
         let charged_bytes = projection.len().saturating_add(ARC_OVERHEAD_BYTES);
-        if state.limit_entries == 0 || state.reserved_bytes.saturating_add(charged_bytes) > state.limit_bytes {
+        if state.limit_entries == 0
+            || state.reserved_bytes.saturating_add(charged_bytes) > state.limit_bytes
+        {
             return;
         }
-        if let Some(position) = state.entries.iter().position(|entry| entry.version == version) {
+        if let Some(position) = state
+            .entries
+            .iter()
+            .position(|entry| entry.version == version)
+        {
             let previous = state.entries.remove(position).unwrap();
             state.occupied_bytes -= previous.projection.len() + ARC_OVERHEAD_BYTES;
         }
         while state.entries.len() >= state.limit_entries
             || state.occupied_bytes.saturating_add(charged_bytes) > state.limit_bytes
         {
-            let Some(oldest) = state.entries.pop_front() else { return; };
+            let Some(oldest) = state.entries.pop_front() else {
+                return;
+            };
             state.occupied_bytes -= oldest.projection.len() + ARC_OVERHEAD_BYTES;
         }
         state.occupied_bytes += charged_bytes;
-        state.entries.push_back(Entry { version, projection });
+        state.entries.push_back(Entry {
+            version,
+            projection,
+        });
     }
 }
 
@@ -109,17 +130,27 @@ impl Write for LimitedBytes {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let required = self.bytes.len().saturating_add(bytes.len());
         if required > self.limit {
-            return Err(io::Error::other("projection exceeds optional cache capacity"));
+            return Err(io::Error::other(
+                "projection exceeds optional cache capacity",
+            ));
         }
         if required > self.bytes.capacity() {
-            let capacity = self.bytes.capacity().saturating_mul(2).max(required).min(self.limit);
-            self.bytes.reserve_exact(capacity.saturating_sub(self.bytes.len()));
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(required)
+                .min(self.limit);
+            self.bytes
+                .reserve_exact(capacity.saturating_sub(self.bytes.len()));
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 struct VersionWriter(Sha256);
@@ -130,7 +161,9 @@ impl Write for VersionWriter {
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn version(
@@ -139,13 +172,16 @@ fn version(
     available_tools: &[String],
     runtime_origin: Option<&Value>,
 ) -> Option<Version> {
-    // Tool availability is a set in the projection; canonicalize only its cache key, not request declarations.
-    // 投影按集合判断工具可用性；仅规范缓存键，不改请求声明、原始消息或私有转录。
+    // 映射按集合判断工具可用性；仅规范缓存键，不改请求声明、原始消息或私有转录。
     let mut available_tools = available_tools.iter().collect::<Vec<_>>();
     available_tools.sort_unstable();
     available_tools.dedup();
     let mut writer = VersionWriter(Sha256::new());
-    serde_json::to_writer(&mut writer, &(protocol, formal_history, available_tools, runtime_origin)).ok()?;
+    serde_json::to_writer(
+        &mut writer,
+        &(protocol, formal_history, available_tools, runtime_origin),
+    )
+    .ok()?;
     Some(writer.0.finalize().into())
 }
 
@@ -160,7 +196,9 @@ pub(super) fn project(
         return build();
     };
     static CACHE: OnceLock<ProjectionCache> = OnceLock::new();
-    CACHE.get_or_init(|| ProjectionCache::new(MAX_BYTES, MAX_ENTRIES)).project(version, build)
+    CACHE
+        .get_or_init(|| ProjectionCache::new(MAX_BYTES, MAX_ENTRIES))
+        .project(version, build)
 }
 
 #[cfg(test)]
@@ -170,7 +208,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::models::gateway_protocol::{build_history_projection, continuation_span, protocol, restore_continuation};
+    use crate::models::gateway_protocol::{
+        build_history_projection, continuation_span, protocol, restore_continuation,
+    };
 
     fn history() -> Vec<Value> {
         vec![
@@ -195,10 +235,12 @@ mod tests {
         origin: Option<&Value>,
         builds: &Cell<usize>,
     ) -> HistoryProjection {
-        cache.project(version(protocol, history, tools, origin).unwrap(), || {
-            builds.set(builds.get() + 1);
-            build_history_projection(protocol, history, tools, origin)
-        }).unwrap()
+        cache
+            .project(version(protocol, history, tools, origin).unwrap(), || {
+                builds.set(builds.get() + 1);
+                build_history_projection(protocol, history, tools, origin)
+            })
+            .unwrap()
     }
 
     #[test]
@@ -206,15 +248,26 @@ mod tests {
         let history = history();
         let original = history.clone();
         let tools = vec!["filesystem.read".into()];
-        for protocol in ["openai-completions", "anthropic-messages", "openai-responses"] {
+        for protocol in [
+            "openai-completions",
+            "anthropic-messages",
+            "openai-responses",
+        ] {
             let cache = ProjectionCache::new(MAX_BYTES, MAX_ENTRIES);
             let builds = Cell::new(0);
             let cold = load(&cache, &history, protocol, &tools, None, &builds);
             let warm = load(&cache, &history, protocol, &tools, None, &builds);
             assert_eq!(builds.get(), 1, "cold=1 build, warm=0 builds: {protocol}");
-            assert_eq!(serde_json::to_value(&cold).unwrap(), serde_json::to_value(&warm).unwrap());
+            assert_eq!(
+                serde_json::to_value(&cold).unwrap(),
+                serde_json::to_value(&warm).unwrap()
+            );
             assert!(protocol::complete_pairs(&warm.messages));
-            assert!(warm.messages.iter().any(|message| message.to_string().contains("original successful receipt")));
+            assert!(
+                warm.messages
+                    .iter()
+                    .any(|message| message.to_string().contains("original successful receipt"))
+            );
             assert_eq!(history, original);
         }
     }
@@ -223,21 +276,56 @@ mod tests {
     fn history_projection_cache_keys_tool_availability_as_set_without_reordering_inputs() {
         let history = history();
         let tools = vec!["filesystem.read".into(), "filesystem.stat".into()];
-        let reordered = vec!["filesystem.stat".into(), "filesystem.read".into(), "filesystem.read".into()];
+        let reordered = vec![
+            "filesystem.stat".into(),
+            "filesystem.read".into(),
+            "filesystem.read".into(),
+        ];
         let original_tools = tools.clone();
         let original_reordered = reordered.clone();
         let original_history = history.clone();
-        for protocol in ["openai-completions", "anthropic-messages", "openai-responses"] {
+        for protocol in [
+            "openai-completions",
+            "anthropic-messages",
+            "openai-responses",
+        ] {
             let cache = ProjectionCache::new(MAX_BYTES, MAX_ENTRIES);
             let builds = Cell::new(0);
             let cold = load(&cache, &history, protocol, &tools, None, &builds);
             let warm = load(&cache, &history, protocol, &reordered, None, &builds);
-            assert_eq!(builds.get(), 1, "Tool availability order and duplicates must not rebuild: {protocol}");
-            assert!(cold.messages.iter().any(|message| !super::super::call_ids(message).is_empty()));
-            assert_eq!(serde_json::to_value(&cold).unwrap(), serde_json::to_value(&warm).unwrap());
-            let revoked = load(&cache, &history, protocol, &["filesystem.stat".into()], None, &builds);
-            assert_eq!(builds.get(), 2, "Removing availability must still invalidate: {protocol}");
-            assert!(revoked.messages.iter().all(|message| super::super::call_ids(message).is_empty()));
+            assert_eq!(
+                builds.get(),
+                1,
+                "Tool availability order and duplicates must not rebuild: {protocol}"
+            );
+            assert!(
+                cold.messages
+                    .iter()
+                    .any(|message| !super::super::call_ids(message).is_empty())
+            );
+            assert_eq!(
+                serde_json::to_value(&cold).unwrap(),
+                serde_json::to_value(&warm).unwrap()
+            );
+            let revoked = load(
+                &cache,
+                &history,
+                protocol,
+                &["filesystem.stat".into()],
+                None,
+                &builds,
+            );
+            assert_eq!(
+                builds.get(),
+                2,
+                "Removing availability must still invalidate: {protocol}"
+            );
+            assert!(
+                revoked
+                    .messages
+                    .iter()
+                    .all(|message| super::super::call_ids(message).is_empty())
+            );
         }
         assert_eq!(tools, original_tools);
         assert_eq!(reordered, original_reordered);
@@ -254,29 +342,64 @@ mod tests {
         let builds = Cell::new(0);
         let protocol = "openai-completions";
         let original = load(&cache, &history, protocol, &tools, Some(&origin), &builds);
-        assert!(original.messages.iter().any(|message| message["content"] == "saved runtime"));
-        let isolated = load(&cache, &history, protocol, &tools, Some(&other_origin), &builds);
-        assert!(!isolated.messages.iter().any(|message| message["content"] == "saved runtime"));
+        assert!(
+            original
+                .messages
+                .iter()
+                .any(|message| message["content"] == "saved runtime")
+        );
+        let isolated = load(
+            &cache,
+            &history,
+            protocol,
+            &tools,
+            Some(&other_origin),
+            &builds,
+        );
+        assert!(
+            !isolated
+                .messages
+                .iter()
+                .any(|message| message["content"] == "saved runtime")
+        );
         let revoked = load(&cache, &history, protocol, &[], Some(&origin), &builds);
-        assert!(!revoked.messages.iter().any(|message| !super::super::call_ids(message).is_empty()));
+        assert!(
+            !revoked
+                .messages
+                .iter()
+                .any(|message| !super::super::call_ids(message).is_empty())
+        );
         assert!(protocol::complete_pairs(&revoked.messages));
 
         history[0]["Content"] = json!("Updated content with the same stable message ID");
         let updated = load(&cache, &history, protocol, &tools, Some(&origin), &builds);
         assert_eq!(updated.messages[0]["content"], history[0]["Content"]);
-        history[1]["ModelTranscript"]["rounds"][0]["contextBefore"][0]["message"]["content"] = json!("changed private runtime");
+        history[1]["ModelTranscript"]["rounds"][0]["contextBefore"][0]["message"]["content"] =
+            json!("changed private runtime");
         let changed = load(&cache, &history, protocol, &tools, Some(&origin), &builds);
         let direct = build_history_projection(protocol, &history, &tools, Some(&origin)).unwrap();
-        assert_eq!(serde_json::to_value(changed).unwrap(), serde_json::to_value(direct).unwrap());
+        assert_eq!(
+            serde_json::to_value(changed).unwrap(),
+            serde_json::to_value(direct).unwrap()
+        );
         history.extend([
             json!({"Id":"user-2","Role":"user","Content":"Next question","Status":"completed"}),
             json!({"Id":"assistant-2","Role":"assistant","ReplyTo":"user-2","Content":"Next answer","Status":"completed"}),
         ]);
         let appended = load(&cache, &history, protocol, &tools, Some(&origin), &builds);
-        assert!(appended.messages.iter().any(|message| message["content"] == "Next answer"));
+        assert!(
+            appended
+                .messages
+                .iter()
+                .any(|message| message["content"] == "Next answer")
+        );
         history.drain(..2);
         let deleted = load(&cache, &history, protocol, &tools, Some(&origin), &builds);
-        assert!(!serde_json::to_string(&deleted).unwrap().contains("original successful receipt"));
+        assert!(
+            !serde_json::to_string(&deleted)
+                .unwrap()
+                .contains("original successful receipt")
+        );
         assert_eq!(builds.get(), 7);
     }
 
@@ -286,11 +409,35 @@ mod tests {
         let history = history();
         let tools = vec!["filesystem.read".into()];
         let builds = Cell::new(0);
-        let first = load(&cache, &history, "openai-completions", &tools, None, &builds);
-        load(&cache, &history, "anthropic-messages", &tools, None, &builds);
-        let rebuilt = load(&cache, &history, "openai-completions", &tools, None, &builds);
+        let first = load(
+            &cache,
+            &history,
+            "openai-completions",
+            &tools,
+            None,
+            &builds,
+        );
+        load(
+            &cache,
+            &history,
+            "anthropic-messages",
+            &tools,
+            None,
+            &builds,
+        );
+        let rebuilt = load(
+            &cache,
+            &history,
+            "openai-completions",
+            &tools,
+            None,
+            &builds,
+        );
         assert_eq!(builds.get(), 3);
-        assert_eq!(serde_json::to_value(&first).unwrap(), serde_json::to_value(rebuilt).unwrap());
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(rebuilt).unwrap()
+        );
         let state = cache.0.lock().unwrap();
         assert!(state.occupied_bytes <= state.limit_bytes);
         assert_eq!(state.entries.len(), 1);
@@ -299,12 +446,27 @@ mod tests {
         let tiny = ProjectionCache::new(256, 1);
         let uncached = Cell::new(0);
         for _ in 0..2 {
-            load(&tiny, &history, "openai-completions", &tools, None, &uncached);
+            load(
+                &tiny,
+                &history,
+                "openai-completions",
+                &tools,
+                None,
+                &uncached,
+            );
         }
         assert_eq!(uncached.get(), 2);
         assert!(tiny.0.lock().unwrap().entries.is_empty());
         let failed_version = [255; 32];
-        assert!(cache.project(failed_version, || Err(ModelError::new("FIXTURE_FAILURE", "fixture", 500))).is_err());
+        assert!(
+            cache
+                .project(failed_version, || Err(ModelError::new(
+                    "FIXTURE_FAILURE",
+                    "fixture",
+                    500
+                )))
+                .is_err()
+        );
         assert!(cache.get(&failed_version).is_none());
     }
 
@@ -314,19 +476,48 @@ mod tests {
         let history = history();
         let tools = vec!["filesystem.read".into()];
         let builds = Cell::new(0);
-        let mut restored = load(&cache, &history, "anthropic-messages", &tools, None, &builds);
+        let mut restored = load(
+            &cache,
+            &history,
+            "anthropic-messages",
+            &tools,
+            None,
+            &builds,
+        );
         let assistant = &history[1];
         let round = &assistant["ModelTranscript"]["rounds"][0];
         let continuation = [json!({"role":"assistant","content":[
             {"type":"thinking","thinking":"opaque provider continuation","signature":"original-provider-signature"},
             {"type":"text","text":"reading"},{"type":"tool_use","id":"call-1","name":"filesystem_read","input":{"path":"fixture.txt"}}]})];
         let span = continuation_span(&restored, assistant, round).unwrap();
-        assert!(restore_continuation(&mut restored, assistant, round, span, &continuation));
-        assert!(restored.messages.iter().any(|message| message["content"][0]["signature"] == "original-provider-signature"));
+        assert!(restore_continuation(
+            &mut restored,
+            assistant,
+            round,
+            span,
+            &continuation
+        ));
+        assert!(
+            restored
+                .messages
+                .iter()
+                .any(|message| message["content"][0]["signature"] == "original-provider-signature")
+        );
         assert!(protocol::complete_pairs(&restored.messages));
-        let cached = load(&cache, &history, "anthropic-messages", &tools, None, &builds);
+        let cached = load(
+            &cache,
+            &history,
+            "anthropic-messages",
+            &tools,
+            None,
+            &builds,
+        );
         assert_eq!(builds.get(), 1);
-        assert!(!serde_json::to_string(&cached).unwrap().contains("original-provider-signature"));
+        assert!(
+            !serde_json::to_string(&cached)
+                .unwrap()
+                .contains("original-provider-signature")
+        );
         assert!(protocol::complete_pairs(&cached.messages));
     }
 }

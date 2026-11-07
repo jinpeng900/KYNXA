@@ -40,15 +40,18 @@ fn inspect_session(root: &Path, session: &Path) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Inspect the selected canonical scope afresh; preparation caches never authorize its actual paths.
-/// 每次即时检查所选正式范围；目录准备缓存不能替代实际路径授权。
+/// 每次即时检查所选正式范围，目录准备缓存不算路径授权。
 pub(crate) fn inspect_conversation(root: &Path, location: &Value) -> Result<(), ContractError> {
     let chat_id = id(&location["Id"])?;
     let session = if location["ProjectId"].is_null() {
         root.join("Chats").join(chat_id)
     } else {
         let folder = root.join("Projects").join(id(&location["ProjectId"])?);
-        for path in [folder.clone(), folder.join("Sessions"), folder.join("Memory")] {
+        for path in [
+            folder.clone(),
+            folder.join("Sessions"),
+            folder.join("Memory"),
+        ] {
             inspect_path(root, &path, true)?;
         }
         inspect_path(root, &folder.join("project.json"), false)?;
@@ -151,7 +154,6 @@ fn create_session(root: &Path, session: PathBuf) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Layout version is checked before any scaffolding or canonical transaction effects.
 /// 任何目录框架或正式事务发生实际效应前，都先检查数据布局版本。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.layout.plan" {

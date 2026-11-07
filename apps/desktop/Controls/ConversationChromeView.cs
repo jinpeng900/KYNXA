@@ -10,7 +10,6 @@ using Windows.Foundation;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Hosts owned Chrome as a native child inside the workspace viewport.
 /// 将应用拥有的 Chrome 作为原生子窗口放入工作区视口。
 /// </summary>
 public sealed partial class ConversationChromeView : Grid, IDisposable
@@ -54,8 +53,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         await _loaded.Task.WaitAsync(_lifetime.Token);
         WatchViewportVisibility();
         _conversationId = conversationId;
-        // Observe late startup receipts so Rust can close the owned process.
-        // 视图关闭后仍接收启动回执，以便关闭对应进程。
         _opening = _api.OpenAsync(conversationId, address, CancellationToken.None);
         _page = await _opening;
         if (_disposed) return;
@@ -73,12 +70,10 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
             _browserWindowId = _page.WindowId;
             if (_browserWindowId is long windowId) _browserWindows[windowId] = _chrome;
             _owner = Microsoft.UI.Win32Interop.GetWindowFromWindowId(XamlRoot.ContentIslandEnvironment.AppWindowId);
-            // Reveal only the still-offscreen window so Chrome lays out its own toolbar before calibration.
             // 仅显示仍在屏幕外的窗口，让 Chrome 先完成自身工具栏布局，再一次性校准，不抢焦点。
             ShowWindow(_chrome, 4);
             await Task.Delay(40, _lifetime.Token);
-            // The open receipt already identifies this window and viewport; show it before polling navigation state.
-            // 打开回执已包含窗口和视口，先挂载显示，再按原有流程更新导航状态。
+            // 打开结果已包含窗口和视口，先挂载显示，再按原有流程更新导航状态。
             InitializeContentInsets(_page.Viewport);
             AttachBrowserWindow();
             WatchContentGeometry(_page.ProcessId);
@@ -141,7 +136,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
     public void SetActive(bool active)
     {
         _active = active && !_disposed;
-        // Disable input hit testing on inactive pages so underlying documents remain usable.
         // 非活动网页不接收输入，让下层文档正常滚动和翻页。
         IsHitTestVisible = _active;
         if (_active) { PositionWindow(); _timer.Start(); } else _timer.Stop();
@@ -164,16 +158,12 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         UpdateRendererInsets();
         var point = TransformToVisual(root.Content).TransformPoint(new Point());
         double scale = root.RasterizationScale;
-        // Both child windows use parent-client physical pixels; the host itself clips everything outside the viewport.
         // 两级子窗口均使用父客户区物理像素，视口外的绘制由 Windows 父子窗口裁剪负责。
         var bounds = ((int)Math.Round(point.X * scale), (int)Math.Round(point.Y * scale),
             (int)Math.Round(ActualWidth * scale), (int)Math.Round(ActualHeight * scale));
-        // Raise the viewport above the sibling ContentIsland surface while keeping the parent's clipping and focus.
         // 视口位于同级 ContentIsland 表面之上，仍由父窗口裁剪且不抢输入焦点。
         if (bounds != _hostBounds && SetWindowPos(_host, 0, bounds.Item1, bounds.Item2, bounds.Item3, bounds.Item4, 0x0010))
             _hostBounds = bounds;
-        // ContentIsland can reorder its native surface on activation without changing layout.
-        // Restore only the child viewport's sibling order; never raise the application above another app.
         // ContentIsland 激活时可能改原生层级但不改布局；只恢复视口子窗口层级，不把软件置顶。
         if (GetWindow(_host, 3) != 0) SetWindowPos(_host, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
         var insets = ContentInsets();
@@ -215,7 +205,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
             SetParent(_chrome, _host);
             if (GetParent(_chrome) != _host) throw new Win32Exception(Marshal.GetLastPInvokeError());
         }
-        // A native parent replaces the former top-level owner and region workaround; never detach on a tab switch.
         // 原生父窗口取代旧的顶层 owner 与区域模拟方案；切换标签时只隐藏，不能解除父子关系。
         SetWindowRgn(_chrome, 0, true);
         SetWindowPos(_chrome, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020);
@@ -241,14 +230,12 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
     {
         foreach (var item in _visibilityCallbacks) item.Element.UnregisterPropertyChangedCallback(VisibilityProperty, item.Token);
         _visibilityCallbacks.Clear();
-        // Visibility changes must hide native windows immediately, even when no composition frame is produced.
         // 可见性变化须立即隐藏原生窗口，即使锁屏或后台没有新的合成帧也不能等布局更新。
         for (DependencyObject? element = this; element is not null; element = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element))
             if (element is UIElement visual)
                 _visibilityCallbacks.Add((visual, visual.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => PositionWindow())));
     }
 
-    // Capture Chrome's client-drawn decoration before embedding. Hidden render-widget HWNDs may be tiny IME helpers.
     // 接入前记录 Chrome 客户区装饰；隐藏的 RenderWidget HWND 可能只是很小的输入法辅助窗口。
     private void InitializeContentInsets(ChromeWorkspaceViewport? viewport)
     {
@@ -264,7 +251,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         _windowInsets[_chrome] = _chromeUiInsets;
     }
 
-    // Narrow infobars may wrap; measure the visible page HWND, not CSS height.
     // 窄窗口的提示栏会换行；按可见页面 HWND 测量，避免 CSS 高度反复撑大窗口。
     private void UpdateRendererInsets()
     {
@@ -306,7 +292,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
             frame.Right + (int)Math.Round(_chromeUiInsets.Right * scale), frame.Bottom + (int)Math.Round(_chromeUiInsets.Bottom * scale));
     }
 
-    // Only native nonclient borders may vary with the current frame; page layout never feeds back into window size.
     // 只随当前原生边框调整，网页排版尺寸不能反过来累积到窗口尺寸里。
     private (int Left, int Top, int Right, int Bottom) NativeFrameInsets()
     {
@@ -331,7 +316,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         return true;
     }
 
-    // Native frame/layout changes do not necessarily trigger XAML layout; observe only this owned browser process.
     // 原生边框和布局变化不一定触发 XAML 布局；仅监听本次自有浏览器，离开时解除钩子。
     private void WatchContentGeometry(int processId)
     {
@@ -345,7 +329,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         _geometryHook = SetWinEventHook(0x8002, 0x800B, 0, _geometryChanged, (uint)processId, 0, 0);
     }
 
-    // Embedded browser bubbles stay top-level; attach only its active frameless popups.
     // 嵌入后的气泡仍可能置顶；只接入当前浏览器的无框弹层，排除网页窗口和系统对话框。
     private void AttachBrowserBubble(nint window)
     {
@@ -373,7 +356,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         ShowWindow(window, 4);
     }
 
-    // The native parent owns stacking and movement; observe shell visibility without stealing focus.
     // 原生父窗口负责层级和移动，仅监听软件可见状态且不抢焦点。
     private void WatchOwner()
     {
@@ -392,7 +374,6 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
         DispatcherQueue.TryEnqueue(() => { _positionQueued = false; PositionWindow(); });
     }
 
-    // CDP IDs are not HWNDs; match title and bounds within the owned process.
     // CDP ID 不是 HWND；只在自有进程内按标题和边界匹配，不接入个人浏览器。
     private static nint FindOwnedWindow(int processId, string? title, ChromeWorkspaceWindowBounds? bounds)
     {

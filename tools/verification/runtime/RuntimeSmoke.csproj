@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RepoRoot>$(MSBuildThisFileDirectory)../../..</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RepoRoot)/apps/shared/**/*.cs" Exclude="$(RepoRoot)/apps/shared/**/obj/**/*.cs;$(RepoRoot)/apps/shared/**/bin/**/*.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Models/ModelApiClient.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Data/ApplicationPaths.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Models/ChatStreamReader.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Models/LocalModelsApiClient.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/LocalModelDownloadPresentation.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Integration/GatewayApiException.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Integration/GatewayResponseReader.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Models/UI/ChatMessageState.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/PausedTaskSelection.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/TranscriptPresentation.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/TranscriptHtmlCache.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/TranscriptMarkdown.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/MathMarkdown.cs" />
+    <Compile Include="$(RepoRoot)/apps/desktop/Services/Presentation/CodeSyntaxHighlighter.cs" />
+    <PackageReference Include="ColorCode.Core" Version="2.0.15" />
+    <PackageReference Include="Markdig" Version="1.4.0" />
+  </ItemGroup>
+</Project>

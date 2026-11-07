@@ -95,7 +95,6 @@ fn section_end(headings: &[Value], heading: &Value, length: usize) -> usize {
         .unwrap_or(length)
 }
 
-/// Use UTF-16 window/reference offsets and facts from the actual parser.
 /// 窗口及引用偏移使用 UTF-16，语法事实取自实际解析器。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     if operation == "retrieval.window-options" {

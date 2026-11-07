@@ -14,8 +14,8 @@ use super::service_error::{ServiceError, ServiceResult};
 use super::service_mcp::preview_sections;
 use crate::models::protocol::{array, string, truthy};
 
-const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PIXELS: u64 = 16_000_000;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PIXELS: u64 = 64_000_000;
 
 fn appended_image_receipt(image: Value, arguments: &Value) -> Value {
     let mut receipt = json!({"screenshotStatus":"available"});
@@ -37,7 +37,6 @@ fn u16_be(bytes: &[u8], offset: usize) -> Option<u16> {
     ))
 }
 
-/// Media structure and scope are verified before any bytes become a local-viewer artifact.
 /// 媒体结构与读取范围在字节成为本地查看附件前完成验证。
 fn dimensions(bytes: &[u8], declared: &Value) -> Option<Value> {
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {

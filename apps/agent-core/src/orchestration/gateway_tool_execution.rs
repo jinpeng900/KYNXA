@@ -1,9 +1,10 @@
-//! Shared tool execution context and receipt semantics for root and delegated tasks.
-//! 根任务与委派任务共用执行上下文和回执语义，正式操作仍由原任务日志持有。
+//! 根任务与委派任务共用执行上下文和结果含义，正式操作仍由原任务日志持有。
 
-use super::{gateway_runtime::{GatewayRuntime, RequestRun},
+use super::{
+    gateway_runtime::{GatewayRuntime, RequestRun},
     gateway_work_progress::{RoundProgress, WorkProgress, WorkProgressPlan},
-    task::{completed_output_paths, successful_completion_receipt}};
+    task::{completed_output_paths, successful_completion_receipt},
+};
 use crate::{
     gateway_contract::GatewayError,
     storage::{gateway as data, task_repository::OperationState},
@@ -19,41 +20,78 @@ pub(super) struct ToolProgressOutcome {
 }
 
 pub(super) fn progress_interruption(plan: &WorkProgressPlan) -> Option<GatewayError> {
-    plan.wait_for_user.then(||GatewayError::new("TASK_CONTINUATION_NO_PROGRESS",
-        "后续处理未能继续推进，已有结果和进度已保留。",409))
+    plan.wait_for_user.then(|| {
+        GatewayError::new(
+            "TASK_CONTINUATION_NO_PROGRESS",
+            "连续多轮没有新的进展。",
+            409,
+        )
+    })
 }
 
-/// Successful dispatch alone is not a changed artifact; native file preconditions and hashes are authoritative.
-/// 派发成功不等于产物变化；文件原生前置版本和实际哈希才是依据。
-pub(super) fn artifact_version_changed(call: &Value, receipt: &Value, before: &Value, after: &Value) -> bool {
-    if receipt["reused"] == true || receipt["executed"] == false || !successful_completion_receipt(receipt) {return false;}
+/// 派发成功不代表产物变化，要看文件原生前置版本和实际哈希。
+pub(super) fn artifact_version_changed(
+    call: &Value,
+    receipt: &Value,
+    before: &Value,
+    after: &Value,
+) -> bool {
+    if receipt["reused"] == true
+        || receipt["executed"] == false
+        || !successful_completion_receipt(receipt)
+    {
+        return false;
+    }
     let name = call["name"].as_str().unwrap_or("");
     let value = &receipt["content"];
-    if value["reused"] == true || value["executed"] == false {return false;}
-    if matches!(name,"filesystem.write" | "filesystem.edit" | "filesystem.delete" | "filesystem.mkdir" | "document.create" | "attachment.export") {
-        if value["path"].as_str().is_some_and(|path|!path.is_empty()) {
-            if value["deleted"] == true || value["created"] == true || value["changed"] == true {return true;}
-            if matches!(name,"filesystem.write" | "filesystem.edit" | "document.create" | "attachment.export")
-                && let Some(hash) = value["sha256"].as_str().filter(|hash|
-                    hash.len()==64 && hash.bytes().all(|byte|byte.is_ascii_hexdigit())) {
-                // Native writes require null for a missing target or the exact previous hash for replacement.
+    if value["reused"] == true || value["executed"] == false {
+        return false;
+    }
+    if matches!(
+        name,
+        "filesystem.write"
+            | "filesystem.edit"
+            | "filesystem.delete"
+            | "filesystem.mkdir"
+            | "document.create"
+            | "attachment.export"
+    ) {
+        if value["path"].as_str().is_some_and(|path| !path.is_empty()) {
+            if value["deleted"] == true || value["created"] == true || value["changed"] == true {
+                return true;
+            }
+            if matches!(
+                name,
+                "filesystem.write" | "filesystem.edit" | "document.create" | "attachment.export"
+            ) && let Some(hash) = value["sha256"].as_str().filter(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
                 // 原生写入只接受不存在目标的 null，或覆盖前真实版本哈希。
                 let expected = &call["arguments"]["expectedHash"];
-                if expected.is_null() {return name != "filesystem.edit";}
-                if let Some(previous) = expected.as_str().filter(|previous|
-                    previous.len()==64 && previous.bytes().all(|byte|byte.is_ascii_hexdigit())) {
+                if expected.is_null() {
+                    return name != "filesystem.edit";
+                }
+                if let Some(previous) = expected.as_str().filter(|previous| {
+                    previous.len() == 64 && previous.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) {
                     return !previous.eq_ignore_ascii_case(hash);
                 }
             }
         }
     }
-    before["complete"] == true && after["complete"] == true
-        && before["signature"].as_str().filter(|value|!value.is_empty())
-            .zip(after["signature"].as_str().filter(|value|!value.is_empty()))
-            .is_some_and(|(previous,current)|previous != current)
+    before["complete"] == true
+        && after["complete"] == true
+        && before["signature"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .zip(
+                after["signature"]
+                    .as_str()
+                    .filter(|value| !value.is_empty()),
+            )
+            .is_some_and(|(previous, current)| previous != current)
 }
 
-/// Derive progress from the existing canonical observation history and accepted document facts.
 /// 用已有正式观察指纹及已接受的文档事实派生进展，不为调用次数或新归档 ID 记功。
 pub(super) fn observe_progress_round(
     work: &mut WorkProgress,
@@ -64,12 +102,22 @@ pub(super) fn observe_progress_round(
     let before = observation_facts(observations)?;
     let mut observed = results.to_vec();
     for pair in &mut observed {
-        if matches!(pair["call"]["name"].as_str(), Some("tool.search" | "tool.load")) {
+        if matches!(
+            pair["call"]["name"].as_str(),
+            Some("tool.search" | "tool.load")
+        ) {
             pair["observation"] = json!(true);
         }
     }
-    let observation = observations.apply("observations.success", &json!({"results":observed}))
-        .map_err(|code|GatewayError::new(code,"Tool progress projection failed. / 工具进展投影失败。",500))?;
+    let observation = observations
+        .apply("observations.success", &json!({"results":observed}))
+        .map_err(|code| {
+            GatewayError::new(
+                code,
+                "Tool progress projection failed. / 工具进展投影失败。",
+                500,
+            )
+        })?;
     let after = observation_facts(observations)?;
     round.waiting_only = !results.is_empty() && results.iter().all(active_wait_receipt);
     if !round.waiting_only {
@@ -81,22 +129,81 @@ pub(super) fn observe_progress_round(
             }
         }
     }
+    if !round.waiting_only {
+        // 命令和桌面操作不属于观察类工具，但会改变状态，按实际结果判断。
+        let outcomes = results
+            .iter()
+            .filter(|pair| {
+                pair["observation"] != true
+                    && pair["result"]["executed"] != false
+                    && pair["result"]["reused"] != true
+                    && !pair["call"]["name"].as_str().is_some_and(|name| {
+                        name.starts_with("task.")
+                            || matches!(name, "tool.search" | "tool.load" | "context.compact")
+                    })
+            })
+            .map(|pair| {
+                (
+                    &pair["call"],
+                    &pair["result"],
+                    successful_completion_receipt(&pair["result"]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let (successful, failed) = work.record_outcomes(&outcomes);
+        round.action_outcomes_only = successful > 0
+            && !round.evidence_changed
+            && !round.artifact_updated
+            && !round.new_read_range;
+        round.evidence_changed |= successful > 0;
+        round.new_failed_outcomes = failed;
+    }
     let repeated_calls = if observation["repeated"] == true {
-        observed.iter().filter(|pair|pair["observation"] == true
-            && successful_completion_receipt(&pair["result"]) && !active_wait_receipt(pair)).count() as u64
-    } else {0};
+        observed
+            .iter()
+            .filter(|pair| {
+                pair["observation"] == true
+                    && successful_completion_receipt(&pair["result"])
+                    && !active_wait_receipt(pair)
+            })
+            .count() as u64
+    } else {
+        0
+    };
     round.repeated_reads = round.repeated_reads.max(repeated_calls);
-    round.suppressed_calls = results.iter().filter(|pair|
-        pair["result"]["code"] == "TOOL_ACTION_REQUIRES_CORRECTION").count() as u64;
-    Ok(ToolProgressOutcome {plan:work.observe_round(&round),observation})
+    round.suppressed_calls = results
+        .iter()
+        .filter(|pair| pair["result"]["code"] == "TOOL_ACTION_REQUIRES_CORRECTION")
+        .count() as u64;
+    Ok(ToolProgressOutcome {
+        plan: work.observe_round(&round),
+        observation,
+    })
 }
 
-fn observation_facts(observations: &mut crate::tools::observations::ObservationGuard)
-    -> Result<std::collections::BTreeSet<(String, String)>, GatewayError> {
-    let state = observations.apply("observations.state", &json!({}))
-        .map_err(|code|GatewayError::new(code,"Tool observation state failed. / 工具观察状态读取失败。",500))?;
-    Ok(state["observations"].as_array().into_iter().flatten().filter_map(|item|
-        Some((item["key"].as_str()?.to_owned(), item["fingerprint"].as_str()?.to_owned()))).collect())
+fn observation_facts(
+    observations: &mut crate::tools::observations::ObservationGuard,
+) -> Result<std::collections::BTreeSet<(String, String)>, GatewayError> {
+    let state = observations
+        .apply("observations.state", &json!({}))
+        .map_err(|code| {
+            GatewayError::new(
+                code,
+                "Tool observation state failed. / 工具观察状态读取失败。",
+                500,
+            )
+        })?;
+    Ok(state["observations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some((
+                item["key"].as_str()?.to_owned(),
+                item["fingerprint"].as_str()?.to_owned(),
+            ))
+        })
+        .collect())
 }
 
 fn active_wait_receipt(pair: &Value) -> bool {
@@ -104,29 +211,74 @@ fn active_wait_receipt(pair: &Value) -> bool {
     let mut nodes = vec![receipt];
     let mut cursor = 0;
     while cursor < nodes.len() && nodes.len() < 32 {
-        for field in ["content", "structuredContent", "value", "result", "details", "error"] {
-            if let Some(value) = nodes[cursor].get(field).filter(|value|value.is_object()) {nodes.push(value);}
+        for field in [
+            "content",
+            "structuredContent",
+            "value",
+            "result",
+            "details",
+            "error",
+        ] {
+            if let Some(value) = nodes[cursor].get(field).filter(|value| value.is_object()) {
+                nodes.push(value);
+            }
         }
         for field in ["tasks", "children", "operations", "jobs"] {
             if let Some(items) = nodes[cursor].get(field).and_then(Value::as_array) {
-                for value in items.iter().filter(|value|value.is_object()).take(32usize.saturating_sub(nodes.len())) {
+                for value in items
+                    .iter()
+                    .filter(|value| value.is_object())
+                    .take(32usize.saturating_sub(nodes.len()))
+                {
                     nodes.push(value);
                 }
             }
         }
         cursor += 1;
     }
-    let transient = nodes.iter().any(|node|node["retryAfterMs"].as_u64().is_some_and(|delay|delay>0)
-        || node["code"].as_str().is_some_and(|code|matches!(code,
-            "RESOURCE_WAIT" | "RESOURCE_UNAVAILABLE" | "RESOURCE_LIMIT" | "MODEL_NETWORK_FAILED"
-            | "MODEL_RESPONSE_READ_FAILED" | "MODEL_RESPONSE_TIMEOUT" | "MODEL_IDLE_TIMEOUT"
-            | "MODEL_STREAM_INCOMPLETE" | "MCP_TIMEOUT" | "MCP_CONNECTION_CLOSED" | "MCP_CONNECTION_LOST")));
-    if transient {return true;}
-    nodes.iter().any(|node|["status", "state"].iter().any(|field|matches!(node[*field].as_str(),
-        Some("running" | "pending" | "queued" | "waiting" | "waiting-network")))
-        && ["taskId", "operationId", "jobId", "processId", "sessionId", "recoveryHandle"]
-            .iter().any(|field|node.get(field).is_some_and(|value|!value.is_null()
-                && value.as_str().is_none_or(|text|!text.is_empty()))))
+    let transient = nodes.iter().any(|node| {
+        node["retryAfterMs"].as_u64().is_some_and(|delay| delay > 0)
+            || node["code"].as_str().is_some_and(|code| {
+                matches!(
+                    code,
+                    "RESOURCE_WAIT"
+                        | "RESOURCE_UNAVAILABLE"
+                        | "RESOURCE_LIMIT"
+                        | "MODEL_NETWORK_FAILED"
+                        | "MODEL_RESPONSE_READ_FAILED"
+                        | "MODEL_RESPONSE_TIMEOUT"
+                        | "MODEL_IDLE_TIMEOUT"
+                        | "MODEL_STREAM_INCOMPLETE"
+                        | "MCP_TIMEOUT"
+                        | "MCP_CONNECTION_CLOSED"
+                        | "MCP_CONNECTION_LOST"
+                )
+            })
+    });
+    if transient {
+        return true;
+    }
+    nodes.iter().any(|node| {
+        ["status", "state"].iter().any(|field| {
+            matches!(
+                node[*field].as_str(),
+                Some("running" | "pending" | "queued" | "waiting" | "waiting-network")
+            )
+        }) && [
+            "taskId",
+            "operationId",
+            "jobId",
+            "processId",
+            "sessionId",
+            "recoveryHandle",
+        ]
+        .iter()
+        .any(|field| {
+            node.get(field).is_some_and(|value| {
+                !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty())
+            })
+        })
+    })
 }
 
 #[cfg(test)]
@@ -146,24 +298,128 @@ mod work_progress_tests {
     fn canonical_read_progress_ignores_new_call_ids_and_accepts_new_ranges() {
         let mut work = WorkProgress::default();
         let mut observations = ObservationGuard::default();
-        let facts = RoundProgress {work_calls:1,source_reads:1,..Default::default()};
+        let facts = RoundProgress {
+            work_calls: 1,
+            source_reads: 1,
+            ..Default::default()
+        };
         for index in 0..5 {
-            let result = observe_progress_round(&mut work,&mut observations,facts.clone(),
-                &[read(&format!("call-{index}"),0)]).unwrap();
-            assert_eq!(result.plan.made_progress,index==0);
-            assert_eq!(result.plan.wait_for_user,index==4);
+            let result = observe_progress_round(
+                &mut work,
+                &mut observations,
+                facts.clone(),
+                &[read(&format!("call-{index}"), 0)],
+            )
+            .unwrap();
+            assert_eq!(result.plan.made_progress, index == 0);
+            assert_eq!(result.plan.wait_for_user, index == 4);
         }
         let alternative = json!({"call":{"id":"new-method","name":"terminal.run",
             "arguments":{"command":"try-a-different-source"}},"observation":false,
             "result":{"status":"error","isError":true,"content":{"exitCode":1}}});
-        let mixed = observe_progress_round(&mut work,&mut observations,
-            RoundProgress {work_calls:2,source_reads:1,..Default::default()},&[read("same",0),alternative]).unwrap();
+        let mixed = observe_progress_round(
+            &mut work,
+            &mut observations,
+            RoundProgress {
+                work_calls: 2,
+                source_reads: 1,
+                ..Default::default()
+            },
+            &[read("same", 0), alternative],
+        )
+        .unwrap();
         assert!(!mixed.plan.wait_for_user);
-        let advanced = observe_progress_round(&mut work,&mut observations,facts.clone(),&[read("next",20)]).unwrap();
+        let advanced = observe_progress_round(
+            &mut work,
+            &mut observations,
+            facts.clone(),
+            &[read("next", 20)],
+        )
+        .unwrap();
         assert!(advanced.plan.made_progress);
         assert!(!advanced.plan.wait_for_user);
         work.resume_after_user_instruction();
-        assert!(!observe_progress_round(&mut work,&mut observations,facts,&[read("continued",20)]).unwrap().plan.wait_for_user);
+        assert!(
+            !observe_progress_round(
+                &mut work,
+                &mut observations,
+                facts,
+                &[read("continued", 20)]
+            )
+            .unwrap()
+            .plan
+            .wait_for_user
+        );
+    }
+
+    fn action(id: &str, command: &str, process: u64, output: &str, failed: bool) -> Value {
+        json!({"call":{"id":id,"name":"terminal.host.run","arguments":{"script":command,"reason":id}},"observation":false,
+            "result":{"status":if failed {"error"} else {"completed"},"isError":failed,
+                "content":{"value":{"exitCode":i32::from(failed),"stdout":output,"processId":process,"elapsedMs":process}}}})
+    }
+
+    #[test]
+    fn host_actions_count_by_outcome_and_identical_repeats_still_stall() {
+        let mut work = WorkProgress::default();
+        let mut observations = ObservationGuard::default();
+        let facts = RoundProgress {
+            work_calls: 1,
+            ..Default::default()
+        };
+        let first = observe_progress_round(
+            &mut work,
+            &mut observations,
+            facts.clone(),
+            &[action("a", "g++ sol.cpp", 1, "built", false)],
+        )
+        .unwrap();
+        assert!(
+            first.plan.made_progress,
+            "a new successful command is progress"
+        );
+        let second = observe_progress_round(
+            &mut work,
+            &mut observations,
+            facts.clone(),
+            &[action("b", "./sol", 2, "10 5", false)],
+        )
+        .unwrap();
+        assert!(second.plan.made_progress);
+        let diagnosis = observe_progress_round(
+            &mut work,
+            &mut observations,
+            facts.clone(),
+            &[action("c", "g++ -v", 3, "", true)],
+        )
+        .unwrap();
+        assert!(!diagnosis.plan.made_progress);
+        assert_eq!(
+            diagnosis.plan.no_progress_rounds, 0,
+            "new diagnostics are not stagnation"
+        );
+        let mut last = diagnosis.plan;
+        for index in 0..4 {
+            // The same command and output with a new process ID and call ID is a repeat.
+            last = observe_progress_round(
+                &mut work,
+                &mut observations,
+                facts.clone(),
+                &[action(
+                    &format!("r{index}"),
+                    "./sol",
+                    10 + index,
+                    "10 5",
+                    false,
+                )],
+            )
+            .unwrap()
+            .plan;
+            assert!(!last.made_progress);
+        }
+        assert_eq!(
+            last.no_progress_rounds, 4,
+            "identical repeats still accumulate stagnation"
+        );
     }
 
     #[test]
@@ -174,30 +430,52 @@ mod work_progress_tests {
             "content":{"state":"running","taskId":"actual-child"}}})));
         assert!(active_wait_receipt(&json!({"result":{"status":"completed",
             "content":{"tasks":[{"state":"running","taskId":"actual-child"}]}}})));
-        assert!(active_wait_receipt(&json!({"result":{"status":"error","code":"RESOURCE_WAIT"}})));
-        assert!(active_wait_receipt(&json!({"result":{"status":"error","code":"MODEL_NETWORK_FAILED"}})));
-        assert!(!active_wait_receipt(&json!({"result":{"status":"error","code":"INVALID_TOOL_ARGUMENTS"}})));
+        assert!(active_wait_receipt(
+            &json!({"result":{"status":"error","code":"RESOURCE_WAIT"}})
+        ));
+        assert!(active_wait_receipt(
+            &json!({"result":{"status":"error","code":"MODEL_NETWORK_FAILED"}})
+        ));
+        assert!(!active_wait_receipt(
+            &json!({"result":{"status":"error","code":"INVALID_TOOL_ARGUMENTS"}})
+        ));
     }
 
     #[test]
     fn successful_same_bytes_are_not_progress_but_new_or_deleted_files_are() {
         let hash = "a".repeat(64);
-        let call = json!({"name":"filesystem.write","arguments":{"path":"output","expectedHash":hash}});
-        let receipt = json!({"status":"completed","executed":true,"content":{"path":"output","sha256":hash}});
+        let call =
+            json!({"name":"filesystem.write","arguments":{"path":"output","expectedHash":hash}});
+        let receipt =
+            json!({"status":"completed","executed":true,"content":{"path":"output","sha256":hash}});
         let before = json!({"complete":true,"signature":"known"});
         let after = json!({"complete":true,"signature":"newly-registered-target"});
-        assert!(!artifact_version_changed(&call,&receipt,&before,&after));
+        assert!(!artifact_version_changed(&call, &receipt, &before, &after));
         let mut changed = receipt.clone();
         changed["content"]["sha256"] = json!("b".repeat(64));
-        assert!(artifact_version_changed(&call,&changed,&Value::Null,&Value::Null));
+        assert!(artifact_version_changed(
+            &call,
+            &changed,
+            &Value::Null,
+            &Value::Null
+        ));
         let mut create = call.clone();
         create["arguments"]["expectedHash"] = Value::Null;
-        assert!(artifact_version_changed(&create,&receipt,&Value::Null,&Value::Null));
-        assert!(artifact_version_changed(&json!({"name":"filesystem.delete"}),
-            &json!({"status":"completed","content":{"path":"output","deleted":true}}),&Value::Null,&Value::Null));
+        assert!(artifact_version_changed(
+            &create,
+            &receipt,
+            &Value::Null,
+            &Value::Null
+        ));
+        assert!(artifact_version_changed(
+            &json!({"name":"filesystem.delete"}),
+            &json!({"status":"completed","content":{"path":"output","deleted":true}}),
+            &Value::Null,
+            &Value::Null
+        ));
         let mut reused = receipt;
         reused["reused"] = json!(true);
-        assert!(!artifact_version_changed(&create,&reused,&before,&after));
+        assert!(!artifact_version_changed(&create, &reused, &before, &after));
     }
 
     #[test]
@@ -205,19 +483,35 @@ mod work_progress_tests {
         let call = json!({"name":"attachment.export","arguments":{"path":"copy.png","expectedSha256":"a".repeat(64)}});
         let receipt = json!({"status":"completed","executed":true,
             "content":{"path":"copy.png","sha256":"a".repeat(64),"bytes":20}});
-        assert!(artifact_version_changed(&call, &receipt, &Value::Null, &Value::Null));
+        assert!(artifact_version_changed(
+            &call,
+            &receipt,
+            &Value::Null,
+            &Value::Null
+        ));
         for marker in [json!({"reused":true}), json!({"executed":false})] {
             let mut reused = receipt.clone();
-            reused["content"].as_object_mut().unwrap().extend(marker.as_object().unwrap().clone());
-            assert!(!artifact_version_changed(&call, &reused,
-                &json!({"complete":true,"signature":"before"}), &json!({"complete":true,"signature":"after"})));
+            reused["content"]
+                .as_object_mut()
+                .unwrap()
+                .extend(marker.as_object().unwrap().clone());
+            assert!(!artifact_version_changed(
+                &call,
+                &reused,
+                &json!({"complete":true,"signature":"before"}),
+                &json!({"complete":true,"signature":"after"})
+            ));
         }
     }
 }
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum ReceiptStatus { Completed, Error, Unknown }
+enum ReceiptStatus {
+    Completed,
+    Error,
+    Unknown,
+}
 
 impl ReceiptStatus {
     fn from_value(value: &Value) -> Option<Self> {
@@ -230,7 +524,6 @@ impl ReceiptStatus {
     }
 }
 
-/// Native execution facts are typed; vendor payloads and original error bodies remain unchanged.
 /// 原生执行事实使用类型约束，供应商载荷与原始错误正文保持不变。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,8 +536,7 @@ struct ToolExecutionReceipt {
     recovery_handle: Option<Value>,
     content: Value,
 }
-/// Reused legacy receipts use today's error semantics without rewriting their original content.
-/// 复用旧回执时按当前错误语义判断，原始正文保持不变。
+/// 复用旧结果时按当前错误含义判断，原始正文保持不变。
 pub(super) fn normalize_reused_receipt(name: &str, receipt: &mut Value) {
     if receipt["status"] == "completed" && tools::explicit_tool_error(name, &receipt["content"]) {
         receipt["isError"] = json!(true);
@@ -252,7 +544,6 @@ pub(super) fn normalize_reused_receipt(name: &str, receipt: &mut Value) {
     }
 }
 
-/// Withdrawn memory invalidates pending plans, not completed effects or history.
 /// 记忆撤回使待执行方案失效，保留已完成操作和历史。
 pub(super) fn memory_replanning_result() -> Value {
     json!({"isError":true,"executed":false,"requestDispatched":false,"recoverable":true,
@@ -265,48 +556,74 @@ pub(super) fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Val
         Ok(value) => {
             let unknown = value["status"] == "unknown"
                 || value["outcome"] == "unknown"
-                || value["code"].as_str().is_some_and(|code| code.contains("UNKNOWN"));
+                || value["code"]
+                    .as_str()
+                    .is_some_and(|code| code.contains("UNKNOWN"));
             json!(ToolExecutionReceipt {
-                status: if unknown { ReceiptStatus::Unknown } else if value["isError"] == true { ReceiptStatus::Error } else { ReceiptStatus::Completed },
-                executed: unknown || value["executed"] != false, is_error: value["isError"] == true || unknown,
-                code: value["code"].clone(), recovery_handle: Some(value["recoveryHandle"].clone()), content: value,
+                status: if unknown {
+                    ReceiptStatus::Unknown
+                } else if value["isError"] == true {
+                    ReceiptStatus::Error
+                } else {
+                    ReceiptStatus::Completed
+                },
+                executed: unknown || value["executed"] != false,
+                is_error: value["isError"] == true || unknown,
+                code: value["code"].clone(),
+                recovery_handle: Some(value["recoveryHandle"].clone()),
+                content: value,
             })
         }
         Err(error) => {
             let unknown = error.code.contains("UNKNOWN")
                 || error.details["status"] == "unknown"
                 || error.details["outcome"] == "unknown";
-            let parameter_error = error.code == "INVALID_TOOL_ARGUMENTS"
-                || error.code.starts_with("INVALID_SKILL_");
-            // Only trusted pre-dispatch validation can prove no effect; error codes cannot replace unknown results.
-            // 只有可信的派发前校验能证明无副作用，错误码不能覆盖未知结果。
-            let not_dispatched = !unknown && parameter_error
+            let parameter_error =
+                error.code == "INVALID_TOOL_ARGUMENTS" || error.code.starts_with("INVALID_SKILL_");
+            // 只有可信的派发前校验能证明无副作用。
+            let not_dispatched = !unknown
+                && parameter_error
                 && error.details["executed"] == false
                 && error.details["requestDispatched"] == false;
             let mut content = error.response();
             if not_dispatched {
                 content["executed"] = json!(false);
                 content["requestDispatched"] = json!(false);
-                content["correction"] = json!("This call was rejected before execution. Keep the current task, prior output and successful receipts. Correct only the reported parameter using the declared tool schema and supplied bounds, then issue a new valid call. Do not repeat successful operations or guess permissions, paths, resource IDs, commands or write contents.");
+                content["correction"] = json!(
+                    "This call was rejected before execution. Keep the current task, prior output and successful receipts. Correct only the reported parameter using the declared tool schema and supplied bounds, then issue a new valid call. Do not repeat successful operations or guess permissions, paths, resource IDs, commands or write contents."
+                );
             }
             json!(ToolExecutionReceipt {
-                status: if unknown { ReceiptStatus::Unknown } else { ReceiptStatus::Error },
-                executed: !not_dispatched, is_error: true, code: json!(error.code), recovery_handle: None, content,
+                status: if unknown {
+                    ReceiptStatus::Unknown
+                } else {
+                    ReceiptStatus::Error
+                },
+                executed: !not_dispatched,
+                is_error: true,
+                code: json!(error.code),
+                recovery_handle: None,
+                content,
             })
         }
     }
 }
 
-/// Release request-owned discovery and tool state on every exit path.
 /// 请求退出时统一释放其发现与工具状态，错误和取消路径同样生效。
-pub(crate) struct RequestToolGuard(pub(crate) tools::GatewayToolContext);
+pub(crate) struct RequestToolGuard(tools::GatewayToolContext);
+impl RequestToolGuard {
+    pub(crate) fn new(ctx: tools::GatewayToolContext) -> Self {
+        tools::enter_request(&ctx);
+        Self(ctx)
+    }
+}
 impl Drop for RequestToolGuard {
     fn drop(&mut self) {
+        tools::leave_request(&self.0);
         tools::release_request(&self.0);
     }
 }
 
-/// Bind specialist I/O to the accepted scope and attempt cancellation token.
 /// 专用 I/O 绑定已确认范围和本次尝试的取消令牌。
 pub(crate) fn specialist_executor(
     runtime: &Arc<GatewayRuntime>,
@@ -321,8 +638,7 @@ pub(crate) fn specialist_executor(
     let mut tool_context = ctx.clone();
     tool_context.external_execute = None;
     let key = run.cancellation_key.clone();
-    // Derive project_id and bindingSnapshot from the formal binding, never model arguments.
-    // project_id 和绑定快照取自正式归属，模型参数不能扩大范围。
+    // project_id 和绑定快照取自正式归属。
     let context = json!({
         "conversationId": run.conversation_id,
         "projectId": ctx.project_id,
@@ -351,7 +667,6 @@ pub(crate) fn specialist_executor(
                     .map_err(|code| GatewayError::new(code, "取消状态无法读取。", 503))?;
                 let _scope = lease.enter();
                 if name == "tool.result.read" {
-                    // Read only current-chat public archives after scope, hash and UTF-16 page checks.
                     // 核对范围、哈希及 UTF-16 分页后，仅回读当前聊天公共归档。
                     return data::read_tool_result(
                         &config.data_root,
@@ -369,7 +684,6 @@ pub(crate) fn specialist_executor(
                     }
                     let chat = context["conversationId"].as_str().unwrap_or("");
                     let id = args["resultId"].as_str().unwrap_or("");
-                    // The original archive owns image references; caller-supplied paths or media are never pinned.
                     // 图像引用只取自当前聊天原始归档，不接受调用方提供路径或媒体作为保留对象。
                     let archive = data::load_private_tool_result(&config.data_root, chat, id)?;
                     data::public_archive(&archive)?;
@@ -384,8 +698,6 @@ pub(crate) fn specialist_executor(
                     if archive["canonical"]["isError"] == true || !super::task::receipt_has_visual_observation(&archive["canonical"]) {
                         return Err(GatewayError::new("IMAGE_RESULT_REQUIRED", "该回执没有可展示的真实图像。", 400));
                     }
-                    // Presentation points to the original receipt; it neither duplicates media nor implies model observation.
-                    // 展示只引用原回执，不复制图像，也不代表模型已经看过。
                     return Ok(json!({"kind":"screenshot","presentation":"workspace","title":args["title"],
                         "sourceResultRef":{"id":archive["id"],"bytes":archive["bytes"],"sha256":archive["sha256"]},
                         "sourceToolName":archive["toolName"],"sourceToolCallId":archive["toolCallId"]}));
@@ -406,7 +718,11 @@ pub(crate) fn specialist_executor(
     })
 }
 
-pub(super) fn tool_failure_environment(ctx: &tools::GatewayToolContext, version: &Value, mutation_revision: u64) -> Value {
+pub(super) fn tool_failure_environment(
+    ctx: &tools::GatewayToolContext,
+    version: &Value,
+    mutation_revision: u64,
+) -> Value {
     json!({"workspace":ctx.workdir,"permission":ctx.permission_mode,"authorizedRoots":ctx.authorized_roots,
         "configuration":ctx.config,"version":{"signature":version["signature"],"complete":version["complete"]},
         "mutationRevision":mutation_revision})
@@ -419,8 +735,7 @@ pub(super) fn tool_failure_definition(call: &Value, catalog: &[Value], cached: &
         .unwrap_or_else(|| json!({"name":call["name"],"definitionAvailable":false}))
 }
 
-/// Settle operation status from the actual receipt, retaining unknown outcomes.
-/// 根据真实回执结算操作状态，未知结果不能按错误或成功处理。
+/// 根据真实结果结算操作状态，未知结果单独保留。
 pub(crate) fn operation_outcome(receipt: &Value) -> OperationState {
     match ReceiptStatus::from_value(&receipt["status"]) {
         Some(ReceiptStatus::Completed) if receipt["isError"] != true => OperationState::Succeeded,
@@ -435,44 +750,73 @@ mod receipt_tests {
 
     #[test]
     fn missing_or_invalid_receipt_status_never_settles_an_operation_as_successful() {
-        for receipt in [Value::Null, json!({"isError":false}), json!({"status":"running"}), json!({"status":false})] {
+        for receipt in [
+            Value::Null,
+            json!({"isError":false}),
+            json!({"status":"running"}),
+            json!({"status":false}),
+        ] {
             assert_eq!(operation_outcome(&receipt), OperationState::Unknown);
         }
-        assert_eq!(operation_outcome(&json!({"status":"completed","isError":false})), OperationState::Succeeded);
-        assert_eq!(operation_outcome(&json!({"status":"completed","isError":true})), OperationState::Failed);
-        assert_eq!(operation_outcome(&json!({"status":"error"})), OperationState::Failed);
-        assert_eq!(operation_outcome(&json!({"status":"unknown","isError":true})), OperationState::Unknown);
+        assert_eq!(
+            operation_outcome(&json!({"status":"completed","isError":false})),
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            operation_outcome(&json!({"status":"completed","isError":true})),
+            OperationState::Failed
+        );
+        assert_eq!(
+            operation_outcome(&json!({"status":"error"})),
+            OperationState::Failed
+        );
+        assert_eq!(
+            operation_outcome(&json!({"status":"unknown","isError":true})),
+            OperationState::Unknown
+        );
     }
 }
 
-
 pub(crate) fn is_read_only_tool(name: &str) -> bool {
-    // Execution policy classifies reads; discovery and context maintenance have no external effects.
     // 执行策略统一判定只读操作；发现和上下文维护无外部副作用。
     crate::tools::policy::is_read_only(name)
         || matches!(name, "tool.load" | "task.document" | "context.compact")
 }
 
 fn completion_evidence_needs_restore(observation: &Value) -> bool {
-    observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none()
+    observation.get("verifiedSuccess").is_none()
+        || observation.get("completionProof").is_none()
         || observation["completionProofVerification"] == "pending"
         || preview_proof_needs_upgrade(observation)
-        || observation["verifiedSuccess"] == true && observation["name"].as_str()
-            .and_then(|name| name.strip_prefix("mcp.")).and_then(|name| name.split_once('.'))
-            .is_some_and(|(_, tool)| tool == "execute_blender_code")
+        || observation["verifiedSuccess"] == true
+            && observation["name"]
+                .as_str()
+                .and_then(|name| name.strip_prefix("mcp."))
+                .and_then(|name| name.split_once('.'))
+                .is_some_and(|(_, tool)| tool == "execute_blender_code")
 }
 
 fn preview_proof_needs_upgrade(observation: &Value) -> bool {
     observation["name"] == "artifact.open"
-        && observation["completionProof"]["targets"].as_array().into_iter().flatten()
+        && observation["completionProof"]["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .any(|target| target["kind"] == "file" && target["version"].is_null())
 }
 
-/// Recover legacy proofs and reject known false-success wrappers without replaying operations.
 /// 恢复旧证据并排除已知的假成功包装，不重放操作。
-pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversation: &str, request: &str, transcript: &mut Vec<Value>) {
-    if !transcript.iter().flat_map(|round| round["observations"].as_array().into_iter().flatten())
-        .any(completion_evidence_needs_restore) {
+pub(super) async fn restore_completion_evidence(
+    root: &std::path::Path,
+    conversation: &str,
+    request: &str,
+    transcript: &mut Vec<Value>,
+) {
+    if !transcript
+        .iter()
+        .flat_map(|round| round["observations"].as_array().into_iter().flatten())
+        .any(completion_evidence_needs_restore)
+    {
         return;
     }
     let root = root.to_owned();
@@ -487,15 +831,13 @@ pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversa
                 let legacy = observation.get("verifiedSuccess").is_none() || observation.get("completionProof").is_none()
                     || preview_proof_needs_upgrade(observation);
                 if !legacy {
-                    // Unchecked old wrappers remain historical facts, not current acceptance evidence.
-                    // 未核验的旧包装保留历史事实，暂不参与当前验收。
+                    // 未检查的旧包装保留历史事实，暂不参与当前验收。
                     observation["verifiedSuccess"] = json!(false);
                     observation["completionProofVerification"] = json!("pending");
                 }
                 let Some(id) = observation["ref"]["id"].as_str() else { continue; };
                 let Ok(archive) = data::load_private_tool_result(&root, &conversation, id) else { continue; };
-                // Keep unavailable references retryable; add proof only after verifying content.
-                // 存储不可读时保留重试入口，核验正文后才补证据。
+                // 存储不可读时保留重试入口，检查正文后才补证据。
                 if legacy {
                     observation["verifiedSuccess"] = json!(false);
                     observation["completionEvidence"] = json!([]);
@@ -525,8 +867,6 @@ pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversa
                 let mut proof = super::completion_evidence::from_receipt(&call, &receipt);
                 if proof.is_object() {
                     proof["mutationSequence"] = observation["mutationSequence"].clone();
-                    // Upgrade receipt-derived fields without reviving an invalidated observation.
-                    // 只升级回执推导字段，不复活已失效的观察，也不重新执行操作。
                     for field in ["mutationSequence", "mutating", "current", "observationCurrent", "visualObserved", "validation"] {
                         if let Some(value) = observation["completionProof"].get(field) { proof[field] = value.clone(); }
                     }
@@ -536,5 +876,7 @@ pub(super) async fn restore_completion_evidence(root: &std::path::Path, conversa
         }
         restored_transcript
     }).await;
-    if let Ok(restored) = restored { *transcript = restored; }
+    if let Ok(restored) = restored {
+        *transcript = restored;
+    }
 }

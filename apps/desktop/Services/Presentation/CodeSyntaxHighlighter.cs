@@ -7,7 +7,6 @@ namespace KYNXA_Desktop.Services;
 internal sealed record CodeToken(string Text, uint? Color = null);
 
 /// <summary>
-/// Produces colored text without HTML, executable content, or changes to copied code.
 /// 生成带颜色文本，不引入 HTML、可执行内容或复制代码的变化。
 /// </summary>
 internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
@@ -17,7 +16,6 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
 
     public static IReadOnlyList<CodeToken> Highlight(string source, string? language)
     {
-        // The caller owns paging and background rendering; loading another page must not remove existing colors.
         // 分页和后台渲染由调用端负责；继续加载一页不能使已经展示的代码整体失去高亮。
         if (ResolveLanguage(language) is not { } syntax)
             return [new(source)];
@@ -30,7 +28,6 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
         }
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or RegexMatchTimeoutException)
         {
-            // An unsupported/incomplete grammar must never prevent displaying the response.
             // 语法不支持或尚未完整时，不能阻止回复展示。
             return [new(source)];
         }
@@ -58,7 +55,6 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
         };
     }
 
-    // Additional grammars use the same ColorCode parser and palette in chat and file previews.
     // 扩展语法继续使用同一个 ColorCode 解析器和调色板，聊天与文件预览不重复实现词法器。
     private static readonly ILanguage Rust = new AdditionalLanguage("rust", "Rust", [
         Rule(@"//[^\r\n]*|/\*[\s\S]*?\*/", "Comment"),
@@ -107,7 +103,6 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
         foreach (var child in scope.Children) Paint(child, colors);
     }
 
-    // A restrained light palette with sufficient contrast on the reply's #F7F7F7 surface.
     // 浅色调色板在回复的 #F7F7F7 背景上保持足够对比度。
     private static uint? GetColor(string scope)
     {

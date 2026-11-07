@@ -15,7 +15,6 @@ fn utf16(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-/// Select from original wire records without reserializing private source IDs.
 /// 从原始传输记录选择，不重新序列化私有来源身份。
 fn project(args: &Value, compact: bool, navigate: bool) -> Value {
     let items = args["items"].as_array().map(Vec::as_slice).unwrap_or(&[]);

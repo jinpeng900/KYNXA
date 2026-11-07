@@ -10,7 +10,6 @@ namespace KYNXA_Desktop.Controls;
 public sealed record ToolApprovalDecision(bool Approved, string Scope = "once");
 
 /// <summary>
-/// Shows a pending operation without interrupting the conversation or owning its approval request.
 /// 在会话内展示待审批操作；控件不接管审批请求身份，也不打断当前输入。
 /// </summary>
 public sealed partial class InlineToolApprovalCard : UserControl
@@ -68,7 +67,6 @@ public sealed partial class InlineToolApprovalCard : UserControl
             : tool.Name.StartsWith("mcp.", StringComparison.Ordinal) ? "MCP 服务是受信任的外部程序，不属于终端沙箱。" : null;
         if (executionBoundaryKey is not null)
         {
-            // Reuse complete execution boundaries in the readable details.
             // 详情完整保留原执行边界和授权范围，沿用审批规则。
             var executionBoundary = Label("InlineToolApprovalExecutionBoundary", secondary: true);
             UiLocalization.Bind(executionBoundary, TextBlock.TextProperty, executionBoundaryKey);
@@ -135,7 +133,6 @@ public sealed partial class InlineToolApprovalCard : UserControl
         _surface.Child = _layout;
         Content = _surface;
 
-        // Scroll details between the fixed title and buttons; reserve composer space in short windows.
         // 详情在固定标题和按钮之间滚动；矮窗口仍为输入区留出空间。
         SizeChanged += (_, args) => { UpdateActionsLayout(args.NewSize.Width); UpdateContentHeight(); };
         _title.SizeChanged += (_, _) => UpdateContentHeight();
@@ -160,7 +157,6 @@ public sealed partial class InlineToolApprovalCard : UserControl
             Math.Max(_actions.ActualHeight, _actions.DesiredSize.Height));
         double fixedHeight = titleHeight + actionsHeight + 2 * _layout.RowSpacing +
             _surface.Padding.Top + _surface.Padding.Bottom + _surface.BorderThickness.Top + _surface.BorderThickness.Bottom;
-        // Drop the content minimum when fixed controls exhaust the available height.
         // 空间不足时取消正文最小高度，保留按钮高度，避免挤走输入框。
         double contentHeight = Math.Max(0, cardBudget - fixedHeight);
         if (Math.Abs(_contentScroll.MaxHeight - contentHeight) > 0.5) _contentScroll.MaxHeight = contentHeight;
@@ -196,7 +192,6 @@ public sealed partial class InlineToolApprovalCard : UserControl
 
     private void SelectDecision(ToolApprovalDecision decision)
     {
-        // Latch before notifying the owner so double clicks and reentrant callbacks cannot authorize twice.
         // 通知调用方前先锁定本次决定，防止双击或事件重入重复提交授权。
         if (_decisionSelected) return;
         _decisionSelected = true;

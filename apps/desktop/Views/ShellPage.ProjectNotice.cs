@@ -14,7 +14,6 @@ public sealed partial class ShellPage
 
     private void ShowProjectNotice(string message, Func<Task>? undo = null)
     {
-        // A notice owns exactly its own action; a later message must never reuse a previous undo.
         // 每条提示只持有自己的操作，后来的消息不得复用上一条撤销。
         _undoSidebarChange = undo;
         ProjectNotice.Message = message;
@@ -53,7 +52,6 @@ public sealed partial class ShellPage
             int index = current.FindIndex(chat => chat.Id == previous.Id);
             if (index < 0)
             {
-                // Only a never-saved local draft may be absent from the authoritative catalog.
                 // 只有从未保存的本地草稿可以不在正式目录中，已删除或移出范围的聊天不能复活。
                 if (previous.IsPersisted || previous.IsArchived || catalog.Chats.Concat(catalog.Projects.SelectMany(project => project.Chats))
                     .Any(chat => chat.Id == previous.Id)) return null;
@@ -62,8 +60,7 @@ public sealed partial class ShellPage
             }
             var metadata = current[index];
             if (metadata.IsArchived) return null;
-            // Keep body/draft and history identity; the refreshed catalog still owns all formal metadata.
-            // 保留正文、草稿及历史投影身份，正式元数据仍以重新读取的目录为准。
+            // 保留正文、草稿及历史映射身份，正式元数据仍以重新读取的目录为准。
             previous.Title = metadata.Title;
             previous.IsSample = metadata.IsSample;
             previous.IsPinned = metadata.IsPinned;
@@ -168,7 +165,6 @@ public sealed partial class ShellPage
             var current = RequireUndoProject(projectId);
             if (!MatchesProjectFolderBinding(current, expected)) throw ProjectUndoUnavailable();
             var rollback = CaptureProjectFolderBinding(current);
-            // Restoring a removed or rebound root gets a fresh version; prior task capabilities must stay revoked.
             // 恢复已移除或改绑的根目录使用新版本，不能重新激活旧任务的目录能力。
             var restored = previous.Mounts.Select(mount =>
             {

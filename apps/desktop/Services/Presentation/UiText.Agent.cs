@@ -490,7 +490,6 @@ public static partial class UiText
 
     internal static string CatalogDescription(string description)
     {
-        // Match complete built-in descriptions only; external or updated catalog text remains untouched.
         // 仅匹配完整的内置说明；第三方或已更新的目录文案保留原文。
         if (Language == "en") return description;
         return ToolCatalogTranslations.FirstOrDefault(entry => entry.Value == description).Key ?? description;

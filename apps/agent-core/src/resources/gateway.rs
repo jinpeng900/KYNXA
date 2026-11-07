@@ -1,5 +1,4 @@
-//! Native resource-service transport; one process remains the hardware allocation authority.
-//! 原生资源服务传输；硬件授额仍由唯一资源服务进程负责。
+//! 原生资源服务传输；硬件额度仍由唯一资源服务进程负责。
 
 use crate::gateway_contract::GatewayError;
 use serde_json::{Value, json};
@@ -34,8 +33,7 @@ pub struct ResourceService {
     next_id: Arc<AtomicU64>,
 }
 
-/// A dropped or timed-out caller still owns admission retirement until its original receipt settles.
-/// 调用方被丢弃或超时后仍须结算原准入回执，避免晚到的授予租约失去释放者。
+/// 调用方被丢弃或超时后仍须结算原准入结果，避免晚到的授予租约失去释放者。
 struct PendingAdmission {
     service: Arc<ResourceService>,
     request_id: u64,
@@ -44,15 +42,32 @@ struct PendingAdmission {
 
 impl Drop for PendingAdmission {
     fn drop(&mut self) {
-        let Some(attempt) = self.attempt.take() else { return; };
+        let Some(attempt) = self.attempt.take() else {
+            return;
+        };
         let service = self.service.clone();
         let request_id = self.request_id;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = service.request("cancelAcquire", json!({"requestId":request_id}), Duration::from_secs(5)).await;
+                let _ = service
+                    .request(
+                        "cancelAcquire",
+                        json!({"requestId":request_id}),
+                        Duration::from_secs(5),
+                    )
+                    .await;
                 if let Ok(Ok(receipt)) = attempt.await {
-                    if let Some(lease_id) = receipt["leaseId"].as_str().filter(|_| receipt["status"] == "granted") {
-                        let _ = service.request("release", json!({"leaseId":lease_id}), Duration::from_secs(5)).await;
+                    if let Some(lease_id) = receipt["leaseId"]
+                        .as_str()
+                        .filter(|_| receipt["status"] == "granted")
+                    {
+                        let _ = service
+                            .request(
+                                "release",
+                                json!({"leaseId":lease_id}),
+                                Duration::from_secs(5),
+                            )
+                            .await;
                     }
                 }
             });
@@ -89,8 +104,7 @@ impl ResourceService {
         tokio::spawn(async move {
             loop {
                 let mut frame = Vec::new();
-                // A bounded frame reader cannot allocate forever on a corrupt helper response.
-                // 辅助进程响应异常时，有界帧读取不能无限分配内存。
+                // 辅助进程响应异常时，限量帧读取不能无限分配内存。
                 let mut complete = false;
                 while frame.len() <= 65536 {
                     let available = match output.fill_buf().await {
@@ -208,7 +222,6 @@ impl ResourceService {
                 if method != "acquire" {
                     self.pending.lock().await.remove(&id);
                 }
-                // Cancel only an admission attempt. Released or unknown effects are never fabricated.
                 // 仅取消等待准入；不虚构预约释放或未知执行结果。
                 if method == "acquire" {
                     let cancel_id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -238,7 +251,6 @@ impl ResourceService {
         self.lease_from_receipt(receipt, ttl_ms)
     }
 
-    /// Keep accepted foreground work waiting across admission windows until capacity returns or its owner stops it.
     /// 已接受的前台任务跨准入等待窗口继续等待，资源恢复后执行，直到所属任务明确停止。
     pub async fn acquire_waiting(
         self: &Arc<Self>,
@@ -284,10 +296,10 @@ impl ResourceService {
                 return Err(GatewayError::new("RESOURCE_CANCELLED", "资源等待已取消。", 499));
             }
         };
-        // The selected branch consumed the settled receipt; its caller now owns any granted allocation.
-        // 已选分支取得结算回执后，授予资源交由调用方持有；其余退出统一经过待准入保护清理。
+        // 已选分支取得结算结果后，授予资源交由调用方持有；其余退出统一经过待准入保护清理。
         admission.attempt.take();
-        result.map_err(|_| GatewayError::new("RESOURCE_RUNTIME_EXITED", "资源等待任务退出。", 503))?
+        result
+            .map_err(|_| GatewayError::new("RESOURCE_RUNTIME_EXITED", "资源等待任务退出。", 503))?
     }
 
     fn lease_from_receipt(
@@ -296,13 +308,28 @@ impl ResourceService {
         ttl_ms: u64,
     ) -> Result<ResourceLease, GatewayError> {
         if result["status"] != "granted" {
-            let code = result["reason"].as_str().unwrap_or("RESOURCE_INVALID_RECEIPT");
-            let capacity = matches!(code, "RESOURCE_PRESSURE" | "RESOURCE_WAIT_TIMEOUT" | "RESOURCE_QUEUE_FULL" | "RESOURCE_LEASE_LIMIT");
+            let code = result["reason"]
+                .as_str()
+                .unwrap_or("RESOURCE_INVALID_RECEIPT");
+            let capacity = matches!(
+                code,
+                "RESOURCE_PRESSURE"
+                    | "RESOURCE_WAIT_TIMEOUT"
+                    | "RESOURCE_QUEUE_FULL"
+                    | "RESOURCE_LEASE_LIMIT"
+            );
             return Err(GatewayError::new(
                 code,
-                if capacity { "当前硬件资源不足，正在等待可用资源。" }
-                else { "资源请求未通过协议校验，已有进度已保留。" },
-                if code == "RESOURCE_INVALID_REQUEST" { 400 } else { 503 },
+                if capacity {
+                    "当前硬件资源不足，正在等待可用资源。"
+                } else {
+                    "资源请求未通过协议校验，已有进度已保留。"
+                },
+                if code == "RESOURCE_INVALID_REQUEST" {
+                    400
+                } else {
+                    503
+                },
             ));
         }
         let lease_id = result["leaseId"]
@@ -347,7 +374,6 @@ impl ResourceService {
     }
 }
 
-/// Retry only acknowledged admission denials: no model or tool action has started at this boundary.
 /// 仅重排已确认被拒的准入；此边界尚未发起模型或工具操作，通信未知不得自动重派。
 async fn wait_for_resource_response<Request, Response>(
     mut request: Request,
@@ -359,18 +385,26 @@ where
 {
     loop {
         if *cancellation.borrow() {
-            return Err(GatewayError::new("RESOURCE_CANCELLED", "资源等待已取消。", 499));
+            return Err(GatewayError::new(
+                "RESOURCE_CANCELLED",
+                "资源等待已取消。",
+                499,
+            ));
         }
         let receipt = request().await?;
         if receipt["status"] != "denied"
             || !matches!(
                 receipt["reason"].as_str(),
-                Some("RESOURCE_PRESSURE" | "RESOURCE_WAIT_TIMEOUT" | "RESOURCE_QUEUE_FULL" | "RESOURCE_LEASE_LIMIT")
+                Some(
+                    "RESOURCE_PRESSURE"
+                        | "RESOURCE_WAIT_TIMEOUT"
+                        | "RESOURCE_QUEUE_FULL"
+                        | "RESOURCE_LEASE_LIMIT"
+                )
             )
         {
             return Ok(receipt);
         }
-        // Yield between full queues; normal pressure still waits in the native queue for its bounded window.
         // 队列满时让出调度，普通压力仍在原生队列中按窗口等待，不紧密轮询或占用 UI 线程。
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(500)) => {},
@@ -392,8 +426,7 @@ pub struct ResourceLease {
     pub allocation: Value,
 }
 impl ResourceLease {
-    /// Cancelling an external dispatch does not prove its work stopped; expiry retains its quarantined reservation.
-    /// 取消外部派发不证明任务已停止；停止续租后，资源服务到期仍保留隔离预约，核验完成才显式释放。
+    /// 取消外部派发不证明任务已停止；停止续租后，资源服务到期仍保留隔离预约，检查完成才显式释放。
     pub fn retain_unknown_on_drop(&mut self) {
         self.release_on_drop = false;
     }
@@ -523,10 +556,15 @@ mod admission_wait_tests {
     async fn invalid_resource_parameters_do_not_enter_the_capacity_wait_loop() {
         let (_owner, cancellation) = watch::channel(false);
         let attempts = AtomicUsize::new(0);
-        let receipt = wait_for_resource_response(|| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            async { Ok(json!({"status":"denied","reason":"RESOURCE_INVALID_REQUEST"})) }
-        }, cancellation).await.unwrap();
+        let receipt = wait_for_resource_response(
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Ok(json!({"status":"denied","reason":"RESOURCE_INVALID_REQUEST"})) }
+            },
+            cancellation,
+        )
+        .await
+        .unwrap();
         assert_eq!(receipt["reason"], "RESOURCE_INVALID_REQUEST");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -541,27 +579,34 @@ mod tests {
     async fn dropped_admission_future_cancels_queue_and_releases_a_racing_grant() {
         let executable = std::env::var_os("KYNXA_TEST_RESOURCE_SERVICE")
             .expect("set KYNXA_TEST_RESOURCE_SERVICE to the isolated resource-service executable");
-        let service = ResourceService::start(Path::new(&executable)).await.unwrap();
+        let service = ResourceService::start(Path::new(&executable))
+            .await
+            .unwrap();
         let (_owner, cancellation) = watch::channel(false);
         for grant_before_drop in [false, true] {
-            let snapshot = service.request("snapshot", json!({}), Duration::from_secs(2)).await.unwrap();
-            // Import exact owned CPU debt so this fixture is independent of adaptive grants under host pressure.
-            // 恢复精确的自有 CPU 预约，使夹具不受宿主压力下的自适应授额影响。
+            let snapshot = service
+                .request("snapshot", json!({}), Duration::from_secs(2))
+                .await
+                .unwrap();
+            // 恢复精确的自有 CPU 预约，使夹具不受宿主压力下的自适应额度影响。
             let restored = service.request("restore", json!({"leases":[{
                 "leaseId":"drop-owner","taskId":"drop-owner",
                 "expiresAt":chrono::Utc::now().timestamp_millis() + 30000,
                 "cpuThreads":snapshot["budget"]["cpuThreads"],"memoryBytes":0,"gpuMemoryBytes":0,
             }]}), Duration::from_secs(2)).await.unwrap();
             assert_eq!(restored["status"], "restored");
-            let owner = service.lease_from_receipt(
-                json!({"status":"granted","leaseId":"drop-owner"}), 30000,
-            ).unwrap();
+            let owner = service
+                .lease_from_receipt(json!({"status":"granted","leaseId":"drop-owner"}), 30000)
+                .unwrap();
             let mut owner = Some(owner);
-            let mut admission = Box::pin(service.acquire(json!({
-                "taskId":"drop-waiter","workspaceId":"isolated-drop-test","kind":"foreground",
-                "workload":"compute","cpuThreads":1,"memoryBytes":0,"gpuMemoryBytes":0,
-                "waitMs":30000,"ttlMs":30000,
-            }), cancellation.clone()));
+            let mut admission = Box::pin(service.acquire(
+                json!({
+                    "taskId":"drop-waiter","workspaceId":"isolated-drop-test","kind":"foreground",
+                    "workload":"compute","cpuThreads":1,"memoryBytes":0,"gpuMemoryBytes":0,
+                    "waitMs":30000,"ttlMs":30000,
+                }),
+                cancellation.clone(),
+            ));
             tokio::select! {
                 _ = &mut admission => panic!("fixture must wait behind its owner"),
                 queued = tokio::time::timeout(Duration::from_secs(5), async {
@@ -576,24 +621,41 @@ mod tests {
                 owner.take().unwrap().release().await;
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        let snapshot = service.request("snapshot", json!({}), Duration::from_secs(2)).await.unwrap();
-                        if snapshot["queuedRequests"] == 0 && snapshot["activeLeases"] == 1 { break; }
+                        let snapshot = service
+                            .request("snapshot", json!({}), Duration::from_secs(2))
+                            .await
+                            .unwrap();
+                        if snapshot["queuedRequests"] == 0 && snapshot["activeLeases"] == 1 {
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
             }
-            // Drop the original future without sending a cancellation signal, as preparation timeout does.
             // 如预准备超时一样直接丢弃原 future，不通过取消信号替代这条释放路径。
             drop(admission);
             let expected_leases = u64::from(owner.is_some());
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    let snapshot = service.request("snapshot", json!({}), Duration::from_secs(2)).await.unwrap();
-                    if snapshot["queuedRequests"] == 0 && snapshot["activeLeases"] == expected_leases { break; }
+                    let snapshot = service
+                        .request("snapshot", json!({}), Duration::from_secs(2))
+                        .await
+                        .unwrap();
+                    if snapshot["queuedRequests"] == 0
+                        && snapshot["activeLeases"] == expected_leases
+                    {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap();
-            if let Some(owner) = owner { owner.release().await; }
+            })
+            .await
+            .unwrap();
+            if let Some(owner) = owner {
+                owner.release().await;
+            }
         }
         service.close().await;
     }

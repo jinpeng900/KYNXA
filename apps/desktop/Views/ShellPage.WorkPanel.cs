@@ -46,7 +46,6 @@ public sealed partial class ShellPage
         bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
         bool editingFolder = WorkspaceHome.IsFolderEditorVisible;
         bool canOpen = (ActiveChatId is not null || isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder || editingFolder) && hasSpace;
-        // A folder header alone does not need a preview column. Empty opening belongs to the mode/project/chat scope.
         // 仅有目录标题时不占用预览列；空面板请求属于当前模式、项目与会话，未创建聊天时也不会跨项目泄漏。
         bool visible = canOpen && _layout.PreviewVisible && (WorkTabs.HasOpenTabs || _emptyWorkPanelRequested || editingFolder);
         _workPanelUsesOverlay = visible && !inline;
@@ -54,7 +53,6 @@ public sealed partial class ShellPage
             : GetWorkPanelOverlayWidth(available, _layout.PreviewWidth) : 0;
         double gap = visible && inline ? WorkPanelGap : 0;
 
-        // Reuse one pane and its loaded viewers; compact mode overlays the chat without squeezing its column.
         // 复用同一个面板及已加载的预览；紧凑模式覆盖聊天，不挤压聊天列，也不新建窗口。
         PreviewColumn.Width = new GridLength(inline ? panelWidth : 0);
         PreviewGripColumn.Width = new GridLength(gap);
@@ -72,8 +70,6 @@ public sealed partial class ShellPage
         ConversationActionsButton.Margin = new Thickness(0, 8, canOpen && !visible ? 48 : 12, 0);
         ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 88 : 52, 0);
 
-        // Automatic hiding never changes the user's explicit open/closed preference.
-        // 自动隐藏不改变用户明确选择的展开或关闭偏好。
         return Math.Max(0, available - (inline ? panelWidth + gap : 0));
     }
 

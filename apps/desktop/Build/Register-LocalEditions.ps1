@@ -8,7 +8,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ([IntPtr]::Size -ne 8) { throw 'Use 64-bit PowerShell to register these Windows x64 applications.' }
 
-# Register the two current-user launch entries without changing either application's data or ports.
 # 注册两个当前用户启动入口，不修改任何一份软件的数据目录或端口。
 $applications = @(
     @{ Name = 'KYNXA 正式版'; Id = 'KYNXA.Desktop'; Executable = [IO.Path]::GetFullPath($MainExecutable) },

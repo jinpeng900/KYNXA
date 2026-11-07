@@ -68,7 +68,6 @@ impl BuildJob {
     }
 }
 
-/// Track background generations, capacity, retries and completion independently of runtime futures.
 /// 独立维护后台代次、容量、重试和完成记录，不依赖运行时 Future。
 #[derive(Default)]
 struct BuildQueue {
@@ -369,8 +368,7 @@ struct AnnStore {
     batches: HashMap<u64, BackgroundBatch>,
 }
 
-/// Expose operation receipts only; keep runtime objects and vector buffers with the caller.
-/// 仅返回操作回执，运行时对象与向量缓冲由调用方持有。
+/// 仅返回操作结果，运行时对象与向量缓冲由调用方持有。
 #[derive(Default)]
 pub struct AnnSession {
     queue: BuildQueue,
@@ -851,109 +849,7 @@ impl AnnStore {
                 }
                 Ok(Value::Null)
             }
-            "store.batchNext" | "store.batchPartition" | "store.batchComplete" => {
-                let batch = arguments["batchId"]
-                    .as_u64()
-                    .and_then(|id| self.batches.get_mut(&id))
-                    .ok_or_else(|| {
-                        error(
-                            "INVALID_RETRIEVAL_ANN",
-                            "ANN batch is closed. / 向量批次已关闭。",
-                            409,
-                        )
-                    })?;
-                if operation == "store.batchNext" {
-                    if batch.current.is_some() {
-                        return Err(error(
-                            "INVALID_RETRIEVAL_ANN",
-                            "ANN batch has unfinished work. / 向量批次仍有未结算分片。",
-                            409,
-                        ));
-                    }
-                    let next = batch.pending.pop_front();
-                    batch.current = next;
-                    return Ok(next
-                        .map(
-                            |(id, _)| json!({"descriptorId":id,"completedVectors":batch.completed}),
-                        )
-                        .unwrap_or(Value::Null));
-                }
-                let (_, count) = batch.current.ok_or_else(|| {
-                    error(
-                        "INVALID_RETRIEVAL_ANN",
-                        "ANN batch has no active shard. / 向量批次缺少当前分片。",
-                        409,
-                    )
-                })?;
-                if operation == "store.batchComplete" {
-                    batch.completed = batch.completed.checked_add(count).ok_or_else(|| {
-                        error(
-                            "INVALID_RETRIEVAL_ANN",
-                            "ANN count overflow. / 向量数量超限。",
-                            400,
-                        )
-                    })?;
-                    batch.current = None;
-                    return Ok(json!(batch.completed));
-                }
-                let parts = arguments["parts"]
-                    .as_array()
-                    .filter(|parts| !parts.is_empty())
-                    .ok_or_else(|| {
-                        error(
-                            "INVALID_RETRIEVAL_ANN",
-                            "Invalid ANN partitions. / 向量分片无效。",
-                            400,
-                        )
-                    })?;
-                let counts: Vec<u64> = parts
-                    .iter()
-                    .map(|part| {
-                        part["count"]
-                            .as_u64()
-                            .filter(|count| *count > 0)
-                            .ok_or_else(|| {
-                                error(
-                                    "INVALID_RETRIEVAL_ANN",
-                                    "Invalid ANN partition count. / 向量分片数量无效。",
-                                    400,
-                                )
-                            })
-                    })
-                    .collect::<Result<_, _>>()?;
-                let total = counts
-                    .iter()
-                    .try_fold(0u64, |total, count| total.checked_add(*count));
-                if total != Some(count) {
-                    return Err(error(
-                        "RETRIEVAL_ANN_STALE_BUILD",
-                        "ANN partition counts changed. / 向量分片数量已变化。",
-                        409,
-                    ));
-                }
-                let mut ids = Vec::new();
-                if counts.len() == 1 {
-                    return Ok(Value::Null);
-                }
-                for count in counts {
-                    let id = batch.next_id;
-                    batch.next_id = batch.next_id.checked_add(1).ok_or_else(|| {
-                        error(
-                            "INVALID_RETRIEVAL_ANN",
-                            "ANN partition identities overflow. / 向量分片身份超限。",
-                            400,
-                        )
-                    })?;
-                    ids.push((id, count));
-                }
-                // Replace the current shard with ordered partition IDs; keep queue state here.
-                // 按顺序用分区 ID 替换当前分片，队列状态由本模块管理。
-                for part in ids.iter().rev() {
-                    batch.pending.push_front(*part);
-                }
-                batch.current = None;
-                Ok(json!(ids.iter().map(|(id, _)| *id).collect::<Vec<_>>()))
-            }
+            "store.batchNext" | "store.batchPartition" | "store.batchComplete" => self.apply_store_batch_next(operation, arguments),
             "store.init" => {
                 if !["chunks", "retrieval_vector_rows"].contains(&string(&arguments["vectorTable"]))
                 {
@@ -1358,53 +1254,7 @@ impl AnnStore {
                             .is_none_or(|resident| resident["generation"] != entry["generation"])
                 ))
             }
-            "store.enqueue" => {
-                self.worker_guard(number(&arguments["now"], 0.0))?;
-                let entry = &arguments["entry"];
-                let descriptor = &entry["descriptor"];
-                let options = &entry["options"];
-                let covering = array(&arguments["jobs"]).iter().any(|job| {
-                    let candidate = &job["descriptor"];
-                    job["cancelled"] != true
-                        && candidate["buildConnectivity"] == options["connectivity"]
-                        && candidate["buildExpansionAdd"] == options["expansionAdd"]
-                        && candidate["buildExpansionSearch"] == options["expansionSearch"]
-                        && [
-                            "scope_key",
-                            "embedding_profile_id",
-                            "dimensions",
-                            "embedding_model_version",
-                            "embedding_space_id",
-                            "domain",
-                            "generation",
-                        ]
-                        .iter()
-                        .all(|field| candidate[*field] == descriptor[*field])
-                        && number(&candidate["minimumId"], 0.0)
-                            <= number(&descriptor["minimumId"], 0.0)
-                        && number(&candidate["maximumId"], 9_007_199_254_740_991.0)
-                            >= number(&descriptor["maximumId"], 9_007_199_254_740_991.0)
-                });
-                if covering {
-                    return Ok(Value::Null);
-                }
-                let mut build = descriptor.clone();
-                let budget_key = format!(
-                    "[{},{}]",
-                    options["maxShardBytes"], options["maxCachedShards"]
-                );
-                build["buildBudgetKey"] = json!(budget_key);
-                for (target, source) in [
-                    ("buildMaxShardBytes", "maxShardBytes"),
-                    ("buildMaxCachedShards", "maxCachedShards"),
-                    ("buildConnectivity", "connectivity"),
-                    ("buildExpansionAdd", "expansionAdd"),
-                    ("buildExpansionSearch", "expansionSearch"),
-                ] {
-                    build[target] = options[source].clone();
-                }
-                Ok(build)
-            }
+            "store.enqueue" => self.apply_store_enqueue(arguments),
             "store.reducedBuild" => {
                 let options = &arguments["options"];
                 self.set("buildShardLimit",json!({"bytes":options["maxShardBytes"],"expiresAt":number(&arguments["now"],0.0)+30000.0}));
@@ -1472,8 +1322,7 @@ impl AnnStore {
                 ))
             }
             "store.searchDispatch" => {
-                // Validate and update one request-scoped metadata projection; no cross-query JS ledger is cached.
-                // 核验并更新本次请求的元信息投影，不在 JS 缓存跨查询业务账本。
+                // 检查并更新本次请求的元信息映射，不在 JS 缓存跨查询业务记录。
                 self.apply("store.assertBuild", arguments)?;
                 let limit = self.apply("store.searchCurrent", arguments)?;
                 let mut entry = arguments["entry"].clone();
@@ -1596,6 +1445,157 @@ impl AnnStore {
                 400,
             )),
         }
+    }
+
+    fn apply_store_batch_next(&mut self, operation: &str, arguments: &Value) -> AnnResult {
+        let batch = arguments["batchId"]
+            .as_u64()
+            .and_then(|id| self.batches.get_mut(&id))
+            .ok_or_else(|| {
+                error(
+                    "INVALID_RETRIEVAL_ANN",
+                    "ANN batch is closed. / 向量批次已关闭。",
+                    409,
+                )
+            })?;
+        if operation == "store.batchNext" {
+            if batch.current.is_some() {
+                return Err(error(
+                    "INVALID_RETRIEVAL_ANN",
+                    "ANN batch has unfinished work. / 向量批次仍有未结算分片。",
+                    409,
+                ));
+            }
+            let next = batch.pending.pop_front();
+            batch.current = next;
+            return Ok(next
+                .map(
+                    |(id, _)| json!({"descriptorId":id,"completedVectors":batch.completed}),
+                )
+                .unwrap_or(Value::Null));
+        }
+        let (_, count) = batch.current.ok_or_else(|| {
+            error(
+                "INVALID_RETRIEVAL_ANN",
+                "ANN batch has no active shard. / 向量批次缺少当前分片。",
+                409,
+            )
+        })?;
+        if operation == "store.batchComplete" {
+            batch.completed = batch.completed.checked_add(count).ok_or_else(|| {
+                error(
+                    "INVALID_RETRIEVAL_ANN",
+                    "ANN count overflow. / 向量数量超限。",
+                    400,
+                )
+            })?;
+            batch.current = None;
+            return Ok(json!(batch.completed));
+        }
+        let parts = arguments["parts"]
+            .as_array()
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| {
+                error(
+                    "INVALID_RETRIEVAL_ANN",
+                    "Invalid ANN partitions. / 向量分片无效。",
+                    400,
+                )
+            })?;
+        let counts: Vec<u64> = parts
+            .iter()
+            .map(|part| {
+                part["count"]
+                    .as_u64()
+                    .filter(|count| *count > 0)
+                    .ok_or_else(|| {
+                        error(
+                            "INVALID_RETRIEVAL_ANN",
+                            "Invalid ANN partition count. / 向量分片数量无效。",
+                            400,
+                        )
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        let total = counts
+            .iter()
+            .try_fold(0u64, |total, count| total.checked_add(*count));
+        if total != Some(count) {
+            return Err(error(
+                "RETRIEVAL_ANN_STALE_BUILD",
+                "ANN partition counts changed. / 向量分片数量已变化。",
+                409,
+            ));
+        }
+        let mut ids = Vec::new();
+        if counts.len() == 1 {
+            return Ok(Value::Null);
+        }
+        for count in counts {
+            let id = batch.next_id;
+            batch.next_id = batch.next_id.checked_add(1).ok_or_else(|| {
+                error(
+                    "INVALID_RETRIEVAL_ANN",
+                    "ANN partition identities overflow. / 向量分片身份超限。",
+                    400,
+                )
+            })?;
+            ids.push((id, count));
+        }
+        // 按顺序用分区 ID 替换当前分片，队列状态由本模块管理。
+        for part in ids.iter().rev() {
+            batch.pending.push_front(*part);
+        }
+        batch.current = None;
+        Ok(json!(ids.iter().map(|(id, _)| *id).collect::<Vec<_>>()))
+    }
+
+    fn apply_store_enqueue(&mut self, arguments: &Value) -> AnnResult {
+        self.worker_guard(number(&arguments["now"], 0.0))?;
+        let entry = &arguments["entry"];
+        let descriptor = &entry["descriptor"];
+        let options = &entry["options"];
+        let covering = array(&arguments["jobs"]).iter().any(|job| {
+            let candidate = &job["descriptor"];
+            job["cancelled"] != true
+                && candidate["buildConnectivity"] == options["connectivity"]
+                && candidate["buildExpansionAdd"] == options["expansionAdd"]
+                && candidate["buildExpansionSearch"] == options["expansionSearch"]
+                && [
+                    "scope_key",
+                    "embedding_profile_id",
+                    "dimensions",
+                    "embedding_model_version",
+                    "embedding_space_id",
+                    "domain",
+                    "generation",
+                ]
+                .iter()
+                .all(|field| candidate[*field] == descriptor[*field])
+                && number(&candidate["minimumId"], 0.0)
+                    <= number(&descriptor["minimumId"], 0.0)
+                && number(&candidate["maximumId"], 9_007_199_254_740_991.0)
+                    >= number(&descriptor["maximumId"], 9_007_199_254_740_991.0)
+        });
+        if covering {
+            return Ok(Value::Null);
+        }
+        let mut build = descriptor.clone();
+        let budget_key = format!(
+            "[{},{}]",
+            options["maxShardBytes"], options["maxCachedShards"]
+        );
+        build["buildBudgetKey"] = json!(budget_key);
+        for (target, source) in [
+            ("buildMaxShardBytes", "maxShardBytes"),
+            ("buildMaxCachedShards", "maxCachedShards"),
+            ("buildConnectivity", "connectivity"),
+            ("buildExpansionAdd", "expansionAdd"),
+            ("buildExpansionSearch", "expansionSearch"),
+        ] {
+            build[target] = options[source].clone();
+        }
+        Ok(build)
     }
 }
 

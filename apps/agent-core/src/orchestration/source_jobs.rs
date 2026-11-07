@@ -63,8 +63,7 @@ struct JobOwner {
     acknowledged: usize,
 }
 
-/// Queue admission, durable cancellation and per-pass publication decisions belong to one native owner.
-/// 队列准入、持久取消和逐轮发布决策由统一原生拥有者维护；实际作业写入/回执及 AbortController 留给适配器。
+/// 队列准入、持久取消和逐轮发布决策由统一原生拥有者维护；实际作业写入/结果及 AbortController 留给适配器。
 #[derive(Default)]
 pub struct SourceJobState {
     closed: bool,
@@ -274,57 +273,7 @@ impl SourceJobState {
                     json!({"status": "cancelled", "error": if job.value["superseded"] == true && job.value["cancelledByUser"] != true { "INDEX_SUPERSEDED" } else { "INDEX_CANCELLED" }, "finishedAt": args["now"]}),
                 )
             }
-            "orchestration.sourceManagement.jobs.rebuildPlan" => {
-                if self.closed {
-                    return Err("RETRIEVAL_CLOSED".into());
-                }
-                let project = &args["projectId"];
-                let automatic = args["automatic"] == true;
-                if automatic && stopped(self.stops.get(&key(project)), &args["scope"]) {
-                    return Ok(
-                        json!({"kind": "blocked", "jobId": self.stops[&key(project)]["jobId"]}),
-                    );
-                }
-                // Select against immutable metadata before mutating the selected owner's refresh marker.
-                // 先按不可变元信息选择，再修改该拥有者的刷新标记。
-                let selected = self
-                    .active_order
-                    .iter()
-                    .find(|id| {
-                        self.active.get(*id).is_some_and(|job| {
-                            job.value["projectId"] == *project
-                                && job.value["acceptingRefresh"] == true
-                                && job.value["aborted"] != true
-                        })
-                    })
-                    .cloned();
-                if let Some(id) = selected {
-                    if args["dirty"] == true {
-                        self.active.get_mut(&id).unwrap().value["needsRefresh"] = json!(true);
-                    }
-                    return Ok(json!({"kind": "current", "jobId": id}));
-                }
-                let waits: Vec<String> = if automatic {
-                    vec![]
-                } else {
-                    self.active_order
-                        .iter()
-                        .filter(|id| {
-                            self.active.get(*id).is_some_and(|job| {
-                                job.value["projectId"] == *project
-                                    && job.value["cancelledByUser"] == true
-                                    && job.value["aborted"] == true
-                            })
-                        })
-                        .cloned()
-                        .collect()
-                };
-                let mut options = json!({"resumeAutomatic": !automatic});
-                if let Some(scope) = args.get("scope") {
-                    options["automaticRebuildScope"] = scope.clone();
-                }
-                Ok(json!({"kind": "create", "waitIds": waits, "options": options}))
-            }
+            "orchestration.sourceManagement.jobs.rebuildPlan" => self.apply_orchestration_source_management_jobs_rebuild_plan(args),
             "orchestration.sourceManagement.jobs.created" => {
                 if args["automatic"] != true {
                     self.stops.remove(&key(&args["projectId"]));
@@ -451,59 +400,7 @@ impl SourceJobState {
                     json!(true);
                 Ok(Value::Null)
             }
-            "orchestration.sourceManagement.jobs.coverage" => {
-                let report = &args["report"];
-                let scan = &args["scan"];
-                if report["coverage"].is_null() && scan["coverage"].is_null() {
-                    return Ok(Value::Null);
-                }
-                let mut coverage = report.get("coverage").filter(|coverage| !coverage.is_null()).cloned().unwrap_or(json!({"discovered": args["sourceCount"], "lexical": 0, "semantic": 0, "failed": 0, "skipped": 0, "partial": 0, "complete": false, "sources": []}));
-                for field in ["discovered", "failed", "skipped"] {
-                    let fallback = if field == "failed" {
-                        array(&scan["failures"]).len() as u64
-                    } else {
-                        0
-                    };
-                    coverage[field] = json!(
-                        coverage[field]
-                            .as_u64()
-                            .unwrap_or(0)
-                            .max(scan["coverage"][field].as_u64().unwrap_or(fallback))
-                    );
-                }
-                coverage["partial"] = coverage.get("partial").cloned().unwrap_or(json!(0));
-                coverage["failures"] =
-                    json!(array(&scan["failures"]).iter().take(50).collect::<Vec<_>>());
-                let sources = array(&coverage["sources"]);
-                let truncated = sources.len() > 50
-                    || array(&scan["failures"]).len() > 50
-                    || truthy(&coverage["reportTruncated"]);
-                coverage["sources"] = json!(&sources[sources.len().saturating_sub(50)..]);
-                coverage["complete"] = json!(
-                    truthy(&coverage["complete"])
-                        && scan["coverage"]["complete"] != false
-                        && array(&scan["failures"]).is_empty()
-                        && !truthy(&scan["truncated"])
-                        && !truthy(&scan["backgroundPending"])
-                );
-                for field in ["limit", "effectiveLimits"] {
-                    if truthy(&scan["coverage"][field]) {
-                        coverage[field] = scan["coverage"][field].clone();
-                    }
-                }
-                if truthy(&scan["coverage"]["limits"]) {
-                    coverage["limits"] = json!(
-                        array(&scan["coverage"]["limits"])
-                            .iter()
-                            .take(50)
-                            .collect::<Vec<_>>()
-                    );
-                }
-                coverage["reportTruncated"] = json!(truncated);
-                self.active.get_mut(id).ok_or("INDEX_JOB_NOT_OWNED")?.value["coverage"] =
-                    coverage.clone();
-                Ok(json!({"coverage": coverage}))
-            }
+            "orchestration.sourceManagement.jobs.coverage" => self.apply_orchestration_source_management_jobs_coverage(args),
             "orchestration.sourceManagement.jobs.semantic" => {
                 let semantic = &args["semantic"];
                 let job = self.active.get_mut(id).ok_or("INDEX_JOB_NOT_OWNED")?;
@@ -584,5 +481,111 @@ impl SourceJobState {
             }
             _ => Err("AGENT_CORE_UNKNOWN_OPERATION".into()),
         }
+    }
+
+    fn apply_orchestration_source_management_jobs_rebuild_plan(&mut self, args: &Value) -> Result<Value, String> {
+        if self.closed {
+            return Err("RETRIEVAL_CLOSED".into());
+        }
+        let project = &args["projectId"];
+        let automatic = args["automatic"] == true;
+        if automatic && stopped(self.stops.get(&key(project)), &args["scope"]) {
+            return Ok(
+                json!({"kind": "blocked", "jobId": self.stops[&key(project)]["jobId"]}),
+            );
+        }
+        // 先按不可变元信息选择，再修改该拥有者的刷新标记。
+        let selected = self
+            .active_order
+            .iter()
+            .find(|id| {
+                self.active.get(*id).is_some_and(|job| {
+                    job.value["projectId"] == *project
+                        && job.value["acceptingRefresh"] == true
+                        && job.value["aborted"] != true
+                })
+            })
+            .cloned();
+        if let Some(id) = selected {
+            if args["dirty"] == true {
+                self.active.get_mut(&id).unwrap().value["needsRefresh"] = json!(true);
+            }
+            return Ok(json!({"kind": "current", "jobId": id}));
+        }
+        let waits: Vec<String> = if automatic {
+            vec![]
+        } else {
+            self.active_order
+                .iter()
+                .filter(|id| {
+                    self.active.get(*id).is_some_and(|job| {
+                        job.value["projectId"] == *project
+                            && job.value["cancelledByUser"] == true
+                            && job.value["aborted"] == true
+                    })
+                })
+                .cloned()
+                .collect()
+        };
+        let mut options = json!({"resumeAutomatic": !automatic});
+        if let Some(scope) = args.get("scope") {
+            options["automaticRebuildScope"] = scope.clone();
+        }
+        Ok(json!({"kind": "create", "waitIds": waits, "options": options}))
+    }
+
+    fn apply_orchestration_source_management_jobs_coverage(&mut self, args: &Value) -> Result<Value, String> {
+        let id = string(&args["jobId"]);
+        let report = &args["report"];
+        let scan = &args["scan"];
+        if report["coverage"].is_null() && scan["coverage"].is_null() {
+            return Ok(Value::Null);
+        }
+        let mut coverage = report.get("coverage").filter(|coverage| !coverage.is_null()).cloned().unwrap_or(json!({"discovered": args["sourceCount"], "lexical": 0, "semantic": 0, "failed": 0, "skipped": 0, "partial": 0, "complete": false, "sources": []}));
+        for field in ["discovered", "failed", "skipped"] {
+            let fallback = if field == "failed" {
+                array(&scan["failures"]).len() as u64
+            } else {
+                0
+            };
+            coverage[field] = json!(
+                coverage[field]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .max(scan["coverage"][field].as_u64().unwrap_or(fallback))
+            );
+        }
+        coverage["partial"] = coverage.get("partial").cloned().unwrap_or(json!(0));
+        coverage["failures"] =
+            json!(array(&scan["failures"]).iter().take(50).collect::<Vec<_>>());
+        let sources = array(&coverage["sources"]);
+        let truncated = sources.len() > 50
+            || array(&scan["failures"]).len() > 50
+            || truthy(&coverage["reportTruncated"]);
+        coverage["sources"] = json!(&sources[sources.len().saturating_sub(50)..]);
+        coverage["complete"] = json!(
+            truthy(&coverage["complete"])
+                && scan["coverage"]["complete"] != false
+                && array(&scan["failures"]).is_empty()
+                && !truthy(&scan["truncated"])
+                && !truthy(&scan["backgroundPending"])
+        );
+        for field in ["limit", "effectiveLimits"] {
+            if truthy(&scan["coverage"][field]) {
+                coverage[field] = scan["coverage"][field].clone();
+            }
+        }
+        if truthy(&scan["coverage"]["limits"]) {
+            coverage["limits"] = json!(
+                array(&scan["coverage"]["limits"])
+                    .iter()
+                    .take(50)
+                    .collect::<Vec<_>>()
+            );
+        }
+        coverage["reportTruncated"] = json!(truncated);
+        self.active.get_mut(id).ok_or("INDEX_JOB_NOT_OWNED")?.value["coverage"] =
+            coverage.clone();
+        Ok(json!({"coverage": coverage}))
     }
 }

@@ -17,8 +17,7 @@ public sealed record ModelPreset(string Id, string Name, string BaseUrl, string[
 
 public static class ModelPresets
 {
-    // Official API references are recorded in UI-COMPONENTS.md. Never store keys here.
-    // 官方 API 来源记录于 UI-COMPONENTS.md；此处绝不保存密钥。
+    // 官方 API 来源记录于 UI-COMPONENTS.md；此处不保存密钥。
     public static IReadOnlyList<ModelPreset> All { get; } = new ModelPreset[]
     {
         new("deepseek", "DeepSeek", "https://api.deepseek.com",
@@ -53,15 +52,12 @@ public static class ModelPresets
             "填写服务地址和模型 ID，接入其他兼容 OpenAI 的服务。")
     };
 
-    // Notify existing items so the open selector keeps its selection and container state.
     // 通知已有选项更新，保留已打开选择器的选择与容器状态。
     public static void RefreshDisplayNames()
     {
         foreach (var preset in All) preset.RefreshDisplayName();
     }
 
-    // Context-only UI defaults mirror the verified gateway capability snapshot.
-    // Enforcement and independent input/output ceilings belong to the native Rust model capability layer.
     // 界面上下文默认值对应已核实的网关能力快照；输入和输出上限的实际约束由原生 Rust 模型能力层负责。
     private static readonly IReadOnlyDictionary<string, Dictionary<string, int>> OfficialContextWindows = BuildContextWindows();
 
@@ -97,7 +93,6 @@ public static class ModelPresets
     }
 
     /// <summary>
-    /// A new draft uses the smallest verified window among its selected models.
     /// 新草稿取所选模型中最小的已验证上下文窗口。
     /// </summary>
     public static int DefaultContextWindowTokens(string baseUrl, IEnumerable<string> selectedModels)

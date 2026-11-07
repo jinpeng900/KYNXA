@@ -1,5 +1,4 @@
-//! Request projections execute the existing native compaction plans without mutating formal history.
-//! 请求投影执行现有原生压缩计划，不修改正式历史或重新派发已执行工具。
+//! 请求映射执行现有原生压缩计划，不修改正式历史或重新派发已执行工具。
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,8 +14,7 @@ use super::{
     tool_context::ToolContextState,
 };
 
-/// Callers may reuse their existing admission and task meter; the model domain owns no task ledger.
-/// 调用方复用既有准入及任务计量；模型领域不拥有另一份任务账本。
+/// 调用方复用现有准入及任务计量；模型领域不拥有另一份任务记录。
 pub type SummaryExecutor = Arc<
     dyn Fn(
             Value,
@@ -27,33 +25,70 @@ pub type SummaryExecutor = Arc<
         + Sync,
 >;
 
-fn prefix_fingerprint(connection: &Value, model: &str, messages: &[Value], system: &str, tools: &[Value]) -> String {
+fn prefix_fingerprint(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    tools: &[Value],
+) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(json!([connection["protocol"], connection["baseUrl"], model,
-        messages, system, tools]).to_string().as_bytes()))
+    format!(
+        "{:x}",
+        Sha256::digest(
+            json!([
+                connection["protocol"],
+                connection["baseUrl"],
+                model,
+                messages,
+                system,
+                tools
+            ])
+            .to_string()
+            .as_bytes()
+        )
+    )
 }
 
-/// Snapshot the wire prefix from a series clone; do not mutate live history or project twice.
-/// 从序列副本生成协议前缀，不修改活动历史或重复投影。
-pub(crate) fn summary_prefix(connection: &Value, model: &str, messages: &[Value], system: &str,
-    tools: &[Value], series: &super::tool_updates::ToolSeries) -> Result<Option<Value>, ModelError> {
-    if !super::tool_updates::supports_additions(connection) { return Ok(None); }
-    let mut request = gateway_protocol::build_request(connection, model, messages, system, None, tools, false)?;
+/// 从序列副本生成协议前缀，不修改活动历史或重复映射。
+pub(crate) fn summary_prefix(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    tools: &[Value],
+    series: &super::tool_updates::ToolSeries,
+) -> Result<Option<Value>, ModelError> {
+    if !super::tool_updates::supports_additions(connection) {
+        return Ok(None);
+    }
+    let mut request =
+        gateway_protocol::build_request(connection, model, messages, system, None, tools, false)?;
     super::tool_updates::project(connection, &mut request, &mut series.clone());
-    Ok(Some(json!({"version":1,"logicalFingerprint":prefix_fingerprint(connection,model,messages,system,tools),
-        "request":request})))
+    Ok(Some(
+        json!({"version":1,"logicalFingerprint":prefix_fingerprint(connection,model,messages,system,tools),
+        "request":request}),
+    ))
 }
 
-fn matching_summary_prefix<'a>(connection: &Value, model: &str, messages: &[Value], system: &str,
-    tools: &[Value], candidate: Option<&'a Value>) -> Option<&'a Value> {
+fn matching_summary_prefix<'a>(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    tools: &[Value],
+    candidate: Option<&'a Value>,
+) -> Option<&'a Value> {
     let candidate = candidate?;
-    (super::tool_updates::supports_additions(connection) && candidate["version"] == 1 &&
-        candidate["logicalFingerprint"] == prefix_fingerprint(connection,model,messages,system,tools) &&
-        candidate["request"]["messages"].is_array()).then_some(&candidate["request"])
+    (super::tool_updates::supports_additions(connection)
+        && candidate["version"] == 1
+        && candidate["logicalFingerprint"]
+            == prefix_fingerprint(connection, model, messages, system, tools)
+        && candidate["request"]["messages"].is_array())
+    .then_some(&candidate["request"])
 }
 
-/// Borrow only the live authorized projection; never revive an earlier cached system or tool catalog.
-/// 仅借用本次已授权投影，不从旧缓存恢复系统提示或工具目录。
+/// 仅借用本次已授权映射，不从旧缓存恢复系统提示或工具目录。
 #[derive(Clone, Copy)]
 struct SummaryRequestPrefix<'a> {
     messages: &'a [Value],
@@ -62,8 +97,7 @@ struct SummaryRequestPrefix<'a> {
     wire: Option<&'a Value>,
 }
 
-/// Reuse the entire prefix only when it fits; source coverage and tool/result pairing take precedence.
-/// 仅在完整前缀装得下时复用；来源覆盖与工具调用／回执配对优先，不为缓存截断历史。
+/// 仅在完整前缀装得下时复用；来源覆盖与工具调用／结果配对优先，不为缓存截断历史。
 fn build_summary_with_prefix(
     connection: &Value,
     model: &str,
@@ -77,15 +111,22 @@ fn build_summary_with_prefix(
     if let Some(prefix) = prefix {
         let reason = if prefix.messages.iter().any(opaque) {
             Some("private-continuation")
-        } else if prefix.messages.iter().any(|message| protocol::image_inputs(message) > 0) {
+        } else if prefix
+            .messages
+            .iter()
+            .any(|message| protocol::image_inputs(message) > 0)
+        {
             Some("unmeasured-media-input")
         } else if !gateway_protocol::supports_tools(connection) {
             Some("native-text-turn-projection")
         } else if gateway_protocol::protocol(connection) == "ollama" && !prefix.tools.is_empty() {
             Some("tool-free-summary-required")
         } else if gateway_protocol::protocol(connection) == "anthropic-messages"
-            && prefix.messages.last().is_some_and(|message| message["role"] == "system") {
-            // The new user summary tail would invalidate a native system-message boundary.
+            && prefix
+                .messages
+                .last()
+                .is_some_and(|message| message["role"] == "system")
+        {
             // 新增的 user 摘要指令会破坏原生 system 的位置约束，保留原历史并走独立摘要。
             Some("summary-tail-after-native-system")
         } else {
@@ -94,31 +135,55 @@ fn build_summary_with_prefix(
         if let Some(reason) = reason {
             audit["reason"] = json!(reason);
         } else {
-            // Keep the source payload and citation validator unchanged; only move its instruction after history.
             // 来源载荷及出处验收保持不变，仅将摘要指令移到完整历史之后。
             let mut tail = vec![json!({"role":"user","content":format!(
                 "{system}\n\nThe retained conversation above is historical context. Summarize only the supplied source payload below, using its allowed source identities. Do not continue the original task or invoke tools."
             )})];
             tail.extend_from_slice(messages);
-            if let Some(wire) = matching_summary_prefix(connection,model,
-                prefix.messages,prefix.system,prefix.tools,prefix.wire) {
-                if protocol::array(&wire["messages"]).last().is_some_and(|message| message["role"] == "system") {
+            if let Some(wire) = matching_summary_prefix(
+                connection,
+                model,
+                prefix.messages,
+                prefix.system,
+                prefix.tools,
+                prefix.wire,
+            ) {
+                if protocol::array(&wire["messages"])
+                    .last()
+                    .is_some_and(|message| message["role"] == "system")
+                {
                     audit["reason"] = json!("wire-summary-tail-after-native-system");
                 } else {
-                    let (body,controls) = gateway_protocol::build_summary_from_wire_prefix(
-                        connection,model,wire,&tail,max_output_tokens)?;
+                    let (body, controls) = gateway_protocol::build_summary_from_wire_prefix(
+                        connection,
+                        model,
+                        wire,
+                        &tail,
+                        max_output_tokens,
+                    )?;
                     let estimated = protocol::estimate_tokens(&body.to_string());
                     if estimated <= input_budget_tokens {
-                        return Ok((body,controls,json!({"mode":"projected-wire-prefix","reason":Value::Null,
+                        return Ok((
+                            body,
+                            controls,
+                            json!({"mode":"projected-wire-prefix","reason":Value::Null,
                             "prefixEstimatedInputTokens":estimated,"inputBudgetTokens":input_budget_tokens,
                             "preservedMessages":protocol::array(&wire["messages"]).len(),
-                            "preservedTools":protocol::array(&wire["tools"]).len()})));
+                            "preservedTools":protocol::array(&wire["tools"]).len()}),
+                        ));
                     }
                     audit = json!({"mode":"standalone","reason":"wire-prefix-input-over-budget",
                         "prefixEstimatedInputTokens":estimated,"inputBudgetTokens":input_budget_tokens});
                 }
-                let (body,controls)=gateway_protocol::build_summary_request(connection,model,messages,system,max_output_tokens,false)?;
-                return Ok((body,controls,audit));
+                let (body, controls) = gateway_protocol::build_summary_request(
+                    connection,
+                    model,
+                    messages,
+                    system,
+                    max_output_tokens,
+                    false,
+                )?;
+                return Ok((body, controls, audit));
             }
             let mut retained = prefix.messages.to_vec();
             retained.extend(tail);
@@ -128,7 +193,13 @@ fn build_summary_with_prefix(
                 "prefixEstimatedInputTokens":estimated_tokens,"inputBudgetTokens":input_budget_tokens});
             if estimated_tokens <= input_budget_tokens {
                 let (body, controls) = gateway_protocol::build_summary_request_with_tools(
-                    connection, model, &retained, prefix.system, max_output_tokens, prefix.tools, false,
+                    connection,
+                    model,
+                    &retained,
+                    prefix.system,
+                    max_output_tokens,
+                    prefix.tools,
+                    false,
                 )?;
                 audit["mode"] = json!("original-prefix");
                 audit["reason"] = Value::Null;
@@ -139,7 +210,12 @@ fn build_summary_with_prefix(
         }
     }
     let (body, controls) = gateway_protocol::build_summary_request(
-        connection, model, messages, system, max_output_tokens, false,
+        connection,
+        model,
+        messages,
+        system,
+        max_output_tokens,
+        false,
     )?;
     Ok((body, controls, audit))
 }
@@ -206,7 +282,6 @@ fn requested_summary_output(content_budget: u64) -> u64 {
     content_budget.saturating_add(3072).max(4096)
 }
 
-/// Accept one complete JSON document or one complete JSON fence, never a substring of prose or reasoning.
 /// 只接收完整 JSON 或独立完整 JSON 围栏，不从说明文字、推理标签或多个围栏中抽取子串。
 fn working_facts_json(content: &str) -> (Option<Value>, bool) {
     if let Ok(value) = serde_json::from_str(content) {
@@ -228,7 +303,6 @@ fn working_facts_json(content: &str) -> (Option<Value>, bool) {
     (serde_json::from_str(body).ok(), true)
 }
 
-/// Both summary paths reserve reasoning transport independently of their validated public content target.
 /// 两条摘要路径独立预留思考传输额度，公开正文目标及真实模型硬限仍分别约束。
 fn summary_output_allocation(
     budget: &Value,
@@ -252,8 +326,6 @@ fn summary_output_allocation(
     )
 }
 
-/// Recheck the public archive on cache hits and recovery; a saved flag does not prove readability.
-/// 缓存命中和恢复时仍核验公开归档；保存的标记不能证明可读。
 pub(crate) async fn verify_working_summary_archive(
     data_root: &std::path::Path,
     conversation: &str,
@@ -300,8 +372,7 @@ pub(crate) async fn verify_working_summary_archive(
     Ok(summary)
 }
 
-/// Archive only validated public facts through the existing create-only, scope-checked ToolResults contract.
-/// 已校验公开事实仅经已有仅创建、范围核验的 ToolResults 合同归档，保存后完整读回才开放省略投影。
+/// 已校验公开事实仅经已有仅创建、范围检查的 ToolResults 约定归档，保存后完整读回才开放省略映射。
 async fn archive_working_summary(
     root: &std::path::Path,
     conversation: &str,
@@ -312,8 +383,7 @@ async fn archive_working_summary(
     if uuid::Uuid::parse_str(request).is_err() {
         return Ok(None);
     }
-    // Direct JSON avoids wrapping the note in another escaped string; legacy archives remain readable.
-    // 直接保存 JSON，避免把工作笔记再包成转义字符串；旧归档仍可核验和回读。
+    // 直接保存 JSON，避免把工作笔记再包成转义字符串；旧归档仍可检查和回读。
     let mut candidate = summary.clone();
     candidate["archive"] = json!({"payloadVersion":2});
     let canonical = super::tool_context::working_summary_payload(&candidate);
@@ -335,8 +405,7 @@ async fn archive_working_summary(
     Ok((verified["archive"]["verified"] == true).then(|| verified["archive"].clone()))
 }
 
-/// Save and read back changed payloads; unchanged payloads reuse this round's verified archive.
-/// 内容变化后重新保存并回读；未变时复用本轮已核验归档。
+/// 内容变化后重新保存并回读；未变时复用本轮已检查归档。
 async fn refresh_working_summary_archive(
     root: &std::path::Path,
     conversation: &str,
@@ -372,8 +441,7 @@ async fn refresh_working_summary_archive(
     Ok(())
 }
 
-/// Work summaries share the caller's model executor and meter; only formal public results are read.
-/// 工作摘要复用调用方模型执行器及计量，只读取正式公开回执；不建立记忆、不读取模型私有推理。
+/// 工作摘要复用调用方模型执行器及计量，只读取正式公开结果；不建立记忆、不读取模型私有推理。
 async fn summarize_current_step_with_prefix(
     connection: &Value,
     model: &str,
@@ -402,10 +470,8 @@ async fn summarize_current_step_with_prefix(
             previous["archive"]["verified"] = json!(false);
         }
     }
-    // Size public work against the actual remaining checkpoint, not a fixed 2K ceiling.
-    // 工作正文按实际检查点余量授额，不固定压到 2K；其余空间保留引用与执行状态。
+    // 工作正文按实际检查点余量额度，不固定压到 2K；其余空间保留引用与执行状态。
     let content_budget = (u128::from(checkpoint_budget) * 3 / 4) as u64;
-    // Separate the public-content target from reasoning/output transport; both respect the shared hard limit.
     // 正文目标与思考/正文传输额度分开，均遵守统一硬上限。
     let requested_output = requested_summary_output(content_budget);
     let Some(executor) = executor else {
@@ -605,8 +671,7 @@ async fn summarize_current_step_with_prefix(
             })
         })
         .count() as u64;
-    // Work in proportion to pending sources and leave dispatches for continuation and the final answer.
-    // 整理按待处理来源扩大并给继续执行及最终答复留调用；原执行器仍核验真实任务总额度。
+    // 整理按待处理来源扩大并给继续执行及最终答复留调用；原执行器仍检查真实任务总额度。
     let summary_call_limit = pending_sources
         .saturating_mul(2)
         .saturating_add(1)
@@ -625,8 +690,7 @@ async fn summarize_current_step_with_prefix(
     } else {
         Value::Null
     };
-    // A bounded delivery refinement already attempted for these inputs must not become a paid loop.
-    // 相同来源、目标和真实额度下已尝试过的交付精简不能反复触发计费调用；额度或来源改变会使签名失效。
+    // 相同来源、目标和真实额度下已尝试过的交付精简不再触发计费调用；额度或来源改变会使签名失效。
     let saved_refinement = saved_fit["omittedFacts"]
         .as_u64()
         .is_some_and(|count| count > 0)
@@ -698,18 +762,15 @@ async fn summarize_current_step_with_prefix(
             .and_then(|index| cursors[index]["processedCharacters"].as_u64())
             .unwrap_or(0) as usize;
         while (offset < total || refine_saved && calls == 0) && calls < summary_call_limit {
-            // Other documents are already saved: only revise this source, then merge unchanged facts in Rust.
             // 其他文档成果已保存；模型仅更新当前来源，Rust 原样合并其他结论，避免每份重写整本摘要。
             let source_prior_facts = facts
                 .iter()
                 .filter(|fact| fact["resultId"] == reference["id"])
                 .cloned()
                 .collect::<Vec<_>>();
-            // Summary cursors slice the archived excerpt; only receipt metadata describes original-file reads.
-            // 摘要游标只切分归档摘录；原文件实际读取范围来自工具回执，不据摘要剩余量安排重读。
+            // 摘要游标只切分归档摘录；原文件实际读取范围来自工具结果，不据摘要剩余量安排重读。
             let mut payload = json!({"userGoals":user_goals,"priorFacts":source_prior_facts,"budgetTokens":source_content_budget.saturating_sub(32),"guidance":"Return content facts only for source.resultId. Other sources are already saved and will be merged unchanged by the program. Keep concrete final values, superseded-value distinctions and semantic gaps concise within budgetTokens. Summary window offsets are internal processing progress, not unread file ranges; exclude them and any inferred reread tasks from facts.","source":{"resultId":reference["id"],"identity":source["source"],"offset":offset,"endOffset":total,"totalCharacters":total,"offsetUnit":"utf16-code-units","windowScope":"archived-public-receipt-excerpt","originalReadRange":{"offset":source["source"]["offset"],"nextOffset":source["source"]["nextOffset"],"totalCharacters":source["source"]["totalCharacters"]},"text":""}});
             if refine_saved {
-                // Complete analyses need a smaller delivery projection, not another pass over the original files.
                 // 原件已分析完成时，只压缩现有成果以供交付，不重新读取或分析原文件。
                 payload["priorFacts"] = json!(facts);
                 payload["source"]["windowScope"] = json!("saved-facts-only");
@@ -807,8 +868,7 @@ async fn summarize_current_step_with_prefix(
                             return Err(ModelError::cancelled());
                         }
                         if repair_fallback.is_object() {
-                            // An optional refinement cannot invalidate the already verified candidate or its cursors.
-                            // 可选精简失败不能作废已核验候选及游标；完整事实仍可从真实归档回读。
+                            // 可选精简失败时已检查候选及游标仍有效，完整事实可从真实归档回读。
                             facts = protocol::array(&repair_fallback["facts"]).to_vec();
                             cursors = protocol::array(&repair_fallback["sources"]).to_vec();
                             summary_archive = repair_fallback["archive"].clone();
@@ -908,7 +968,6 @@ async fn summarize_current_step_with_prefix(
                     ) => value,
                     _ => "unknown",
                 };
-                // Keep only safe response metadata; exclude content, private reasoning and unknown generated strings.
                 // 诊断仅保留安全元信息，不保存正文、私有推理或未知生成字符串。
                 last_response_shape = json!({"publicCharacters":response.content.encode_utf16().count(),"publicEstimatedTokens":public_tokens,
                 "privateReasoningPresent":!response.reasoning.is_empty(),"outputTruncated":response.output_truncated,"normalizedFinish":normalized_finish,
@@ -943,7 +1002,6 @@ async fn summarize_current_step_with_prefix(
                 if response.calls.is_empty()
                     && (rejection == Some("over-content-budget") || rejection.is_none())
                 {
-                    // Exceed the soft content target only if the checkpoint still fits all facts and unknown effects.
                     // 仅当检查点仍能容纳全部事实和未知副作用时，才允许超过正文软目标。
                     let mut projected_cursors = cursors.clone();
                     let current = json!({"tool":source["tool"],"resultRef":reference,"source":source["source"],"processedCharacters":end,"totalCharacters":total});
@@ -989,8 +1047,7 @@ async fn summarize_current_step_with_prefix(
                         });
                         trial_summary["archive"] = accepted_archive.clone();
                     }
-                    // A missing/failed archive retains the former lossless requirement and bounded repair path.
-                    // 归档缺失或失败时保留原有全事实要求与有界修正路径，不仅凭一个 verified 布尔值省略事实。
+                    // 归档缺失或失败时保留原有全事实要求与限量修正路径，不仅凭一个 verified 布尔值省略事实。
                     if rejection == Some("over-content-budget")
                         || repair_required_sources.is_some()
                         || projection["resultRef"].is_object()
@@ -1024,7 +1081,6 @@ async fn summarize_current_step_with_prefix(
                     && calls < summary_call_limit
                     && (optional_refinement || missing_prior_refinement || hard_refinement)
                 {
-                    // Allow one fact refinement per compaction, within the shared call cap and metering.
                     // 每次压缩只精简一次事实，仍计入共用调用上限和计量。
                     repair_used = true;
                     let mut feedback_facts = merged_facts.clone().unwrap();
@@ -1129,7 +1185,6 @@ async fn summarize_current_step_with_prefix(
     } else {
         previous["checkpointRefinementInputSignature"].clone()
     };
-    // Only a rejected public input is cached; a failed request must not poison unchanged sources.
     // 仅缓存被拒绝的公开输入；请求失败保留事实与游标，下次必要压缩可在原额度内续接。
     if !reason.is_null()
         && !model_request_failed
@@ -1232,8 +1287,6 @@ async fn summarize_with_prefix(
         ));
     };
     let mut plan = plan.clone();
-    // Validate against the content budget; cap reasoning/output transport separately.
-    // 按正文预算验收，思考/正文传输额度另行限额。
     plan["maxOutputTokens"] = output_allocation["summaryOutputBudgetTokens"].clone();
     let opened = summary_call(
         "open",
@@ -1323,7 +1376,16 @@ async fn summarize(
     cancellation: watch::Receiver<bool>,
     executor: Option<&SummaryExecutor>,
 ) -> Result<(Option<Value>, Value), ModelError> {
-    summarize_with_prefix(connection, model, budget, input, cancellation, executor, None).await
+    summarize_with_prefix(
+        connection,
+        model,
+        budget,
+        input,
+        cancellation,
+        executor,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1339,8 +1401,20 @@ async fn summarize_current_step(
     cancellation: watch::Receiver<bool>,
     executor: Option<&SummaryExecutor>,
 ) -> Result<(Option<Value>, Value), ModelError> {
-    summarize_current_step_with_prefix(connection, model, budget, input, checkpoint_budget,
-        plan, projection, user_goals, cancellation, executor, None).await
+    summarize_current_step_with_prefix(
+        connection,
+        model,
+        budget,
+        input,
+        checkpoint_budget,
+        plan,
+        projection,
+        user_goals,
+        cancellation,
+        executor,
+        None,
+    )
+    .await
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1466,7 +1540,6 @@ fn apply_actions(
             for recipe in action["replacements"].as_array().into_iter().flatten() {
                 let original = recipe["originalIndex"].as_u64().unwrap() as usize;
                 let mut message = if recipe["modelHistory"] == true {
-                    // A broker excerpt is contextual evidence, not a new vendor assistant turn with invented reasoning.
                     // 程序摘录属于上下文证据，不伪造供应商助手轮次或推理字段；真实原生续传仍保留全部字段。
                     json!({"role":if recipe["role"]=="assistant" {json!("user")} else {recipe["role"].clone()}})
                 } else {
@@ -1499,8 +1572,7 @@ fn opaque(message: &Value) -> bool {
         })
 }
 
-/// Budget metadata is supplied by the live run: original history sources and durable result receipts.
-/// 授额元信息来自当前运行：原历史来源及持久工具回执；压缩不能依据正文猜测执行状态。
+/// 额度元信息来自当前运行：原历史来源及持久工具结果。
 pub async fn compact_request(
     connection: &Value,
     model: &str,
@@ -1523,8 +1595,7 @@ pub async fn compact_request(
     .await
 }
 
-/// A summary is another actual provider request and must honor the caller's shared quota and cancellation.
-/// 摘要也是一次真实供应商请求，必须遵守调用方共用的额度与取消状态。
+/// 摘要也是一次真实供应商请求，遵守调用方共用的额度与取消状态。
 pub async fn compact_request_with_executor(
     connection: &Value,
     model: &str,
@@ -1603,7 +1674,12 @@ pub async fn compact_request_with_executor(
             input,
             cancellation.clone(),
             executor.as_ref(),
-            Some(SummaryRequestPrefix { messages, system, tools: protocol::array(&budget["declarations"]), wire:budget.get("wireRequestPrefix") }),
+            Some(SummaryRequestPrefix {
+                messages,
+                system,
+                tools: protocol::array(&budget["declarations"]),
+                wire: budget.get("wireRequestPrefix"),
+            }),
         )
         .await?;
         summary_update = candidate;
@@ -1640,8 +1716,7 @@ pub async fn compact_request_with_executor(
         &json!({"protocol":name,"conversationId":budget["conversationId"],"conversationIdValid":crate::storage::identity(&budget["conversationId"]).is_ok(),"items":descriptors(&items),"sources":sources}),
     )?;
     for source in budget["resultSources"].as_array().into_iter().flatten() {
-        // Match receipts to actual protocol identities, so earlier compaction cannot shift their indexed ownership.
-        // 根据实际协议身份匹配回执，避免上一轮压缩后的数组偏移改变所属工具。
+        // 根据实际协议身份匹配结果，避免上一轮压缩后的数组偏移改变所属工具。
         for (message, item) in &items {
             let id = source["callId"].as_str().unwrap_or("");
             let location = if message["tool_call_id"] == id || message["call_id"] == id {
@@ -1678,9 +1753,7 @@ pub async fn compact_request_with_executor(
             )?;
         }
     }
-    // Replacing an earlier duplicate still rewrites a cached prefix. Defer optional observation
-    // deduplication until real compaction or completion of its existing public checkpoint.
-    // 替换旧的重复回执仍会改写缓存前缀；可选观察去重只在实际压缩或已有公开检查点续写时进行。
+    // 替换旧的重复结果仍会改写缓存前缀；可选观察去重只在实际压缩或已有公开检查点续写时进行。
     if pressure || pending_public_sources {
         let actions = call(
             &mut state,
@@ -1722,8 +1795,7 @@ pub async fn compact_request_with_executor(
     if !summary_audit.is_null() {
         audit["semanticSummary"] = summary_audit.clone();
     }
-    // A bounded pass must finish already-read public sources even after the request fits again.
-    // 已读公开来源尚待摘要时仍续接一次有界处理；输入重新装得下不能冻结剩余来源。
+    // 已读公开来源尚待摘要时再续接一次限量处理，处理完剩余来源。
     if after > input || pending_public_sources {
         let plan = call(
             &mut state,
@@ -1829,7 +1901,12 @@ pub async fn compact_request_with_executor(
                     &goals,
                     cancellation.clone(),
                     executor.as_ref(),
-                    Some(SummaryRequestPrefix { messages, system, tools: protocol::array(&budget["declarations"]), wire:budget.get("wireRequestPrefix") }),
+                    Some(SummaryRequestPrefix {
+                        messages,
+                        system,
+                        tools: protocol::array(&budget["declarations"]),
+                        wire: budget.get("wireRequestPrefix"),
+                    }),
                 )
                 .await?;
                 audit["currentStepSummary"] = working_audit.clone();
@@ -1937,52 +2014,136 @@ mod tests {
 
     #[test]
     fn summary_wire_prefix_preserves_deferred_tools_and_updates_once_without_mutating_history() {
-        use super::super::tool_updates::{self,ToolSeries};
+        use super::super::tool_updates::{self, ToolSeries};
         let route = json!({"protocol":"anthropic-messages","baseUrl":"https://api.deepseek.com/anthropic",
             "routeProjection":{"kind":"deepseek-messages","toolUpdate":"addition-only"}});
-        let tool = |name:&str| json!({"name":name,"description":name,"input_schema":{"type":"object","properties":{}}});
+        let tool = |name: &str| json!({"name":name,"description":name,"input_schema":{"type":"object","properties":{}}});
         let first_tools = vec![tool("a.read")];
-        let tools = vec![tool("a.read"),tool("b.search")];
+        let tools = vec![tool("a.read"), tool("b.search")];
         let system = "Stable authorized system.";
         let mut history = vec![json!({"role":"user","content":"Start."})];
         let mut series = ToolSeries::default();
-        series.reconcile(&route,&tools,&json!({"generation":1}));
-        let mut first = gateway_protocol::build_request(&route,"deepseek-flash",&history,system,None,&first_tools,false).unwrap();
-        tool_updates::project(&route,&mut first,&mut series);
-        history.extend([json!({"role":"assistant","content":"Loaded."}),json!({"role":"user","content":"Use the new search."})]);
-        let mut added = gateway_protocol::build_request(&route,"deepseek-flash",&history,system,None,&tools,false).unwrap();
-        tool_updates::project(&route,&mut added,&mut series);
-        history.extend([json!({"role":"assistant","content":"Searched."}),json!({"role":"user","content":"Continue."})]);
+        series.reconcile(&route, &tools, &json!({"generation":1}));
+        let mut first = gateway_protocol::build_request(
+            &route,
+            "deepseek-flash",
+            &history,
+            system,
+            None,
+            &first_tools,
+            false,
+        )
+        .unwrap();
+        tool_updates::project(&route, &mut first, &mut series);
+        history.extend([
+            json!({"role":"assistant","content":"Loaded."}),
+            json!({"role":"user","content":"Use the new search."}),
+        ]);
+        let mut added = gateway_protocol::build_request(
+            &route,
+            "deepseek-flash",
+            &history,
+            system,
+            None,
+            &tools,
+            false,
+        )
+        .unwrap();
+        tool_updates::project(&route, &mut added, &mut series);
+        history.extend([
+            json!({"role":"assistant","content":"Searched."}),
+            json!({"role":"user","content":"Continue."}),
+        ]);
         let original = history.clone();
-        let wire = summary_prefix(&route,"deepseek-flash",&history,system,&tools,&series).unwrap().unwrap();
-        let payload = vec![json!({"role":"user","content":"Summarize only these saved source facts."})];
-        let (summary,_,audit)=build_summary_with_prefix(&route,"deepseek-flash",&payload,"Summarize source facts.",Some(512),64000,
-            Some(SummaryRequestPrefix {messages:&history,system,tools:&tools,wire:Some(&wire)})).unwrap();
+        let wire = summary_prefix(&route, "deepseek-flash", &history, system, &tools, &series)
+            .unwrap()
+            .unwrap();
+        let payload =
+            vec![json!({"role":"user","content":"Summarize only these saved source facts."})];
+        let (summary, _, audit) = build_summary_with_prefix(
+            &route,
+            "deepseek-flash",
+            &payload,
+            "Summarize source facts.",
+            Some(512),
+            64000,
+            Some(SummaryRequestPrefix {
+                messages: &history,
+                system,
+                tools: &tools,
+                wire: Some(&wire),
+            }),
+        )
+        .unwrap();
         let prefix = protocol::array(&wire["request"]["messages"]);
-        assert_eq!(&protocol::array(&summary["messages"])[..prefix.len()],prefix);
-        assert_eq!(summary["tools"],wire["request"]["tools"]);
-        assert_eq!(summary["tools"][1]["defer_loading"],true);
-        assert_eq!(protocol::array(&summary["messages"]).iter().flat_map(|message| protocol::array(&message["content"]))
-            .filter(|block|block["type"]=="tool_addition").count(),1);
-        assert_eq!(audit["mode"],"projected-wire-prefix");
-        assert_eq!(history,original);
-        assert_eq!(series.required_tool_names(&route),vec!["a.read","b.search"]);
-        let (_,_,small)=build_summary_with_prefix(&route,"deepseek-flash",&payload,"Summarize.",Some(32),1,
-            Some(SummaryRequestPrefix {messages:&history,system,tools:&tools,wire:Some(&wire)})).unwrap();
-        assert_eq!(small["reason"],"wire-prefix-input-over-budget");
-        assert!(matching_summary_prefix(&route,"deepseek-flash",&history,
-            "Current revoked authority.",&tools,Some(&wire)).is_none());
+        assert_eq!(
+            &protocol::array(&summary["messages"])[..prefix.len()],
+            prefix
+        );
+        assert_eq!(summary["tools"], wire["request"]["tools"]);
+        assert_eq!(summary["tools"][1]["defer_loading"], true);
+        assert_eq!(
+            protocol::array(&summary["messages"])
+                .iter()
+                .flat_map(|message| protocol::array(&message["content"]))
+                .filter(|block| block["type"] == "tool_addition")
+                .count(),
+            1
+        );
+        assert_eq!(audit["mode"], "projected-wire-prefix");
+        assert_eq!(history, original);
+        assert_eq!(
+            series.required_tool_names(&route),
+            vec!["a.read", "b.search"]
+        );
+        let (_, _, small) = build_summary_with_prefix(
+            &route,
+            "deepseek-flash",
+            &payload,
+            "Summarize.",
+            Some(32),
+            1,
+            Some(SummaryRequestPrefix {
+                messages: &history,
+                system,
+                tools: &tools,
+                wire: Some(&wire),
+            }),
+        )
+        .unwrap();
+        assert_eq!(small["reason"], "wire-prefix-input-over-budget");
+        assert!(
+            matching_summary_prefix(
+                &route,
+                "deepseek-flash",
+                &history,
+                "Current revoked authority.",
+                &tools,
+                Some(&wire)
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn summary_prefix_keeps_native_history_and_live_tools_before_the_instruction() {
-        for name in ["openai-completions", "anthropic-messages", "openai-responses"] {
+        for name in [
+            "openai-completions",
+            "anthropic-messages",
+            "openai-responses",
+        ] {
             let connection = json!({"protocol":name});
             let definition = json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]});
             let tools = match name {
-                "anthropic-messages" => vec![json!({"name":"filesystem.read","description":"Read an authorized file","input_schema":definition})],
-                "openai-responses" => vec![json!({"type":"function","name":"filesystem.read","description":"Read an authorized file","parameters":definition})],
-                _ => vec![json!({"type":"function","function":{"name":"filesystem.read","description":"Read an authorized file","parameters":definition}})],
+                "anthropic-messages" => vec![
+                    json!({"name":"filesystem.read","description":"Read an authorized file","input_schema":definition}),
+                ],
+                "openai-responses" => vec![
+                    json!({"type":"function","name":"filesystem.read","description":"Read an authorized file","parameters":definition}),
+                ],
+                _ => vec![
+                    json!({"type":"function","function":{"name":"filesystem.read","description":"Read an authorized file","parameters":definition}}),
+                ],
             };
             let history = match name {
                 "anthropic-messages" => vec![
@@ -2003,20 +2164,49 @@ mod tests {
             };
             let original = history.clone();
             let live_system = "Current memory: none. Current authorization: filesystem.read only.";
-            let payload = [json!({"role":"user","content":"{\"allowedSourceMessageIds\":[\"current-source\"]}"})];
-            let normal = gateway_protocol::build_request(&connection, "fixture", &history, live_system,
-                Some(1024), &tools, false).unwrap();
-            let (summary, _, audit) = build_summary_with_prefix(&connection, "fixture", &payload,
-                "Produce cited summary JSON only.", Some(1024), 16384,
-                Some(SummaryRequestPrefix { messages:&history, system:live_system, tools:&tools, wire:None })).unwrap();
-            let field = if name == "openai-responses" { "input" } else { "messages" };
+            let payload = [
+                json!({"role":"user","content":"{\"allowedSourceMessageIds\":[\"current-source\"]}"}),
+            ];
+            let normal = gateway_protocol::build_request(
+                &connection,
+                "fixture",
+                &history,
+                live_system,
+                Some(1024),
+                &tools,
+                false,
+            )
+            .unwrap();
+            let (summary, _, audit) = build_summary_with_prefix(
+                &connection,
+                "fixture",
+                &payload,
+                "Produce cited summary JSON only.",
+                Some(1024),
+                16384,
+                Some(SummaryRequestPrefix {
+                    messages: &history,
+                    system: live_system,
+                    tools: &tools,
+                    wire: None,
+                }),
+            )
+            .unwrap();
+            let field = if name == "openai-responses" {
+                "input"
+            } else {
+                "messages"
+            };
             let leading = normal[field].as_array().unwrap();
             let sent = summary[field].as_array().unwrap();
             assert_eq!(&sent[..leading.len()], leading.as_slice(), "{name}");
             assert_eq!(summary["system"], normal["system"]);
             assert_eq!(summary["instructions"], normal["instructions"]);
             assert_eq!(summary["tools"], normal["tools"]);
-            assert!(protocol::text_parts(&sent[leading.len()]["content"]).contains("Produce cited summary JSON only."));
+            assert!(
+                protocol::text_parts(&sent[leading.len()]["content"])
+                    .contains("Produce cited summary JSON only.")
+            );
             assert_eq!(sent.last().unwrap(), &payload[0]);
             assert_eq!(audit["mode"], "original-prefix");
             assert_eq!(audit["preservedMessages"], history.len());
@@ -2027,37 +2217,94 @@ mod tests {
     #[test]
     fn summary_prefix_fallback_preserves_source_payload_and_excludes_private_continuation() {
         let connection = json!({"protocol":"openai-completions"});
-        let payload = [json!({"role":"user","content":"Exact source identities and public evidence."})];
-        let history = [json!({"role":"user","content":"A very large original history. ".repeat(600)})];
+        let payload =
+            [json!({"role":"user","content":"Exact source identities and public evidence."})];
+        let history =
+            [json!({"role":"user","content":"A very large original history. ".repeat(600)})];
         let original = history.clone();
-        let (body, _, audit) = build_summary_with_prefix(&connection, "fixture", &payload,
-            "Summarize public evidence.", Some(256), 256,
-            Some(SummaryRequestPrefix { messages:&history, system:"Current authorized system.", tools:&[], wire:None })).unwrap();
+        let (body, _, audit) = build_summary_with_prefix(
+            &connection,
+            "fixture",
+            &payload,
+            "Summarize public evidence.",
+            Some(256),
+            256,
+            Some(SummaryRequestPrefix {
+                messages: &history,
+                system: "Current authorized system.",
+                tools: &[],
+                wire: None,
+            }),
+        )
+        .unwrap();
         assert_eq!(audit["mode"], "standalone");
         assert_eq!(audit["reason"], "prefix-input-over-budget");
         assert_eq!(body["messages"][1], payload[0]);
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
         assert!(body["tools"].is_null());
         assert_eq!(history, original);
-        let private = [json!({"role":"assistant","content":"Public text.","reasoning_content":"Private reasoning must not become summary input."})];
-        let (body, _, audit) = build_summary_with_prefix(&connection, "fixture", &payload,
-            "Summarize public evidence.", Some(256), 16384,
-            Some(SummaryRequestPrefix { messages:&private, system:"Current authorized system.", tools:&[], wire:None })).unwrap();
+        let private = [
+            json!({"role":"assistant","content":"Public text.","reasoning_content":"Private reasoning must not become summary input."}),
+        ];
+        let (body, _, audit) = build_summary_with_prefix(
+            &connection,
+            "fixture",
+            &payload,
+            "Summarize public evidence.",
+            Some(256),
+            16384,
+            Some(SummaryRequestPrefix {
+                messages: &private,
+                system: "Current authorized system.",
+                tools: &[],
+                wire: None,
+            }),
+        )
+        .unwrap();
         assert_eq!(audit["reason"], "private-continuation");
         assert!(!body.to_string().contains("Private reasoning"));
         assert_eq!(body["messages"][1], payload[0]);
-        let tools = [json!({"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{}}}})];
-        let (body, _, audit) = build_summary_with_prefix(&json!({"protocol":"ollama"}), "fixture", &payload,
-            "Summarize public evidence.", Some(256), 16384,
-            Some(SummaryRequestPrefix { messages:&[], system:"Current authorized system.", tools:&tools, wire:None })).unwrap();
+        let tools = [
+            json!({"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{}}}}),
+        ];
+        let (body, _, audit) = build_summary_with_prefix(
+            &json!({"protocol":"ollama"}),
+            "fixture",
+            &payload,
+            "Summarize public evidence.",
+            Some(256),
+            16384,
+            Some(SummaryRequestPrefix {
+                messages: &[],
+                system: "Current authorized system.",
+                tools: &tools,
+                wire: None,
+            }),
+        )
+        .unwrap();
         assert_eq!(audit["reason"], "tool-free-summary-required");
         assert!(body["tools"].is_null());
         assert_eq!(body["messages"][1], payload[0]);
-        let native = [json!({"role":"user","content":"Existing goal."}), json!({"role":"system","content":"Recorded runtime facts."})];
+        let native = [
+            json!({"role":"user","content":"Existing goal."}),
+            json!({"role":"system","content":"Recorded runtime facts."}),
+        ];
         let original = native.clone();
-        let (body, _, audit) = build_summary_with_prefix(&json!({"protocol":"anthropic-messages"}), "claude-opus-4-8", &payload,
-            "Summarize public evidence.", Some(256), 16384,
-            Some(SummaryRequestPrefix { messages:&native, system:"Current authorized system.", tools:&tools, wire:None })).unwrap();
+        let (body, _, audit) = build_summary_with_prefix(
+            &json!({"protocol":"anthropic-messages"}),
+            "claude-opus-4-8",
+            &payload,
+            "Summarize public evidence.",
+            Some(256),
+            16384,
+            Some(SummaryRequestPrefix {
+                messages: &native,
+                system: "Current authorized system.",
+                tools: &tools,
+                wire: None,
+            }),
+        )
+        .unwrap();
         assert_eq!(audit["reason"], "summary-tail-after-native-system");
         assert_eq!(body["messages"], json!(payload));
         assert_eq!(body["system"], "Summarize public evidence.");
@@ -2072,8 +2319,11 @@ mod tests {
         let chat = uuid::Uuid::new_v4().to_string();
         let goal = "Preserve the saved work and user constraints. ".repeat(32);
         let progress = "The recorded work is saved; verify it before another write. ".repeat(32);
-        let history = vec![json!({"role":"user","content":goal}), json!({"role":"assistant","content":progress}),
-            json!({"role":"user","content":"Continue with the existing saved progress."})];
+        let history = vec![
+            json!({"role":"user","content":goal}),
+            json!({"role":"assistant","content":progress}),
+            json!({"role":"user","content":"Continue with the existing saved progress."}),
+        ];
         let original = history.clone();
         let sources = json!([{"checkpointComplete":true,"user":{"messageId":user,"content":goal,"status":"completed"},
             "assistant":{"messageId":assistant,"replyTo":user,"status":"completed","finalText":progress},"rounds":[]}]);
@@ -2085,28 +2335,59 @@ mod tests {
         let original_tokens = protocol::tool_message_tokens(&history, system)
             + protocol::estimate_tokens(&tools.to_string());
         assert!(original_tokens > 1024 * 9 / 10);
-        let summary_input = summary_output_allocation(&budget, 1024, 1024).unwrap()
-            ["summaryInputBudgetTokens"].as_u64().unwrap();
+        let summary_input =
+            summary_output_allocation(&budget, 1024, 1024).unwrap()["summaryInputBudgetTokens"]
+                .as_u64()
+                .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
         let expected = history.clone();
         let executor: SummaryExecutor = Arc::new(move |body, _| {
             seen.fetch_add(1, Ordering::AcqRel);
             assert_eq!(body["messages"][0]["content"], system);
-            assert_eq!(&body["messages"].as_array().unwrap()[1..=expected.len()], expected.as_slice());
+            assert_eq!(
+                &body["messages"].as_array().unwrap()[1..=expected.len()],
+                expected.as_slice()
+            );
             assert_eq!(body["tools"].as_array().unwrap().len(), 1);
             assert_eq!(body["tool_choice"], "none");
-            assert!(protocol::tool_message_tokens(protocol::array(&body["messages"]), "")
-                + protocol::estimate_tokens(&body["tools"].to_string()) <= summary_input);
+            assert!(
+                protocol::tool_message_tokens(protocol::array(&body["messages"]), "")
+                    + protocol::estimate_tokens(&body["tools"].to_string())
+                    <= summary_input
+            );
             let content = json!({"entries":[{"kind":"progress","text":"Saved work remains available; verify before another write.","sourceMessageIds":[user]}]}).to_string();
-            Box::pin(async move { Ok(gateway_protocol::ModelResponse { content, reasoning:String::new(), calls:vec![], continuation:vec![],
-                finish:json!("stop"), usage:json!({"prompt_tokens":100,"completion_tokens":50}), raw:json!({}), output_truncated:false }) })
+            Box::pin(async move {
+                Ok(gateway_protocol::ModelResponse {
+                    content,
+                    reasoning: String::new(),
+                    calls: vec![],
+                    continuation: vec![],
+                    finish: json!("stop"),
+                    usage: json!({"prompt_tokens":100,"completion_tokens":50}),
+                    raw: json!({}),
+                    output_truncated: false,
+                })
+            })
         });
         let (_owner, cancellation) = watch::channel(false);
-        let compact = compact_request_with_executor(&json!({"protocol":"openai-completions"}), "fixture",
-            &history, system, &budget, cancellation, None, Some(executor)).await.unwrap();
+        let compact = compact_request_with_executor(
+            &json!({"protocol":"openai-completions"}),
+            "fixture",
+            &history,
+            system,
+            &budget,
+            cancellation,
+            None,
+            Some(executor),
+        )
+        .await
+        .unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 1);
-        assert_eq!(compact.audit["semanticSummary"]["prefixProjection"]["mode"], "original-prefix");
+        assert_eq!(
+            compact.audit["semanticSummary"]["prefixProjection"]["mode"],
+            "original-prefix"
+        );
         assert!(compact.summary_update.is_some(), "{}", compact.audit);
         assert_eq!(compact.messages.last(), original.last());
         assert_eq!(history, original);
@@ -2366,8 +2647,7 @@ mod tests {
             second.history_sources.last().unwrap()["checkpointSemanticSummary"]["semanticCorrectnessCertified"],
             false
         );
-        // Reuse the summary cursor for the same verified version and read range.
-        // 同一已核验版本和读取范围复用摘要游标。
+        // 同一已检查版本和读取范围复用摘要游标。
         let duplicate_reference = data::save_tool_result(
             &root,
             &chat,
@@ -2408,7 +2688,6 @@ mod tests {
                 .to_string()
                 .contains("operative value is 431")
         );
-        // Finish another saved source below pressure without asking the model to rewrite earlier source facts.
         // 输入不再拥挤也续完另一已读来源；当前摘要仅处理该来源，其他来源事实由程序原样保留。
         let other_body = "The other source's operative value is 557.";
         let other_canonical = json!({"content":other_body,"path":"/work/other-evidence.txt","sha256":"c".repeat(64),"offset":0,"nextOffset":other_body.len(),"totalCharacters":other_body.len()});
@@ -2452,9 +2731,10 @@ mod tests {
         let original_id = other_reference["id"].clone();
         let finish_pending: SummaryExecutor = Arc::new(move |request, _| {
             counted.fetch_add(1, Ordering::AcqRel);
-            let input: Value =
-                serde_json::from_str(protocol::string(&protocol::array(&request["messages"])
-                    .last().unwrap()["content"])).unwrap();
+            let input: Value = serde_json::from_str(protocol::string(
+                &protocol::array(&request["messages"]).last().unwrap()["content"],
+            ))
+            .unwrap();
             assert_eq!(input["source"]["resultId"], original_id);
             assert_eq!(input["source"]["offset"], 0);
             assert_eq!(input["priorFacts"], json!([]));
@@ -2531,17 +2811,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_step_summary_excludes_unusable_web_sources_and_prior_facts_without_model_calls() {
+    async fn current_step_summary_excludes_unusable_web_sources_and_prior_facts_without_model_calls()
+     {
         use crate::storage::gateway as data;
-        let root = std::env::temp_dir().join(format!("kynxa-unusable-web-summary-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-unusable-web-summary-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let chat = uuid::Uuid::new_v4().to_string();
         let request = uuid::Uuid::new_v4().to_string();
         data::ensure_conversation(&root, &chat, "isolated blocked webpage summary").unwrap();
         let canonical = json!({"url":"https://example.org/challenge","content":"CHALLENGE_BODY_IS_NOT_A_FACT",
             "evidenceUsable":false,"needsHumanVerification":true});
-        let reference = data::save_tool_result(&root, &chat, &request,
-            &json!({"id":"blocked-page","name":"web.fetch"}), &canonical, None).unwrap();
+        let reference = data::save_tool_result(
+            &root,
+            &chat,
+            &request,
+            &json!({"id":"blocked-page","name":"web.fetch"}),
+            &canonical,
+            None,
+        )
+        .unwrap();
         let metadata = super::super::tool_context::source_metadata(&canonical);
         let plan = json!({"checkpointEvidence":[{"kind":"original-source","tool":"web.fetch","status":"completed",
             "resultRef":reference,"source":metadata,"excerpt":"CHALLENGE_BODY_IS_NOT_A_FACT"}]});
@@ -2554,12 +2845,29 @@ mod tests {
         let counted = calls.clone();
         let executor: SummaryExecutor = Arc::new(move |_, _| {
             counted.fetch_add(1, Ordering::AcqRel);
-            Box::pin(async { Err(ModelError::new("UNEXPECTED_SUMMARY_CALL", "Blocked pages are not factual sources.", 500)) })
+            Box::pin(async {
+                Err(ModelError::new(
+                    "UNEXPECTED_SUMMARY_CALL",
+                    "Blocked pages are not factual sources.",
+                    500,
+                ))
+            })
         });
         let (_owner, cancel) = watch::channel(false);
-        let (summary, audit) = summarize_current_step(&json!({"protocol":"openai-completions"}), "fixture",
-            &budget, 2048, 1024, &plan, &previous, &[json!("retain actual source facts")], cancel, Some(&executor))
-            .await.unwrap();
+        let (summary, audit) = summarize_current_step(
+            &json!({"protocol":"openai-completions"}),
+            "fixture",
+            &budget,
+            2048,
+            1024,
+            &plan,
+            &previous,
+            &[json!("retain actual source facts")],
+            cancel,
+            Some(&executor),
+        )
+        .await
+        .unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 0);
         assert_eq!(audit["modelCalls"], 0);
         let summary = summary.unwrap();
@@ -2653,8 +2961,7 @@ mod tests {
         assert_eq!(retry["modelCalls"], 1);
         assert_eq!(calls.load(Ordering::Acquire), 2);
         assert!(retry_plan["checkpointSemanticSummary"]["failedInputSignature"].is_null());
-        // An old projection-only failure must not block the bounded refinement attempt.
-        // 旧版仅投影失败不能阻止一次有界精简恢复。
+        // 旧版仅映射失败时，仍可进行一次限量精简恢复。
         use sha2::{Digest, Sha256};
         let old_signature = format!(
             "{:x}",
@@ -2738,8 +3045,7 @@ mod tests {
                 })
             })
         });
-        // The next bounded request resumes the same original without another filesystem read.
-        // 下一次有界请求直接续接同一原件，不要求改动来源或重新调用文件读取。
+        // 下一次限量请求直接续接同一原件，不要求改动来源或重新调用文件读取。
         let (recovered, recovered_audit) = summarize_current_step(
             &connection,
             "fixture",
@@ -2998,7 +3304,6 @@ mod tests {
             summary["sources"][0]["processedCharacters"],
             body.encode_utf16().count()
         );
-        // Refine an oversized candidate once; preserve its source, goal and unknown-effect boundaries.
         // 超限候选仅精简一次；保留来源、目标和未知副作用边界。
         let repair_calls = Arc::new(AtomicUsize::new(0));
         let count = repair_calls.clone();
@@ -3146,8 +3451,7 @@ mod tests {
         .unwrap();
         assert_eq!(cached["modelCalls"], 0);
         assert_eq!(failure_calls.load(Ordering::Acquire), 2);
-        // One optional refinement reuses the dispatch cap; failure retains the verified full archive and cursor.
-        // 可选精简共享原派发上限；反馈失败仍复用已核验完整归档及处理游标，不反复分析原件。
+        // 可选精简共享原派发上限；反馈失败仍复用已检查完整归档及处理游标，不反复分析原件。
         let optional_calls = Arc::new(AtomicUsize::new(0));
         let count = optional_calls.clone();
         let archived_candidate = hard.clone();
@@ -3432,8 +3736,7 @@ mod tests {
         .unwrap();
         let summary = summary.unwrap();
         assert!(audit["reason"].is_null(), "{audit}");
-        // Long input can need multiple bounded windows; every dispatch must still be metered once.
-        // 长原文可能分成多个有界窗口；每次真实派发仍须恰好计量一次，不能假定每份文档只需一轮。
+        // 长原文可能分成多个限量窗口，每次真实派发恰好计量一次。
         let actual_calls = calls.load(Ordering::Acquire);
         assert!((2..=4).contains(&actual_calls));
         assert_eq!(audit["modelCalls"], actual_calls);
@@ -3550,8 +3853,7 @@ mod tests {
         assert_eq!(cached["archive"]["resultRef"], *archive_ref);
         assert_eq!(cached_audit["workingArchive"]["saveAttempts"], 0);
 
-        // Statistics stay in the checkpoint; they do not create a new archive for identical findings.
-        // 统计保留在检查点；事实与游标未变时复用归档，不能让模型反复读取新的元信息版本。
+        // 统计保留在检查点；事实与游标未变时复用归档，省去模型反复读取新的元信息版本。
         let metadata = json!({"path":"/work/source-0.md","bytes":old_body.len(),"sha256":format!("{:x}",Sha256::digest(old_body.as_bytes()))});
         let metadata_ref = data::save_tool_result(
             &root,
@@ -3613,7 +3915,6 @@ mod tests {
             .unwrap();
         assert_eq!(changed["archive"]["verified"], true);
 
-        // Rejected-input caching also keeps navigation counters separate from the verified evidence archive.
         // 已拒绝输入的缓存早返也将导航计数与证据归档分开，不重试原本被拒绝的模型调用。
         let changed_archive_ref = changed["archive"]["resultRef"].clone();
         changed["failedInputSignature"] = changed["inputSignature"].clone();
@@ -3680,11 +3981,14 @@ mod tests {
         );
     }
 
-    fn stable_prefix_receipts() -> (Vec<Value>,Value) {
-        let content="Stable archived observation including the exact recorded version. ".repeat(160);
-        let mut messages=vec![json!({"role":"user","content":"Inspect this source twice, then continue without repeating actions."})];
-        let mut receipts=Vec::new();
-        for (round,call) in [(1,"first-read"),(2,"second-read")] {
+    fn stable_prefix_receipts() -> (Vec<Value>, Value) {
+        let content =
+            "Stable archived observation including the exact recorded version. ".repeat(160);
+        let mut messages = vec![
+            json!({"role":"user","content":"Inspect this source twice, then continue without repeating actions."}),
+        ];
+        let mut receipts = Vec::new();
+        for (round, call) in [(1, "first-read"), (2, "second-read")] {
             messages.push(json!({"role":"assistant","content":"Inspecting the existing source.",
                 "tool_calls":[{"id":call,"type":"function","function":{"name":"filesystem_read","arguments":"{}"}}]}));
             messages.push(json!({"role":"tool","tool_call_id":call,"content":content}));
@@ -3694,45 +3998,94 @@ mod tests {
                     "contentFingerprint":"b".repeat(64),"version":{"sha256":"a".repeat(64)}},
                 "originalExcerpt":content,"originalCharacters":content.encode_utf16().count()}));
         }
-        messages.push(json!({"role":"user","content":"Continue using the already saved evidence."}));
-        (messages,json!({"inputBudgetTokens":64000,"declarations":[],"resultSources":receipts,
-            "conversationId":"11111111-1111-4111-8111-111111111111"}))
+        messages
+            .push(json!({"role":"user","content":"Continue using the already saved evidence."}));
+        (
+            messages,
+            json!({"inputBudgetTokens":64000,"declarations":[],"resultSources":receipts,
+            "conversationId":"11111111-1111-4111-8111-111111111111"}),
+        )
     }
 
     #[tokio::test]
     async fn stable_prefix_under_pressure_threshold_keeps_completed_receipts_byte_identical() {
-        let (messages,mut budget)=stable_prefix_receipts();
-        let (_owner,cancel)=watch::channel(false);
-        let first=compact_request(&json!({"protocol":"openai-completions"}),"fixture",&messages,"",
-            &budget,cancel.clone(),None).await.unwrap();
-        assert_eq!(first.messages,messages);
-        assert_eq!(first.audit["observationCompaction"]["duplicateCount"].as_u64().unwrap_or(0),0);
-        // A different still-sufficient input grant must not re-project already completed operations.
-        // 输入授额改变但仍有余量时，不重新投影已经完成的操作及其回执。
-        budget["inputBudgetTokens"]=json!(48000);
-        budget["declarations"]=json!([{"type":"function","function":{"name":"additional_tool","parameters":{"type":"object"}}}]);
-        let second=compact_request(&json!({"protocol":"openai-completions"}),"fixture",&first.messages,"",
-            &budget,cancel,None).await.unwrap();
-        assert_eq!(second.messages,messages);
+        let (messages, mut budget) = stable_prefix_receipts();
+        let (_owner, cancel) = watch::channel(false);
+        let first = compact_request(
+            &json!({"protocol":"openai-completions"}),
+            "fixture",
+            &messages,
+            "",
+            &budget,
+            cancel.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.messages, messages);
+        assert_eq!(
+            first.audit["observationCompaction"]["duplicateCount"]
+                .as_u64()
+                .unwrap_or(0),
+            0
+        );
+        // 输入额度改变但仍有余量时，不重新映射已经完成的操作及其结果。
+        budget["inputBudgetTokens"] = json!(48000);
+        budget["declarations"] = json!([{"type":"function","function":{"name":"additional_tool","parameters":{"type":"object"}}}]);
+        let second = compact_request(
+            &json!({"protocol":"openai-completions"}),
+            "fixture",
+            &first.messages,
+            "",
+            &budget,
+            cancel,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.messages, messages);
         assert!(!second.budget_exceeded);
-        assert_eq!(second.audit["observationCompaction"]["duplicateCount"].as_u64().unwrap_or(0),0);
+        assert_eq!(
+            second.audit["observationCompaction"]["duplicateCount"]
+                .as_u64()
+                .unwrap_or(0),
+            0
+        );
     }
 
     #[tokio::test]
     async fn stable_prefix_policy_still_repairs_real_pressure_without_relaxing_input_limit() {
-        let (messages,mut budget)=stable_prefix_receipts();
-        let input=protocol::tool_message_tokens(&messages,"")
-            + protocol::estimate_tokens(&budget["declarations"].to_string())-64;
-        budget["inputBudgetTokens"]=json!(input);
-        let (_owner,cancel)=watch::channel(false);
-        let projected=compact_request(&json!({"protocol":"openai-completions"}),"fixture",&messages,"",
-            &budget,cancel,None).await.unwrap();
-        assert_ne!(projected.messages,messages);
-        assert!(projected.audit["observationCompaction"]["duplicateCount"].as_u64().unwrap_or(0)>0);
+        let (messages, mut budget) = stable_prefix_receipts();
+        let input = protocol::tool_message_tokens(&messages, "")
+            + protocol::estimate_tokens(&budget["declarations"].to_string())
+            - 64;
+        budget["inputBudgetTokens"] = json!(input);
+        let (_owner, cancel) = watch::channel(false);
+        let projected = compact_request(
+            &json!({"protocol":"openai-completions"}),
+            "fixture",
+            &messages,
+            "",
+            &budget,
+            cancel,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(projected.messages, messages);
+        assert!(
+            projected.audit["observationCompaction"]["duplicateCount"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
         assert!(protocol::complete_pairs(&projected.messages));
-        let actual=protocol::tool_message_tokens(&projected.messages,"")
+        let actual = protocol::tool_message_tokens(&projected.messages, "")
             + protocol::estimate_tokens(&budget["declarations"].to_string());
-        assert!(actual<=input || projected.budget_exceeded, "Unfittable input remains explicitly marked for repair.");
+        assert!(
+            actual <= input || projected.budget_exceeded,
+            "Unfittable input remains explicitly marked for repair."
+        );
     }
 
     #[tokio::test]
@@ -3871,7 +4224,6 @@ mod tests {
         let request = uuid::Uuid::new_v4().to_string();
         data::ensure_conversation(&root, &chat, "isolated repeated checkpoint fixture").unwrap();
         let goal = json!({"role":"user","content":"Read the current source and verify the original task without replaying writes."});
-        // A user can quote checkpoint syntax; only the broker-owned sidecar makes context replaceable.
         // 用户可以引用检查点语法；只有程序拥有的来源侧车才能把派生上下文标为可替换。
         let constraint = json!({"role":"user","content":json!({"contextCheckpoint":true,"origin":"broker-context-checkpoint","instructionAuthority":false,"constraint":"Do not use Chrome or Edge."}).to_string()});
         let mut messages = vec![goal.clone(), constraint.clone()];

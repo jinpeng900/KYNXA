@@ -6,7 +6,6 @@ using KYNXA_Desktop.Models.UI;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Keeps local receipt times in a separate UI cache without changing authoritative message fields.
 /// 将本机接收结束时间保存在独立界面缓存中，不修改正式消息字段。
 /// </summary>
 public static class MessageTimePresentation
@@ -48,7 +47,6 @@ public static class MessageTimePresentation
     private static void RecordEndCore(Guid? conversationId, ChatMessageState message, DateTimeOffset endedAt)
     {
         if (!IsTerminal(message) || endedAt <= DateTimeOffset.UnixEpoch || endedAt < message.CreatedAt) return;
-        // Preserve the first observed terminal instant. A late finally block must not move it forward.
         // 保留首次观测终态的时刻，迟到的 finally 不能将其向后移动。
         lock (Sync)
         {
@@ -123,7 +121,6 @@ public static class MessageTimePresentation
         var candidates = messages.Where(message => IsTerminal(message) && message.Id != Guid.Empty &&
             GetEnd(conversationId, message) is null).Select(message =>
                 (Message: message, Id: message.Id, Status: message.Status, Content: message.Content)).ToArray();
-        // Limit concurrent file reads; late loads cannot attach a time to another attempt or data root.
         // 限制同时读取的文件数；迟到的读取不能把时间挂到另一轮回复或数据目录。
         foreach (var batch in candidates.Chunk(16))
         {
@@ -159,7 +156,6 @@ public static class MessageTimePresentation
             if (Cache is not { } cache) return Task.FromResult(true);
             var identity = (conversationId, message.Id);
             MessageWrites.TryGetValue(identity, out var preceding);
-            // Invalidate memory now; queue disk removal between this message's old and next writes.
             // 内存立即失效；删除排在本消息旧写入之后、新终态写入之前，不等其他聊天。
             var removal = ForgetCoreAsync(cache, conversationId, message.Id, preceding);
             TrackWrite(identity, removal);
@@ -199,7 +195,6 @@ public static class MessageTimePresentation
             RetriedMessages.RemoveWhere(key => key.ConversationId == conversationId);
         }
         await FlushAsync();
-        // Keep live object observations so the existing undo action can restore its display cache.
         // 保留仍存活对象的观测值，以便现有撤销操作恢复显示缓存。
         bool removed = cache is null || await cache.RemoveAsync(conversationId);
         lock (Sync)
@@ -222,7 +217,6 @@ public static class MessageTimePresentation
         }
     }
 
-    // Match final content and status; client and gateway timestamps may differ.
     // 按最终公开正文和状态匹配，允许客户端与网关时钟不同。
     private static string ContentHash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
 

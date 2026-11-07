@@ -11,7 +11,6 @@ using Windows.ApplicationModel.DataTransfer;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Loads bounded text pages on demand. Media is fetched only by an explicit action.
 /// 按需读取有大小上限的文本页；媒体只在明确操作之后获取。
 /// </summary>
 public sealed class ToolResultDialog : IDisposable
@@ -88,7 +87,6 @@ public sealed class ToolResultDialog : IDisposable
         UiText.LanguageChanged += LanguageChanged;
         LanguageChanged(null, EventArgs.Empty);
         UpdateLayout();
-        // Keep media decoding bounded; regular results can still be read through text pages.
         // 限制媒体解码规模；常规结果仍可通过文本分页读取。
         _media.IsEnabled = _reference.Bytes <= 8 * 1024 * 1024;
         if (!_media.IsEnabled) AddNotice(_screenshot ? "截图过大，无法预览（最大 8 MB）。" : "结果过大，请通过分页查看文本；媒体预览限制为 8 MB。");
@@ -118,7 +116,6 @@ public sealed class ToolResultDialog : IDisposable
     private void UpdateLayout()
     {
         if (_closed) return;
-        // Vertical actions keep English labels and keyboard targets within a narrow dialog.
         // 窄对话框竖排操作，保证英文标签和键盘操作目标都位于内容范围内。
         var actions = _actions.Children.OfType<FrameworkElement>().Where(action => action.Visibility == Visibility.Visible).ToArray();
         foreach (var action in actions) action.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
@@ -145,7 +142,6 @@ public sealed class ToolResultDialog : IDisposable
         try
         {
             var data = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
-            // Copy the original loaded pages; the native multiline editor normalizes display line endings.
             // 复制已加载分页原文；原生多行编辑框会归一化显示换行。
             data.SetText(_loaded.ToString());
             Clipboard.SetContent(data);

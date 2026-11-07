@@ -14,7 +14,6 @@ public sealed record SavedAttachmentPage(SavedAttachmentEntry[] Attachments, int
     int Limit = 50, int Total = 0, bool HasMore = false, int? NextOffset = null);
 
 /// <summary>
-/// Imports user-selected files through the gateway; local paths never become model context.
 /// 用户选择的文件由网关接收保存；本地来源路径不作为模型上下文或正式附件字段。
 /// </summary>
 public sealed class MessageAttachmentsApiClient : IDisposable
@@ -48,7 +47,6 @@ public sealed class MessageAttachmentsApiClient : IDisposable
             new { messageId, files = files.Select(file => new { file.Id, file.Path, file.Name }).ToArray() }, JsonOptions, deadline.Token);
         var result = await GatewayResponseReader.ReadAsync<AttachmentResponse>(response,
             UiText.Get("附件接收结果为空。"), UiText.Get("附件接收失败（HTTP {0}）。"), deadline.Token, JsonOptions);
-        // Original reception makes the card usable; extraction readiness is a separate state.
         // 原件接收完成即可打开卡片；正文解析是否完成由后台独立维护。
         return result.Attachments.Select(file => file.Status == "pending" ? file with { Status = "ready" } : file).ToArray();
     }

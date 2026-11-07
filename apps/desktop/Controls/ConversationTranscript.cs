@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using CachedHtml = KYNXA_Desktop.Services.TranscriptHtml;
 using System.Diagnostics;
 using System.Text.Json;
 using KYNXA.Contracts;
@@ -17,7 +18,6 @@ public sealed record ConversationHistoryRequest(Guid ConversationId, string Dire
 public sealed record ConversationAttachmentRequest(Guid ConversationId, Guid MessageId, ChatAttachment Attachment);
 
 /// <summary>
-/// A single document keeps browser selection continuous across the whole conversation.
 /// 整个聊天使用同一文档，保证浏览器选择可以跨消息连续进行。
 /// </summary>
 public sealed class ConversationTranscript : Grid, IDisposable
@@ -62,18 +62,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private bool _diagramExportPending;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
     private bool _prioritizeNextProjection;
-    private sealed record CachedSegmentHtml(AssistantSegment Source, string Html, string ReasoningHtml,
-        TranscriptMarkdown.StreamingState? Stream = null)
-    {
-        public long Size => (long)Source.Content.Length + Source.Reasoning.Length + Html.Length + ReasoningHtml.Length
-            + (Stream is null ? 0 : Stream.Source.Length + Stream.StableHtml.Length);
-    }
-    private sealed record CachedHtml(string Role, string Content, string Reasoning, bool Streaming, string Mode, string Html, string ReasoningHtml,
-        CachedSegmentHtml[] Segments, TranscriptMarkdown.StreamingState? Stream = null)
-    {
-        public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length + Segments.Sum(segment => segment.Size)
-            + (Stream is null ? 0 : Stream.Source.Length + Stream.StableHtml.Length);
-    }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
         ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
@@ -168,19 +156,15 @@ public sealed class ConversationTranscript : Grid, IDisposable
         if (conversationId is Guid timeScope)
             _ = RestoreMessageTimesAsync(timeScope, _messages.Select(row => row.Message).ToArray(), _generation, _timeRestoreCancellation.Token);
         _openAtBottom |= changed || openAtBottom;
-        // The browser can restore a recently visited conversation while updated content is parsed.
         // 解析更新内容期间，浏览器可先恢复最近访问过的聊天。
         if (changed) Post(new { type = "openConversation", conversationId = conversationId?.ToString() ?? "" });
         QueueRefresh();
         bool prioritize = _prioritizeNextProjection;
         _prioritizeNextProjection = false;
-        // A navigation should not wait for the 40 ms stream batching timer.
         // 切换聊天不应等待 40 毫秒的流式合并刷新计时器。
         if (!_rendering && _ready.Task.IsCompletedSuccessfully)
         {
             _refresh.Stop();
-            // Show sent messages before background UI work; serialize outside the send handler.
-            // 优先显示已发送消息，聊天编码移出发送事件。
             DispatcherQueue.TryEnqueue(prioritize ? Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal
                 : Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
                 async () => { if (!_disposed) await FlushAsync(); });
@@ -197,7 +181,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
         catch (Exception error)
         {
-            // A display cache must never break navigation or expose message content in diagnostics.
             // 显示缓存不能破坏会话切换，也不能在诊断中暴露消息内容。
             Debug.WriteLine($"Message time cache restore: {error.GetType().Name}");
         }
@@ -231,18 +214,15 @@ public sealed class ConversationTranscript : Grid, IDisposable
         try
         {
             await _ready.Task;
-            // Loading can finish after navigation or a close command; never move focus for an obsolete request.
             // 加载可能晚于会话切换或关闭命令；过期请求不能移动焦点。
             if (_disposed || request != _findTextRequest || conversationId != _conversationId || !_browser.IsLoaded) return;
             _browser.Focus(FocusState.Programmatic);
-            // Ready may precede rendering; align chat identity before opening to preserve its viewport.
             // Ready 可能早于首屏；打开查找前对齐会话 ID，相同 ID 保留缓存视口。
             Post(new { type = "openConversation", conversationId = conversationId?.ToString() ?? "" });
             Post(new { type = "findText", action = "open" });
         }
         catch (Exception error)
         {
-            // Initialization already exposes its loading failure; keep this focus request independently observed.
             // 初始化会展示加载失败；这里单独观察焦点请求异常，避免产生未观察的任务。
             Debug.WriteLine($"Transcript find open: {error.GetType().Name}");
         }
@@ -256,7 +236,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     public void NavigateFindText(bool previous = false)
     {
-        // Navigation from native controls keeps their focus and draft; the page enforces selection/modal guards.
         // 原生控件发起导航时保留焦点与草稿；页面继续校验选区和图表模态保护。
         if (!_disposed && IsFindTextOpen) Post(new { type = "findText", action = previous ? "previous" : "next" });
     }
@@ -273,7 +252,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
         if (_disposed) return;
         var palette = AppearanceService.Current;
         _browser.DefaultBackgroundColor = AppearanceService.ParseColor(palette.Main);
-        // Appearance changes reach CSS without rebuilding message content or its cached trees.
         // 外观变化只更新 CSS，不重建消息正文或缓存树，字号变化由页面保留阅读锚点。
         Post(new
         {
@@ -303,8 +281,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed) return;
         _notice.Text = UiText.Get(_noticeKey);
-        // The browser retains language-neutral metadata for active and cached rows.
-        // Do not queue a transcript render: that would also touch selection and scrolling.
         // 浏览器保留当前行与缓存行的语言无关元数据；本地化不重渲染聊天，以免改变选择和滚动。
         Post(new
         {
@@ -405,8 +381,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed || row.ConversationId != _conversationId) return;
         var message = row.Message;
-        // State bypasses Markdown and body encoding; the revision rejects older in-flight projections.
-        // 状态不等 Markdown 和正文编码；版本号防止在途旧投影把终态改回生成中。
+        // 状态不等 Markdown 和正文编码；版本号防止在途旧映射把终态改回生成中。
         Post(new { type = "messageState", conversationId = _conversationId?.ToString() ?? "", revision = _revision,
             message = new { id = message.Id, role = message.Role, status = message.Status, streaming = row.IsStreaming,
                 waiting = row.IsWaiting, error = message.Error, canRetry = row.RetryVisibility == Visibility.Visible,
@@ -440,7 +415,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
             if (_disposed) return;
             var core = _browser.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false;
-            // Keep text editing/selection shortcuts, without browser reload or navigation keys.
             // 保留文本编辑和选择快捷键，同时阻止浏览器刷新与页面导航快捷键。
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
@@ -588,15 +562,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
             var clipboardContent = new DataPackage();
             clipboardContent.SetText(text.GetString() ?? "");
             Clipboard.SetContent(clipboardContent);
-            // Flush clipboard data before reporting success so it survives application exit.
             // 报告成功前将数据写实到系统剪贴板，避免退出后复制内容消失。
             Clipboard.Flush();
             succeeded = true;
         }
         catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
 
-        // Acknowledge the actual clipboard result for this chat and operation, not the click.
-        // 点击只代表请求；回执应绑定聊天与操作，反映剪贴板实际结果。
+        // 点击只代表请求；结果应绑定聊天与操作，反映剪贴板实际结果。
         Post(new { type = "copyResult", conversationId = _conversationId?.ToString() ?? "", requestId = request.GetString(), success = succeeded });
     }
 
@@ -619,7 +591,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
         { if (!_disposed) request.Response = environment.CreateWebResourceResponse(null, 404, "Image unavailable", ""); }
     }
 
-    // Only durable attachments belonging to visible messages can cross the local document boundary.
     // 仅当前聊天已展示消息中的真实附件可以跨越本地文档边界，不开放任意网址或磁盘路径。
     private async Task ReadAttachmentImageAsync(CoreWebView2Environment environment, CoreWebView2WebResourceRequestedEventArgs request, Uri resource)
     {
@@ -674,7 +645,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
             || !message.TryGetProperty("messageId", out var messageId) || messageId.ValueKind != JsonValueKind.String
             || !Guid.TryParse(messageId.GetString(), out var parsedId) || !_messages.Any(row => row.Message.Id == parsedId)) return;
 
-        // Snapshot request fields and HWND before awaiting; JSON and live UI state are not export content.
         // 首次等待前固定请求字段及 HWND，避免用 JSON 或变化中的界面状态导出文档。
         string requestId = request.GetString()!;
         string format = message.TryGetProperty("format", out var formatField) && formatField.ValueKind == JsonValueKind.String ? formatField.GetString()! : "";
@@ -740,8 +710,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             bool initialPublished = !_hasPublishedSnapshot && _messages.Count > 4;
             if (initialPublished)
             {
-                // Capture and encode the visible tail before projecting earlier task/tool histories.
-                // 先捕获并发送可见尾部，再投影更早的任务与工具历史，首屏不等待整页处理。
+                // 先捕获并发送可见尾部，再映射更早的任务与工具历史，首屏不等待整页处理。
                 var recent = _messages.TakeLast(4).Select(CaptureSnapshot).Select(row =>
                 {
                     _html.TryGetValue(row.Id, out var cached);
@@ -754,14 +723,12 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 await Task.Yield();
                 if (_disposed || generation != _generation) return;
             }
-            // Streaming updates only project dirty rows; navigation still reconciles the whole window.
-            // 流式更新只投影脏行；导航时仍核对整个消息窗口。
+            // 流式更新只映射脏行；导航时仍核对整个消息窗口。
             var snapshots = refreshAll ? _messages.Select(CaptureSnapshot).ToArray()
                 : pendingRows.Where(_messageRows.ContainsKey).Select(id => CaptureSnapshot(_messageRows[id])).ToArray();
             var order = sourceOrder;
             bool fullSnapshot = !_hasPublishedSnapshot;
             bool orderChanged = !ReferenceEquals(_publishedOrder, order) && !_publishedOrder.SequenceEqual(order);
-            // Evicted historical HTML needs no parsing while its published message stays unchanged.
             // 历史 HTML 被淘汰后，只要已发布消息未变化就无需重新解析。
             var changed = fullSnapshot ? snapshots : snapshots.Where(row =>
                 !_publishedRows.TryGetValue(row.Id, out var previous) || !SamePublishedSnapshot(previous, row)).ToArray();
@@ -780,9 +747,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             bool progressive = initialPublished || fullSnapshot && changed.Length > 0 || missing.Count > 1;
             if (progressive && !initialPublished)
             {
-                // Show cached formatting or escaped source first; Markdown work cannot hold the whole page blank.
                 // 先显示缓存排版或安全转义的原文，整页消息不再等待全部 Markdown 解析完成。
-                // Send recent visible messages first; encode the rest in background batches.
                 // 首次只发送最近可见消息，其余后台分批编码，避免同步复制整页 HTML。
                 var preview = Enumerable.Range(Math.Max(0, rendered.Length - 4), Math.Min(4, rendered.Length))
                     .Select(index => (rendered[index].Row,
@@ -798,7 +763,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 _notice.Visibility = Visibility.Collapsed;
                 await Task.Yield();
             }
-            // Parse recent replies first in bounded batches, sharing the HTML cache.
             // 优先分批解析最近回复，共用有容量上限的 HTML 缓存。
             var work = progressive ? Enumerable.Range(0, changed.Length) : missing.AsEnumerable();
             foreach (var batch in work.Reverse().Chunk(4))
@@ -819,7 +783,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 if (!await PublishRowsAsync(completed, false, conversationId, revision, generation, null, false))
                 { _dirty = true; return; }
                 foreach (var item in completed) _publishedRows[item.Row.Id] = item.Row;
-                // New output takes precedence over the remaining older formatting; unparsed rows remain dirty.
                 // 新输出优先于尚未排版的旧消息，未解析行保持待更新，下一次刷新继续补齐。
                 if (revision != _revision) { _dirty = true; return; }
             }
@@ -833,7 +796,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
             }
             else
             {
-                // Recent-first parsing must still leave the newest messages at the cache's hot end.
                 // 解析顺序优先最新消息，但缓存热端仍按消息顺序保留最新内容。
                 foreach (var item in rendered) CacheHtml(item.Row.Id, item.Cache!);
             }
@@ -855,7 +817,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
         finally
         {
-            // An interrupted batch must keep its unpublished rows, including evicted historical HTML.
             // 批次未发完就保留待更新行，包括 HTML 已被淘汰的历史行。
             if (!published && !_disposed && generation == _generation)
             {
@@ -870,12 +831,10 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private Snapshot CaptureSnapshot(ConversationMessageViewModel row)
     {
         SnapshotCaptureCount++;
-        // Reuse unchanged historical projections; a live row invalidates only its own snapshot.
-        // 复用未变的历史投影；活动消息只让自身快照失效。
+        // 复用未变的历史映射；活动消息只让自身快照失效。
         if (_capturedRows.TryGetValue(row.Message.Id, out var captured)) return captured;
         var visible = TranscriptPresentation.Select(row.Message.Role, row.Message.Status, row.Content,
             row.Message.AssistantSegments, row.ToolActivities, row.Message.TaskCompletionState);
-        // Public process records belong to the gateway. Hidden phases need no HTML or browser payload.
         // 公开过程记录归网关所有；隐藏的阶段不需要生成 HTML 或传入浏览器。
         var segments = visible.Segments.Select(segment => segment with { Reasoning = "", ReasoningDurationMs = 0 }).ToArray();
         return _capturedRows[row.Message.Id] = new Snapshot(row.Message.Id, row.Message.Role, visible.Content, "", row.IsStreaming,
@@ -894,45 +853,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming && cached.Mode == row.Mode &&
         cached.Segments.Select(segment => segment.Source).SequenceEqual(row.AssistantSegments);
 
-    private static CachedHtml PreviewHtml(Snapshot row, CachedHtml? previous)
-    {
-        static string PlainHtml(string content) => content.Length == 0 ? ""
-            : "<div class=\"markdown-pending\" style=\"white-space:pre-wrap\">"
-                + System.Net.WebUtility.HtmlEncode(content.Length > 8192 ? content[^8192..] : content) + "</div>";
-        var segments = row.AssistantSegments.Select(segment =>
-            previous?.Segments.FirstOrDefault(value => value.Source == segment)
-                ?? new CachedSegmentHtml(segment, PlainHtml(segment.Content), "")).ToArray();
-        return new(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode,
-            row.Role != "user" && segments.Length == 0 ? PlainHtml(row.Content) : "", "", segments);
-    }
+    private static CachedHtml PreviewHtml(Snapshot row, CachedHtml? previous) =>
+        TranscriptHtmlCache.Preview(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, row.AssistantSegments, previous);
 
-    private static CachedHtml RenderHtml(Snapshot row, CachedHtml? previous)
-    {
-        var segments = row.AssistantSegments.Select(segment =>
-        {
-            var match = previous?.Segments.FirstOrDefault(value => value.Source == segment);
-            if (match is not null) return match;
-            if (segment.Status == "streaming")
-            {
-                var prior = previous?.Segments.FirstOrDefault(value => value.Source.Id == segment.Id);
-                var stream = TranscriptMarkdown.RenderStreaming(segment.Content, prior?.Stream);
-                return new CachedSegmentHtml(segment, stream.Html, "", stream.State);
-            }
-            return new CachedSegmentHtml(segment, TranscriptMarkdown.Render(segment.Content), "");
-        }).ToArray();
-        string html = "";
-        TranscriptMarkdown.StreamingState? state = null;
-        if (row.Role != "user" && segments.Length == 0)
-        {
-            if (row.Streaming)
-            {
-                var stream = TranscriptMarkdown.RenderStreaming(row.Content, previous?.Stream);
-                html = stream.Html; state = stream.State;
-            }
-            else html = TranscriptMarkdown.Render(row.Content);
-        }
-        return new(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, html, "", segments, state);
-    }
+    private static CachedHtml RenderHtml(Snapshot row, CachedHtml? previous) =>
+        TranscriptHtmlCache.Render(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, row.AssistantSegments, previous);
 
     private async Task<bool> PublishRowsAsync(IReadOnlyList<(Snapshot Row, CachedHtml Cache)> rendered, bool fullSnapshot,
         Guid? conversationId, long revision, long generation, Guid[]? messageOrder, bool openAtBottom, bool progressiveSnapshot = false)
@@ -940,8 +865,12 @@ public sealed class ConversationTranscript : Grid, IDisposable
         var payload = new { type = fullSnapshot ? "render" : "renderPatch", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom, progressiveSnapshot,
             messageOrder,
             historyHasOlder = _historyHasOlder, historyHasNewer = _historyHasNewer, historyHasNewReplies = _historyHasNewReplies,
-            messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
-                html = item.Cache.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
+            messages = rendered.Select(item =>
+            {
+                bool reuseBody = !fullSnapshot && _publishedRows.TryGetValue(item.Row.Id, out var previous)
+                    && SamePublishedBody(previous, item.Row);
+                return new { id = item.Row.Id, role = item.Row.Role, reuseBody, content = reuseBody ? null : item.Row.Content,
+                html = reuseBody ? null : item.Cache.Html, reasoningHtml = reuseBody ? null : item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                 htmlStableLength = item.Cache.Stream?.StableHtml.Length, htmlStableBlocks = item.Cache.Stream?.StableBlocks,
                 reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
                 presentationMode = item.Row.Mode, durationMs = item.Row.DurationMs,
@@ -954,7 +883,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 generationTimingState = item.Row.GenerationTimingState, generationClockId = item.Row.GenerationClockId,
                 createdAtMs = item.Row.CreatedAtMs, endRecordedAtMs = item.Row.EndRecordedAtMs,
                 streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
-                assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
+                assistantSegments = reuseBody ? null : item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
                     round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,
                     isAnswerContinuation = segment.Source.IsAnswerContinuation,
                     status = segment.Source.Status, content = segment.Source.Content, html = segment.Html,
@@ -966,8 +895,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     arguments = tool.Arguments, status = tool.Status, summary = tool.Summary, result = tool.Result,
                     approvalId = tool.ApprovalId, outsideWorkspace = tool.OutsideWorkspace, sandbox = tool.Sandbox,
                     workspaceRoot = tool.WorkspaceRoot, code = tool.Code, round = tool.Round, order = tool.Order,
-                    resultRef = tool.ResultRef is { } reference ? new { id = reference.Id, bytes = reference.Bytes, sha256 = reference.Sha256 } : null }).ToArray() }).ToArray() };
-        // Freeze UI-owned metadata first; encode full bodies off-thread and discard departed conversations.
+                    resultRef = tool.ResultRef is { } reference ? new { id = reference.Id, bytes = reference.Bytes, sha256 = reference.Sha256 } : null }).ToArray() };
+            }).ToArray() };
         // 先固定界面元信息，再后台编码完整正文；离开聊天后丢弃过期结果。
         string encoded = await Task.Run(() => JsonSerializer.Serialize(payload));
         if (_disposed || generation != _generation || conversationId != _conversationId) return false;
@@ -975,21 +904,24 @@ public sealed class ConversationTranscript : Grid, IDisposable
         catch (System.Runtime.InteropServices.COMException) { return false; }
     }
 
-    // Compare clock origins; inherited timing needs one metadata update, not per-frame updates.
     // 按计时起点比较；继承计时只更新一次元数据，无需逐帧刷新。
+    private static bool SamePublishedBody(Snapshot previous, Snapshot current) =>
+        previous.Role == current.Role && previous.Content == current.Content && previous.Reasoning == current.Reasoning
+        && previous.Streaming == current.Streaming && previous.Mode == current.Mode
+        && previous.AssistantSegments.SequenceEqual(current.AssistantSegments);
+
     private static bool SamePublishedSnapshot(Snapshot previous, Snapshot current) =>
-        previous.Id == current.Id && previous.Role == current.Role && previous.Content == current.Content &&
-        previous.Reasoning == current.Reasoning && previous.Streaming == current.Streaming &&
+        previous.Id == current.Id && SamePublishedBody(previous, current) &&
         previous.ReasoningState == current.ReasoningState && previous.ReasoningSeconds == current.ReasoningSeconds &&
         previous.Waiting == current.Waiting && previous.Status == current.Status && previous.Error == current.Error &&
-        previous.CanRetry == current.CanRetry && previous.Mode == current.Mode && previous.DurationMs == current.DurationMs &&
+        previous.CanRetry == current.CanRetry && previous.DurationMs == current.DurationMs &&
         previous.ExecutionPhase == current.ExecutionPhase &&
         previous.GenerationStartedTimestamp == current.GenerationStartedTimestamp &&
         previous.GenerationTimingState == current.GenerationTimingState && previous.GenerationClockId == current.GenerationClockId &&
         (current.GenerationTimingState == "live" || previous.GenerationElapsedMs == current.GenerationElapsedMs) &&
         previous.CreatedAtMs == current.CreatedAtMs && previous.EndRecordedAtMs == current.EndRecordedAtMs &&
         previous.TaskCompletionState == current.TaskCompletionState && previous.Attachments.SequenceEqual(current.Attachments) &&
-        previous.AssistantSegments.SequenceEqual(current.AssistantSegments) && previous.ToolActivities.SequenceEqual(current.ToolActivities);
+        previous.ToolActivities.SequenceEqual(current.ToolActivities);
 
     private long GetToolDisplayRevision(Guid messageId, ToolActivity tool)
     {
@@ -1001,8 +933,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
             while (_toolRevisions.Count >= MaximumToolDisplayRevisions) _toolRevisions.Remove(_toolRevisionOrder.Dequeue());
             _toolRevisionOrder.Enqueue(key);
         }
-        // Events are immutable records. A weak source avoids retaining full tool results
-        // merely to skip unchanged DOM rows during streaming and cached navigation.
         // 事件是不可变记录；弱引用避免仅为跳过未变化的 DOM 行而保留完整工具结果。
         long revision = ++_nextToolRevision;
         _toolRevisions[key] = new(new WeakReference<ToolActivity>(tool), revision);

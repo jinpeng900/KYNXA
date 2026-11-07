@@ -100,7 +100,6 @@ public sealed partial class ShellPage
                 }
                 else
                 {
-                    // Read the saved preferences after the picker returns; an unapplied input draft is never exported.
                     // 文件选择完成后读取已保存偏好，不能将输入框中尚未应用的草稿导出。
                     await AppearancePreferencesTransfer.WriteAsync(file, readSavedPreferences());
                 }
@@ -127,7 +126,6 @@ public sealed partial class ShellPage
             UiLocalization.Bind(_status, InfoBar.MessageProperty, key);
             _status.Severity = severity;
             _status.IsOpen = true;
-            // A result below the scroll fold must be visible after an explicit transfer action.
             // 显式导入或导出后的本地反馈可能位于滚动区域下方，需要让结果进入可见区域。
             Root.DispatcherQueue.TryEnqueue(() =>
             {

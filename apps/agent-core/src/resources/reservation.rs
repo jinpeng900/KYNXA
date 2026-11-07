@@ -49,7 +49,6 @@ fn records(profile: &Value, backend: &str) -> Result<Vec<Value>, String> {
         .unwrap_or_default())
 }
 
-/// Samples are accepted only from this reservation's owned isolated process, never gateway RSS.
 /// 仅采纳当前预约拥有的隔离进程采样；网关 RSS 和其他进程不能冒充模型占用。
 fn remember_cost(
     profile: &Value,
@@ -104,7 +103,6 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     inference::calculate("resources.inferenceRequest", &args)
 }
 
-/// Rust owns approved lease facts and all model demand/feedback rules; adapters execute effects.
 /// Rust 拥有已批准租约事实及完整模型需求/反馈规则；适配器执行申请、续期和释放 I/O。
 #[derive(Default)]
 pub struct ReservationState {
@@ -509,73 +507,7 @@ impl ReservationState {
                     Value::Null
                 },
             ),
-            "resources.reservation.lease" => {
-                let lease = &args["lease"];
-                let kind = args["kind"]
-                    .as_str()
-                    .ok_or("INFERENCE_INVALID_LEASE_KIND")?;
-                if lease["status"] != "granted" {
-                    if kind == "gpu" {
-                        self.last_gpu_snapshot_at = now;
-                        self.diagnostic = json!({"code": "GPU_RESOURCE_UNAVAILABLE", "reason": lease["reason"].as_str().unwrap_or("gpu-budget-unavailable")});
-                    }
-                    if kind == "gpuUpgrade" {
-                        self.adjustment(
-                            &json!({"reason": "gpu-expansion-denied", "boundary": "next-request"}),
-                            now,
-                        );
-                    }
-                    return Ok(
-                        json!({"accepted": false, "denied": true, "reason": lease["reason"]}),
-                    );
-                }
-                let accepted = match kind {
-                    "resident" => {
-                        self.resident.push(lease.clone());
-                        true
-                    }
-                    "execution" => {
-                        self.execution = lease.clone();
-                        if number(&lease["suggestions"]["batchMultiplier"], 1.0) < 1.0 {
-                            self.batch_multiplier = self
-                                .batch_multiplier
-                                .min(number(&lease["suggestions"]["batchMultiplier"], 1.0));
-                        }
-                        true
-                    }
-                    "gpuUpgrade" => self.gpu.first().is_some_and(|base| {
-                        ["executionProvider", "executionDeviceId", "deviceId"]
-                            .iter()
-                            .all(|key| lease[*key] == base[*key])
-                    }),
-                    "gpu" => {
-                        let direct_ml = self.platform == "win32"
-                            && lease["executionProvider"] == "dml"
-                            && integer(&lease["executionDeviceId"]).is_some();
-                        let cuda = self.platform == "linux"
-                            && self.arch == "x64"
-                            && lease["deviceId"] == 0
-                            && ["", "0"].contains(&self.cuda_visible_devices.as_str());
-                        if !direct_ml && !cuda {
-                            self.diagnostic = json!({"code": "GPU_DEVICE_MAPPING_UNVERIFIED"});
-                        }
-                        direct_ml || cuda
-                    }
-                    _ => return Err("INFERENCE_INVALID_LEASE_KIND".into()),
-                };
-                if accepted && ["gpu", "gpuUpgrade"].contains(&kind) {
-                    self.gpu.push(lease.clone());
-                }
-                // Retain even an unusable grant until release is acknowledged; uncertainty never permits replacement.
-                // 不可用的批准额度也须保留到释放确认；未知清理状态不能允许替代驻留。
-                if !accepted {
-                    self.gpu.push(lease.clone());
-                }
-                Ok(
-                    json!({"accepted": accepted, "release": !accepted, "leaseId": lease["leaseId"],
-                    "registerProcessId": if kind == "execution" { None } else { self.executor_process_id }}),
-                )
-            }
+            "resources.reservation.lease" => self.apply_resources_reservation_lease(args),
             "resources.reservation.grant" => {
                 if self.closed {
                     return Err("INFERENCE_RESERVATION_CLOSED".into());
@@ -674,76 +606,7 @@ impl ReservationState {
                         .collect::<Vec<_>>()
                 ))
             }
-            "resources.reservation.report" => {
-                let feedback = &args["feedback"];
-                remember_cost(
-                    &self.profile,
-                    feedback,
-                    self.executor_process_id,
-                    self.gateway_process_id,
-                )?;
-                let sequence = integer(&feedback["sequenceTokens"]).unwrap_or(0);
-                let batch = integer(&feedback["batchSize"]).unwrap_or(0);
-                let tokens = integer(&feedback["inputTokens"]).unwrap_or(0);
-                let padded = integer(&feedback["paddedTokens"]).unwrap_or(0);
-                if feedback["phase"] == "hot-inference"
-                    && self.executor_process_id.is_some()
-                    && integer(&feedback["processId"]) == self.executor_process_id
-                    && sequence > 0
-                    && (1..=128).contains(&batch)
-                    && tokens > 0
-                    && padded >= tokens
-                {
-                    self.last_batch_measurement = json!({"processId": feedback["processId"], "backend": feedback["backend"],
-                        "sequenceTokens": sequence, "batchSize": batch, "inputTokens": tokens, "paddedTokens": padded,
-                        "paddingTokens": padded - tokens, "source": "owned-worker-hot-inference"});
-                    if integer(&feedback["bucketMinimumTokens"]).is_some() {
-                        self.last_batch_measurement["bucketMinimumTokens"] =
-                            feedback["bucketMinimumTokens"].clone();
-                    }
-                    if feedback["latencyMs"].as_f64().is_some_and(f64::is_finite) {
-                        self.last_batch_measurement["latencyMs"] = feedback["latencyMs"].clone();
-                    }
-                }
-                self.request = self.demand(
-                    number(&self.request["cpuThreads"], 1.0),
-                    feedback["backend"].as_str().unwrap_or("cpu"),
-                    number(&feedback["sequenceTokens"], 128.0),
-                    number(&self.request["memoryEstimate"]["batchSize"], 32.0),
-                )?;
-                if feedback["phase"]
-                    .as_str()
-                    .is_some_and(|phase| !phase.is_empty() && phase != "hot-inference")
-                    && feedback["allocationFailure"] != true
-                {
-                    return Ok(Value::Null);
-                }
-                let lease = self.gpu.first().unwrap_or(&self.execution);
-                if !present(lease) {
-                    return Ok(Value::Null);
-                }
-                let mut filtered = serde_json::Map::new();
-                for key in [
-                    "throughputPerSecond",
-                    "latencyMs",
-                    "queueDepth",
-                    "allocationFailure",
-                    "foregroundLatencyMs",
-                    "progress",
-                    "phase",
-                    "unit",
-                    "backend",
-                    "inputTokens",
-                    "sequenceTokens",
-                    "batchSize",
-                    "cpuThreads",
-                ] {
-                    if let Some(value) = feedback.get(key) {
-                        filtered.insert(key.into(), value.clone());
-                    }
-                }
-                Ok(json!({"leaseId": lease["leaseId"], "feedback": filtered}))
-            }
+            "resources.reservation.report" => self.apply_resources_reservation_report(args),
             "resources.reservation.feedback" => {
                 if args["result"]["status"] == "reported" {
                     self.feedback = args["result"]["feedback"].clone();
@@ -757,6 +620,145 @@ impl ReservationState {
             "resources.reservation.status" => Ok(self.status()),
             _ => Err("AGENT_CORE_UNKNOWN_OPERATION".into()),
         }
+    }
+
+    fn apply_resources_reservation_lease(&mut self, args: &Value) -> Result<Value, String> {
+        let now = number(&args["now"], 0.0);
+        let lease = &args["lease"];
+        let kind = args["kind"]
+            .as_str()
+            .ok_or("INFERENCE_INVALID_LEASE_KIND")?;
+        if lease["status"] != "granted" {
+            if kind == "gpu" {
+                self.last_gpu_snapshot_at = now;
+                self.diagnostic = json!({"code": "GPU_RESOURCE_UNAVAILABLE", "reason": lease["reason"].as_str().unwrap_or("gpu-budget-unavailable")});
+            }
+            if kind == "gpuUpgrade" {
+                self.adjustment(
+                    &json!({"reason": "gpu-expansion-denied", "boundary": "next-request"}),
+                    now,
+                );
+            }
+            return Ok(
+                json!({"accepted": false, "denied": true, "reason": lease["reason"]}),
+            );
+        }
+        let accepted = match kind {
+            "resident" => {
+                self.resident.push(lease.clone());
+                true
+            }
+            "execution" => {
+                self.execution = lease.clone();
+                if number(&lease["suggestions"]["batchMultiplier"], 1.0) < 1.0 {
+                    self.batch_multiplier = self
+                        .batch_multiplier
+                        .min(number(&lease["suggestions"]["batchMultiplier"], 1.0));
+                }
+                true
+            }
+            "gpuUpgrade" => self.gpu.first().is_some_and(|base| {
+                ["executionProvider", "executionDeviceId", "deviceId"]
+                    .iter()
+                    .all(|key| lease[*key] == base[*key])
+            }),
+            "gpu" => {
+                let direct_ml = self.platform == "win32"
+                    && lease["executionProvider"] == "dml"
+                    && integer(&lease["executionDeviceId"]).is_some();
+                let cuda = self.platform == "linux"
+                    && self.arch == "x64"
+                    && lease["deviceId"] == 0
+                    && ["", "0"].contains(&self.cuda_visible_devices.as_str());
+                if !direct_ml && !cuda {
+                    self.diagnostic = json!({"code": "GPU_DEVICE_MAPPING_UNVERIFIED"});
+                }
+                direct_ml || cuda
+            }
+            _ => return Err("INFERENCE_INVALID_LEASE_KIND".into()),
+        };
+        if accepted && ["gpu", "gpuUpgrade"].contains(&kind) {
+            self.gpu.push(lease.clone());
+        }
+        // 不可用的批准额度也须保留到释放确认；未知清理状态不能允许替代驻留。
+        if !accepted {
+            self.gpu.push(lease.clone());
+        }
+        Ok(
+            json!({"accepted": accepted, "release": !accepted, "leaseId": lease["leaseId"],
+            "registerProcessId": if kind == "execution" { None } else { self.executor_process_id }}),
+        )
+    }
+
+    fn apply_resources_reservation_report(&mut self, args: &Value) -> Result<Value, String> {
+        let feedback = &args["feedback"];
+        remember_cost(
+            &self.profile,
+            feedback,
+            self.executor_process_id,
+            self.gateway_process_id,
+        )?;
+        let sequence = integer(&feedback["sequenceTokens"]).unwrap_or(0);
+        let batch = integer(&feedback["batchSize"]).unwrap_or(0);
+        let tokens = integer(&feedback["inputTokens"]).unwrap_or(0);
+        let padded = integer(&feedback["paddedTokens"]).unwrap_or(0);
+        if feedback["phase"] == "hot-inference"
+            && self.executor_process_id.is_some()
+            && integer(&feedback["processId"]) == self.executor_process_id
+            && sequence > 0
+            && (1..=128).contains(&batch)
+            && tokens > 0
+            && padded >= tokens
+        {
+            self.last_batch_measurement = json!({"processId": feedback["processId"], "backend": feedback["backend"],
+                "sequenceTokens": sequence, "batchSize": batch, "inputTokens": tokens, "paddedTokens": padded,
+                "paddingTokens": padded - tokens, "source": "owned-worker-hot-inference"});
+            if integer(&feedback["bucketMinimumTokens"]).is_some() {
+                self.last_batch_measurement["bucketMinimumTokens"] =
+                    feedback["bucketMinimumTokens"].clone();
+            }
+            if feedback["latencyMs"].as_f64().is_some_and(f64::is_finite) {
+                self.last_batch_measurement["latencyMs"] = feedback["latencyMs"].clone();
+            }
+        }
+        self.request = self.demand(
+            number(&self.request["cpuThreads"], 1.0),
+            feedback["backend"].as_str().unwrap_or("cpu"),
+            number(&feedback["sequenceTokens"], 128.0),
+            number(&self.request["memoryEstimate"]["batchSize"], 32.0),
+        )?;
+        if feedback["phase"]
+            .as_str()
+            .is_some_and(|phase| !phase.is_empty() && phase != "hot-inference")
+            && feedback["allocationFailure"] != true
+        {
+            return Ok(Value::Null);
+        }
+        let lease = self.gpu.first().unwrap_or(&self.execution);
+        if !present(lease) {
+            return Ok(Value::Null);
+        }
+        let mut filtered = serde_json::Map::new();
+        for key in [
+            "throughputPerSecond",
+            "latencyMs",
+            "queueDepth",
+            "allocationFailure",
+            "foregroundLatencyMs",
+            "progress",
+            "phase",
+            "unit",
+            "backend",
+            "inputTokens",
+            "sequenceTokens",
+            "batchSize",
+            "cpuThreads",
+        ] {
+            if let Some(value) = feedback.get(key) {
+                filtered.insert(key.into(), value.clone());
+            }
+        }
+        Ok(json!({"leaseId": lease["leaseId"], "feedback": filtered}))
     }
 }
 

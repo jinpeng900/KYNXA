@@ -70,7 +70,6 @@ public sealed partial class ModelManagementWindow : Window
         _ = InitializeAsync();
     }
 
-    // Application exit closes this editor without leaving its discard prompt or requests alive.
     // 应用退出时关闭编辑器，同时结束丢弃确认和仍在进行的请求。
     public void CloseForOwner()
     {
@@ -90,7 +89,6 @@ public sealed partial class ModelManagementWindow : Window
     private void Appearance_Changed(object? sender, EventArgs e)
     {
         if (_closed) return;
-        // Recolor retained provider buttons without rebuilding the list or replacing unsaved form values.
         // 只更新现有连接按钮的状态色，不重建列表，也不替换未保存的表单内容。
         if (DispatcherQueue.HasThreadAccess) UpdateProviderLabels();
         else DispatcherQueue.TryEnqueue(() => { if (!_closed) UpdateProviderLabels(); });
@@ -100,8 +98,6 @@ public sealed partial class ModelManagementWindow : Window
     {
         if (_closed) return;
         Title = UiText.Get("KYNXA 模型管理");
-        // Update presentation only. Reapplying a preset or rebuilding either list would
-        // discard unsaved form values, selection, focus, or the current scroll position.
         // 只更新展示；重新应用预设或重建列表会丢失未保存表单、选择、焦点与滚动位置。
         bool wasChangingPreset = _changingPreset;
         _changingPreset = true;
@@ -131,8 +127,6 @@ public sealed partial class ModelManagementWindow : Window
 
     private static void RefreshSelectedCaption(ComboBox choice)
     {
-        // WinUI caches the selected caption when a ComboBoxItem's localized
-        // content changes. Retain the same item and drafts while refreshing it.
         // WinUI 会缓存选中项的本地化文案；刷新时保留原项与未保存输入。
         if (choice.SelectedItem is not { } selected) return;
         choice.SelectedItem = null;
@@ -148,7 +142,6 @@ public sealed partial class ModelManagementWindow : Window
             area.Y + (area.Height - height) / 2, width, height));
     }
 
-    // The composer opens the same preset-first setup page.
     // 输入区使用同一套以服务商预设为入口的配置页面。
     public void ShowCustomModels() => _ = BeginNewConnectionAsync();
 
@@ -159,7 +152,6 @@ public sealed partial class ModelManagementWindow : Window
         {
             await RefreshAsync();
             if (_closed) return;
-            // Resolve a new ID only after saved connections have been loaded.
             // 加载已有连接之后才分配新 ID，避免与现有连接冲突。
             if (_editing is null && PresetBox.SelectedItem is ModelPreset preset)
                 ProviderIdBox.Text = NewId(preset.Id);
@@ -327,7 +319,6 @@ public sealed partial class ModelManagementWindow : Window
 
     private void NameBox_LostFocus(object sender, RoutedEventArgs e)
     {
-        // Recognize a typed service name only in an untouched custom form.
         // 仅对尚未修改的自定义表单识别用户输入的服务商名称。
         if (_editing is not null || PresetBox.SelectedItem is not ModelPreset { Id: "custom" } ||
             !string.IsNullOrWhiteSpace(BaseUrlBox.Text) || !string.IsNullOrWhiteSpace(ModelsBox.Text)) return;
@@ -363,7 +354,6 @@ public sealed partial class ModelManagementWindow : Window
             _automaticContextOption = null;
             if (!ContextWindowBox.Items.OfType<ComboBoxItem>().Any(item => (string)item.Tag == tokens))
             {
-                // One exact model-derived value avoids filling the selector with similar 1M variants.
                 // 使用模型推导出的一个确切数值，避免选择器出现多个相近的 1M 档位。
                 _automaticContextOption = new ComboBoxItem { Tag = tokens,
                     Content = window.ToString("N0", CultureInfo.InvariantCulture) };
@@ -408,7 +398,6 @@ public sealed partial class ModelManagementWindow : Window
 
     private static void UpdateTokenChoiceVisibility(ComboBox choice, TextBox? customValue)
     {
-        // SelectionChanged can fire while InitializeComponent is still creating the text box.
         // InitializeComponent 尚在创建文本框时，SelectionChanged 也可能触发。
         if (customValue is null || choice.SelectedItem is not ComboBoxItem option) return;
         bool custom = (string)option.Tag == "custom";
@@ -498,7 +487,6 @@ public sealed partial class ModelManagementWindow : Window
         ModelsBox.Text = string.Join(Environment.NewLine, ids);
         UpdateModelCount();
         _updatingModelList = false;
-        // A collapsed manual editor may defer TextChanged; checkbox selection is authoritative now.
         // 折叠的手动编辑器可能延后 TextChanged；此时以复选框的当前选择为准。
         UpdateAutomaticContextWindow();
         UpdateDraftPresentation();
@@ -512,7 +500,6 @@ public sealed partial class ModelManagementWindow : Window
     private void FocusInvalidField(Exception error)
     {
         if (_closed || error is not ModelFormValidationException validation) return;
-        // Reveal the original field without clearing drafts or changing any validation and request rules.
         // 显示原错误字段，不清空草稿，也不改变校验或请求规则。
         if (ReferenceEquals(validation.Field, ProviderIdBox)) AdvancedSettings.IsExpanded = true;
         if (ReferenceEquals(validation.Field, ModelsBox)) ManualModelsSection.IsExpanded = true;
@@ -628,8 +615,6 @@ public sealed partial class ModelManagementWindow : Window
             var provider = await _api.SaveAsync(input, _lifetime.Token);
             if (_closed) return;
             SelectProvider(provider);
-            // Save has succeeded even if reloading the list subsequently fails.
-            // 即使随后刷新列表失败，保存本身也已经成功。
             _providers = _providers.Where(candidateProvider => candidateProvider.ProviderId != provider.ProviderId).Append(provider).ToArray();
             RenderProviders();
             SetStatus(() => string.Format(UiText.Get("已保存 {0}。返回聊天页，选择模型即可使用。"), provider.DisplayName));

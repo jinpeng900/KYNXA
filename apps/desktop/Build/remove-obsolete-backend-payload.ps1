@@ -18,7 +18,6 @@ if (-not $isManagedOutput) {
 }
 if (-not [IO.File]::Exists((Join-Path $bundle 'KYNXA.Desktop.dll'))) { throw 'Desktop assembly marker is absent; no files were removed.' }
 if ($PublishedOutput) {
-    # Publishing never authorizes changing the running application, even inside a managed build root.
     # 发布操作也不授权改动运行中的软件，即使它位于受控构建输出内也必须保留。
     $runningOutput = $false
     foreach ($process in [Diagnostics.Process]::GetProcesses()) {
@@ -50,7 +49,6 @@ $obsoleteDirectories = @('runtime/node', 'runtime/node_modules', 'model-gateway'
 $obsoleteFiles = @('runtime/node.exe', 'runtime/node-runtime.json', 'runtime/npm', 'runtime/npm.cmd', 'runtime/npm.ps1',
     'runtime/npx', 'runtime/npx.cmd', 'runtime/npx.ps1', 'runtime/agent/kynxa-agent-core-native.node')
 if ($PublishedOutput) {
-    # The publish hook owns only the retired BGE model, not other runtime generations or user extensions.
     # 发布钩子仅负责移除旧 BGE 模型，不处理其他运行时版本或用户扩展。
     $obsoleteDirectories = @('runtime/rerank/builtin-multilingual-reranker')
     $obsoleteFiles = @()
@@ -64,7 +62,6 @@ foreach ($payloadRoot in $revisionRoots) {
     $revisionRoot = [IO.Path]::GetFullPath((Join-Path $payloadRoot 'runtime/agent/revisions'))
     if (-not [IO.Directory]::Exists($revisionRoot)) { continue }
     Assert-UnlinkedOutputPath $revisionRoot
-    # A 64-hex revision and the exact old NAPI filename jointly identify this obsolete payload.
     # 仅由 64 位十六进制修订名和旧 NAPI 精确文件名共同识别旧载荷，不清空整个 revisions 目录。
     foreach ($entry in Get-ChildItem -LiteralPath $revisionRoot -Force) {
         if (-not $entry.PSIsContainer -or $entry.Name -notmatch '^[0-9a-fA-F]{64}$') { continue }
@@ -83,7 +80,6 @@ $targets = @($directoryTargets) + @($payloadRoots | ForEach-Object {
 if (-not ($targets | Where-Object { [IO.File]::Exists($_) -or [IO.Directory]::Exists($_) })) { return }
 if (-not [IO.File]::Exists((Join-Path $bundle 'runtime/agent/kynxa-gateway.exe'))) { throw 'Native replacement marker is absent; old payload was preserved.' }
 
-# The parent output authenticates only its immediate AppX staging folder, never unrelated package layouts.
 # 父输出的原生标记仅授权其紧邻 AppX 暂存目录；不会扫描其他包或整个 bin 目录。
 foreach ($payloadRoot in $payloadRoots) {
     $hasObsoletePayload = $targets | Where-Object {
@@ -95,7 +91,6 @@ foreach ($payloadRoot in $payloadRoots) {
     }
 }
 
-# Validate every absolute target and ancestor before touching any known obsolete file.
 # 删除任何已知旧载荷之前，先核验全部绝对目标与父目录；不处理用户 Data 或未知输出位置。
 foreach ($path in $targets) {
     Assert-UnlinkedOutputPath $path
@@ -130,7 +125,6 @@ foreach ($root in $directoryTargets) {
                 throw 'Possible formal data found in an obsolete source directory; no files were removed.'
             }
             if ($isRemovedReranker) {
-                # Only the old pinned model files are build-owned; unknown content is preserved atomically.
                 # 仅旧固定模型文件属于构建载荷；发现未知内容时整批保留，不触碰正式数据。
                 $modelRelative = $entry.FullName.Substring($root.Length + 1).Replace('\', '/')
                 $knownModelEntry = if ($entry.PSIsContainer) { $modelRelative -eq 'onnx' } else {
@@ -150,7 +144,6 @@ foreach ($payloadRoot in $payloadRoots) {
     }
 }
 
-# Remove enumerated files, then empty directories; never perform a broad recursive output deletion.
 # 先删除已枚举的旧载荷文件，再移除空目录；不对整个输出目录做递归清空。
 foreach ($path in $files) { Remove-Item -LiteralPath $path -Force }
 foreach ($path in ($directories | Sort-Object { $_.Length } -Descending)) { [IO.Directory]::Delete($path, $false) }

@@ -30,7 +30,6 @@ pub fn extension_managed(path: &Path, root: &Path) -> bool {
             .contains(&parts[0])
 }
 
-/// Protected identities are published atomically after asynchronous canonical resolution.
 /// 异步真实路径解析完成后，原子发布受保护身份快照。
 #[derive(Default)]
 pub struct StorageBoundary {

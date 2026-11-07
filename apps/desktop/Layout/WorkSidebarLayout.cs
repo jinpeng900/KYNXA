@@ -3,7 +3,6 @@ namespace KYNXA_Desktop.Layout;
 public sealed record WorkSidebarLayoutResult(double RecentHeight, double ProjectsHeight, double TasksHeight);
 
 /// <summary>
-/// Starts with four rows per list, then fits remembered or dragged heights to the viewport.
 /// 列表默认四行，拖动及保存的高度按当前视口分配。
 /// </summary>
 public static class WorkSidebarLayout
@@ -12,7 +11,6 @@ public static class WorkSidebarLayout
         bool projectsExpanded, bool tasksExpanded, int recentCount, int projectVisibleCount, int taskCount,
         double rowHeight = 40, double recentRatio = 0, double projectsRatio = 0, double tasksRatio = 0)
     {
-        // A detached view retains its last geometry.
         // 脱离视觉树的视图保留上次几何尺寸。
         if (!double.IsFinite(availableHeight) || availableHeight <= 0) return null;
         if (!double.IsFinite(rowHeight) || rowHeight <= 0) rowHeight = 40;
@@ -53,8 +51,6 @@ public static class WorkSidebarLayout
         double lowerMinimum = hasLower ? Math.Min(rowHeight, limits[lower]) : 0;
         if (delta > 0)
         {
-            // Use free space before shortening the next list.
-            // 先使用底部空白，再压缩相邻列表。
             double spare = Math.Max(0, budget - heights.Sum());
             double growth = Math.Min(delta, Math.Max(0, limits[upper] - heights[upper]));
             growth = Math.Min(growth, spare + (hasLower ? Math.Max(0, heights[lower] - lowerMinimum) : 0));
@@ -78,7 +74,6 @@ public static class WorkSidebarLayout
         if (minimum > budget)
             return allocated.Select(height => minimum > 0 ? height * budget / minimum : 0).ToArray();
         budget -= minimum;
-        // Keep one row per active list, then satisfy short lists before sharing the remainder.
         // 各展开列表先保留一行，再满足短列表并分配剩余空间。
         var pending = Enumerable.Range(0, desired.Length).Where(index => desired[index] > allocated[index]).ToList();
         while (pending.Count > 0)

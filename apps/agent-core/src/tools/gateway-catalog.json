@@ -1,6 +1,47 @@
 {
   "tools": [
     {
+      "name": "training.inspect",
+      "description": "Read the local training workbench: available backends/dependencies, frozen datasets, runs, actual loss metrics, checkpoints and produced files. 查询模型训练台、数据集、训练进度、真实损失曲线、断点和结果。Use jobs.read with jobId and afterMetric; do not start another run to check progress. jobs.predict performs actual inference using a completed builtin/scikit-learn artifact and its frozen preprocessing; it does not retrain or imply arbitrary model/chat compatibility. Backend availability is not inferred from an installed inference model. Missing metrics do not prove failure; queued/paused/running/completed are distinct. Routine monitoring needs no screenshots or right-pane switching.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["capabilities", "datasets.list", "jobs.list", "jobs.read", "jobs.predict"] },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "jobId": { "type": "string" },
+              "afterMetric": { "type": "integer", "minimum": 0 },
+              "metricLimit": { "type": "integer", "minimum": 0, "description": "Optional frozen byte watermark from a previous nextMetric/metricLength; prevents later appended metrics entering this read." },
+              "samples": { "type": "array", "maxItems": 1000, "items": { "type": "object", "additionalProperties": true } }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": ["action", "payload"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "training.manage",
+      "description": "Create a frozen local training dataset, configure a training experiment, or start/pause/resume/stop/export an existing run in the current project. 操控模型训练台：导入训练资料、调整训练参数、启动训练、暂停续训和导出模型。Train only when requested; a question about training is not authorization to train. Use datasets.create with text/samples or authorized sources, then jobs.create with datasetId/backend/algorithm/parameters, then jobs.start with jobId. Inspect real capabilities before choosing a backend; GGUF inference installation alone does not establish trainability. Preserve original model weights. Reuse runId/jobId and successful receipts when continuing; do not recreate completed work, launch repeated tuning, or poll by screenshots. Training runs independently of a chat reply. Missing hardware/dependencies return actual readiness, never fake loss curves. Native file picker import grants cannot be invented or widened by model fields. The training Python is chosen first by the user's 选择 Python 环境 button on the training page (saved per project), then KYNXA_TRAINING_PYTHON, then automatic detection. Tools cannot change it, so ask the user to use that button instead of editing environment variables.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["datasets.create", "jobs.create", "jobs.start", "jobs.pause", "jobs.resume", "jobs.stop", "jobs.export"] },
+          "payload": {
+            "type": "object",
+            "description": "Action-specific configuration. Dataset: name, format=auto|text|conversation|table|image or kind=text|tabular|image, sources=[{path}], text or samples; optional sheetName (Excel defaults to its first sheet), targetColumn, featureColumns, split={validation,test}. Job: name,datasetId,backend,algorithm,modelId/modelPath,task,parameters, optional idempotencyKey. Existing run actions require jobId. A successful start proves dispatch, not completed training; use actual job state and artifacts. Parameter support is given by capabilities; do not invent accepted fields or image labels.",
+            "additionalProperties": true
+          }
+        },
+        "required": ["action", "payload"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "media.transcribe",
       "description": "Transcribe requested speech from an authorized local audio/video file with the bundled offline multilingual model. 返回真实语音文字和时间片段，用于音频转录、字幕、会议笔记。Does not open a player, record a microphone, display intermediate files or require screenshots. WAV/MP3/FLAC/OGG work locally; other containers need an available FFmpeg audio decoder. Returns explicit dependency status when unavailable, never invents speech. Optional version is source SHA-256. Run only when speech content is relevant to the request, not as extra validation. Large media waits in a cancellable low-priority queue; use returned time coverage and do not claim unprocessed content was heard.",
       "inputSchema": {

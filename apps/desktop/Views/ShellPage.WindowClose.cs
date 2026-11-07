@@ -44,7 +44,6 @@ public sealed partial class ShellPage
         {
             if (_projectViewClosed || _chatClosing || _savingOnClose) { args.Cancel = true; return; }
             string action = exit.IsChecked == true ? MainWindowClosePreferences.Exit : MainWindowClosePreferences.Tray;
-            // Cancellation never changes preferences; a rejected preference save keeps both the dialog and window open.
             // 取消不修改偏好；偏好保存被拒绝时，保留确认框与窗口，不执行关闭动作。
             if (!TrySetMainWindowClosePreferences(new(action, doNotAsk.IsChecked != true)))
             {
@@ -61,7 +60,6 @@ public sealed partial class ShellPage
         }
         catch (System.Runtime.InteropServices.COMException)
         {
-            // A different modal may already own the root; keep the main window available for a later close attempt.
             // 其他模态窗口可能已占用此可视根；保留主窗口，允许用户处理后再次关闭。
             ShowMainWindowCloseFeedback("暂时无法显示关闭确认，请先关闭其他弹窗。");
             return null;

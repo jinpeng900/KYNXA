@@ -245,7 +245,6 @@
       if (['noAutofit', 'normAutofit', 'spAutoFit'].includes(node.localName)) return 'autofit';
       return node.localName;
     };
-    // Empty local property containers do not erase individual layout/master properties.
     // 本页的空属性容器不能擦除版式和母版；各属性按最近定义覆盖，源 XML 保持只读。
     for (const source of [...sources].reverse()) {
       for (const attribute of source.attributes) result.setAttributeNS(attribute.namespaceURI, attribute.name, attribute.value);
@@ -323,7 +322,6 @@
       slides.push({ path: relation.path });
     }
     if (!slides.length) throw failure('PPTX contains no slides');
-    // Read only the requested slide before first paint; shared layouts and later slides keep their own promises.
     // 首屏前只解析当前页；共用布局和后续页缓存各自 Promise，翻页及后台准备不会重复解包。
     function loadSlide(index) {
       if (loadedSlides.has(index)) return loadedSlides.get(index);
@@ -745,7 +743,6 @@
     function report(error) {
       if (error?.name === 'AbortError' || disposed) return;
       const event = new CustomEvent('pptx-error', { detail: error, bubbles: true }); root.dispatchEvent(event);
-      // Page failures stay visible to the trusted host, which can switch this file to PDF.
       // 后续页失败通知可信宿主，仅将当前文件切换为 PDF，不伪装为成功页面。
       if (typeof options.onError === 'function') options.onError(error);
     }
@@ -761,7 +758,6 @@
       options.onBackground?.(true);
       try {
         const remaining = new Set(deck.slides.map((_, index) => index)); remaining.delete(page);
-        // Parse a single upcoming page per idle turn. User navigation uses the same cached promises immediately.
         // 每个空闲片段只解析一张后续页；用户翻页直接复用同一 Promise，不等待整份演示稿准备。
         while (remaining.size) {
           await backgroundTurn(); alive();
@@ -837,7 +833,6 @@
           stage.focus({ preventScroll: true });
           navigate(requestedPage + 1);
         };
-        // Leave time for a double-click to select a word; blank-area clicks navigate immediately.
         // 文字单击稍候再翻页，为双击选词留出机会；拖选、已有选区和控件操作均不翻页。
         if (target.closest('.pptx-textbox')) {
           if (event.detail > 1) return;
@@ -854,7 +849,6 @@
       Object.assign(root.style, { display: 'flex', flexDirection: 'column', minHeight: '360px', height: 'calc(100vh - 24px)',
         maxHeight: 'calc(100vh - 24px)', overflow: 'hidden', background: '#f3f2f0', borderRadius: '8px', outlineColor: '#8c806e' });
       root.tabIndex = 0;
-      // A boundary navigation button loses focus when disabled; keep paging available in the visible preview.
       // 到达首页或末页后按钮禁用会释放焦点；外层键盘委托保留翻页，只响应当前可见预览及页面空白。
       container.ownerDocument.addEventListener('keydown', keyboard);
       eventCleanups.push(() => container.ownerDocument.removeEventListener('keydown', keyboard));

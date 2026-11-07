@@ -7,7 +7,6 @@ using Microsoft.Win32;
 namespace KYNXA.ToolHost;
 
 /// <summary>
-/// Discover executables and launch approved applications outside the helper job.
 /// 发现桌面程序，并在助手作业之外启动已批准应用。
 /// </summary>
 internal static class DesktopApplications
@@ -25,7 +24,6 @@ internal static class DesktopApplications
     ];
 
     /// <summary>
-    /// Return bounded candidates from known apps and registry paths without launching them.
     /// 限量返回已知应用和注册表路径中的候选程序，不执行启动。
     /// </summary>
     internal static Dictionary<string, object?> Apps()
@@ -54,7 +52,6 @@ internal static class DesktopApplications
                     appPath = Path.GetFullPath(path)
                 });
             }
-            // An unreadable discovery candidate is omitted; launching remains a separately validated action.
             // 无法读取的发现候选可跳过；实际启动仍是单独校验的操作。
             catch (IOException)
             {
@@ -108,8 +105,7 @@ internal static class DesktopApplications
     }
 
     /// <summary>
-    /// Validates the executable and arguments, then returns only the observed launch and placement facts.
-    /// 校验程序与参数后启动，回执仅报告实际观察到的启动和窗口放置事实。
+    /// 校验程序与参数后启动，结果仅报告实际观察到的启动和窗口放置事实。
     /// </summary>
     internal static Dictionary<string, object?> Launch(DesktopRequest request, CancellationToken cancellation)
     {
@@ -144,7 +140,6 @@ internal static class DesktopApplications
         var placement = new DesktopForegroundPlacement();
         if (request.Background)
         {
-            // STARTF_USESHOWWINDOW and SW_SHOWNOACTIVATE are display hints, not a focus-policy bypass.
             // STARTF_USESHOWWINDOW 与 SW_SHOWNOACTIVATE 仅提供显示提示，不绕过焦点策略。
             startupInformation.StartupInfo.Flags = 1;
             startupInformation.StartupInfo.ShowWindow = 4;
@@ -152,8 +147,6 @@ internal static class DesktopApplications
         var process = new NativeMethods.ProcessInformation();
         try
         {
-            // Launched applications must never inherit this helper's gateway IPC pipes.
-            // Leave the launch-only job; report failure if breakaway is denied.
             // 应用不得继承网关 IPC 管道；必须脱离启动助手作业，失败时不虚报启动成功。
             if (!NativeMethods.CreateProcessW(
                 executable,
@@ -173,7 +166,6 @@ internal static class DesktopApplications
             {
                 placement.ObserveLaunch(checked((int)process.ProcessId), cancellation);
             }
-            // The executable may delegate to an existing app. Never attribute another process's window to this launch.
             // 可执行程序可能把请求转交给已有应用，不能把其他进程的窗口归属到本次启动。
             nint foregroundAfter = DesktopNativeMethods.GetForegroundWindow();
             DesktopNativeMethods.GetWindowThreadProcessId(foregroundAfter, out uint foregroundProcessId);
@@ -201,7 +193,6 @@ internal static class DesktopApplications
         }
     }
 
-    // Match Windows quoting rules, including backslashes before quotes and the closing delimiter.
     // 按 Windows 引用规则处理引号前和结尾反斜杠，不能直接拼接参数。
     private static string QuoteArgument(string argument)
     {
@@ -260,7 +251,6 @@ internal static class DesktopApplications
         }
         string? entry = pythonWindowed && arguments.Length >= 1 ? arguments[0]
             : javaWindowed && arguments.Length >= 2 && arguments[0] == "-jar" ? arguments[1] : null;
-        // Windowed runtimes can launch an explicit file entry, never an inline command or implicit module.
         // 窗口运行时只接受明确的文件入口，不允许内联命令或隐式模块执行。
         if (entry is null || !Path.IsPathFullyQualified(entry) || entry.StartsWith(@"\\", StringComparison.Ordinal) || !File.Exists(entry)
             || (pythonWindowed && Path.GetExtension(entry).ToLowerInvariant() is not (".py" or ".pyw"))
@@ -272,7 +262,6 @@ internal static class DesktopApplications
 
     private static bool IsApplicationExecutable(string path)
     {
-        // Some desktop apps (for example Blender) use the console subsystem despite presenting a GUI.
         // 部分桌面应用（例如 Blender）使用控制台子系统，不能仅凭 PE 子系统就拒绝合法应用。
         using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new BinaryReader(stream);

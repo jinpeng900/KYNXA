@@ -7,8 +7,7 @@ using Microsoft.UI.Xaml.Media;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Shared menu presentation. Callers retain selection, persistence and action behavior.
-/// 共享菜单展示；选择、持久化与具体动作仍由调用方负责。
+/// 共享菜单展示；选择、保存与具体动作仍由调用方负责。
 /// </summary>
 internal static class PickerMenu
 {
@@ -28,8 +27,7 @@ internal static class PickerMenu
 
     public static double SetContentWidth(Flyout flyout, double requestedWidth, double viewportWidth)
     {
-        // Match this popup's content plus its existing padding and border; leave shared menu styles unchanged.
-        // 匹配当前菜单的内容宽度及既有内边距、边框，不改变共用菜单样式。
+        // 匹配当前菜单的内容宽度及现有内边距、边框，不改变共用菜单样式。
         double presenterWidth = Math.Min(requestedWidth + PresenterChrome, Math.Max(0, viewportWidth - ViewportInset * 2));
         var presenterStyle = new Style(typeof(FlyoutPresenter)) { BasedOn = flyout.FlyoutPresenterStyle };
         presenterStyle.Setters.Add(new Setter(FrameworkElement.WidthProperty, presenterWidth));
@@ -60,14 +58,12 @@ internal static class PickerMenu
             return Math.Max(64, empty.DesiredSize.Height);
         }
 
-        // Measure only the four visible rows, including their native template, padding and margin.
         // 只测量最多四条可见行，计入原生模板、内边距和外边距，不展开整个列表的虚拟化内容。
         double height = list.Padding.Top + list.Padding.Bottom + list.BorderThickness.Top + list.BorderThickness.Bottom;
         var rowSize = new Windows.Foundation.Size(Math.Max(0, contentWidth - list.Padding.Left - list.Padding.Right
             - list.BorderThickness.Left - list.BorderThickness.Right), double.PositiveInfinity);
         for (int index = 0; index < Math.Min(VisibleRows, list.Items.Count); index++)
         {
-            // Activate the template's data bindings before measuring an otherwise detached row.
             // 先为模板内容设置数据上下文，避免离树行按空文字和默认可见状态低估高度。
             object item = list.Items[index];
             object content = list.ItemTemplate?.LoadContent() ?? item;
@@ -84,12 +80,10 @@ internal static class PickerMenu
         return height;
     }
 
-    // Menus and management lists share native row states without replacing selection or virtualization.
     // 选择菜单与管理列表共用原生行状态，保留各自的选择行为和虚拟化。
     public static void ConfigureListPresentation(ListView list)
     {
         list.Resources["ListViewItemSelectionIndicatorVisualEnabled"] = false;
-        // The SDK presenter reads its radius and state colors from the owning list, not the row's CornerRadius.
         // SDK 呈现器从所属列表读取圆角和状态色，不使用行控件本身的 CornerRadius。
         list.Resources["ListViewItemCornerRadius"] = Application.Current.Resources["KynxaControlRadius"];
         foreach ((string target, string source) in new[]

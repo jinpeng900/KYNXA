@@ -9,7 +9,6 @@ namespace KYNXA_Desktop.Services;
 public sealed record StorageMigrationResult(string DataRoot, int VerifiedFiles);
 
 /// <summary>
-/// Copy and verify while all application writers are paused; activate the pointer last.
 /// 所有应用写入暂停期间复制并验证；最后才启用新路径指针。
 /// </summary>
 public static class StorageMigrationService
@@ -49,16 +48,13 @@ public static class StorageMigrationService
             await ExtensionConfigurationMigration.ValidateAsync(conversationRoot, cancellationToken);
         }
         byte[]? oldPointer = File.Exists(pointer) ? await File.ReadAllBytesAsync(pointer, cancellationToken) : null;
-        // A custom model home keeps conversations below itself; move that subtree to
-        // the new Data root exactly once, where the standard Models layout expects it.
         // 自定义模型目录可能包含聊天子目录；只迁移一次到新 Data 根目录，使其符合标准 Models 布局。
         var roots = new List<CopyRoot> {
             new CopyRoot(desktop, "Desktop"),
             new CopyRoot(models, "Models", Exclude: standardModelsDirectory ? null : ["Conversations"]),
             new CopyRoot(conversationRoot, "", Include: migrateExtensions ? ConversationEntries : ConversationEntries.Except(["Agent", "Skills", "MCP", "extension-layout.json", "extension-migration-info.json", "extensions-pointer.previous.json"]).ToArray())
         };
-        // Task state belongs to Data even when extension configuration uses another root.
-        // 扩展配置使用独立根目录时，任务账本和任务产物仍属于 Data，必须随数据迁移。
+        // 扩展配置使用独立根目录时，任务记录和任务产物仍属于 Data，必须随数据迁移。
         if (!migrateExtensions && TaskStorageEntries.Any(name => File.Exists(Path.Combine(conversationRoot, "Agent", name)) || Directory.Exists(Path.Combine(conversationRoot, "Agent", name))))
             roots.Add(new CopyRoot(Path.Combine(conversationRoot, "Agent"), "Agent", Include: TaskStorageEntries));
         var snapshots = roots.Select(root => (Root: root, Existed: Directory.Exists(root.Source), Files: ListFiles(root), Directories: ListFiles(root, true))).ToArray();
@@ -115,9 +111,7 @@ public static class StorageMigrationService
             RelocateProjectFolders(document, desktop, target);
             await File.WriteAllTextAsync(path, document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
         }
-        // These manifests are derived from the catalog. Keep the copied view in
-        // sync until the gateway next rebuilds it from the canonical metadata.
-        // 这些清单由正式目录派生；网关再次重建前，复制后的投影仍需保持同步。
+        // 这些清单由正式目录派生；网关再次重建前，复制后的映射仍需保持同步。
         string projectDirectory = Path.Combine(target, "Projects");
         if (Directory.Exists(projectDirectory))
             foreach (string directory in Directory.EnumerateDirectories(projectDirectory))
@@ -140,7 +134,6 @@ public static class StorageMigrationService
                         if (IsWithin(path, root.Source)) local[key] = Path.Combine(target, root.Name, Path.GetRelativePath(root.Source, path));
             await File.WriteAllTextAsync(localServerPath, local.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
         }
-        // Refuse an incompatible/corrupt destination before making it active.
         // 目标目录不兼容或损坏时，拒绝将其设为当前目录。
         if (migrateExtensions)
         {
@@ -148,9 +141,7 @@ public static class StorageMigrationService
             ExtensionPaths.EnsureLayout(target);
         }
         await ValidateLayoutSettingsAsync(target, cancellationToken);
-        // The offline canonical initializer may rebuild projections and append recovery
-        // events. Credentials, extension packages, attachments and backups remain exact.
-        // 离线正式初始化可能重建投影并追加恢复事件；凭据、扩展包、附件与备份的原始字节不变。
+        // 离线正式初始化可能重建映射并追加恢复事件；凭据、扩展包、附件与备份的原始字节不变。
         var preservedFiles = new List<(string Path, byte[] Hash)>();
         foreach (var file in verified)
         {
@@ -175,7 +166,6 @@ public static class StorageMigrationService
             if (!file.Hash.SequenceEqual(digest))
                 throw new IOException(UiText.Get("文件复制校验失败，原数据未改动。"));
         }
-        // Walk all destination entries again so a late link or occupied directory cannot activate.
         // 再次遍历目标所有条目，避免晚到的链接或被占用目录成为当前存储位置。
         ListFiles(new(target, ""));
         if (migrateExtensions) ExtensionPaths.ValidateLayout(target);
@@ -259,8 +249,6 @@ public static class StorageMigrationService
         }
     }
 
-    // Metadata may also be present in a pending catalog transaction. Rewrite only
-    // managed work folders; external folders and immutable backup snapshots stay put.
     // 待提交的目录事务也可能含元数据；只重写应用托管的工作目录，外部路径和不可变备份原样保留。
     private static void RelocateProjectFolders(JsonNode node, string desktop, string target)
     {

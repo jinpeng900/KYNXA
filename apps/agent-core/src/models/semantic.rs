@@ -421,8 +421,7 @@ fn request(plan: &Value, source_json: Option<String>, state_json: Option<String>
     json!({"system": SUMMARY_SYSTEM, "messages": [{"role": "user", "content": content}], "maxOutputTokens": plan["maxOutputTokens"]})
 }
 
-/// Plan and validate semantic checkpoints, sources and citations; do not execute models or formal writes.
-/// 规划并校验语义检查点、来源和引用，不执行模型或正式写入。
+/// 规划并校验含义检查点、来源和引用，不执行模型或正式写入。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     if operation == "models.semantic.request" {
         return Ok(request(&args["plan"], None, None));
@@ -739,8 +738,7 @@ struct SummaryRun {
     candidate: Value,
 }
 
-/// Summary audits and cooldown ownership survive SDK callbacks; only real publication marks a run saved.
-/// 摘要审计和冷却状态独立于 SDK 回调；只有真实提交回执才能将运行标记为已保存。
+/// 摘要审计和冷却状态独立于 SDK 回调；只有真实提交结果才能将运行标记为已保存。
 #[derive(Default)]
 pub struct SummaryRuntimeState {
     cooldowns: BTreeMap<String, Value>,

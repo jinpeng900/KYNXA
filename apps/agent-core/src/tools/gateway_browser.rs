@@ -1,4 +1,3 @@
-//! Chromium DevTools automation, with an owned isolated profile and explicit tab identity.
 //! Chromium DevTools 自动化：独立配置目录、自有进程与明确标签页身份。
 
 use super::gateway::{GatewayToolContext, check_cancelled, failure};
@@ -96,8 +95,7 @@ impl CdpClient {
         let (sender, mut commands) = mpsc::channel::<CdpCommand>(64);
         let events = Arc::new(Mutex::new(EventBuffer::default()));
         let observed = events.clone();
-        // Keep one owned connection for events/dialogs/traces; bounded buffers cannot grow with an idle page forever.
-        // 事件、对话框、跟踪共享自有长连接；有界缓冲不能随闲置页面无限增长。
+        // 事件、对话框、跟踪共享自有长连接，缓冲有上限。
         let task = tokio::spawn(async move {
             let mut pending = HashMap::<u64, CdpReply>::new();
             loop {
@@ -204,11 +202,20 @@ async fn rpc(
     params: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    client(socket, ctx).await?.call(method, params, ctx).await.map_err(|mut error| {
-        if error.code == "BROWSER_TOOL_FAILED" { error.message = format!("{method}: {}", error.message); }
-        error
-    })
+    client(socket, ctx)
+        .await?
+        .call(method, params, ctx)
+        .await
+        .map_err(|mut error| {
+            if error.code == "BROWSER_TOOL_FAILED" {
+                error.message = format!("{method}: {}", error.message);
+            }
+            error
+        })
 }
+
+const BACKGROUND_IDLE_TICK: Duration = Duration::from_secs(15);
+const BACKGROUND_IDLE_CLOSE: Duration = Duration::from_secs(120);
 
 pub(crate) struct BrowserSession {
     child: Option<Child>,
@@ -232,9 +239,10 @@ pub(crate) struct BrowserSession {
     workspace_browser: Option<Arc<Mutex<WorkspaceBrowser>>>,
     workspace_address: Option<String>,
     workspace_current_address: Option<String>,
+    presented: bool,
+    idle_watch: bool,
 }
 
-/// One application-owned process shares persistent site data; page permissions remain conversation-scoped.
 /// 应用自有的单个进程共享持久网站数据；页面操作权限仍按聊天隔离。
 pub(crate) struct WorkspaceBrowser {
     child: Child,
@@ -255,10 +263,13 @@ impl Drop for WorkspaceBrowser {
 
 impl WorkspaceBrowser {
     async fn close(&mut self, ctx: &GatewayToolContext) -> Result<(), GatewayError> {
-        // Browser.close flushes Cookies/Local Storage before the job fallback releases remaining children.
         // Browser.close 先刷新 Cookie/本地存储，随后才由作业兜底释放残余子进程。
         if self.owned.has_running_processes()? {
-            let _ = tokio::time::timeout(Duration::from_secs(2), self.client.call("Browser.close", json!({}), ctx)).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                self.client.call("Browser.close", json!({}), ctx),
+            )
+            .await;
             let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
         }
         self.client.close().await?;
@@ -268,7 +279,6 @@ impl WorkspaceBrowser {
     }
 }
 
-/// Attach only the desktop's external web target; document/chat renderers stay outside automation.
 /// 只接入桌面的外部网页目标；聊天及文档渲染器不进入浏览器自动化范围。
 pub(crate) async fn attach_embedded(
     endpoint: &str,
@@ -302,7 +312,11 @@ pub(crate) async fn attach_embedded(
     }
     if let Some(browser) = ctx.runtime.workspace_browser.lock().await.as_ref() {
         if browser.lock().await.endpoint == address.as_str().trim_end_matches('/') {
-            return Err(failure("BROWSER_ENDPOINT_SCOPE_REQUIRED", "共享浏览器页面沿所属聊天工作区会话接入，不能绕过页面归属重新附着。", 403));
+            return Err(failure(
+                "BROWSER_ENDPOINT_SCOPE_REQUIRED",
+                "共享浏览器页面沿所属聊天工作区会话接入，不能绕过页面归属重新附着。",
+                403,
+            ));
         }
     }
     let mut session = BrowserSession {
@@ -327,6 +341,8 @@ pub(crate) async fn attach_embedded(
         workspace_browser: None,
         workspace_address: None,
         workspace_current_address: None,
+        presented: false,
+        idle_watch: false,
     };
     let tabs = update_tabs(&mut session, ctx).await?;
     if !session.tabs.contains_key(target_id) {
@@ -377,8 +393,7 @@ pub(crate) async fn attach_embedded(
     )
 }
 
-/// Detaching a view drops automation state and never closes the desktop-owned WebView process.
-/// 分离视图只释放自动化状态，绝不关闭桌面拥有的 WebView 进程。
+/// 分离视图只释放自动化状态，桌面拥有的 WebView 进程继续运行。
 pub(crate) async fn detach_embedded(
     id: &str,
     ctx: &GatewayToolContext,
@@ -412,166 +427,303 @@ pub(crate) async fn detach_embedded(
     Ok(json!({"closed":true,"sessionId":id,"externalProcessPreserved":true}))
 }
 
-/// Launch the bundled browser only when a page is requested; reuse one persistent application profile.
 /// 请求网页时才启动随包浏览器；统一复用应用持久配置，不在软件启动时预开浏览器。
-async fn start_workspace_browser(ctx: &GatewayToolContext) -> Result<WorkspaceBrowser, GatewayError> {
-    let browser = chrome_candidates(ctx).into_iter().find(|path| {
-        path.is_absolute() && path.is_file()
-            && super::local_files::inspect(path, false, false).is_ok()
-    }).ok_or_else(|| failure("WORKSPACE_CHROME_UNAVAILABLE", "随包 Chromium 不可用，请修复软件资源。", 503))?;
+async fn start_workspace_browser(
+    ctx: &GatewayToolContext,
+) -> Result<WorkspaceBrowser, GatewayError> {
+    let browser = chrome_candidates(ctx)
+        .into_iter()
+        .find(|path| {
+            path.is_absolute()
+                && path.is_file()
+                && super::local_files::inspect(path, false, false).is_ok()
+        })
+        .ok_or_else(|| {
+            failure(
+                "WORKSPACE_CHROME_UNAVAILABLE",
+                "随包 Chromium 不可用，请修复软件资源。",
+                503,
+            )
+        })?;
     let profile = ctx.data_home.join("Browser/Workspace");
     tokio::fs::create_dir_all(&profile).await?;
-    // A previous crashed launch may leave this discovery file; never reuse an unowned debug endpoint.
-    // 上次异常退出可能遗留端口文件；启动前移除，绝不复用不属于当前作业的调试端点。
+    // 上次异常退出可能遗留端口文件，启动前移除，只用当前作业的调试端点。
     match tokio::fs::remove_file(profile.join("DevToolsActivePort")).await {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
     super::gateway_browser_permissions::prepare(ctx, &browser).await?;
     let mut command = Command::new(browser);
     hide(&mut command);
-    // Disable top-level occlusion handling so embedded pages survive loss of shell focus.
-    // 关闭顶层遮挡处理，避免软件失去焦点时嵌入页面停止显示。
-    command.args([
-        "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-        "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
-        "--disable-extensions", "--window-position=-32000,-32000", "--window-size=1200,900",
-        "--disable-backgrounding-occluded-windows", "--disable-features=CalculateNativeWinOcclusion",
-        "about:blank",
-    ]).arg(format!("--user-data-dir={}", profile.display()))
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
-    let mut child = command.spawn().map_err(|_| failure("BROWSER_START_FAILED", "随包浏览器启动失败。", 503))?;
+    // 关闭顶层遮挡处理，软件失去焦点时嵌入页面才能继续显示。
+    command
+        .args([
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-extensions",
+            "--window-position=-32000,-32000",
+            "--window-size=1200,900",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-features=CalculateNativeWinOcclusion",
+            "about:blank",
+        ])
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|_| failure("BROWSER_START_FAILED", "随包浏览器启动失败。", 503))?;
     let owned = match OwnedProcessJob::attach(&child) {
         Ok(owned) => owned,
-        Err(error) => { terminate(&mut child).await; return Err(error); }
+        Err(error) => {
+            terminate(&mut child).await;
+            return Err(error);
+        }
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let port = loop {
         check_cancelled(ctx)?;
         if !owned.has_running_processes()? {
-            return Err(failure("BROWSER_START_FAILED", "随包浏览器在就绪前退出。", 503));
+            return Err(failure(
+                "BROWSER_START_FAILED",
+                "随包浏览器在就绪前退出。",
+                503,
+            ));
         }
         if let Ok(value) = tokio::fs::read_to_string(profile.join("DevToolsActivePort")).await {
-            if let Some(port) = value.lines().next().and_then(|value| value.parse::<u16>().ok()).filter(|port| *port != 0) {
+            if let Some(port) = value
+                .lines()
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|port| *port != 0)
+            {
                 break port;
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(failure("BROWSER_START_TIMEOUT", "随包浏览器调试端口启动超时。", 504));
+            return Err(failure(
+                "BROWSER_START_TIMEOUT",
+                "随包浏览器调试端口启动超时。",
+                504,
+            ));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     let endpoint = format!("http://127.0.0.1:{port}");
     let version = http_endpoint(&endpoint, "/json/version").await?;
-    let socket = version["webSocketDebuggerUrl"].as_str()
-        .ok_or_else(|| failure("BROWSER_INVALID_ENDPOINT", "随包浏览器窗口连接尚未就绪。", 502))?.to_owned();
+    let socket = version["webSocketDebuggerUrl"]
+        .as_str()
+        .ok_or_else(|| {
+            failure(
+                "BROWSER_INVALID_ENDPOINT",
+                "随包浏览器窗口连接尚未就绪。",
+                502,
+            )
+        })?
+        .to_owned();
     let client = Box::pin(CdpClient::connect(&socket)).await?;
-    // DevTools may be ready before the first page; wait for that page instead of opening another window.
-    // DevTools 可能先于首页就绪；等待并接管首页，避免多开窗口。
+    // DevTools 可能先于首页就绪，等待并接管首页，防止多开窗口。
     let initial_target = loop {
         check_cancelled(ctx)?;
         let targets = client.call("Target.getTargets", json!({}), ctx).await?;
-        if let Some(target) = targets["targetInfos"].as_array().into_iter().flatten()
+        if let Some(target) = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .find(|target| target["type"] == "page" && target["url"] == "about:blank")
             .and_then(|target| target["targetId"].as_str())
-        { break target.to_owned(); }
+        {
+            break target.to_owned();
+        }
         if !owned.has_running_processes()? {
-            return Err(failure("BROWSER_START_FAILED", "随包浏览器在首页就绪前退出。", 503));
+            return Err(failure(
+                "BROWSER_START_FAILED",
+                "随包浏览器在首页就绪前退出。",
+                503,
+            ));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(failure("BROWSER_START_TIMEOUT", "随包浏览器首页启动超时。", 504));
+            return Err(failure(
+                "BROWSER_START_TIMEOUT",
+                "随包浏览器首页启动超时。",
+                504,
+            ));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     {
-        // Repair persisted window placement before measuring the first page; website data stays intact.
         // 首次测量前纠正已保存的异常窗口尺寸，保留网站登录数据与页面缩放设置。
-        let window = client.call("Browser.getWindowForTarget", json!({"targetId":initial_target}), ctx).await?;
-        if window["bounds"]["windowState"].as_str().is_some_and(|state| state != "normal") {
-            client.call("Browser.setWindowBounds", json!({"windowId":window["windowId"],"bounds":{"windowState":"normal"}}), ctx).await?;
+        let window = client
+            .call(
+                "Browser.getWindowForTarget",
+                json!({"targetId":initial_target}),
+                ctx,
+            )
+            .await?;
+        if window["bounds"]["windowState"]
+            .as_str()
+            .is_some_and(|state| state != "normal")
+        {
+            client
+                .call(
+                    "Browser.setWindowBounds",
+                    json!({"windowId":window["windowId"],"bounds":{"windowState":"normal"}}),
+                    ctx,
+                )
+                .await?;
         }
-        client.call("Browser.setWindowBounds", json!({"windowId":window["windowId"],
-            "bounds":{"left":-32000,"top":-32000,"width":1200,"height":900}}), ctx).await?;
+        client
+            .call(
+                "Browser.setWindowBounds",
+                json!({"windowId":window["windowId"],
+            "bounds":{"left":-32000,"top":-32000,"width":1200,"height":900}}),
+                ctx,
+            )
+            .await?;
     }
-    Ok(WorkspaceBrowser { child, owned, endpoint, profile, socket, client, initial_target: Some(initial_target), next_window_index: 1 })
+    Ok(WorkspaceBrowser {
+        child,
+        owned,
+        endpoint,
+        profile,
+        socket,
+        client,
+        initial_target: Some(initial_target),
+        next_window_index: 1,
+    })
 }
 
-/// Each workspace page gets its own target/window while sharing the application login profile.
 /// 每个工作区网页拥有独立目标及窗口，同时共享应用登录配置。
 pub(crate) async fn workspace_open(
     input: &Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
     let url = allowed_url(input["url"].as_str().unwrap_or("about:blank"))?;
-    // The registry lock serializes first launch, page allocation and last-close for this single profile.
-    // 注册锁串行化同一配置的首次启动、页面分配与末页关闭，避免重复进程抢占目录。
+    // 注册锁串行化同一配置的首次启动、页面分配与末页关闭，防止重复进程抢占目录。
     let mut registry = ctx.runtime.workspace_browser.lock().await;
-    let handles = ctx.runtime.browsers.lock().await.iter()
-        .map(|(id, handle)| (id.clone(), handle.clone())).collect::<Vec<_>>();
+    let handles = ctx
+        .runtime
+        .browsers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, handle)| (id.clone(), handle.clone()))
+        .collect::<Vec<_>>();
     for (id, handle) in handles {
         let session = handle.lock().await;
-        if !session.closed && session.workspace_browser.is_some()
+        if !session.closed
+            && session.workspace_browser.is_some()
             && session.conversation_id == ctx.conversation_id
             && (session.workspace_address.as_deref() == Some(url.as_str())
                 || session.workspace_current_address.as_deref() == Some(url.as_str()))
         {
-            if !session.workspace_browser.as_ref().unwrap().lock().await.owned.has_running_processes()? { continue; }
-            drop(session); drop(registry);
+            if !session
+                .workspace_browser
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .owned
+                .has_running_processes()?
+            {
+                continue;
+            }
+            drop(session);
+            drop(registry);
             return workspace_action(&json!({"sessionId":id,"action":"state"}), ctx).await;
         }
     }
     if ctx.runtime.browsers.lock().await.len() >= 16 {
-        return Err(failure("BROWSER_SESSION_CAPACITY", "浏览器会话容量已满。", 429));
+        return Err(failure(
+            "BROWSER_SESSION_CAPACITY",
+            "浏览器会话容量已满。",
+            429,
+        ));
     }
     let running = if let Some(browser) = registry.as_ref() {
         browser.lock().await.owned.has_running_processes()?
-    } else { false };
-    if !running { *registry = Some(Arc::new(Mutex::new(start_workspace_browser(ctx).await?))); }
+    } else {
+        false
+    };
+    if !running {
+        *registry = Some(Arc::new(Mutex::new(start_workspace_browser(ctx).await?)));
+    }
     let browser_handle = registry.as_ref().unwrap().clone();
     let mut browser = browser_handle.lock().await;
-    let target = if let Some(target) = browser.initial_target.take() { target } else {
+    let target = if let Some(target) = browser.initial_target.take() {
+        target
+    } else {
         let coordinate = -32000 + (browser.next_window_index % 512) as i32 * 16;
         browser.next_window_index = browser.next_window_index.wrapping_add(1);
         let created = browser.client.call("Target.createTarget",
             json!({"url":"about:blank","newWindow":true,"background":true,"left":coordinate,"top":coordinate,"width":1200,"height":900}), ctx).await?;
-        created["targetId"].as_str().ok_or_else(|| failure("BROWSER_TAB_UNAVAILABLE", "随包浏览器页面创建失败。", 502))?.to_owned()
+        created["targetId"]
+            .as_str()
+            .ok_or_else(|| failure("BROWSER_TAB_UNAVAILABLE", "随包浏览器页面创建失败。", 502))?
+            .to_owned()
     };
     let id = uuid::Uuid::new_v4().to_string();
     let session = BrowserSession {
-        child: None, endpoint: browser.endpoint.clone(), profile: browser.profile.clone(),
-        conversation_id: ctx.conversation_id.clone(), tabs: HashMap::new(), active_tab: Some(target.clone()),
-        uploads: vec![], upload_bytes: 0, _owned: None, closed: false,
-        profile_cleanup_pending: false, profile_cleanup_error: None,
-        embedded_target: Some(target.clone()), workspace_last_active: Some(tokio::time::Instant::now()),
-        workspace_pages: vec![target.clone()], workspace_page_index: 0,
-        workspace_seen_pages: HashSet::from([target.clone()]), browser_socket: Some(browser.socket.clone()),
+        child: None,
+        endpoint: browser.endpoint.clone(),
+        profile: browser.profile.clone(),
+        conversation_id: ctx.conversation_id.clone(),
+        tabs: HashMap::new(),
+        active_tab: Some(target.clone()),
+        uploads: vec![],
+        upload_bytes: 0,
+        _owned: None,
+        closed: false,
+        profile_cleanup_pending: false,
+        profile_cleanup_error: None,
+        embedded_target: Some(target.clone()),
+        workspace_last_active: Some(tokio::time::Instant::now()),
+        workspace_pages: vec![target.clone()],
+        workspace_page_index: 0,
+        workspace_seen_pages: HashSet::from([target.clone()]),
+        browser_socket: Some(browser.socket.clone()),
         workspace_browser: Some(browser_handle.clone()),
         workspace_address: Some(url.as_str().to_owned()),
         workspace_current_address: None,
+        presented: false,
+        idle_watch: false,
     };
     drop(browser);
-    // Register ownership before fallible target initialization so every created window has a cleanup path.
     // 易失败的页面初始化之前先登记归属，保证已创建窗口始终有准确的关闭入口。
     let handle = Arc::new(Mutex::new(session));
-    ctx.runtime.browsers.lock().await.insert(id.clone(), handle.clone());
+    ctx.runtime
+        .browsers
+        .lock()
+        .await
+        .insert(id.clone(), handle.clone());
     drop(registry);
     let initialized = async {
         let mut session = handle.lock().await;
         update_tabs(&mut session, ctx).await?;
-        let socket = session.tabs.get(&target).ok_or_else(|| failure("BROWSER_TAB_UNAVAILABLE", "随包浏览器页面尚未就绪。", 502))?;
+        let socket = session
+            .tabs
+            .get(&target)
+            .ok_or_else(|| failure("BROWSER_TAB_UNAVAILABLE", "随包浏览器页面尚未就绪。", 502))?;
         rpc(socket, "Page.navigate", json!({"url":url.as_str()}), ctx).await?;
         Ok::<(), GatewayError>(())
-    }.await;
+    }
+    .await;
     if let Err(error) = initialized {
         return Err(cleanup_failed_workspace_open(&id, &handle, error, ctx).await);
     }
     let committed_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         match workspace_action(&json!({"sessionId":id,"action":"state"}), ctx).await {
-            Ok(value) if value["navigationCommitted"] != true && tokio::time::Instant::now() < committed_deadline => {
-                // Wait for the first URL to enter history before a second navigation replaces it.
-                // 等首页写入历史再导航，保留可返回的第一页。
+            Ok(value)
+                if value["navigationCommitted"] != true
+                    && tokio::time::Instant::now() < committed_deadline =>
+            {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             Ok(value) => return Ok(value),
@@ -582,51 +734,80 @@ pub(crate) async fn workspace_open(
     }
 }
 
-/// Cleanup cannot inherit an already-cancelled opening request; keep the original failure visible.
-/// 关闭不能继承已取消的打开请求信号，同时保留原始初始化错误供界面准确报告。
+/// 关闭时不继承已取消的打开请求信号，并保留原始初始化错误供界面报告。
 async fn cleanup_failed_workspace_open(
-    id: &str, handle: &Arc<Mutex<BrowserSession>>, mut error: GatewayError, ctx: &GatewayToolContext,
+    id: &str,
+    handle: &Arc<Mutex<BrowserSession>>,
+    mut error: GatewayError,
+    ctx: &GatewayToolContext,
 ) -> GatewayError {
     let (_sender, cancellation) = tokio::sync::watch::channel(false);
     let mut cleanup = ctx.clone();
     cleanup.cancellation = cancellation;
     let cleanup_result = close_workspace_session(id, handle, &cleanup).await;
     if let Err(cleanup_error) = cleanup_result {
-        // A broken CDP connection cannot orphan the last shared process; never kill a peer's live pages.
-        // CDP 断开也不能遗留最后一个共享进程；存在其他活跃网页时不能连带终止。
+        // CDP 断开时也要清理最后一个共享进程；还有其他活跃网页时保留。
         let registry = ctx.runtime.workspace_browser.lock().await;
-        let browser = handle.lock().await.workspace_browser.as_ref().unwrap().clone();
-        let peers = ctx.runtime.browsers.lock().await.iter().filter(|(other, _)| other.as_str() != id)
-            .map(|(_, handle)| handle.clone()).collect::<Vec<_>>();
+        let browser = handle
+            .lock()
+            .await
+            .workspace_browser
+            .as_ref()
+            .unwrap()
+            .clone();
+        let peers = ctx
+            .runtime
+            .browsers
+            .lock()
+            .await
+            .iter()
+            .filter(|(other, _)| other.as_str() != id)
+            .map(|(_, handle)| handle.clone())
+            .collect::<Vec<_>>();
         let mut has_peer = false;
         for peer in peers {
             let peer = peer.lock().await;
-            if !peer.closed && peer.workspace_browser.as_ref().is_some_and(|other| Arc::ptr_eq(other, &browser)) {
-                has_peer = true; break;
+            if !peer.closed
+                && peer
+                    .workspace_browser
+                    .as_ref()
+                    .is_some_and(|other| Arc::ptr_eq(other, &browser))
+            {
+                has_peer = true;
+                break;
             }
         }
-        let forced = if !has_peer { Some(browser.lock().await.close(&cleanup).await) } else { None };
+        let forced = if !has_peer {
+            Some(browser.lock().await.close(&cleanup).await)
+        } else {
+            None
+        };
         drop(registry);
-        if forced.as_ref().is_some_and(Result::is_ok) && close_workspace_session(id, handle, &cleanup).await.is_ok() {
+        if forced.as_ref().is_some_and(Result::is_ok)
+            && close_workspace_session(id, handle, &cleanup).await.is_ok()
+        {
             return error;
         }
         let final_cleanup = forced.and_then(Result::err).unwrap_or(cleanup_error);
-        error.message = format!("{}（初始化错误：{}；浏览器关闭未确认：{}，已保留自有会话状态。）",
-            error.message, error.code, final_cleanup.code);
+        error.message = format!(
+            "{}（初始化错误：{}；浏览器关闭未确认：{}，已保留自有会话状态。）",
+            error.message, error.code, final_cleanup.code
+        );
         error.code = "BROWSER_INITIALIZATION_CLEANUP_FAILED".to_owned();
         error.status = 503;
     }
     error
 }
 
-/// The UI surface exposes fixed navigation actions, never an arbitrary CDP command or script executor.
 /// 界面仅开放固定导航动作，不暴露任意 CDP 命令或脚本执行接口。
 pub(crate) async fn workspace_action(
     input: &Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
     let action = input["action"].as_str().unwrap_or("state");
-    if action == "clearSiteData" { return clear_workspace_site_data(ctx).await; }
+    if action == "clearSiteData" {
+        return clear_workspace_site_data(ctx).await;
+    }
     if !["navigate", "back", "forward", "reload", "state", "close"].contains(&action) {
         return Err(failure(
             "WORKSPACE_BROWSER_ACTION_INVALID",
@@ -677,29 +858,59 @@ pub(crate) async fn workspace_action(
         Some(socket) => socket.clone(),
         None => {
             let version = http(&session, "/json/version").await?;
-            let socket = version["webSocketDebuggerUrl"].as_str()
-                .ok_or_else(|| failure("BROWSER_INVALID_ENDPOINT", "浏览器窗口连接尚未就绪。", 502))?.to_owned();
-            let address = url::Url::parse(&socket).map_err(|_| failure("BROWSER_INVALID_ENDPOINT", "浏览器窗口连接无效。", 502))?;
-            let endpoint = url::Url::parse(&session.endpoint).map_err(|_| failure("BROWSER_INVALID_ENDPOINT", "浏览器端点无效。", 502))?;
-            if address.scheme() != "ws" || address.host_str() != endpoint.host_str()
+            let socket = version["webSocketDebuggerUrl"]
+                .as_str()
+                .ok_or_else(|| {
+                    failure("BROWSER_INVALID_ENDPOINT", "浏览器窗口连接尚未就绪。", 502)
+                })?
+                .to_owned();
+            let address = url::Url::parse(&socket)
+                .map_err(|_| failure("BROWSER_INVALID_ENDPOINT", "浏览器窗口连接无效。", 502))?;
+            let endpoint = url::Url::parse(&session.endpoint)
+                .map_err(|_| failure("BROWSER_INVALID_ENDPOINT", "浏览器端点无效。", 502))?;
+            if address.scheme() != "ws"
+                || address.host_str() != endpoint.host_str()
                 || address.port_or_known_default() != endpoint.port_or_known_default()
-                || !address.username().is_empty() || address.password().is_some()
+                || !address.username().is_empty()
+                || address.password().is_some()
                 || !address.path().starts_with("/devtools/browser/")
-            { return Err(failure("BROWSER_ENDPOINT_CHANGED", "浏览器窗口连接身份不匹配。", 409)); }
+            {
+                return Err(failure(
+                    "BROWSER_ENDPOINT_CHANGED",
+                    "浏览器窗口连接身份不匹配。",
+                    409,
+                ));
+            }
             session.browser_socket = Some(socket.clone());
             socket
         }
     };
-    // Follow real popup targets in the owned profile; keep opener state instead of rewriting site scripts.
     // 仅跟随自有配置中的真实弹页，保留 opener 和原页面状态，不全局改写网站脚本或重放 URL。
-    if session.embedded_target.as_ref().is_some_and(|id| session.tabs.contains_key(id)) {
+    if session
+        .embedded_target
+        .as_ref()
+        .is_some_and(|id| session.tabs.contains_key(id))
+    {
         for page in tabs.as_array().into_iter().flatten().rev() {
-            let Some(target_id) = page["tabId"].as_str() else { continue; };
-            if allowed_url(page["url"].as_str().unwrap_or("")).is_err() { continue; }
-            if !session.workspace_seen_pages.insert(target_id.to_owned()) { continue; }
-            let target = rpc(&browser_socket, "Target.getTargetInfo", json!({"targetId":target_id}), ctx).await?;
-            if target["targetInfo"]["openerId"].as_str().is_some_and(|opener|
-                session.workspace_pages.iter().any(|known| known == opener))
+            let Some(target_id) = page["tabId"].as_str() else {
+                continue;
+            };
+            if allowed_url(page["url"].as_str().unwrap_or("")).is_err() {
+                continue;
+            }
+            if !session.workspace_seen_pages.insert(target_id.to_owned()) {
+                continue;
+            }
+            let target = rpc(
+                &browser_socket,
+                "Target.getTargetInfo",
+                json!({"targetId":target_id}),
+                ctx,
+            )
+            .await?;
+            if target["targetInfo"]["openerId"]
+                .as_str()
+                .is_some_and(|opener| session.workspace_pages.iter().any(|known| known == opener))
             {
                 let keep = session.workspace_page_index + 1;
                 session.workspace_pages.truncate(keep);
@@ -710,13 +921,22 @@ pub(crate) async fn workspace_action(
             }
         }
     }
-    if session.embedded_target.as_ref().is_none_or(|id| !session.tabs.contains_key(id)) {
-        if let Some((index, id)) = session.workspace_pages.iter().enumerate().rev()
+    if session
+        .embedded_target
+        .as_ref()
+        .is_none_or(|id| !session.tabs.contains_key(id))
+    {
+        if let Some((index, id)) = session
+            .workspace_pages
+            .iter()
+            .enumerate()
+            .rev()
             .find(|(_, id)| session.tabs.contains_key(*id))
         {
             let id = id.clone();
             session.workspace_page_index = index;
-            session.embedded_target = Some(id.clone()); session.active_tab = Some(id);
+            session.embedded_target = Some(id.clone());
+            session.active_tab = Some(id);
         }
     }
     let mut tab = session
@@ -744,9 +964,13 @@ pub(crate) async fn workspace_action(
                 + if action == "back" { -1 } else { 1 };
             let popup_forward = action == "forward"
                 && session.workspace_page_index + 1 < session.workspace_pages.len();
-            if let Some(entry) = (!popup_forward).then(|| usize::try_from(index)
-                .ok()
-                .and_then(|index| history["entries"].get(index))).flatten()
+            if let Some(entry) = (!popup_forward)
+                .then(|| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| history["entries"].get(index))
+                })
+                .flatten()
             {
                 rpc(
                     &socket,
@@ -756,16 +980,26 @@ pub(crate) async fn workspace_action(
                 )
                 .await?;
             } else {
-                let next = if action == "back" { session.workspace_page_index.checked_sub(1) }
-                    else { session.workspace_page_index.checked_add(1).filter(|index| *index < session.workspace_pages.len()) };
-                if let Some((index, target)) = next.and_then(|index|
-                    session.workspace_pages.get(index).filter(|target| session.tabs.contains_key(*target))
-                        .map(|target| (index, target.clone())))
-                {
+                let next = if action == "back" {
+                    session.workspace_page_index.checked_sub(1)
+                } else {
+                    session
+                        .workspace_page_index
+                        .checked_add(1)
+                        .filter(|index| *index < session.workspace_pages.len())
+                };
+                if let Some((index, target)) = next.and_then(|index| {
+                    session
+                        .workspace_pages
+                        .get(index)
+                        .filter(|target| session.tabs.contains_key(*target))
+                        .map(|target| (index, target.clone()))
+                }) {
                     session.workspace_page_index = index;
                     tab = target;
                     socket = session.tabs[&tab].clone();
-                    session.embedded_target = Some(tab.clone()); session.active_tab = Some(tab.clone());
+                    session.embedded_target = Some(tab.clone());
+                    session.active_tab = Some(tab.clone());
                     rpc(&socket, "Page.bringToFront", json!({}), ctx).await?;
                 }
             }
@@ -778,23 +1012,43 @@ pub(crate) async fn workspace_action(
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let current = entries
-        .get(index)
-        .cloned()
-        .unwrap_or(Value::Null);
-    let target = tabs.as_array().and_then(|tabs| tabs.iter().find(|item| item["tabId"] == tab));
-    let current_url = current["url"].as_str().filter(|value| !value.is_empty())
-        .or_else(|| target.and_then(|target| target["url"].as_str())).unwrap_or("");
-    let current_title = current["title"].as_str().filter(|value| !value.is_empty())
-        .or_else(|| target.and_then(|target| target["title"].as_str())).unwrap_or("");
-    if !current_url.is_empty() { session.workspace_current_address = Some(current_url.to_owned()); }
-    let page_state = evaluate(&socket, include_str!("browser_page_state.js").to_owned(), ctx)
-        .await.unwrap_or(Value::Null);
-    // Browser-level metadata survives renderer swaps during Page.navigate.
+    let current = entries.get(index).cloned().unwrap_or(Value::Null);
+    let target = tabs
+        .as_array()
+        .and_then(|tabs| tabs.iter().find(|item| item["tabId"] == tab));
+    let current_url = current["url"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .or_else(|| target.and_then(|target| target["url"].as_str()))
+        .unwrap_or("");
+    let current_title = current["title"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .or_else(|| target.and_then(|target| target["title"].as_str()))
+        .unwrap_or("");
+    if !current_url.is_empty() {
+        session.workspace_current_address = Some(current_url.to_owned());
+    }
+    let page_state = evaluate(
+        &socket,
+        include_str!("browser_page_state.js").to_owned(),
+        ctx,
+    )
+    .await
+    .unwrap_or(Value::Null);
     // 浏览器级窗口信息不依赖当前 renderer，页面导航切换进程期间仍能正确查询。
-    let window = rpc(&browser_socket, "Browser.getWindowForTarget", json!({"targetId":tab}), ctx).await?;
-    let process_id = if let Some(browser) = &session.workspace_browser { browser.lock().await.child.id() }
-        else { session.child.as_ref().and_then(Child::id) };
+    let window = rpc(
+        &browser_socket,
+        "Browser.getWindowForTarget",
+        json!({"targetId":tab}),
+        ctx,
+    )
+    .await?;
+    let process_id = if let Some(browser) = &session.workspace_browser {
+        browser.lock().await.child.id()
+    } else {
+        session.child.as_ref().and_then(Child::id)
+    };
     Ok(
         json!({"sessionId":id,"tabId":tab,"processId":process_id,"endpoint":session.endpoint,
         "url":current_url,"requestedUrl":session.workspace_address,"title":current_title,"canGoBack":index>0 || session.workspace_page_index>0,
@@ -809,13 +1063,18 @@ pub(crate) async fn workspace_action(
     )
 }
 
-/// After navigation, renderer changes may reject history reads; retry metadata, not navigation.
 /// 导航后切换渲染器可能暂时无法读取历史；仅重读元信息，不重放导航。
-async fn workspace_navigation_history(socket: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+async fn workspace_navigation_history(
+    socket: &str,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
     loop {
         match rpc(socket, "Page.getNavigationHistory", json!({}), ctx).await {
-            Err(error) if error.code == "BROWSER_TOOL_FAILED" && error.message.contains("Not attached to an active page") => {
+            Err(error)
+                if error.code == "BROWSER_TOOL_FAILED"
+                    && error.message.contains("Not attached to an active page") =>
+            {
                 if tokio::time::Instant::now() >= deadline {
                     return Ok(json!({"currentIndex":0,"entries":[],"pending":true}));
                 }
@@ -826,82 +1085,223 @@ async fn workspace_navigation_history(socket: &str, ctx: &GatewayToolContext) ->
     }
 }
 
+/// 右侧工作区打开的网页来自用户可见的标签，直接按已展示处理。
+pub(crate) async fn workspace_present(
+    input: &Value,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
+    let opened = workspace_open(input, ctx).await?;
+    mark_presented(&opened, ctx).await;
+    Ok(opened)
+}
+
+/// 用户要求展示过的页面归用户所有，此后只随用户关闭标签释放。
+pub(crate) async fn mark_presented(opened: &Value, ctx: &GatewayToolContext) {
+    let handle = match opened["sessionId"].as_str() {
+        Some(id) => ctx.runtime.browsers.lock().await.get(id).cloned(),
+        None => None,
+    };
+    if let Some(handle) = handle {
+        handle.lock().await.presented = true;
+    }
+}
+
+/// 模型后台页面在所属聊天没有请求后开始空闲计时，到期释放；计时内的追问仍可复用原页面。
+async fn watch_background_session(
+    opened: &Value,
+    ctx: &GatewayToolContext,
+    tick: Duration,
+    idle: Duration,
+) {
+    let Some(id) = opened["sessionId"].as_str().map(str::to_owned) else {
+        return;
+    };
+    let Some(handle) = ctx.runtime.browsers.lock().await.get(&id).cloned() else {
+        return;
+    };
+    {
+        let mut session = handle.lock().await;
+        if session.presented || session.idle_watch || session.workspace_browser.is_none() {
+            return;
+        }
+        session.idle_watch = true;
+    }
+    let (sender, cancellation) = tokio::sync::watch::channel(false);
+    let mut cleanup = ctx.clone();
+    cleanup.cancellation = cancellation;
+    tokio::spawn(async move {
+        let _sender = sender;
+        let mut quiet_since = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(tick).await;
+            if !cleanup.runtime.browsers.lock().await.contains_key(&id) {
+                return;
+            }
+            {
+                let session = handle.lock().await;
+                if session.closed || session.presented {
+                    return;
+                }
+            }
+            if super::gateway::request_active(&cleanup) {
+                quiet_since = tokio::time::Instant::now();
+            } else if quiet_since.elapsed() >= idle {
+                match close_workspace_session(&id, &handle, &cleanup).await {
+                    Ok(_) => return,
+                    Err(_) => quiet_since = tokio::time::Instant::now(),
+                }
+            }
+        }
+    });
+}
+
+async fn settle_presentation(opened: Value, presentation: &str, ctx: &GatewayToolContext) -> Value {
+    if presentation == "workspace" {
+        mark_presented(&opened, ctx).await;
+    } else {
+        watch_background_session(&opened, ctx, BACKGROUND_IDLE_TICK, BACKGROUND_IDLE_CLOSE).await;
+    }
+    browser_presentation(opened, presentation)
+}
+
 async fn close_workspace_session(
-    id: &str, handle: &Arc<Mutex<BrowserSession>>, ctx: &GatewayToolContext,
+    id: &str,
+    handle: &Arc<Mutex<BrowserSession>>,
+    ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
     let mut registry = ctx.runtime.workspace_browser.lock().await;
     let mut session = handle.lock().await;
     if session.conversation_id != ctx.conversation_id {
-        return Err(failure("BROWSER_SESSION_NOT_FOUND", "此网页宿主不属于当前聊天。", 404));
+        return Err(failure(
+            "BROWSER_SESSION_NOT_FOUND",
+            "此网页宿主不属于当前聊天。",
+            404,
+        ));
     }
     let browser = session.workspace_browser.as_ref().unwrap().clone();
     if browser.lock().await.owned.has_running_processes()? {
         let _ = update_tabs(&mut session, ctx).await;
-        let targets = session.tabs.keys().chain(session.workspace_pages.iter())
-            .chain(session.workspace_seen_pages.iter()).cloned().collect::<HashSet<_>>();
+        let targets = session
+            .tabs
+            .keys()
+            .chain(session.workspace_pages.iter())
+            .chain(session.workspace_seen_pages.iter())
+            .cloned()
+            .collect::<HashSet<_>>();
         let browser = browser.lock().await;
         for target in targets {
-            browser.client.call("Target.closeTarget", json!({"targetId":target}), ctx).await?;
+            browser
+                .client
+                .call("Target.closeTarget", json!({"targetId":target}), ctx)
+                .await?;
         }
     }
     session.closed = true;
     for socket in session.tabs.values().chain(session.browser_socket.iter()) {
-        if let Some(connection) = ctx.runtime.cdp.lock().await.remove(&connection_key(socket, ctx)) {
+        if let Some(connection) = ctx
+            .runtime
+            .cdp
+            .lock()
+            .await
+            .remove(&connection_key(socket, ctx))
+        {
             connection.close().await?;
         }
     }
-    for upload in &session.uploads { clean_upload(upload, ctx); }
+    for upload in &session.uploads {
+        clean_upload(upload, ctx);
+    }
     drop(session);
     ctx.runtime.browsers.lock().await.remove(id);
-    let remaining = ctx.runtime.browsers.lock().await.values().cloned().collect::<Vec<_>>();
+    let remaining = ctx
+        .runtime
+        .browsers
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
     let mut in_use = false;
     for handle in remaining {
         let session = handle.lock().await;
-        if !session.closed && session.workspace_browser.as_ref().is_some_and(|other| Arc::ptr_eq(other, &browser)) {
-            in_use = true; break;
+        if !session.closed
+            && session
+                .workspace_browser
+                .as_ref()
+                .is_some_and(|other| Arc::ptr_eq(other, &browser))
+        {
+            in_use = true;
+            break;
         }
     }
     if !in_use {
         browser.lock().await.close(ctx).await?;
-        if registry.as_ref().is_some_and(|registered| Arc::ptr_eq(registered, &browser)) { *registry = None; }
+        if registry
+            .as_ref()
+            .is_some_and(|registered| Arc::ptr_eq(registered, &browser))
+        {
+            *registry = None;
+        }
     }
-    Ok(json!({"closed":true,"sessionId":id,"profilePreserved":true,"profileCleanupPending":false,
-        "externalProcessPreserved":true,"sharedBrowserRunning":in_use}))
+    Ok(
+        json!({"closed":true,"sessionId":id,"profilePreserved":true,"profileCleanupPending":false,
+        "externalProcessPreserved":true,"sharedBrowserRunning":in_use}),
+    )
 }
 
-/// Explicit UI action clears only KYNXA's global site data, after all its workspace windows have exited.
 /// 仅用户显式操作才清除 KYNXA 全局网站数据，并先关闭本应用全部工作区窗口。
 async fn clear_workspace_site_data(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let mut registry = ctx.runtime.workspace_browser.lock().await;
-    let handles = ctx.runtime.browsers.lock().await.iter()
-        .map(|(id, handle)| (id.clone(), handle.clone())).collect::<Vec<_>>();
+    let handles = ctx
+        .runtime
+        .browsers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, handle)| (id.clone(), handle.clone()))
+        .collect::<Vec<_>>();
     let mut closed = Vec::new();
     for (id, handle) in handles {
         let mut session = handle.lock().await;
-        if session.workspace_browser.is_none() { continue; }
+        if session.workspace_browser.is_none() {
+            continue;
+        }
         session.closed = true;
         for socket in session.tabs.values().chain(session.browser_socket.iter()) {
             let key = format!("{}\0{socket}", session.conversation_id);
-            if let Some(connection) = ctx.runtime.cdp.lock().await.remove(&key) { connection.close().await?; }
+            if let Some(connection) = ctx.runtime.cdp.lock().await.remove(&key) {
+                connection.close().await?;
+            }
         }
-        for upload in &session.uploads { clean_upload(upload, ctx); }
+        for upload in &session.uploads {
+            clean_upload(upload, ctx);
+        }
         closed.push(id);
     }
-    if let Some(browser) = registry.as_ref() { browser.lock().await.close(ctx).await?; }
+    if let Some(browser) = registry.as_ref() {
+        browser.lock().await.close(ctx).await?;
+    }
     *registry = None;
     let mut sessions = ctx.runtime.browsers.lock().await;
-    for id in &closed { sessions.remove(id); }
+    for id in &closed {
+        sessions.remove(id);
+    }
     drop(sessions);
     let profile = ctx.data_home.join("Browser/Workspace");
     match tokio::fs::remove_dir_all(&profile).await {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(_) => return Err(failure("BROWSER_SITE_DATA_CLEANUP_FAILED", "浏览器已关闭，但全局网站数据清除失败，请重试。", 503)),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(failure(
+                "BROWSER_SITE_DATA_CLEANUP_FAILED",
+                "浏览器已关闭，但全局网站数据清除失败，请重试。",
+                503,
+            ));
+        }
     }
     Ok(json!({"cleared":true,"scope":"application","closedSessionIds":closed}))
 }
 
-/// Clean only confirmed-closed sessions, within the existing sixteen-session limit; retain no user request.
 /// 仅清理已确认关闭的会话，沿用十六会话上限，不保留用户请求。
 fn defer_owned_profile_cleanup(
     id: String,
@@ -966,8 +1366,7 @@ impl BrowserSession {
         let Some(job) = &self._owned else {
             return Ok(());
         };
-        // Only retry transient Windows file locks after the entire owned job has verifiably exited.
-        // 仅在整个自有作业已确认退出后，重试 Windows 临时文件锁；不能把等待进程隐藏为文件清理。
+        // 仅在整个自有作业已确认退出后，重试 Windows 临时文件锁。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             if job.has_running_processes()? {
@@ -1189,8 +1588,7 @@ pub(crate) fn descriptors() -> Vec<Value> {
 }
 
 fn excluded_executable(path: &Path, intent: &Value) -> bool {
-    // Windows casing aliases do not change an application's identity or the user's explicit ban.
-    // Windows 大小写别名不会改变应用身份，也不能改变用户的明确禁令。
+    // Windows 大小写别名不改变应用身份，用户的明确禁令继续生效。
     let basename = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1207,13 +1605,18 @@ fn excluded_executable(path: &Path, intent: &Value) -> bool {
 }
 
 fn supported_chromium_name(name: &str) -> bool {
-    ["chrome.exe", "chromium.exe", "msedge.exe", "brave.exe", "vivaldi.exe"]
-        .contains(&name.to_ascii_lowercase().as_str())
+    [
+        "chrome.exe",
+        "chromium.exe",
+        "msedge.exe",
+        "brave.exe",
+        "vivaldi.exe",
+    ]
+    .contains(&name.to_ascii_lowercase().as_str())
 }
 
 fn chrome_candidates(ctx: &GatewayToolContext) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    // The workspace uses only its bundled browser; installed or default system browsers are never fallback candidates.
     // 工作区只使用随包浏览器；本机已安装或默认浏览器不作为回退候选。
     if let Some((application, manifest)) = super::gateway::bundled_mcp_manifest(ctx) {
         if let Some(path) =
@@ -1242,7 +1645,10 @@ fn executable(input: &Value, ctx: &GatewayToolContext) -> Result<PathBuf, Gatewa
         .find(|path| {
             path.is_absolute()
                 && path.is_file()
-                && path.file_name().and_then(|name| name.to_str()).is_some_and(supported_chromium_name)
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(supported_chromium_name)
                 && super::local_files::inspect(path, false, false).is_ok()
                 && !excluded_executable(path, &intent)
         })
@@ -1255,16 +1661,18 @@ fn executable(input: &Value, ctx: &GatewayToolContext) -> Result<PathBuf, Gatewa
         })
 }
 
-/// A pending page can already own an embeddable window; its presentation path is not a navigation receipt.
-/// 页面未提交时仍可能已有可嵌入窗口；展示路径可用请求地址，不能改写真实导航回执。
+/// 页面未提交时可能已有可嵌入窗口；展示路径可用请求地址，导航结果保持真实。
 fn workspace_presentation_path(state: &Value) -> Value {
-    if state["url"].as_str().is_some_and(|text| url::Url::parse(text)
-        .is_ok_and(|url| matches!(url.scheme(), "http" | "https")))
-    {
+    if state["url"].as_str().is_some_and(|text| {
+        url::Url::parse(text).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+    }) {
         state["url"].clone()
     } else {
-        state.get("requestedUrl").filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
-            .cloned().unwrap_or_else(|| state["url"].clone())
+        state
+            .get("requestedUrl")
+            .filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| state["url"].clone())
     }
 }
 
@@ -1357,25 +1765,36 @@ fn environment(session: &BrowserSession) -> Value {
     value
 }
 
-async fn update_tabs(session: &mut BrowserSession, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+async fn update_tabs(
+    session: &mut BrowserSession,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     let mut workspace_targets = HashSet::new();
     if let Some(browser) = &session.workspace_browser {
         let browser = browser.lock().await;
-        let targets = browser.client.call("Target.getTargets", json!({}), ctx).await?;
+        let targets = browser
+            .client
+            .call("Target.getTargets", json!({}), ctx)
+            .await?;
         workspace_targets.extend(session.workspace_pages.iter().cloned());
         workspace_targets.extend(session.workspace_seen_pages.iter().cloned());
-        // Only targets descended from this view's root join its automation scope, although cookies are shared.
         // Cookie 虽共享，只有本视图根页面衍生的弹页可进入其自动化范围。
         loop {
             let before = workspace_targets.len();
             for target in targets["targetInfos"].as_array().into_iter().flatten() {
                 if target["type"] == "page"
-                    && target["openerId"].as_str().is_some_and(|id| workspace_targets.contains(id))
+                    && target["openerId"]
+                        .as_str()
+                        .is_some_and(|id| workspace_targets.contains(id))
                 {
-                    if let Some(id) = target["targetId"].as_str() { workspace_targets.insert(id.to_owned()); }
+                    if let Some(id) = target["targetId"].as_str() {
+                        workspace_targets.insert(id.to_owned());
+                    }
                 }
             }
-            if workspace_targets.len() == before { break; }
+            if workspace_targets.len() == before {
+                break;
+            }
         }
     }
     let tabs = http(session, "/json/list").await?;
@@ -1386,13 +1805,15 @@ async fn update_tabs(session: &mut BrowserSession, ctx: &GatewayToolContext) -> 
             continue;
         }
         if session.workspace_browser.is_some()
-            && tab["id"].as_str().is_none_or(|id| !workspace_targets.contains(id))
-        { continue; }
-        if session
-            .embedded_target
-            .as_deref()
-            .is_some_and(|target| session.workspace_last_active.is_none() && tab["id"].as_str() != Some(target))
+            && tab["id"]
+                .as_str()
+                .is_none_or(|id| !workspace_targets.contains(id))
         {
+            continue;
+        }
+        if session.embedded_target.as_deref().is_some_and(|target| {
+            session.workspace_last_active.is_none() && tab["id"].as_str() != Some(target)
+        }) {
             continue;
         }
         if let (Some(id), Some(socket)) = (tab["id"].as_str(), tab["webSocketDebuggerUrl"].as_str())
@@ -1450,31 +1871,45 @@ async fn evaluate(
     Ok(value["result"]["value"].clone())
 }
 
-/// Pause repeated model navigation on a verification wall; explicit UI navigation stays available.
 /// 验证页暂停模型的重复导航；用户在界面里的主动导航及验证操作仍可执行。
 fn verification_handoff(state: &Value, destination: Option<&str>) -> Option<Value> {
-    if state["needsHumanVerification"] != true { return None; }
+    if state["needsHumanVerification"] != true {
+        return None;
+    }
     if let Some(destination) = destination {
         let current = url::Url::parse(state["verificationUrl"].as_str()?).ok()?;
         let requested = url::Url::parse(destination).ok()?;
         let same_page = current.origin() == requested.origin()
-            && current.path() == requested.path() && current.query() == requested.query();
+            && current.path() == requested.path()
+            && current.query() == requested.query();
         let repeated_google_search = state["verificationProvider"] == "google"
-            && current.host_str() == requested.host_str() && requested.path() == "/search";
-        if !same_page && !repeated_google_search { return None; }
+            && current.host_str() == requested.host_str()
+            && requested.path() == "/search";
+        if !same_page && !repeated_google_search {
+            return None;
+        }
     }
     let mut handoff = state.clone();
     handoff["actionDispatched"] = json!(false);
     handoff["navigationPaused"] = json!(true);
     handoff["recommendedTool"] = json!("web.search");
-    handoff["message"] = json!("当前网页需要人工验证，已保留页面且未刷新或重复搜索。普通资料检索请改用 web.search 的已启用搜索来源；此页面由用户完成验证后继续。");
+    handoff["message"] = json!(
+        "当前网页需要人工验证，已保留页面且未刷新或重复搜索。普通资料检索请改用 web.search 的已启用搜索来源；此页面由用户完成验证后继续。"
+    );
     Some(handoff)
 }
 
 async fn inspect_verification_handoff(
-    socket: &str, destination: Option<&str>, ctx: &GatewayToolContext,
+    socket: &str,
+    destination: Option<&str>,
+    ctx: &GatewayToolContext,
 ) -> Result<Option<Value>, GatewayError> {
-    let state = evaluate(socket, include_str!("browser_page_state.js").to_owned(), ctx).await?;
+    let state = evaluate(
+        socket,
+        include_str!("browser_page_state.js").to_owned(),
+        ctx,
+    )
+    .await?;
     Ok(verification_handoff(&state, destination))
 }
 
@@ -1618,8 +2053,7 @@ async fn stage_upload(
         .as_u64()
         .unwrap_or(2 * 1024 * 1024 * 1024)
         .clamp(1024 * 1024, 16 * 1024 * 1024 * 1024);
-    // Copy once from verified handles; delayed form submission must not reopen a changed source.
-    // 从已核验句柄复制一次；延迟提交表单时不重读已变化的源路径。
+    // 从已检查句柄复制一次；延迟提交表单时不重读已变化的源路径。
     let result = tokio::task::spawn_blocking(move || {
         use std::io::{Read, Write};
         super::local_files::inspect(&created, true, false)
@@ -1716,25 +2150,44 @@ async fn stage_upload(
     }
 }
 
-/// Runtime identities are chat-scoped navigation hints, never durable memory or page evidence.
-/// 运行时身份只提供当前聊天的导航线索，不进入长期记忆，也不冒充页面内容观测。
+/// 运行时身份只提供当前聊天的导航线索，不进入长期记忆。
 async fn known_sessions(ctx: &GatewayToolContext) -> Value {
-    let handles = ctx.runtime.browsers.lock().await.iter()
-        .map(|(id, handle)| (id.clone(), handle.clone())).collect::<Vec<_>>();
+    let handles = ctx
+        .runtime
+        .browsers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, handle)| (id.clone(), handle.clone()))
+        .collect::<Vec<_>>();
     let mut sessions = Vec::new();
     let mut busy = false;
     for (id, handle) in handles {
-        let Ok(session) = handle.try_lock() else { busy = true; continue; };
-        if session.closed || session.conversation_id != ctx.conversation_id { continue; }
-        let tab = session.embedded_target.as_ref().or(session.active_tab.as_ref());
-        let url = session.workspace_current_address.as_deref()
-            .or(session.workspace_address.as_deref()).unwrap_or("");
+        let Ok(session) = handle.try_lock() else {
+            busy = true;
+            continue;
+        };
+        if session.closed || session.conversation_id != ctx.conversation_id {
+            continue;
+        }
+        let tab = session
+            .embedded_target
+            .as_ref()
+            .or(session.active_tab.as_ref());
+        let url = session
+            .workspace_current_address
+            .as_deref()
+            .or(session.workspace_address.as_deref())
+            .unwrap_or("");
         sessions.push((session.workspace_last_active, json!({"sessionId":id,"tabId":tab,
             "url":url.chars().take(1024).collect::<String>(),"embedded":session.embedded_target.is_some(),
             "state":"registered","pageContentObserved":false})));
     }
     sessions.sort_by(|left, right| right.0.cmp(&left.0));
-    let values = sessions.into_iter().map(|(_, value)| value).collect::<Vec<_>>();
+    let values = sessions
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
     let active = values.first().cloned().unwrap_or(Value::Null);
     json!({"sessions":values,"sessionId":active["sessionId"],"activeSessionId":active["sessionId"],
         "tabId":active["tabId"],"activeTabId":active["tabId"],
@@ -1745,9 +2198,13 @@ async fn known_sessions(ctx: &GatewayToolContext) -> Value {
 pub(crate) async fn prompt_context(ctx: &GatewayToolContext) -> String {
     let mut known = known_sessions(ctx).await;
     let entries = known["sessions"].as_array_mut().unwrap();
-    if entries.is_empty() { return String::new(); }
+    if entries.is_empty() {
+        return String::new();
+    }
     entries.truncate(4);
-    format!("Current chat browser identities (runtime hints, not page contents): {known}. Use these IDs with browser.snapshot to inspect the existing page; browser.tabs without sessionId discovers this chat's sessions. Do not reopen or navigate merely to inspect the page.")
+    format!(
+        "Current chat browser identities (runtime hints, not page contents): {known}. Use these IDs with browser.snapshot to inspect the existing page; browser.tabs without sessionId discovers this chat's sessions. Do not reopen or navigate merely to inspect the page."
+    )
 }
 
 pub(crate) async fn execute(
@@ -1755,7 +2212,11 @@ pub(crate) async fn execute(
     input: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    if name == "browser.tabs" && input["sessionId"].as_str().is_none_or(|id| id.trim().is_empty()) {
+    if name == "browser.tabs"
+        && input["sessionId"]
+            .as_str()
+            .is_none_or(|id| id.trim().is_empty())
+    {
         return Ok(known_sessions(ctx).await);
     }
     if name == "browser.open" {
@@ -1783,7 +2244,11 @@ pub(crate) async fn execute(
             }
             if let Some(browser) = ctx.runtime.workspace_browser.lock().await.as_ref() {
                 if browser.lock().await.endpoint == endpoint.as_str().trim_end_matches('/') {
-                    return Err(failure("BROWSER_ENDPOINT_SCOPE_REQUIRED", "应用共享浏览器必须沿当前聊天已有的网页会话操作，不能把全局端点重新附着为独立浏览器。", 403));
+                    return Err(failure(
+                        "BROWSER_ENDPOINT_SCOPE_REQUIRED",
+                        "应用共享浏览器必须沿当前聊天已有的网页会话操作，不能把全局端点重新附着为独立浏览器。",
+                        403,
+                    ));
                 }
             }
             let mut session = BrowserSession {
@@ -1808,6 +2273,8 @@ pub(crate) async fn execute(
                 workspace_browser: None,
                 workspace_address: None,
                 workspace_current_address: None,
+                presented: false,
+                idle_watch: false,
             };
             let version = http(&session, "/json/version").await?;
             let intent = super::intent::calculate("tools.browserIntent", &json!({"message":ctx.config["trustedUserText"],"previousUserMessages":ctx.config["previousUserMessages"]}))
@@ -1849,15 +2316,15 @@ pub(crate) async fn execute(
         }
         let intent = super::intent::calculate("tools.browserIntent", &json!({"message":ctx.config["trustedUserText"],"previousUserMessages":ctx.config["previousUserMessages"]}))
             .map_err(|message| failure("TOOL_INTENT_FAILED", &message, 500))?;
-        // Background navigation owns a matching page, never replaces the page the user is reading.
         // 后台分析复用同址页面或创建独立页面，不导航用户正在阅读的其他网页。
-        if input["browserPath"].is_null() && intent["presentationTarget"] != "application"
-            && presentation != "workspace" && input["url"].is_string()
+        if input["browserPath"].is_null()
+            && intent["presentationTarget"] != "application"
+            && presentation != "workspace"
+            && input["url"].is_string()
         {
             let opened = Box::pin(workspace_open(&input, ctx)).await?;
-            return Ok(browser_presentation(opened, "background"));
+            return Ok(settle_presentation(opened, "background", ctx).await);
         }
-        // Connecting without navigation preserves the real session; only explicit display reveals it.
         // 不导航的连接保留真实会话；只有明确展示才进入右侧工作区。
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
             let handles = ctx
@@ -1883,19 +2350,28 @@ pub(crate) async fn execute(
                     continue;
                 }
                 if session.workspace_browser.is_some() {
-                    let navigate = input["url"].as_str().is_some_and(|url|
+                    let navigate = input["url"].as_str().is_some_and(|url| {
                         session.workspace_address.as_deref() != Some(url)
-                            && session.workspace_current_address.as_deref() != Some(url));
+                            && session.workspace_current_address.as_deref() != Some(url)
+                    });
                     let tab = session.embedded_target.as_deref().unwrap_or("");
                     if let Some(socket) = session.tabs.get(tab).filter(|_| navigate) {
-                        if let Some(handoff) = inspect_verification_handoff(socket, input["url"].as_str(), ctx).await? {
-                            return Ok(json!({"sessionId":id,"tabId":tab,"value":handoff,"executionEnvironment":environment(&session)}));
+                        if let Some(handoff) =
+                            inspect_verification_handoff(socket, input["url"].as_str(), ctx).await?
+                        {
+                            return Ok(
+                                json!({"sessionId":id,"tabId":tab,"value":handoff,"executionEnvironment":environment(&session)}),
+                            );
                         }
                     }
                     drop(session);
-                    let opened = workspace_action(&json!({"sessionId":id,
-                        "action":if navigate { "navigate" } else { "state" },"url":input["url"]}), ctx).await?;
-                    return Ok(browser_presentation(opened, presentation));
+                    let opened = workspace_action(
+                        &json!({"sessionId":id,
+                        "action":if navigate { "navigate" } else { "state" },"url":input["url"]}),
+                        ctx,
+                    )
+                    .await?;
+                    return Ok(settle_presentation(opened, presentation, ctx).await);
                 }
                 let tabs = update_tabs(&mut session, ctx).await?;
                 let tab = session.embedded_target.as_deref().unwrap_or("");
@@ -1917,7 +2393,7 @@ pub(crate) async fn execute(
         }
         if input["browserPath"].is_null() && intent["presentationTarget"] != "application" {
             let opened = Box::pin(workspace_open(&input, ctx)).await?;
-            return Ok(browser_presentation(opened, presentation));
+            return Ok(settle_presentation(opened, presentation, ctx).await);
         }
         let path = executable(&input, ctx)?;
         let forbidden=super::intent::calculate("tools.foregroundForbidden",&json!({"message":ctx.config["trustedUserText"],"target":{"kind":"browser","appPath":path}})).map_err(|message|failure("TOOL_INTENT_FAILED",&message,500))?;
@@ -2023,17 +2499,25 @@ pub(crate) async fn execute(
             workspace_browser: None,
             workspace_address: None,
             workspace_current_address: None,
+            presented: false,
+            idle_watch: false,
         };
         let mut tabs = update_tabs(&mut session, ctx).await?;
         if workspace_host {
             loop {
                 let pages = tabs.as_array().map(Vec::as_slice).unwrap_or(&[]);
-                let matched = pages.iter().find(|page| page["url"] == url.as_str()).or_else(|| {
-                    let mut loaded = pages.iter().filter(|page| page["url"].as_str().is_some_and(|address|
-                        address.starts_with("http://") || address.starts_with("https://")));
-                    let only = loaded.next();
-                    loaded.next().is_none().then_some(only).flatten()
-                });
+                let matched = pages
+                    .iter()
+                    .find(|page| page["url"] == url.as_str())
+                    .or_else(|| {
+                        let mut loaded = pages.iter().filter(|page| {
+                            page["url"].as_str().is_some_and(|address| {
+                                address.starts_with("http://") || address.starts_with("https://")
+                            })
+                        });
+                        let only = loaded.next();
+                        loaded.next().is_none().then_some(only).flatten()
+                    });
                 if let Some(tab) = matched.and_then(|page| page["tabId"].as_str()) {
                     session.active_tab = Some(tab.to_owned());
                     break;
@@ -2042,7 +2526,11 @@ pub(crate) async fn execute(
                 if tokio::time::Instant::now() >= deadline {
                     session.close_owned_process().await?;
                     let _ = session.remove_owned_profile().await;
-                    return Err(failure("BROWSER_START_TIMEOUT", "Chrome 网页目标未就绪，请重新打开。", 504));
+                    return Err(failure(
+                        "BROWSER_START_TIMEOUT",
+                        "Chrome 网页目标未就绪，请重新打开。",
+                        504,
+                    ));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 tabs = update_tabs(&mut session, ctx).await?;
@@ -2192,9 +2680,13 @@ pub(crate) async fn execute(
         .cloned()
         .ok_or_else(|| failure("BROWSER_TAB_UNAVAILABLE", "当前浏览器没有此标签页。", 409))?;
     if ["browser.reload", "browser.wait", "browser.navigate"].contains(&name) {
-        let destination = (name == "browser.navigate").then(|| input["url"].as_str()).flatten();
+        let destination = (name == "browser.navigate")
+            .then(|| input["url"].as_str())
+            .flatten();
         if let Some(handoff) = inspect_verification_handoff(&socket, destination, ctx).await? {
-            return Ok(json!({"sessionId":id,"tabId":tab,"value":handoff,"executionEnvironment":environment(&session)}));
+            return Ok(
+                json!({"sessionId":id,"tabId":tab,"value":handoff,"executionEnvironment":environment(&session)}),
+            );
         }
     }
     let value = match name {
@@ -2295,8 +2787,7 @@ pub(crate) async fn execute(
         }
         "browser.snapshot" => {
             let maximum = input["maxChars"].as_u64().unwrap_or(32000).clamp(1, 64000);
-            // Readability works on a clone inside the browser; no Node host or page mutation is involved.
-            // 正文提取仅在浏览器内处理文档副本，不增加 Node 宿主，也不改变用户页面。
+            // 正文提取只在浏览器内处理文档副本，不增加 Node 宿主，用户页面保持不变。
             let expression = format!("(() => {{ const module = undefined; const exports = undefined; {} const snapshot = ({})({maximum}); return Object.assign(snapshot, {}); }})()",
                 include_str!("../../../official-tools/Browser/readability/Readability.js"),
                 include_str!("browser_snapshot.js"),
@@ -2395,7 +2886,9 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
 
 pub(crate) async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     let mut workspace = ctx.runtime.workspace_browser.lock().await;
-    if let Some(browser) = workspace.as_ref() { browser.lock().await.close(ctx).await?; }
+    if let Some(browser) = workspace.as_ref() {
+        browser.lock().await.close(ctx).await?;
+    }
     workspace.take();
     drop(workspace);
     let connections = ctx
@@ -2437,29 +2930,117 @@ mod tests {
     #[test]
     fn pending_workspace_page_keeps_requested_presentation_path_without_claiming_navigation() {
         let mut state = json!({"url":"about:blank","requestedUrl":"https://example.org/requested", "navigationCommitted":false});
-        assert_eq!(workspace_presentation_path(&state), "https://example.org/requested");
+        assert_eq!(
+            workspace_presentation_path(&state),
+            "https://example.org/requested"
+        );
         assert_eq!(state["url"], "about:blank");
         assert_eq!(state["navigationCommitted"], false);
         state["url"] = json!("https://example.org/redirected");
-        assert_eq!(workspace_presentation_path(&state), "https://example.org/redirected");
+        assert_eq!(
+            workspace_presentation_path(&state),
+            "https://example.org/redirected"
+        );
         state["url"] = Value::Null;
-        assert_eq!(workspace_presentation_path(&state), "https://example.org/requested");
+        assert_eq!(
+            workspace_presentation_path(&state),
+            "https://example.org/requested"
+        );
     }
 
     #[cfg(windows)]
     fn use_bundled_fixture(ctx: &mut GatewayToolContext) -> bool {
-        let bundle = std::env::var_os("KYNXA_BROWSER_BUNDLE_ROOT").map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/runtime/native-desktop/win-x64"));
+        let bundle = std::env::var_os("KYNXA_BROWSER_BUNDLE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/runtime/native-desktop/win-x64")
+            });
         ctx.config["officialToolsRoot"] = json!(bundle.join("official-tools"));
         chrome_candidates(ctx).iter().any(|path| path.is_file())
     }
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_pages_close_after_requests_end_but_presented_pages_stay() {
+        use axum::{Router, response::Html, routing::get};
+        let (mut ctx, _sender) = super::super::gateway::test_context();
+        if !use_bundled_fixture(&mut ctx) {
+            eprintln!("Bundled Chromium fixture unavailable.");
+            let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap());
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/a", get(|| async { Html("<h1>a</h1>") }))
+                    .route("/b", get(|| async { Html("<h1>b</h1>") })),
+            )
+            .await
+            .unwrap();
+        });
+        let tick = Duration::from_millis(20);
+        let idle = Duration::from_millis(150);
+        let present = workspace_open(&json!({"url":format!("http://{address}/a")}), &ctx)
+            .await
+            .unwrap();
+        mark_presented(&present, &ctx).await;
+        watch_background_session(&present, &ctx, tick, idle).await;
+        let background = workspace_open(&json!({"url":format!("http://{address}/b")}), &ctx)
+            .await
+            .unwrap();
+        let background_id = background["sessionId"].as_str().unwrap().to_owned();
+
+        super::super::gateway::enter_request(&ctx);
+        watch_background_session(&background, &ctx, tick, idle).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            ctx.runtime
+                .browsers
+                .lock()
+                .await
+                .contains_key(&background_id),
+            "a running request keeps its page"
+        );
+
+        super::super::gateway::leave_request(&ctx);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while ctx
+            .runtime
+            .browsers
+            .lock()
+            .await
+            .contains_key(&background_id)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "idle page was not released"
+            );
+            tokio::time::sleep(tick).await;
+        }
+        let present_id = present["sessionId"].as_str().unwrap();
+        assert!(ctx.runtime.browsers.lock().await.contains_key(present_id));
+        assert!(ctx.runtime.workspace_browser.lock().await.is_some());
+
+        workspace_action(&json!({"sessionId":present_id,"action":"close"}), &ctx)
+            .await
+            .unwrap();
+        assert!(ctx.runtime.workspace_browser.lock().await.is_none());
+        server.abort();
+        let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap());
+    }
+
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_chrome_host_navigates_only_its_conversation_and_closes_process() {
         use axum::{Router, response::Html, routing::get};
         let (mut ctx, _sender) = super::super::gateway::test_context();
         if !use_bundled_fixture(&mut ctx) {
-            eprintln!("Bundled Chromium fixture unavailable; prepare the product payload or set KYNXA_BROWSER_BUNDLE_ROOT.");
+            eprintln!(
+                "Bundled Chromium fixture unavailable; prepare the product payload or set KYNXA_BROWSER_BUNDLE_ROOT."
+            );
             let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap());
             return;
         }
@@ -2471,139 +3052,423 @@ mod tests {
                 .route("/popup", get(|| async { Html("<title>Video page</title><h1>popup</h1>") }))
                 .route("/opened", get(|| async { Html("<title>Opened page</title><h1>opened</h1>") }))).await.unwrap();
         });
-        let opened = super::super::gateway::execute("artifact.open",
-            json!({"url":format!("http://{address}/"),"title":"First"}), &ctx).await.unwrap();
+        let opened = super::super::gateway::execute(
+            "artifact.open",
+            json!({"url":format!("http://{address}/"),"title":"First"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert!(opened["processId"].as_u64().is_some());
         assert_eq!(opened["requestedUrl"], format!("http://{address}/"));
         {
-            let browser = ctx.runtime.workspace_browser.lock().await.as_ref().unwrap().clone();
-            let targets = browser.lock().await.client.call("Target.getTargets", json!({}), &ctx).await.unwrap();
-            assert_eq!(targets["targetInfos"].as_array().unwrap().iter().filter(|target| target["type"] == "page").count(), 1,
-                "The startup blank page must be consumed, not left behind in another window.");
+            let browser = ctx
+                .runtime
+                .workspace_browser
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .clone();
+            let targets = browser
+                .lock()
+                .await
+                .client
+                .call("Target.getTargets", json!({}), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                targets["targetInfos"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|target| target["type"] == "page")
+                    .count(),
+                1,
+                "The startup blank page must be consumed, not left behind in another window."
+            );
         }
         let id = opened["sessionId"].as_str().unwrap();
-        let discovered = execute("browser.tabs", json!({"reason":"Find the current sidebar page"}), &ctx).await.unwrap();
+        let discovered = execute(
+            "browser.tabs",
+            json!({"reason":"Find the current sidebar page"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert_eq!(discovered["sessionId"], id);
         assert_eq!(discovered["tabId"], opened["tabId"]);
         assert!(prompt_context(&ctx).await.contains(id));
-        let socket = ctx.runtime.browsers.lock().await.get(id).unwrap().clone()
-            .lock().await.tabs[opened["tabId"].as_str().unwrap()].clone();
-        evaluate(&socket, "window.sidebarContinuity='preserved';true".into(), &ctx).await.unwrap();
+        let socket = ctx
+            .runtime
+            .browsers
+            .lock()
+            .await
+            .get(id)
+            .unwrap()
+            .clone()
+            .lock()
+            .await
+            .tabs[opened["tabId"].as_str().unwrap()]
+        .clone();
+        evaluate(
+            &socket,
+            "window.sidebarContinuity='preserved';true".into(),
+            &ctx,
+        )
+        .await
+        .unwrap();
         let mut approved = ctx.clone();
         approved.approved = true;
-        let connected = super::super::gateway::execute("browser.open",
-            json!({"url":format!("http://{address}/"),"reason":"Inspect the existing page"}), &approved).await.unwrap();
+        let connected = super::super::gateway::execute(
+            "browser.open",
+            json!({"url":format!("http://{address}/"),"reason":"Inspect the existing page"}),
+            &approved,
+        )
+        .await
+        .unwrap();
         assert_eq!(connected["sessionId"], id);
         assert_eq!(connected["presentation"], "background");
-        assert_eq!(evaluate(&socket, "window.sidebarContinuity".into(), &ctx).await.unwrap(), "preserved");
-        let duplicate = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx).await.unwrap();
+        assert_eq!(
+            evaluate(&socket, "window.sidebarContinuity".into(), &ctx)
+                .await
+                .unwrap(),
+            "preserved"
+        );
+        let duplicate = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(duplicate["sessionId"], id);
         let background = super::super::gateway::execute("browser.open",
             json!({"url":format!("http://{address}/opened"),"reason":"Analyze another page in the background"}), &approved).await.unwrap();
         assert_eq!(background["presentation"], "background");
         assert_ne!(background["sessionId"], id);
         assert_eq!(background["processId"], opened["processId"]);
-        assert_eq!(evaluate(&socket, "({url:location.href,saved:window.sidebarContinuity})".into(), &ctx).await.unwrap(),
-            json!({"url":format!("http://{address}/"),"saved":"preserved"}));
+        assert_eq!(
+            evaluate(
+                &socket,
+                "({url:location.href,saved:window.sidebarContinuity})".into(),
+                &ctx
+            )
+            .await
+            .unwrap(),
+            json!({"url":format!("http://{address}/"),"saved":"preserved"})
+        );
         let background_id = background["sessionId"].as_str().unwrap();
-        let snapshot = execute("browser.snapshot", json!({"sessionId":background_id,"tabId":background["tabId"]}), &ctx).await.unwrap();
+        let snapshot = execute(
+            "browser.snapshot",
+            json!({"sessionId":background_id,"tabId":background["tabId"]}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert_eq!(snapshot["value"]["title"], "Opened page");
-        let captured = execute("browser.screenshot", json!({"sessionId":background_id,"tabId":background["tabId"]}), &ctx).await.unwrap();
-        let pixels = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
-            captured["value"]["content"][0]["data"].as_str().unwrap()).unwrap();
+        let captured = execute(
+            "browser.screenshot",
+            json!({"sessionId":background_id,"tabId":background["tabId"]}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let pixels = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            captured["value"]["content"][0]["data"].as_str().unwrap(),
+        )
+        .unwrap();
         assert!(pixels.starts_with(b"\x89PNG\r\n\x1a\n"));
-        let repeated = execute("browser.open", json!({"url":format!("http://{address}/opened")}), &ctx).await.unwrap();
+        let repeated = execute(
+            "browser.open",
+            json!({"url":format!("http://{address}/opened")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert_eq!(repeated["sessionId"], background_id);
         let presented = super::super::gateway::execute("browser.open",
             json!({"url":format!("http://{address}/opened"),"presentation":"workspace","reason":"Show the analyzed page"}), &approved).await.unwrap();
         assert_eq!(presented["presentation"], "workspace");
         assert_eq!(presented["sessionId"], background_id);
-        assert_eq!(workspace_action(&json!({"sessionId":background_id,"action":"close"}), &ctx).await.unwrap()["closed"], true);
-        let mut foreign = ctx.clone(); foreign.conversation_id = uuid::Uuid::new_v4().to_string();
-        assert!(execute("browser.tabs", json!({"reason":"Discover only this chat"}), &foreign).await.unwrap()["sessions"].as_array().unwrap().is_empty());
-        assert_eq!(workspace_action(&json!({"sessionId":id,"action":"state"}), &foreign).await.unwrap_err().code, "BROWSER_SESSION_NOT_FOUND");
-        assert_eq!(workspace_action(&json!({"sessionId":id,"action":"evaluate"}), &ctx).await.unwrap_err().code, "WORKSPACE_BROWSER_ACTION_INVALID");
-        workspace_action(&json!({"sessionId":id,"action":"navigate","url":format!("http://{address}/next")}), &ctx).await.unwrap();
+        assert_eq!(
+            workspace_action(&json!({"sessionId":background_id,"action":"close"}), &ctx)
+                .await
+                .unwrap()["closed"],
+            true
+        );
+        let mut foreign = ctx.clone();
+        foreign.conversation_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            execute(
+                "browser.tabs",
+                json!({"reason":"Discover only this chat"}),
+                &foreign
+            )
+            .await
+            .unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            workspace_action(&json!({"sessionId":id,"action":"state"}), &foreign)
+                .await
+                .unwrap_err()
+                .code,
+            "BROWSER_SESSION_NOT_FOUND"
+        );
+        assert_eq!(
+            workspace_action(&json!({"sessionId":id,"action":"evaluate"}), &ctx)
+                .await
+                .unwrap_err()
+                .code,
+            "WORKSPACE_BROWSER_ACTION_INVALID"
+        );
+        workspace_action(
+            &json!({"sessionId":id,"action":"navigate","url":format!("http://{address}/next")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         let mut current = Value::Null;
         for _ in 0..40 {
-            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx).await.unwrap();
-            if current["url"].as_str().is_some_and(|url| url.ends_with("/next")) && current["canGoBack"] == true { break; }
+            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx)
+                .await
+                .unwrap();
+            if current["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/next"))
+                && current["canGoBack"] == true
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert_eq!(current["canGoBack"], true, "{current}");
         let session = ctx.runtime.browsers.lock().await.get(id).unwrap().clone();
-        workspace_action(&json!({"sessionId":id,"action":"back"}), &ctx).await.unwrap();
+        workspace_action(&json!({"sessionId":id,"action":"back"}), &ctx)
+            .await
+            .unwrap();
         for _ in 0..40 {
-            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx).await.unwrap();
-            if current["url"] == format!("http://{address}/") { break; }
+            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx)
+                .await
+                .unwrap();
+            if current["url"] == format!("http://{address}/") {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert_eq!(current["url"], format!("http://{address}/"));
         let parent_target = current["tabId"].clone();
         let parent_socket = session.lock().await.tabs[opened["tabId"].as_str().unwrap()].clone();
-        rpc(&parent_socket, "Runtime.evaluate", json!({"expression":"document.querySelector('#popup').click()","userGesture":true}), &ctx).await.unwrap();
+        rpc(
+            &parent_socket,
+            "Runtime.evaluate",
+            json!({"expression":"document.querySelector('#popup').click()","userGesture":true}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         for _ in 0..60 {
-            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx).await.unwrap();
-            if current["url"].as_str().is_some_and(|url| url.ends_with("/popup")) { break; }
+            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx)
+                .await
+                .unwrap();
+            if current["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/popup"))
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(current["url"].as_str().unwrap().ends_with("/popup"), "{current}");
+        assert!(
+            current["url"].as_str().unwrap().ends_with("/popup"),
+            "{current}"
+        );
         assert_ne!(current["tabId"], parent_target);
         let popup_socket = {
             let session = session.lock().await;
             session.tabs[session.embedded_target.as_ref().unwrap()].clone()
         };
-        rpc(&popup_socket, "Runtime.evaluate", json!({"expression":"window.open('/opened','_blank')","userGesture":true}), &ctx).await.unwrap();
+        rpc(
+            &popup_socket,
+            "Runtime.evaluate",
+            json!({"expression":"window.open('/opened','_blank')","userGesture":true}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         for _ in 0..60 {
-            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx).await.unwrap();
-            if current["url"].as_str().is_some_and(|url| url.ends_with("/opened")) { break; }
+            current = workspace_action(&json!({"sessionId":id,"action":"state"}), &ctx)
+                .await
+                .unwrap();
+            if current["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/opened"))
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(current["url"].as_str().unwrap().ends_with("/opened"), "{current}");
-        current = workspace_action(&json!({"sessionId":id,"action":"back"}), &ctx).await.unwrap();
-        assert!(current["url"].as_str().unwrap().ends_with("/popup"), "{current}");
-        current = workspace_action(&json!({"sessionId":id,"action":"back"}), &ctx).await.unwrap();
+        assert!(
+            current["url"].as_str().unwrap().ends_with("/opened"),
+            "{current}"
+        );
+        current = workspace_action(&json!({"sessionId":id,"action":"back"}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            current["url"].as_str().unwrap().ends_with("/popup"),
+            "{current}"
+        );
+        current = workspace_action(&json!({"sessionId":id,"action":"back"}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(current["url"], format!("http://{address}/"));
-        assert_eq!(evaluate(&parent_socket, "window.savedState".into(), &ctx).await.unwrap(), "parent-preserved");
-        current = workspace_action(&json!({"sessionId":id,"action":"forward"}), &ctx).await.unwrap();
-        assert!(current["url"].as_str().unwrap().ends_with("/popup"), "{current}");
+        assert_eq!(
+            evaluate(&parent_socket, "window.savedState".into(), &ctx)
+                .await
+                .unwrap(),
+            "parent-preserved"
+        );
+        current = workspace_action(&json!({"sessionId":id,"action":"forward"}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            current["url"].as_str().unwrap().ends_with("/popup"),
+            "{current}"
+        );
         evaluate(&parent_socket, "document.cookie='kynxa_login=global-fixture; Max-Age=3600; SameSite=Lax';localStorage.setItem('kynxa_login','global-fixture');true".into(), &ctx).await.unwrap();
-        let foreign_page = workspace_open(&json!({"url":format!("http://{address}/next")}), &foreign).await.unwrap();
+        let foreign_page =
+            workspace_open(&json!({"url":format!("http://{address}/next")}), &foreign)
+                .await
+                .unwrap();
         assert_eq!(foreign_page["processId"], opened["processId"]);
         assert_ne!(foreign_page["windowId"], current["windowId"]);
         let foreign_id = foreign_page["sessionId"].as_str().unwrap();
-        let foreign_handle = ctx.runtime.browsers.lock().await.get(foreign_id).unwrap().clone();
-        let foreign_socket = foreign_handle.lock().await.tabs[foreign_page["tabId"].as_str().unwrap()].clone();
-        let shared_login = evaluate(&foreign_socket, "({cookie:document.cookie,saved:localStorage.getItem('kynxa_login')})".into(), &foreign).await.unwrap();
-        assert!(shared_login["cookie"].as_str().unwrap().contains("kynxa_login=global-fixture"));
+        let foreign_handle = ctx
+            .runtime
+            .browsers
+            .lock()
+            .await
+            .get(foreign_id)
+            .unwrap()
+            .clone();
+        let foreign_socket =
+            foreign_handle.lock().await.tabs[foreign_page["tabId"].as_str().unwrap()].clone();
+        let shared_login = evaluate(
+            &foreign_socket,
+            "({cookie:document.cookie,saved:localStorage.getItem('kynxa_login')})".into(),
+            &foreign,
+        )
+        .await
+        .unwrap();
+        assert!(
+            shared_login["cookie"]
+                .as_str()
+                .unwrap()
+                .contains("kynxa_login=global-fixture")
+        );
         assert_eq!(shared_login["saved"], "global-fixture");
-        assert!(!foreign_handle.lock().await.tabs.contains_key(opened["tabId"].as_str().unwrap()));
-        assert_eq!(execute("browser.open", json!({"cdpEndpoint":opened["endpoint"]}), &ctx).await.unwrap_err().code,
-            "BROWSER_ENDPOINT_SCOPE_REQUIRED");
-        assert_eq!(execute("browser.snapshot", json!({"sessionId":foreign_id,"tabId":opened["tabId"]}), &foreign).await.unwrap_err().code,
-            "BROWSER_TAB_UNAVAILABLE");
-        let browser = session.lock().await.workspace_browser.as_ref().unwrap().clone();
+        assert!(
+            !foreign_handle
+                .lock()
+                .await
+                .tabs
+                .contains_key(opened["tabId"].as_str().unwrap())
+        );
+        assert_eq!(
+            execute(
+                "browser.open",
+                json!({"cdpEndpoint":opened["endpoint"]}),
+                &ctx
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "BROWSER_ENDPOINT_SCOPE_REQUIRED"
+        );
+        assert_eq!(
+            execute(
+                "browser.snapshot",
+                json!({"sessionId":foreign_id,"tabId":opened["tabId"]}),
+                &foreign
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "BROWSER_TAB_UNAVAILABLE"
+        );
+        let browser = session
+            .lock()
+            .await
+            .workspace_browser
+            .as_ref()
+            .unwrap()
+            .clone();
         let profile = browser.lock().await.profile.clone();
-        assert_eq!(workspace_action(&json!({"sessionId":id,"action":"close"}), &ctx).await.unwrap()["closed"], true);
+        assert_eq!(
+            workspace_action(&json!({"sessionId":id,"action":"close"}), &ctx)
+                .await
+                .unwrap()["closed"],
+            true
+        );
         assert!(browser.lock().await.owned.has_running_processes().unwrap());
         let mut cancelled_open = foreign.clone();
         let (_cancelled_sender, cancellation) = tokio::sync::watch::channel(true);
         cancelled_open.cancellation = cancellation;
-        let initialization_error = cleanup_failed_workspace_open(foreign_id, &foreign_handle,
-            failure("TOOL_CANCELLED", "Fixture opening cancelled after allocation.", 409), &cancelled_open).await;
+        let initialization_error = cleanup_failed_workspace_open(
+            foreign_id,
+            &foreign_handle,
+            failure(
+                "TOOL_CANCELLED",
+                "Fixture opening cancelled after allocation.",
+                409,
+            ),
+            &cancelled_open,
+        )
+        .await;
         assert_eq!(initialization_error.code, "TOOL_CANCELLED");
         assert!(!browser.lock().await.owned.has_running_processes().unwrap());
         assert!(profile.exists());
-        let reopened = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx).await.unwrap();
+        let reopened = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx)
+            .await
+            .unwrap();
         let reopened_id = reopened["sessionId"].as_str().unwrap();
-        let reopened_handle = ctx.runtime.browsers.lock().await.get(reopened_id).unwrap().clone();
-        let reopened_socket = reopened_handle.lock().await.tabs[reopened["tabId"].as_str().unwrap()].clone();
-        let persisted = evaluate(&reopened_socket, "({cookie:document.cookie,saved:localStorage.getItem('kynxa_login')})".into(), &ctx).await.unwrap();
-        assert!(persisted["cookie"].as_str().unwrap().contains("kynxa_login=global-fixture"), "{persisted}");
+        let reopened_handle = ctx
+            .runtime
+            .browsers
+            .lock()
+            .await
+            .get(reopened_id)
+            .unwrap()
+            .clone();
+        let reopened_socket =
+            reopened_handle.lock().await.tabs[reopened["tabId"].as_str().unwrap()].clone();
+        let persisted = evaluate(
+            &reopened_socket,
+            "({cookie:document.cookie,saved:localStorage.getItem('kynxa_login')})".into(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            persisted["cookie"]
+                .as_str()
+                .unwrap()
+                .contains("kynxa_login=global-fixture"),
+            "{persisted}"
+        );
         assert_eq!(persisted["saved"], "global-fixture");
-        let cleared = workspace_action(&json!({"action":"clearSiteData"}), &ctx).await.unwrap();
+        let cleared = workspace_action(&json!({"action":"clearSiteData"}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(cleared["scope"], "application");
-        assert!(cleared["closedSessionIds"].as_array().unwrap().iter().any(|value| value == reopened_id));
+        assert!(
+            cleared["closedSessionIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == reopened_id)
+        );
         assert!(!profile.exists());
         assert!(ctx.runtime.workspace_browser.lock().await.is_none());
         server.abort();
@@ -2687,7 +3552,8 @@ mod tests {
         let (mut ctx, _sender) = super::super::gateway::test_context();
         if !use_bundled_fixture(&mut ctx) {
             eprintln!("Bundled Chromium fixture unavailable.");
-            let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap()); return;
+            let _ = std::fs::remove_dir_all(ctx.workdir.parent().unwrap());
+            return;
         }
         let root = ctx.workdir.parent().unwrap().to_owned();
         ctx.approved = true;
@@ -2924,13 +3790,28 @@ mod tests {
         let handoff = verification_handoff(&google, None).unwrap();
         assert_eq!(handoff["actionDispatched"], false);
         assert_eq!(handoff["recommendedTool"], "web.search");
-        assert!(verification_handoff(&google, Some("https://www.google.com/search?q=another+query")).is_some());
-        assert!(verification_handoff(&google, Some("https://www.google.com/sorry/index?continue=search")).is_some());
+        assert!(
+            verification_handoff(
+                &google,
+                Some("https://www.google.com/search?q=another+query")
+            )
+            .is_some()
+        );
+        assert!(
+            verification_handoff(
+                &google,
+                Some("https://www.google.com/sorry/index?continue=search")
+            )
+            .is_some()
+        );
         assert!(verification_handoff(&google, Some("https://example.org/article")).is_none());
         assert!(verification_handoff(&json!({"needsHumanVerification":false}), None).is_none());
         let cloudflare = json!({"needsHumanVerification":true,"verificationProvider":"cloudflare",
             "verificationUrl":"https://example.org/article","evidenceUsable":false});
-        assert!(verification_handoff(&cloudflare, Some("https://example.org/article#details")).is_some());
+        assert!(
+            verification_handoff(&cloudflare, Some("https://example.org/article#details"))
+                .is_some()
+        );
         assert!(verification_handoff(&cloudflare, Some("https://example.org/other")).is_none());
     }
 

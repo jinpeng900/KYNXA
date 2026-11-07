@@ -13,8 +13,7 @@ namespace KYNXA_Desktop.Controls;
 public sealed record TaskArtifactRequest(Guid ConversationId, TaskArtifact Artifact);
 
 /// <summary>
-/// Read-only, virtualized task projections. Hiding or disposing cancels reads, never work.
-/// 只读的虚拟任务投影；隐藏或释放只取消读取，绝不改变正式工作。
+/// 只读的虚拟任务映射；隐藏或释放只取消读取，不改变正式工作。
 /// </summary>
 public sealed class ConversationTaskPanel : Grid, IDisposable
 {
@@ -114,7 +113,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private void UpdateBodyHeight()
     {
         _body.Height = Math.Max(32, _availableHeight - 46);
-        // Explicit collapsed geometry wins over the framework's default expander header height.
         // 收起时使用明确高度，避免框架默认 Expander 标题仍占据大块空间。
         _section.Height = _section.IsExpanded ? double.NaN : 34;
         _section.MaxHeight = _section.IsExpanded ? _availableHeight : 34;
@@ -198,7 +196,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
                     _rows.Remove(row);
                 _recoverableTaskIds.IntersectWith(currentRoots);
             }
-            // Recovery remains independent of presentation; hidden reply records stay resumable.
             // 恢复与展示分开；隐藏的回复记录仍可续作，不因暂停变成可见待办。
             int recoveryPosition = loadMore ? _rows.Count(row => _recoverableTaskIds.Contains(row.Record.TaskId)) : 0;
             foreach (var task in recoverable.Tasks)
@@ -219,7 +216,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
                 }
                 if (!loadMore || row is null) recoveryPosition++;
             }
-            // Refresh the first page in place; retained later pages keep their order and expanded controls.
             // 就地刷新第一页；已加载后续页保留顺序及展开状态，避免每次轮询重建整列。
             foreach (var task in page.Tasks.Where(task => task.ParentTaskId is null))
             {

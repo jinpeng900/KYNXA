@@ -67,7 +67,6 @@ internal sealed class DesktopTarget(nint window, int processId)
     internal void EnsureResponding()
     {
         Check(visible: false);
-        // A bounded WM_NULL handshake avoids entering UIA for an already hung UI thread.
         // 使用有超时边界的 WM_NULL 握手，避免对已卡死的界面线程启动 UIA 读取。
         if (!IsResponding() || SendMessageTimeout(Window, 0, 0, 0, 0x0001 | 0x0002, 200, out _) == 0)
             throw new DesktopException("DESKTOP_NOT_RESPONDING", "The selected window is not responding; no UI Automation read was started.");

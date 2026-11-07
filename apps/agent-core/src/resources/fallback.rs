@@ -27,7 +27,9 @@ fn cpu_capacity(hardware: &Value) -> f64 {
 fn memory_capacity(hardware: &Value, workload: &str) -> f64 {
     if workload == "model-transport" {
         return (number(&hardware["memory"]["availableBytes"]) - TRANSPORT_SYSTEM_HEADROOM_BYTES)
-            .min(MAX_TRANSPORT_MEMORY_BYTES).floor().max(0.0);
+            .min(MAX_TRANSPORT_MEMORY_BYTES)
+            .floor()
+            .max(0.0);
     }
     (number(&hardware["memory"]["availableBytes"]) * 0.6 - 512.0 * MIB)
         .min(number(&hardware["memory"]["totalBytes"]) * 0.4)
@@ -46,8 +48,7 @@ fn valid_request(request: &Value) -> bool {
         && utf16(&request["workspaceId"]).is_some_and(|length| length <= 128)
         && ["foreground", "background"].contains(&string(&request["kind"]))
         && ["compute", "model-transport"].contains(&string(&request["workload"]))
-        && (request["workload"] != "model-transport"
-            || valid_transport_request(request))
+        && (request["workload"] != "model-transport" || valid_transport_request(request))
         && integer(&request["cpuThreads"], 0.0, 4096.0)
         && integer(&request["memoryBytes"], 0.0, MAX_SAFE_INTEGER)
         && integer(&request["gpuMemoryBytes"], 0.0, MAX_SAFE_INTEGER)
@@ -261,7 +262,6 @@ fn grant(args: &Value) -> Value {
     let hardware = &args["hardware"];
     let reserved = &args["reserved"];
     let threads = (cpu_capacity(hardware) - number(&reserved["cpuThreads"])).max(0.0);
-    // Without native measurements every reservation remains unresolved, including resident models.
     // 缺少原生观测时所有预约都视为未兑现；小额通信池仍扣除这些债务。
     let memory = (memory_capacity(hardware, string(&request["workload"]))
         - number(&reserved["memoryBytes"]))
@@ -300,7 +300,6 @@ fn grant(args: &Value) -> Value {
         "memoryBytes": request["memoryBytes"], "gpuMemoryBytes": 0, "suggestions": suggestions(args, granted, number(&request["memoryBytes"]), fraction)})
 }
 
-/// Unknown native ownership remains fenced; these rules never infer GPU release from free memory alone.
 /// 原生归属未知时继续隔离预约；这些规则不能仅凭空闲显存推断 GPU 预约已释放。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     Ok(match operation {
@@ -341,9 +340,13 @@ mod tests {
     fn low_memory_transport_uses_a_small_pool_without_relaxing_compute() {
         assert_eq!(grant(&args())["status"], "granted");
         assert_eq!(memory_capacity(&hardware(480), "compute"), 0.0);
-        assert_eq!(memory_capacity(&hardware(480), "model-transport"), MAX_TRANSPORT_MEMORY_BYTES);
+        assert_eq!(
+            memory_capacity(&hardware(480), "model-transport"),
+            MAX_TRANSPORT_MEMORY_BYTES
+        );
         assert_eq!(memory_capacity(&hardware(70), "model-transport"), 6.0 * MIB);
-        let mut request = args(); request["request"]["workload"] = json!("compute");
+        let mut request = args();
+        request["request"]["workload"] = json!("compute");
         assert_eq!(grant(&request)["reason"], "RESOURCE_PRESSURE");
         request["request"]["workload"] = json!("model-transport");
         request["hardware"] = hardware(79);
@@ -364,9 +367,15 @@ mod tests {
     #[test]
     fn direct_fallback_transport_cannot_bypass_the_small_foreground_contract() {
         assert!(valid_request(&transport_request()));
-        for (field, value) in [("kind",json!("background")),("cpuThreads",json!(2)),
-            ("memoryBytes",json!(33 << 20)),("memoryBytes",json!(0)),("gpuMemoryBytes",json!(1))] {
-            let mut request = args(); request["request"][field] = value;
+        for (field, value) in [
+            ("kind", json!("background")),
+            ("cpuThreads", json!(2)),
+            ("memoryBytes", json!(33 << 20)),
+            ("memoryBytes", json!(0)),
+            ("gpuMemoryBytes", json!(1)),
+        ] {
+            let mut request = args();
+            request["request"][field] = value;
             assert!(!valid_request(&request["request"]));
             assert_eq!(grant(&request)["reason"], "RESOURCE_INVALID_REQUEST");
         }

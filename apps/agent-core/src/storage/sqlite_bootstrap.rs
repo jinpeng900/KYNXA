@@ -26,14 +26,21 @@ fn bootstrap(connection: &Connection, root: &Path, arguments: &Value) -> Contrac
     connection
         .execute_batch(sqlite_schema::RETRIEVAL_SCHEMA)
         .map_err(failure)?;
-    migrate_integrity(connection, 6, &[
-        ("retrieval_metadata", ""), ("sources", ""),
-        ("chunks", "UNIQUE(source_id,chunk_index)"), ("scope_snapshots", ""),
-        ("index_jobs", ""), ("source_relations", ""),
-        ("chunk_vector_spaces", ""), ("source_coverage", ""),
-    ], &[
-        "SELECT EXISTS(SELECT 1 FROM chunks GROUP BY source_id,chunk_index HAVING COUNT(*)>1)",
-    ])?;
+    migrate_integrity(
+        connection,
+        6,
+        &[
+            ("retrieval_metadata", ""),
+            ("sources", ""),
+            ("chunks", "UNIQUE(source_id,chunk_index)"),
+            ("scope_snapshots", ""),
+            ("index_jobs", ""),
+            ("source_relations", ""),
+            ("chunk_vector_spaces", ""),
+            ("source_coverage", ""),
+        ],
+        &["SELECT EXISTS(SELECT 1 FROM chunks GROUP BY source_id,chunk_index HAVING COUNT(*)>1)"],
+    )?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
         .map_err(failure)?;
@@ -160,11 +167,9 @@ fn bootstrap(connection: &Connection, root: &Path, arguments: &Value) -> Contrac
         connection
             .execute_batch(sqlite_schema::VECTOR_SPACES_SCHEMA)
             .map_err(failure)?;
-        // Coverage cleanup is part of every source removal, including freshly imported databases.
-        // 来源撤销始终清理覆盖记录，首次导入的新库也必须在同一初始化事务准备该表。
+        // 来源撤销始终清理覆盖记录，首次导入的新库也在同一初始化事务准备该表。
         super::source_coverage::initialize(connection)?;
         let columns = metadata_columns(connection, "chunks")?;
-        // PRAGMA table_info ordinal order determines the old row codec, including column additions.
         // PRAGMA 列序决定旧行编码，新增列也保持原顺序。
         let projection = rows(connection, "PRAGMA table_info(chunks)", vec![])?
             .iter()
@@ -279,8 +284,7 @@ fn migration_batch(connection: &Connection, arguments: &Value) -> ContractResult
     finish(connection, result)
 }
 
-/// Bootstrap, additive upgrades and revocation cleanup run in native SQLite; legacy byte hashes are acknowledged explicitly.
-/// 启动、增量升级及撤销清理由原生 SQLite 执行，历史字节哈希通过显式回执确认。
+/// 启动、增量升级及撤销清理由原生 SQLite 执行，历史字节哈希通过显式结果确认。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let root = Path::new(arguments["root"].as_str().unwrap_or(""));
     let path = Path::new(arguments["path"].as_str().unwrap_or(""));

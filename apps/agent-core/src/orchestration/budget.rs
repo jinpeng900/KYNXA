@@ -4,32 +4,29 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 const LIMITS: [(&str, u64, u64, u64); 4] = [
-    ("maxRounds", 64, 1, 128),
-    ("maxToolCalls", 256, 1, 512),
+    ("maxRounds", 128, 1, 128),
+    ("maxToolCalls", 512, 1, 512),
     ("maxGeneratedTokens", 1_048_576, 1024, 4_194_304),
-    ("maxDurationMs", 1_800_000, 1000, MAX_DURATION_MS),
+    ("maxDurationMs", 3_600_000, 1000, MAX_DURATION_MS),
 ];
 
-/// Transport overrides bound one ordinary segment; an explicit useful work budget may extend it.
 /// 传输覆盖值约束普通执行段；用户明确要求的有意义工作预算可以超过该段上限。
 const MAX_DURATION_MS: u64 = 21_600_000;
-/// Keep duration and the four-worker tree budget exactly representable in shared JSON contracts.
-/// 保证时长与四执行器树预算都能在共享 JSON 合同中精确表示。
+/// 保证时长与四执行器树预算都能在共享 JSON 约定中精确表示。
 const MAX_EXPLICIT_DURATION_MS: u64 = 9_007_199_254_740_991 / 4;
-/// Finishing margin added after a user-required minimum, so verification and delivery still fit.
-/// 用户要求的最低时长之后预留的收尾余量，保证核验与交付仍在额度内。
+/// 用户要求的最低时长之后预留的收尾余量，保证检查与交付仍在额度内。
 const MINIMUM_ACTIVE_MARGIN_MS: u64 = 1_800_000;
 
-/// Leave room for evidence IDs and reasoning; repair attempts may grow within negotiated output.
 /// 为证据 ID 和思考留足输出；验收重试可增额，始终遵守实际协商上限。
 pub(super) fn review_output_limit(requirements: usize, attempts: u64, available: u64) -> u64 {
     let requirements = u64::try_from(requirements).unwrap_or(u64::MAX);
-    2048_u64.saturating_add(requirements.saturating_mul(128))
-        .saturating_add(attempts.saturating_mul(1024)).min(available)
+    2048_u64
+        .saturating_add(requirements.saturating_mul(128))
+        .saturating_add(attempts.saturating_mul(1024))
+        .min(available)
 }
 
-/// A truncated tool proposal needs the execution budget, not another identical short review.
-/// 工具提议被截断后恢复执行额度，不能原样重试短核验。
+/// 工具提议被截断时恢复执行额度，再重试短检查也没有意义。
 pub(super) const TRUNCATED_REVIEW_EXECUTION_NOTICE: &str = "The review proposed an operation but its arguments were cut off before dispatch. Return to execution with the normal negotiated output budget. Generate only the missing complete call; split large payloads into smaller valid steps when needed. No truncated operation ran. Preserve successful receipts and follow the latest user instruction; do not add work or repeat completed effects.";
 
 pub(super) fn resume_execution_after_truncated_review(
@@ -37,7 +34,8 @@ pub(super) fn resume_execution_after_truncated_review(
     code: &str,
     details: &Value,
 ) -> bool {
-    if !*review_pending || details["outputTruncated"] != true
+    if !*review_pending
+        || details["outputTruncated"] != true
         || !(code == "MODEL_TOOL_OUTPUT_TRUNCATED"
             || details["decoderCode"] == "MODEL_TOOL_OUTPUT_TRUNCATED")
     {
@@ -47,7 +45,6 @@ pub(super) fn resume_execution_after_truncated_review(
     true
 }
 
-/// Budget operations are pure; caller-owned timing and cancellation remain at actual I/O boundaries.
 /// 预算操作是纯计算；计时与取消仍由调用方在真实 I/O 边界负责。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
@@ -121,8 +118,7 @@ fn allocation_maximum(values: &[f64]) -> f64 {
     }
 }
 
-/// Ceilings are policy limits, not usage; reserve mandatory input and safety margins.
-/// 分配上限不是实际用量；仍须预留必要输入和安全余量。
+/// 分配上限不是实际用量，还要预留必要输入和安全余量。
 fn context_allocation(args: &Value) -> Value {
     let input = allocation_maximum(&[0.0, projected_number(args, "inputBudgetTokens").floor()]);
     let research = args["taskType"] == "research" || args["taskType"] == "complex";
@@ -160,7 +156,6 @@ fn context_allocation(args: &Value) -> Value {
         "schemaCeilingTokens":allocation_minimum(&[24000.0,(input * schema_fraction).floor()]),"safetyTokens":512})
 }
 
-/// Preserve audit fields, including effective schema limits and truncation details.
 /// 保留审计字段，包括生效的工具定义额度和截断信息。
 fn context_allocation_audit(args: &Value) -> Value {
     let allocation = &args["allocation"];
@@ -247,8 +242,7 @@ fn limits(input: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
-/// Normalize limits before acceptance; invalid values cannot change the goal or stop accepted work.
-/// 接受前归一化额度；异常值不能改变目标或中断已接受任务。
+/// 接受前归一化额度，已接受的任务不受异常值影响。
 pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     let object = input.as_object();
     let mut resolved = json!({});
@@ -259,13 +253,17 @@ pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     for (name, default, minimum, maximum) in LIMITS {
         let requested = object.and_then(|object| object.get(name));
         let number = requested.and_then(Value::as_u64);
-        // Clamp oversized requests to the supported maximum, not the default.
-        // 超限请求取支持的最大值，不退回默认值。
-        let valid = number.map(|value| value.min(maximum)).filter(|value| *value >= minimum);
+        let valid = number
+            .map(|value| value.min(maximum))
+            .filter(|value| *value >= minimum);
         if requested.is_some_and(|value| !value.is_null()) && valid.is_none() {
-            corrections.push(json!({"field":name,"reason":"invalid-limit-using-default","effective":default}));
+            corrections.push(
+                json!({"field":name,"reason":"invalid-limit-using-default","effective":default}),
+            );
         } else if number.is_some_and(|value| value > maximum) {
-            corrections.push(json!({"field":name,"reason":"limit-clamped-to-maximum","effective":maximum}));
+            corrections.push(
+                json!({"field":name,"reason":"limit-clamped-to-maximum","effective":maximum}),
+            );
         }
         resolved[name] = json!(valid.unwrap_or(default));
     }
@@ -277,19 +275,19 @@ pub(crate) fn resolve_request_limits(input: &Value) -> Value {
     json!({"limits":resolved,"corrections":corrections})
 }
 
-/// Combine transport limits with the user's explicit minimum work duration.
-/// 合并传输额度与用户明确要求的最低工作时长。
 pub(crate) fn resolve_input_limits(input: &Value) -> Value {
     let mut resolved = resolve_request_limits(input.get("runLimits").unwrap_or(&Value::Null));
     let message = input["message"].as_str().unwrap_or("");
     if let Some(minimum) = requested_minimum_ms(message) {
         if is_finite_response_request(message) {
-            // Do not idle or repeat a finite answer to satisfy an artificial duration.
             // 有限回复交付后即完成，不为空凑时长等待或重复。
-            resolved["corrections"].as_array_mut().expect("correction array").push(json!({
-                "field":"minActiveMs","reason":"finite-response-does-not-require-time-filling",
-                "requested":minimum
-            }));
+            resolved["corrections"]
+                .as_array_mut()
+                .expect("correction array")
+                .push(json!({
+                    "field":"minActiveMs","reason":"finite-response-does-not-require-time-filling",
+                    "requested":minimum
+                }));
         } else {
             apply_minimum_active(&mut resolved, minimum);
         }
@@ -297,11 +295,11 @@ pub(crate) fn resolve_input_limits(input: &Value) -> Value {
     resolved
 }
 
-/// Reserve the minimum effective duration plus a finishing margin.
-/// 为最低有效工作时长和收尾预留足够额度。
 pub(crate) fn apply_minimum_active(resolved: &mut Value, minimum: u64) {
     let minimum = minimum.min(MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS);
-    let current = resolved["limits"]["maxDurationMs"].as_u64().unwrap_or(1_800_000);
+    let current = resolved["limits"]["maxDurationMs"]
+        .as_u64()
+        .unwrap_or(1_800_000);
     let needed = minimum.saturating_add(MINIMUM_ACTIVE_MARGIN_MS);
     resolved["limits"]["minActiveMs"] = json!(minimum);
     if needed > current {
@@ -309,23 +307,28 @@ pub(crate) fn apply_minimum_active(resolved: &mut Value, minimum: u64) {
     }
 }
 
-/// User steering may replace or revoke a minimum; omitted changes retain the accepted value.
 /// 用户引导可替换或撤销最低时长；未提及时保留原值，不重置累计工作时间。
-pub(super) fn revised_minimum_active(current: u64, requested: Option<&Value>) -> Result<u64, String> {
-    let requested = requested.map(|value| value.as_u64()
-        .filter(|minimum| *minimum <= MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS)
-        .ok_or_else(|| "INVALID_STEERING_MINIMUM_ACTIVE".to_owned())).transpose()?;
+pub(super) fn revised_minimum_active(
+    current: u64,
+    requested: Option<&Value>,
+) -> Result<u64, String> {
+    let requested = requested
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|minimum| *minimum <= MAX_EXPLICIT_DURATION_MS - MINIMUM_ACTIVE_MARGIN_MS)
+                .ok_or_else(|| "INVALID_STEERING_MINIMUM_ACTIVE".to_owned())
+        })
+        .transpose()?;
     Ok(requested.unwrap_or(current))
 }
 
-/// Scale tree-wide model requests at one per 10 seconds, with a minimum of 256.
 /// 任务树按每 10 秒一次估算模型额度，最少 256 次。
 pub(crate) fn model_request_allowance(max_duration_ms: u64) -> u64 {
     (max_duration_ms / 10_000).max(256)
 }
 
-/// Only verified accepted input distinguishes renewable segments from explicit limits.
-/// 只按核验过的原始接受输入区分可续执行段和明确上限。
+/// 只按检查过的原始接受输入区分可续执行段和明确上限。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OperationalBudgetPolicy {
     pub(super) renew_model_requests: bool,
@@ -341,7 +344,6 @@ impl OperationalBudgetPolicy {
     }
 }
 
-/// Live dispatch and cold takeover use the same headroom without resetting accumulated usage.
 /// 实时派发与冷接管使用同一余量规则，不清零累计用量。
 pub(super) fn operational_budget_floor(
     policy: OperationalBudgetPolicy,
@@ -352,9 +354,13 @@ pub(super) fn operational_budget_floor(
 ) -> (u64, u64) {
     let requests = if policy.renew_model_requests {
         request_limit.max(used_requests.saturating_add(64))
-    } else { request_limit };
+    } else {
+        request_limit
+    };
     let execution_ms = match execution_limit_ms {
-        Some(limit) if policy.renew_execution_time && limit.saturating_sub(active_ms) < 5 * 60 * 1000 => {
+        Some(limit)
+            if policy.renew_execution_time && limit.saturating_sub(active_ms) < 5 * 60 * 1000 =>
+        {
             limit.max(active_ms.saturating_add(30 * 60 * 1000))
         }
         limit => limit.unwrap_or(0),
@@ -362,7 +368,6 @@ pub(super) fn operational_budget_floor(
     (requests, execution_ms)
 }
 
-/// An explicit "at least N minutes/hours" requirement; plain mentions of time are ignored.
 /// 只识别“至少／不少于 N 分钟／小时”等明确的最低时长要求，普通时间描述不计入。
 fn minimum_duration_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -385,33 +390,53 @@ fn requested_minimum_ms(message: &str) -> Option<u64> {
     let amount = match &captures[1] {
         "半" => 0.5,
         text => text.parse::<f64>().ok().or_else(|| chinese_number(text))?,
-    } + if captures.get(2).is_some_and(|half| half.as_str() == "个半") { 0.5 } else { 0.0 };
+    } + if captures.get(2).is_some_and(|half| half.as_str() == "个半") {
+        0.5
+    } else {
+        0.0
+    };
     let unit = captures[3].to_lowercase();
     let hours = unit.starts_with('小') || unit.starts_with('钟') || unit.starts_with('h');
     let extra_minutes = captures
         .get(4)
         .filter(|_| hours)
-        .and_then(|minutes| minutes.as_str().parse::<f64>().ok().or_else(|| chinese_number(minutes.as_str())))
+        .and_then(|minutes| {
+            minutes
+                .as_str()
+                .parse::<f64>()
+                .ok()
+                .or_else(|| chinese_number(minutes.as_str()))
+        })
         .unwrap_or(0.0);
-    let minutes = if hours { amount * 60.0 + extra_minutes } else { amount };
+    let minutes = if hours {
+        amount * 60.0 + extra_minutes
+    } else {
+        amount
+    };
     (minutes.is_finite() && minutes >= 1.0).then(|| (minutes * 60_000.0) as u64)
 }
 
-/// Exclude only finite greetings or literal repetition, not substantial or unknown tasks.
 /// 仅排除有限问候或字面重复，不限制实质性或尚未明确的任务。
 pub(crate) fn is_finite_response_request(message: &str) -> bool {
     static FINITE: OnceLock<Regex> = OnceLock::new();
     static QUALIFIER: OnceLock<Regex> = OnceLock::new();
-    let qualifier = QUALIFIER.get_or_init(|| Regex::new(
-        r"(?i)^(?:至少|最少|不少于|不低于|起码|at\s+least|no\s+less\s+than|a\s+minimum\s+of)"
-    ).expect("static duration qualifier expression"));
-    let remainder = minimum_duration_pattern().replace_all(message, |captures: &regex::Captures<'_>| {
-        let whole = captures.get(0).expect("duration match");
-        let amount = captures.get(1).expect("duration amount");
-        qualifier.replace(&message[whole.start()..amount.start()], "").into_owned()
+    let qualifier = QUALIFIER.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:至少|最少|不少于|不低于|起码|at\s+least|no\s+less\s+than|a\s+minimum\s+of)",
+        )
+        .expect("static duration qualifier expression")
     });
-    let remainder = remainder.trim_matches(|character: char| character.is_whitespace()
-        || "，,。.!！?？；;：:".contains(character));
+    let remainder =
+        minimum_duration_pattern().replace_all(message, |captures: &regex::Captures<'_>| {
+            let whole = captures.get(0).expect("duration match");
+            let amount = captures.get(1).expect("duration amount");
+            qualifier
+                .replace(&message[whole.start()..amount.start()], "")
+                .into_owned()
+        });
+    let remainder = remainder.trim_matches(|character: char| {
+        character.is_whitespace() || "，,。.!！?？；;：:".contains(character)
+    });
     FINITE.get_or_init(|| Regex::new(concat!(
         r#"(?ix)^(?:请|麻烦|帮我|你|让模型|让你|继续|接着|连续|一直|不断|反复|持续|工作|只|please|just|keep|for|and|\s|[，,。.!！?？；;：:])*"#,
         r#"(?:(?:说|回复|回答|输出|打印|重复|say|repeat|respond(?:\s+with)?|print)\s*)?"#,
@@ -486,8 +511,7 @@ fn remove_overlap<'a>(previous: &str, text: &'a str) -> &'a str {
     if previous.is_empty() || text.is_empty() {
         return text;
     }
-    // Compare exact suffixes at Unicode boundaries, while the maximum remains measured in UTF-16 units.
-    // 按完整 Unicode 边界比较精确后缀；最大重叠长度仍遵循现有 UTF-16 单位合同。
+    // 按完整 Unicode 边界比较精确后缀；最大重叠长度仍遵循现有 UTF-16 单位约定。
     let mut prefix_boundaries = Vec::new();
     let mut utf16_length = 0;
     for (offset, character) in text.char_indices() {
@@ -522,14 +546,35 @@ mod tests {
                 "finish_reason":"length"}]}})).unwrap();
         let error = &decoded["error"];
         let mut reviewing = true;
-        assert!(resume_execution_after_truncated_review(&mut reviewing, error["code"].as_str().unwrap(), error));
-        let next_limit = if reviewing { review_output_limit(1, 0, available) } else { available };
+        assert!(resume_execution_after_truncated_review(
+            &mut reviewing,
+            error["code"].as_str().unwrap(),
+            error
+        ));
+        let next_limit = if reviewing {
+            review_output_limit(1, 0, available)
+        } else {
+            available
+        };
         assert_eq!(next_limit, available);
-        assert!(!resume_execution_after_truncated_review(&mut reviewing, error["code"].as_str().unwrap(), error),
-            "An execution failure cannot keep receiving a fresh review escape.");
-        for details in [json!({"outputTruncated":false}), json!({"outputTruncated":true,"decoderCode":"MODEL_TOOL_ARGUMENT_INVALID"})] {
+        assert!(
+            !resume_execution_after_truncated_review(
+                &mut reviewing,
+                error["code"].as_str().unwrap(),
+                error
+            ),
+            "An execution failure cannot keep receiving a fresh review escape."
+        );
+        for details in [
+            json!({"outputTruncated":false}),
+            json!({"outputTruncated":true,"decoderCode":"MODEL_TOOL_ARGUMENT_INVALID"}),
+        ] {
             let mut pending = true;
-            assert!(!resume_execution_after_truncated_review(&mut pending, "MODEL_TOOL_CALL_INVALID", &details));
+            assert!(!resume_execution_after_truncated_review(
+                &mut pending,
+                "MODEL_TOOL_CALL_INVALID",
+                &details
+            ));
             assert!(pending);
         }
     }
@@ -554,9 +599,15 @@ mod tests {
     fn review_output_respects_small_windows_and_extreme_counters_without_overflow() {
         for available in [0, 1, 640, 2048] {
             assert_eq!(review_output_limit(1, 0, available), available);
-            assert_eq!(review_output_limit(usize::MAX, u64::MAX, available), available);
+            assert_eq!(
+                review_output_limit(usize::MAX, u64::MAX, available),
+                available
+            );
         }
-        assert_eq!(review_output_limit(usize::MAX, u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(
+            review_output_limit(usize::MAX, u64::MAX, u64::MAX),
+            u64::MAX
+        );
     }
 
     #[test]
@@ -573,7 +624,7 @@ mod tests {
         assert_eq!(resolved["corrections"].as_array().unwrap().len(), 5);
         assert!(resolved["limits"].get("maxModelRequests").is_none());
         assert!(resolved["limits"].get("maxKnownTokens").is_none());
-        assert_eq!(resolve_request_limits(&json!([1,2]))["limits"], defaults);
+        assert_eq!(resolve_request_limits(&json!([1, 2]))["limits"], defaults);
         assert!(limits(&json!({"maxRounds":"wrong"})).is_err());
     }
 
@@ -581,21 +632,50 @@ mod tests {
     fn large_durations_clamp_and_explicit_minimums_extend_the_task_budget() {
         let clamped = resolve_request_limits(&json!({"maxDurationMs":28_800_000}));
         assert_eq!(clamped["limits"]["maxDurationMs"], MAX_DURATION_MS);
-        assert_eq!(clamped["corrections"][0]["reason"], "limit-clamped-to-maximum");
-        let hour = resolve_input_limits(&json!({"message":"继续精修，通过 Blender MCP 至少进行 60 分钟有效建模"}));
+        assert_eq!(
+            clamped["corrections"][0]["reason"],
+            "limit-clamped-to-maximum"
+        );
+        let hour = resolve_input_limits(
+            &json!({"message":"继续精修，通过 Blender MCP 至少进行 60 分钟有效建模"}),
+        );
         assert_eq!(hour["limits"]["minActiveMs"], 3_600_000);
         assert_eq!(hour["limits"]["maxDurationMs"], 5_400_000);
         let english = resolve_input_limits(&json!({"message":"work for at least 2 hours"}));
         assert_eq!(english["limits"]["minActiveMs"], 7_200_000);
-        let explicit = resolve_input_limits(&json!({"message":"至少有效工作 1.5 小时","runLimits":{"maxDurationMs":21_600_000}}));
+        let explicit = resolve_input_limits(
+            &json!({"message":"至少有效工作 1.5 小时","runLimits":{"maxDurationMs":21_600_000}}),
+        );
         assert_eq!(explicit["limits"]["maxDurationMs"], 21_600_000);
-        for (message, minutes) in [("至少工作一小时", 60), ("至少半小时", 30), ("至少要再认真做一个半小时", 90),
-            ("至少两个小时", 120), ("起码九十分钟", 90), ("不少于 1 小时 30 分钟", 90), ("至少一个钟头", 60),
-            ("至少十五分钟", 15), ("至少 45 min", 45)] {
-            assert_eq!(resolve_input_limits(&json!({"message":message}))["limits"]["minActiveMs"], minutes * 60_000, "{message}");
+        for (message, minutes) in [
+            ("至少工作一小时", 60),
+            ("至少半小时", 30),
+            ("至少要再认真做一个半小时", 90),
+            ("至少两个小时", 120),
+            ("起码九十分钟", 90),
+            ("不少于 1 小时 30 分钟", 90),
+            ("至少一个钟头", 60),
+            ("至少十五分钟", 15),
+            ("至少 45 min", 45),
+        ] {
+            assert_eq!(
+                resolve_input_limits(&json!({"message":message}))["limits"]["minActiveMs"],
+                minutes * 60_000,
+                "{message}"
+            );
         }
-        for plain in ["5 分钟前我打开了 Blender", "你好", "渲染 60 帧", "至少三个文件，耗时 60 分钟"] {
-            assert!(resolve_input_limits(&json!({"message":plain}))["limits"].get("minActiveMs").is_none(), "{plain}");
+        for plain in [
+            "5 分钟前我打开了 Blender",
+            "你好",
+            "渲染 60 帧",
+            "至少三个文件，耗时 60 分钟",
+        ] {
+            assert!(
+                resolve_input_limits(&json!({"message":plain}))["limits"]
+                    .get("minActiveMs")
+                    .is_none(),
+                "{plain}"
+            );
         }
         assert_eq!(model_request_allowance(1_800_000), 256);
         assert_eq!(model_request_allowance(5_400_000), 540);
@@ -604,27 +684,62 @@ mod tests {
     #[test]
     fn operational_renewal_preserves_each_explicit_dimension_and_accumulated_time() {
         let implicit = OperationalBudgetPolicy::from_input(&json!({"message":"继续完成原任务"}));
-        assert_eq!(operational_budget_floor(implicit, 256, 1_800_000, 256, Some(1_800_000)), (320, 3_600_000));
-        let explicit_time = OperationalBudgetPolicy::from_input(&json!({"runLimits":{"maxDurationMs":1_800_000}}));
-        assert_eq!(operational_budget_floor(explicit_time, 256, 1_800_000, 256, Some(1_800_000)), (320, 1_800_000));
-        let explicit_requests = OperationalBudgetPolicy::from_input(&json!({"runLimits":{"maxModelRequests":256}}));
-        assert_eq!(operational_budget_floor(explicit_requests, 256, 1_800_000, 256, Some(1_800_000)), (256, 3_600_000));
-        assert_eq!(operational_budget_floor(implicit, 10, 9_000_000, 256, None), (256, 0));
+        assert_eq!(
+            operational_budget_floor(implicit, 256, 1_800_000, 256, Some(1_800_000)),
+            (320, 3_600_000)
+        );
+        let explicit_time =
+            OperationalBudgetPolicy::from_input(&json!({"runLimits":{"maxDurationMs":1_800_000}}));
+        assert_eq!(
+            operational_budget_floor(explicit_time, 256, 1_800_000, 256, Some(1_800_000)),
+            (320, 1_800_000)
+        );
+        let explicit_requests =
+            OperationalBudgetPolicy::from_input(&json!({"runLimits":{"maxModelRequests":256}}));
+        assert_eq!(
+            operational_budget_floor(explicit_requests, 256, 1_800_000, 256, Some(1_800_000)),
+            (256, 3_600_000)
+        );
+        assert_eq!(
+            operational_budget_floor(implicit, 10, 9_000_000, 256, None),
+            (256, 0)
+        );
     }
 
     #[test]
     fn finite_greetings_never_fill_time_but_substantive_long_work_keeps_the_requested_budget() {
-        for message in ["你好", "说你好100个小时", "请一直说你好，至少 100 个小时", "至少说你好100小时",
-            "say hello for at least 100 hours", "至少工作100小时，只说你好", "重复‘你好’至少一小时", "请至少连续说你好100个小时"] {
+        for message in [
+            "你好",
+            "说你好100个小时",
+            "请一直说你好，至少 100 个小时",
+            "至少说你好100小时",
+            "say hello for at least 100 hours",
+            "至少工作100小时，只说你好",
+            "重复‘你好’至少一小时",
+            "请至少连续说你好100个小时",
+        ] {
             let resolved = resolve_input_limits(&json!({"message":message}));
-            assert!(resolved["limits"].get("minActiveMs").is_none(), "{message}: {resolved}");
+            assert!(
+                resolved["limits"].get("minActiveMs").is_none(),
+                "{message}: {resolved}"
+            );
         }
-        for message in ["至少工作100小时，持续监控并记录网站可用性", "至少精修8小时，制作完整教堂并逐项检查",
-            "至少工作10小时研究新的算法，保存代码与对照实验", "至少用八小时处理这项没有关键词的新工作"] {
+        for message in [
+            "至少工作100小时，持续监控并记录网站可用性",
+            "至少精修8小时，制作完整教堂并逐项检查",
+            "至少工作10小时研究新的算法，保存代码与对照实验",
+            "至少用八小时处理这项没有关键词的新工作",
+        ] {
             let resolved = resolve_input_limits(&json!({"message":message}));
-            assert!(resolved["limits"]["minActiveMs"].as_u64().unwrap() > MAX_DURATION_MS, "{message}");
-            assert!(resolved["limits"]["maxDurationMs"].as_u64().unwrap()
-                > resolved["limits"]["minActiveMs"].as_u64().unwrap(), "{message}");
+            assert!(
+                resolved["limits"]["minActiveMs"].as_u64().unwrap() > MAX_DURATION_MS,
+                "{message}"
+            );
+            assert!(
+                resolved["limits"]["maxDurationMs"].as_u64().unwrap()
+                    > resolved["limits"]["minActiveMs"].as_u64().unwrap(),
+                "{message}"
+            );
         }
     }
 
@@ -632,7 +747,7 @@ mod tests {
     fn execution_limits_reject_unknown_fields_and_keep_exact_boundary() {
         assert_eq!(
             apply("budget.limits", &json!({})).unwrap()["maxDurationMs"],
-            1_800_000
+            3_600_000
         );
         assert_eq!(
             apply("budget.limits", &json!({"maxRounds":1})).unwrap()["maxRounds"],
@@ -652,17 +767,17 @@ mod tests {
         assert_eq!(
             apply(
                 "budget.check",
-                &json!({"rounds":64,"toolCalls":256,"generatedTokens":1_048_576})
+                &json!({"rounds":128,"toolCalls":512,"generatedTokens":1_048_576})
             )
             .unwrap(),
             Value::Null
         );
         assert_eq!(
-            apply("budget.check", &json!({"rounds":65})).unwrap_err(),
+            apply("budget.check", &json!({"rounds":129})).unwrap_err(),
             "TOOL_RUN_ROUND_LIMIT"
         );
         assert_eq!(
-            apply("budget.check", &json!({"toolCalls":257})).unwrap_err(),
+            apply("budget.check", &json!({"toolCalls":513})).unwrap_err(),
             "TOOL_RUN_CALL_LIMIT"
         );
     }

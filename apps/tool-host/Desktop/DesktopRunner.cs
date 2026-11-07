@@ -33,7 +33,6 @@ internal static class DesktopRunner
             try { completion.TrySetResult(Run(request, deadline.Token)); }
             catch (Exception error) { completion.TrySetException(error); }
         }) { IsBackground = true, Name = "KYNXA desktop operation" };
-        // UIA runs on its own MTA thread, never an application's UI thread.
         // UIA 在独立 MTA 线程运行，不占用应用的界面线程。
         operationThread.SetApartmentState(ApartmentState.MTA); operationThread.Start();
         try { return await completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs + 100), cancellation); }
@@ -41,9 +40,7 @@ internal static class DesktopRunner
             (error is TimeoutException || error is OperationCanceledException && deadline.IsCancellationRequested))
         {
             deadline.Cancel();
-            // A stalled provider cannot be cancelled in-process. The helper's background thread
-            // is discarded when this independent request process exits after its timeout receipt.
-            // 卡住的提供方无法在进程内取消；独立请求进程返回超时回执并退出后，其后台线程随之终止。
+            // 卡住的提供方无法在进程内取消；独立请求进程返回超时结果并退出后，其后台线程随之终止。
             throw new DesktopException("DESKTOP_READ_TIMEOUT", "The bounded UI Automation read timed out; no input was sent.");
         }
     }
@@ -98,7 +95,6 @@ internal static class DesktopRunner
         EnumWindows((window, _) =>
         {
             GetWindowThreadProcessId(window, out uint ownerProcessId);
-            // Filter before reading titles. Tests inspect only their own synthetic process.
             // 先过滤进程再读取标题；测试只检查自己创建的模拟进程。
             if (IsWindowVisible(window) && (processId is null || ownerProcessId == processId))
             {

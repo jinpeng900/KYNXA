@@ -61,7 +61,6 @@ function Get-McpHash([string]$Path) {
 }
 function Write-McpJson([string]$Path, $Value) {
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path)) | Out-Null
-    # Publish each complete document atomically; a mismatched pair invalidates reuse.
     # 每份完整文档原子发布；两份清单不一致时不能复用缓存。
     $pending = $Path + '.write-' + [Guid]::NewGuid().ToString('N')
     try {
@@ -78,7 +77,6 @@ function Save-McpPreparedState($Files) {
     Save-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp' -InputHash $componentInput -Files $records -Scope 'runtime/mcp'
 }
 function Test-McpInventory($Previous, $Integrity) {
-    # Cache metadata cannot redefine a complete payload as an empty or partial inventory.
     # 缓存元数据不能把空清单或部分文件重新定义为完整载荷。
     if ($Previous.schemaVersion -ne 1 -or $Previous.runtimeIdentifier -ne $RuntimeIdentifier -or
         $Integrity.schemaVersion -ne 1 -or -not $Integrity.files -or
@@ -136,7 +134,6 @@ $outputManifest = Join-Path $payloadRoot 'manifest.json'
 $integrityPath = Join-Path $payloadRoot 'payload-integrity.json'
 $fileList = Join-Path $bundleRootPath 'mcp-files.txt'
 
-# The build lock protects one immutable vendor payload; user extensions are never installed here.
 # 构建锁保护固定的第三方随包资源；用户扩展不在此处安装，也不共享用户 npm 配置。
 $cacheLock = $null
 $lockDeadline = [DateTime]::UtcNow.AddMinutes(2)
@@ -228,7 +225,6 @@ try {
     $servicesInput = Get-KynxaResourceInputHash -Paths @((Join-Path $sourceRoot 'package.json'), (Join-Path $sourceRoot 'package-lock.json')) -Values @('npm-ci-v1', $node.version)
     if ($VerifyResources -or -not (Test-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp-services' -InputHash $servicesInput)) {
         foreach ($name in @('package.json', 'package-lock.json')) { Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination (Join-Path $servicesRoot $name) -Force }
-        # A private configuration keeps source overrides local while npm verifies locked package integrity.
         # 私有配置只影响随包构建源，npm 继续验证锁文件中的固定依赖完整性。
         $npmArguments = @($npmCli, 'ci', '--prefix', $servicesRoot, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', '--cache', (Join-Path $cacheRoot 'npm-cache'), '--userconfig', (Join-Path $cacheRoot 'npmrc'), '--registry', $NpmRegistry, '--fetch-retries=3', '--fetch-retry-mintimeout=2000', '--fetch-retry-maxtimeout=15000', '--fetch-timeout=120000', '--loglevel=notice', '--progress=true')
         [IO.File]::WriteAllText((Join-Path $cacheRoot 'npmrc'), 'registry=' + $NpmRegistry.TrimEnd('/') + '/' + [Environment]::NewLine, $utf8)
@@ -254,7 +250,6 @@ try {
         if (-not [IO.File]::Exists($entryPath) -or $package.version -ne $service.version) { throw "Pinned MCP entry missing: $($service.id)" }
         $services += @{id=$service.id;package=$service.package;version=$service.version;entry=$service.entry;sha256=(Get-McpHash $entryPath)}
     }
-    # Browser binaries are prepared once on the build machine; users never invoke Playwright install.
     # 浏览器二进制只在构建机准备一次；用户运行时不调用 Playwright install。
     $browserRoot = Assert-McpPath $payloadRoot (Join-Path $payloadRoot 'browsers')
     [IO.Directory]::CreateDirectory($browserRoot) | Out-Null

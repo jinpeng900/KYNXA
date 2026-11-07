@@ -5,7 +5,6 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Pure parsing of MCP editor references. Credentials are names, never values or model prompts.
 /// 纯解析 MCP 编辑器引用；凭据只以名称保存，不包含实际值，也不进入模型提示。
 /// </summary>
 public static class McpConfigurationInput

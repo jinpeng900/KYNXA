@@ -7,8 +7,7 @@ fn bounded(value: &Value, fallback: i64, minimum: i64, maximum: i64) -> i64 {
         .map_or(fallback, |number| number.clamp(minimum, maximum))
 }
 
-/// Record configuration, grants and truncation together; candidate capacity is independent from final references.
-/// 同时记录配置、授额与截断；内部候选容量独立于最终引用额度，资源建议不能改变用户上限。
+/// 同时记录配置、额度与截断；内部候选容量独立于最终引用额度，用户上限不变。
 pub fn apply(args: &Value) -> Result<Value, String> {
     if let Some(budget) = args.get("budget").filter(|value| value.is_object()) {
         return Ok(retire_rerank_budget(budget.clone()));
@@ -76,14 +75,17 @@ pub fn apply(args: &Value) -> Result<Value, String> {
     Ok(retire_rerank_budget(budget))
 }
 
-/// Keep retired fields readable for one compatibility version without reserving a neural-rerank budget.
 /// 旧字段保留一个兼容版本并统一为 null，不再计算或申请神经重排额度。
 fn retire_rerank_budget(mut budget: Value) -> Value {
     budget["rerankCandidates"] = Value::Null;
     budget["audit"]["configured"]["rerankCandidates"] = Value::Null;
     budget["audit"]["configured"]["localRerankCandidates"] = Value::Null;
     budget["audit"]["approved"]["rerankCandidates"] = Value::Null;
-    for field in ["rerankRequestedCandidates", "resourceRerankLimit", "rerankBudgetSource"] {
+    for field in [
+        "rerankRequestedCandidates",
+        "resourceRerankLimit",
+        "rerankBudgetSource",
+    ] {
         budget["audit"][field] = Value::Null;
     }
     budget

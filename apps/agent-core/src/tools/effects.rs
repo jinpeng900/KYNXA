@@ -15,8 +15,6 @@ struct EffectReceipt {
     reusable: bool,
 }
 
-/// Request-owned effect protection. Model metadata cannot confirm a dispatch.
-/// 请求级副作用保护；模型状态和文字不能确认真实派发结果。
 #[derive(Default)]
 pub struct EffectLedger {
     completed: Vec<(String, EffectReceipt)>,
@@ -49,14 +47,14 @@ impl EffectLedger {
                             "completed"
                         })
                     });
-                // This list is a bounded diagnostic projection; recovery protection lives in the keyed sets.
-                // 此列表只是有界诊断投影；恢复保护保存在按操作键组织的集合中，不能因诊断容量丢弃。
-                self.observed_receipt_count = self.observed_receipt_count.saturating_add(1);
-                if self.receipts.len() == MAX_EFFECT_RECEIPTS { self.receipts.remove(0); }
+                // 此列表只是限量诊断映射；恢复保护另存在按操作键组织的集合中。
+                self.observed_receipt_count += 1;
+                if self.receipts.len() == MAX_EFFECT_RECEIPTS {
+                    self.receipts.remove(0);
+                }
                 self.receipts
                     .push(json!({"id": call["id"], "name": call["name"], "status": status}));
-                // Rebinding an old receipt is not a new dispatch or a fresh state observation.
-                // 复用回执和未派发结果不会产生新副作用，也不能刷新旧状态的有效性。
+                // 复用结果和未派发结果不产生新副作用，也不刷新旧状态。
                 if result["reused"].as_bool().unwrap_or(false) || result["executed"] == false {
                     return Ok(Value::Null);
                 }
@@ -73,11 +71,13 @@ impl EffectLedger {
                 } else if !is_truthy(&result["isError"])
                     && (!is_truthy(&result["status"]) || result["status"] == "completed")
                 {
-                    // A restored protected state now belongs to this dispatch, not the superseded one.
-                    // 已恢复的受保护文件状态归属于本次派发，后续修复不能再绑定过期回执。
+                    // 已恢复的受保护文件状态归属于本次派发，后续修复绑定新结果。
                     if receipt.mutable_target.is_some() {
                         if let Some(protected) = &mut self.protected_effects {
-                            if protected.iter().any(|(previous_key, _)| previous_key == &key) {
+                            if protected
+                                .iter()
+                                .any(|(previous_key, _)| previous_key == &key)
+                            {
                                 set_receipt(protected, key.clone(), receipt.clone());
                             }
                         }
@@ -87,8 +87,7 @@ impl EffectLedger {
                 Ok(Value::Null)
             }
             "effects.protect" => {
-                // Freeze the pre-recovery set; later work joins only at an explicit checkpoint.
-                // 冻结恢复前的回执集合；后续成功操作仅在明确检查点加入保护。
+                // 冻结恢复前的结果集合；后续成功操作仅在明确检查点加入保护。
                 let protected = self
                     .protected_effects
                     .get_or_insert_with(|| self.completed.clone());
@@ -105,9 +104,12 @@ impl EffectLedger {
                     return Ok(Value::Null);
                 }
                 let key = effect_key(call)?;
-                // Reuse the unconfirmed dispatch as-is; do not replay it or certify success.
-                // 原样复用未确认的派发，既不重复执行，也不冒充成功。
-                if let Some((_, receipt)) = self.unknown.iter().find(|(previous_key, _)| previous_key == &key) {
+                // 原样复用未确认的派发，既不重复执行，也不算成功。
+                if let Some((_, receipt)) = self
+                    .unknown
+                    .iter()
+                    .find(|(previous_key, _)| previous_key == &key)
+                {
                     let mut previous = receipt_value(receipt);
                     previous["result"]["reused"] = json!(true);
                     return Ok(previous);
@@ -147,10 +149,8 @@ impl EffectLedger {
     }
 
     fn invalidate_file_state(&mut self, target: Option<&str>) {
-        // A later mutation invalidates state receipts, not historical one-time dispatch facts.
-        // 后续变更使旧文件状态回执失效；发送、提交或启动等一次性派发记录仍保留。
-        // Opaque effects may touch files, so they form a barrier for file-state reuse only.
-        // 无法解析目标的副作用可能修改文件，只撤销文件状态回执的复用资格。
+        // 后续变更使旧文件状态结果失效；发送、提交或启动等一次性派发记录仍保留。
+        // 无法解析目标的副作用可能修改文件，只撤销文件状态结果的复用资格。
         let invalidate = |items: &mut Vec<(String, EffectReceipt)>| {
             for (_, receipt) in items {
                 if let Some(previous_target) = receipt.mutable_target.as_deref() {
@@ -276,7 +276,6 @@ fn effect_key(call: &Value) -> Result<String, String> {
         .and_then(Value::as_object)
         .ok_or("INVALID_AGENT_CORE_ARGUMENTS")?
         .clone();
-    // Only app-owned root justification fields are excluded; nested MCP arguments are business data.
     // 仅排除应用自有的顶层理由字段；MCP 嵌套 arguments 内同名字段仍属于业务输入。
     business.remove("reason");
     business.remove("policy");
@@ -288,24 +287,30 @@ fn effect_key(call: &Value) -> Result<String, String> {
 fn mutable_target(call: &Value, workspace_root: Option<&str>) -> Option<String> {
     if !matches!(
         call["name"].as_str(),
-        Some("filesystem.write" | "filesystem.edit" | "filesystem.delete" | "filesystem.mkdir" | "document.create" | "attachment.export")
+        Some(
+            "filesystem.write"
+                | "filesystem.edit"
+                | "filesystem.delete"
+                | "filesystem.mkdir"
+                | "document.create"
+                | "attachment.export"
+        )
     ) {
         return None;
     }
     let path = call["arguments"]["path"].as_str()?;
     let target = Path::new(path);
-    // The trusted request root resolves aliases; this identity never grants file access.
     // 可信请求目录用于归一化相对路径；目标标识不授予或替代文件访问权限。
     let resolved = if target.is_relative() {
         workspace_root.map(|root| Path::new(root).join(target))
     } else {
         None
     };
-    let normalized = absolute_path(&resolved.map_or_else(|| path.to_owned(), |path| {
-        path.to_string_lossy().into_owned()
-    }));
-    // Approved targets can have Windows short-name aliases; a failed resolution proves no identity.
-    // 已批准目标可能使用 Windows 短名别名；解析失败不能被当作已确认的同一目标。
+    let normalized = absolute_path(&resolved.map_or_else(
+        || path.to_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    ));
+    // 已批准目标可能使用 Windows 短名别名，解析失败时不算同一目标。
     canonical(&normalized, true)
         .ok()
         .map(|target| path_key(&target))
@@ -345,16 +350,50 @@ mod tests {
     fn diagnostic_capacity_does_not_drop_recovery_protection_or_unknown_outcomes() {
         let mut ledger = EffectLedger::default();
         for index in 0..MAX_EFFECT_RECEIPTS + 5 {
-            ledger.apply("effects.observe", &json!({"call":call(&index.to_string(), &format!("command-{index}")),
-                "result":{"status":"completed"}})).unwrap();
+            ledger
+                .apply(
+                    "effects.observe",
+                    &json!({"call":call(&index.to_string(), &format!("command-{index}")),
+                "result":{"status":"completed"}}),
+                )
+                .unwrap();
         }
-        ledger.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
-        let first = ledger.apply("effects.previous", &json!({"call":call("retry", "command-0")})).unwrap();
+        ledger
+            .apply("effects.protect", &json!({"includeCurrent":true}))
+            .unwrap();
+        let first = ledger
+            .apply(
+                "effects.previous",
+                &json!({"call":call("retry", "command-0")}),
+            )
+            .unwrap();
         assert_eq!(first["result"]["status"], "completed");
-        assert_eq!(ledger.apply("effects.state", &json!({})).unwrap()["effectCount"], MAX_EFFECT_RECEIPTS + 5);
-        ledger.apply("effects.observe", &json!({"call":call("unknown", "uncertain"),"result":{"status":"unknown"}})).unwrap();
-        assert_eq!(ledger.apply("effects.state", &json!({})).unwrap()["unknown"].as_array().unwrap().len(), 1);
-        assert_eq!(ledger.apply("effects.previous", &json!({"call":call("retry", "command-0")})).unwrap()["result"]["status"], "completed");
+        assert_eq!(
+            ledger.apply("effects.state", &json!({})).unwrap()["effectCount"],
+            MAX_EFFECT_RECEIPTS + 5
+        );
+        ledger
+            .apply(
+                "effects.observe",
+                &json!({"call":call("unknown", "uncertain"),"result":{"status":"unknown"}}),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.apply("effects.state", &json!({})).unwrap()["unknown"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            ledger
+                .apply(
+                    "effects.previous",
+                    &json!({"call":call("retry", "command-0")})
+                )
+                .unwrap()["result"]["status"],
+            "completed"
+        );
     }
 
     #[test]
@@ -410,22 +449,47 @@ mod tests {
         let mut ledger = EffectLedger::default();
         let original = call("original", "fixture");
         ledger
-            .apply("effects.observe", &json!({"call": original, "result": {"status": "unknown"}}))
+            .apply(
+                "effects.observe",
+                &json!({"call": original, "result": {"status": "unknown"}}),
+            )
             .unwrap();
-        ledger.apply("effects.protect", &json!({"includeCurrent": true})).unwrap();
+        ledger
+            .apply("effects.protect", &json!({"includeCurrent": true}))
+            .unwrap();
         let state = ledger.apply("effects.state", &json!({})).unwrap();
         assert_eq!(state["unknown"].as_array().unwrap().len(), 1);
         assert!(state.get("hasUnknownEffects").is_none());
         let mut repeated = call("retry", "fixture");
         repeated["arguments"]["reason"] = json!("Retry the same operation");
-        let previous = ledger.apply("effects.previous", &json!({"call": repeated})).unwrap();
+        let previous = ledger
+            .apply("effects.previous", &json!({"call": repeated}))
+            .unwrap();
         assert_eq!(previous["call"]["id"], "original");
         assert_eq!(previous["result"]["status"], "unknown");
         assert_eq!(previous["result"]["reused"], true);
         assert!(ledger.completed.is_empty());
-        assert!(ledger.apply("effects.previous", &json!({"call":call("other", "unrelated")})).unwrap().is_null());
-        assert!(ledger.apply("effects.previous", &json!({"call":original,"observation":true})).unwrap().is_null());
-        let fallback = ledger.apply("effects.fallback", &json!({"message": "继续处理"})).unwrap();
+        assert!(
+            ledger
+                .apply(
+                    "effects.previous",
+                    &json!({"call":call("other", "unrelated")})
+                )
+                .unwrap()
+                .is_null()
+        );
+        assert!(
+            ledger
+                .apply(
+                    "effects.previous",
+                    &json!({"call":original,"observation":true})
+                )
+                .unwrap()
+                .is_null()
+        );
+        let fallback = ledger
+            .apply("effects.fallback", &json!({"message": "继续处理"}))
+            .unwrap();
         assert!(fallback.as_str().unwrap().contains("结果尚未确认 1 项"));
     }
 

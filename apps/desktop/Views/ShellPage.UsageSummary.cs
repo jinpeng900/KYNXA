@@ -72,7 +72,6 @@ public sealed partial class ShellPage
 
     private async Task RefreshUsageSummaryAsync(UsageSummaryScope scope, CancellationToken cancellationToken)
     {
-        // Compact rows refresh when the reply settles. Only expanded details poll, with one request in flight.
         // 紧凑行在回复结算时刷新；仅展开详情低频轮询，并且同一范围最多一个请求，不占发送前置。
         while (!cancellationToken.IsCancellationRequested && _usageSummaryScope == scope && _usageSummaryLoaded && !_chatClosing)
         {

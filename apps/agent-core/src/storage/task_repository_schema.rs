@@ -1,4 +1,3 @@
-//! One relational task store; original messages and tool bodies remain in their existing owners.
 //! 唯一任务关系库仅保存状态和引用；消息原文及工具正文仍由现有正式存储拥有。
 
 pub(super) const SCHEMA: &str = r#"

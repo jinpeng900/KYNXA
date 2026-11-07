@@ -27,7 +27,6 @@
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const renderer = renderers.get(kind);
     if (!renderer) throw new Error('Office preview renderer unavailable');
-    // A cached native view owns the resulting DOM and state; switching tabs does not call open again.
     // 缓存视图持有生成的 DOM 与状态；普通标签切换不会再次进入 open 或重复下载解包。
     return renderer(bytes, options);
   }

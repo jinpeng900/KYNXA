@@ -18,7 +18,6 @@ use crate::models::protocol::{array, slice, string};
 const MAX_SKILLS: usize = 128;
 const MAX_CANDIDATES: usize = 512;
 
-/// Validate the public page before discovery touches any skill source directory.
 /// 在访问任何技能目录前校验公开分页，错误保留可供模型纠正的参数边界。
 pub(crate) fn list_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
     if !arguments.is_object() {
@@ -27,8 +26,10 @@ pub(crate) fn list_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
             "skill.list 参数必须是对象。",
             400,
         )
-        .with_details(json!({"tool":"skill.list","parameter":"arguments","type":"object",
-            "executed":false,"requestDispatched":false,"recoverable":true})));
+        .with_details(
+            json!({"tool":"skill.list","parameter":"arguments","type":"object",
+            "executed":false,"requestDispatched":false,"recoverable":true}),
+        ));
     }
     let page_value = |name: &str, fallback: u64| {
         let value = &arguments[name];
@@ -50,7 +51,10 @@ pub(crate) fn list_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
                     "executed":false,"requestDispatched":false,"recoverable":true}))
             })
     };
-    Ok((page_value("offset", 0)?, page_value("limit", MAX_SKILLS as u64)?))
+    Ok((
+        page_value("offset", 0)?,
+        page_value("limit", MAX_SKILLS as u64)?,
+    ))
 }
 
 fn cancelled(cancellation: &Option<Arc<AtomicBool>>) -> ServiceResult<()> {
@@ -68,7 +72,6 @@ fn cancelled(cancellation: &Option<Arc<AtomicBool>>) -> ServiceResult<()> {
 }
 
 pub(crate) fn identity(path: &Path, arguments: &Value) -> Value {
-    // Normalize lexical separators before hashing legacy Windows path identities.
     // 对旧 Windows 路径身份求哈希前先统一词法分隔符。
     let normalized_path = absolute_path(&path_text(path));
     let path = normalized_path.as_path();
@@ -227,8 +230,7 @@ fn scope(arguments: &Value) -> Value {
     json!({"aliases":aliases.iter().map(|path|path_text(path)).collect::<Vec<_>>(),"denied":denied})
 }
 
-/// Discovery owns bounded traversal and source precedence; YAML parsing remains an SDK boundary.
-/// 发现服务拥有有界遍历与来源优先级；YAML 解析保留为 SDK 边界。
+/// 发现服务拥有限量遍历与来源优先级；YAML 解析保留为 SDK 边界。
 #[derive(Default)]
 pub struct SkillDiscovery {
     arguments: Value,
@@ -360,7 +362,6 @@ impl SkillDiscovery {
         };
         match scan() {
             Ok((candidates, truncated)) => {
-                // The runtime supplies collation ordinals without owning candidate admission or traversal.
                 // 运行时提供排序序号，不拥有候选接纳或遍历职责。
                 if truncated {
                     self.status["truncated"] = json!(true);
@@ -758,8 +759,14 @@ mod pagination_tests {
     #[test]
     fn list_page_uses_compatible_defaults_and_accepts_schema_boundaries() {
         assert_eq!(list_page(&json!({})).unwrap(), (0, 128));
-        assert_eq!(list_page(&json!({"offset":128,"limit":1})).unwrap(), (128, 1));
-        assert_eq!(list_page(&json!({"offset":0,"limit":128})).unwrap(), (0, 128));
+        assert_eq!(
+            list_page(&json!({"offset":128,"limit":1})).unwrap(),
+            (128, 1)
+        );
+        assert_eq!(
+            list_page(&json!({"offset":0,"limit":128})).unwrap(),
+            (0, 128)
+        );
     }
 
     #[test]

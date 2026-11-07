@@ -20,7 +20,6 @@ struct Write<'a> {
     message: &'a RawValue,
 }
 
-/// The durable intent owns directory moves and canonical publication, including restart replay.
 /// 持久事务意图拥有目录移动和正式发布，包括进程重启后的重放。
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
@@ -66,7 +65,6 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             400,
         )
     })?;
-    // Validate every move and append destination before writing durable intent or touching a directory.
     // 写入持久意图或改动任何目录前，先验证全部移动及追加目标。
     for item in projection["Moves"].as_array().unwrap() {
         for location in [&item["From"], &item["To"]] {
@@ -165,8 +163,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         .as_bytes()
         .to_vec();
     managed_files::atomic_write(root, &catalog_path, &catalog_bytes, u64::MAX)?;
-    // A completed canonical replacement is the receipt. Cleanup never turns it into a cancelled write.
-    // 正式替换完成即为提交回执；清理不能将其错误报告为已取消写入。
+    // 正式替换完成即为提交结果，后续清理不影响这个结果。
     let cleanup_pending = match fs::remove_file(&journal_path) {
         Ok(()) => false,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,

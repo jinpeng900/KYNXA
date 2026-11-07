@@ -75,7 +75,6 @@ public sealed partial class LocalModelsPage
         _inlineEditor = new Border { Child = page, Padding = new Thickness(20, 12, 20, 16),
             Background = AppearanceService.GetBrush("KynxaMainBrush"), CornerRadius = new CornerRadius(12) };
         Grid.SetRowSpan(_inlineEditor, _root.RowDefinitions.Count);
-        // Inline forms stay inside the owning settings category; hidden controls cannot retain keyboard focus.
         // 表单在所属设置分类内展开；隐藏原页面，避免键盘进入表单背后的控件。
         foreach (var child in _root.Children) child.Visibility = Visibility.Collapsed;
         _root.Children.Add(_inlineEditor);
@@ -128,7 +127,6 @@ public sealed partial class LocalModelsPage
         string directory = _snapshot.InstallDirectory;
         await RunOperationAsync(async () =>
         {
-            // Let the owner create/check the library before the first installation as well.
             // 首次安装前也由后端所有者创建并检查模型目录，界面只负责打开。
             var snapshot = await _api.SettingsAsync(installDirectory: directory, token: _lifetime.Token);
             if (!_closed)

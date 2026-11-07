@@ -1,4 +1,3 @@
-//! Unified configured search, source cooldowns and conversation-scoped request sharing.
 //! 统一已配置的网页搜索、来源冷却与聊天内请求合并；不扩大权限或改写原始查询。
 
 use super::gateway::{GatewayToolContext, check_cancelled, failure, wait_for_cancellation};
@@ -11,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_SEARCH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-/// Sources tried for one query, including the built-in last-resort source.
 /// 一次查询最多尝试的来源数，包含内置最后备用来源。
 const MAX_SEARCH_SOURCES: usize = 8;
 
@@ -33,7 +31,6 @@ struct SearchWaiter(Arc<PendingSearch>);
 
 impl Drop for SearchWaiter {
     fn drop(&mut self) {
-        // Keep shared reads for remaining waiters; the last waiter cancels the network task.
         // 仍有等待者就保留共享读取；最后一位离开时取消网络任务。
         if self.0.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
             let _ = self.0.cancel.send(true);
@@ -41,8 +38,7 @@ impl Drop for SearchWaiter {
     }
 }
 
-/// Runtime-owned cooldowns and bounded, conversation-scoped query sharing.
-/// 冷却与查询合并归运行时所有；缓存有界并按聊天和授权快照隔离。
+/// 冷却与查询合并归运行时所有；缓存限量并按聊天和授权快照隔离。
 #[derive(Default)]
 pub(crate) struct SearchState {
     cooldowns: Mutex<HashMap<String, (Instant, Duration, GatewayError)>>,
@@ -55,8 +51,7 @@ impl SearchState {
     }
 
     fn provider_key(server: &Value) -> String {
-        // Names, aliases and timeout edits do not create a new upstream quota identity.
-        // 名称、别名和超时设置变化不能产生新的远端配额身份。
+        // 名称、别名和超时设置变化不产生新的远端配额身份。
         Self::key(
             &json!({"url":server["url"],"command":server["command"],"args":server["args"],
             "env":server["env"],"envRefs":server["envRefs"],"headers":server["headers"],"headerEnv":server["headerEnv"],"auth":server["auth"]}),
@@ -78,11 +73,9 @@ impl SearchState {
             .unwrap_or_else(|error| error.into_inner());
         cooldowns.retain(|_, (started, duration, _)| started.elapsed() < *duration);
         let (started, duration, error) = cooldowns.get(&Self::provider_key(server))?;
-        Some(
-            error.clone().with_retry_after(Some(
-                duration.saturating_sub(started.elapsed()).as_millis() as u64,
-            )),
-        )
+        Some(error.clone().with_retry_after(Some(
+            duration.saturating_sub(started.elapsed()).as_millis() as u64,
+        )))
     }
 
     fn failed(&self, server: &Value, error: &GatewayError) {
@@ -99,8 +92,7 @@ impl SearchState {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         cooldowns.retain(|_, (started, duration, _)| started.elapsed() < *duration);
-        // Do not evict an unexpired rate limit to make a service immediately eligible again.
-        // 未到期的限流记录不能为腾缓存而删除，再次请求会重新收到并保留真实限制。
+        // 未到期的限流记录要保留，否则再次请求还会被限流。
         if cooldowns.len() < 128 || cooldowns.contains_key(&Self::provider_key(server)) {
             cooldowns.insert(
                 Self::provider_key(server),
@@ -172,8 +164,7 @@ impl SearchState {
             }
         }
         requests.clear();
-        // Configuration invalidates shared work, not an upstream rate-limit cooldown.
-        // 配置变化撤销共享查询，但不能清除远端限流的真实冷却记录。
+        // 配置变化撤销共享查询，远端限流的冷却记录保留。
     }
 }
 
@@ -189,25 +180,35 @@ fn search_failure(error: GatewayError) -> GatewayError {
     {
         return error;
     }
-    if error.code == "MCP_CONNECTION_CAPACITY" || error.details["failureOrigin"] == "local-capacity" {
+    if error.code == "MCP_CONNECTION_CAPACITY" || error.details["failureOrigin"] == "local-capacity"
+    {
         let mut error = error;
         error.details["failureOrigin"] = json!("local-capacity");
         return error;
     }
     let http_status = error.details["httpStatus"].as_u64();
     let transport_failure = super::gateway_mcp::transient_connection_failure(&error.code);
-    let quota = error.details["providerCode"].as_str().is_some_and(|code| matches!(
-        code.to_ascii_uppercase().as_str(),
-        "INSUFFICIENT_QUOTA" | "QUOTA_EXCEEDED" | "CREDITS_EXHAUSTED"
-            | "INSUFFICIENT_CREDITS" | "PAYMENT_REQUIRED" | "CREDIT_BALANCE_EXHAUSTED"
-    ));
+    let quota = error.details["providerCode"].as_str().is_some_and(|code| {
+        matches!(
+            code.to_ascii_uppercase().as_str(),
+            "INSUFFICIENT_QUOTA"
+                | "QUOTA_EXCEEDED"
+                | "CREDITS_EXHAUSTED"
+                | "INSUFFICIENT_CREDITS"
+                | "PAYMENT_REQUIRED"
+                | "CREDIT_BALANCE_EXHAUSTED"
+        )
+    });
     let code = if http_status == Some(402) || quota {
         "WEB_SEARCH_QUOTA_EXHAUSTED"
     } else if http_status == Some(429) {
         "WEB_SEARCH_RATE_LIMITED"
-    } else if matches!(http_status, Some(401 | 403)) || error.code == "WEB_SEARCH_CREDENTIAL_MISSING" {
+    } else if matches!(http_status, Some(401 | 403))
+        || error.code == "WEB_SEARCH_CREDENTIAL_MISSING"
+    {
         "WEB_SEARCH_AUTH_FAILED"
-    } else if http_status.is_some_and(|status| status >= 500) || transport_failure
+    } else if http_status.is_some_and(|status| status >= 500)
+        || transport_failure
         || [
             "WEB_SEARCH_TRANSIENT",
             "WEB_SEARCH_FAILED",
@@ -232,33 +233,57 @@ fn search_failure(error: GatewayError) -> GatewayError {
             "WEB_SEARCH_AUTH_FAILED" => "搜索服务认证或访问权限未满足。",
             _ => "搜索服务暂时不可用，已有结果与其他任务仍可继续。",
         },
-        if code == "WEB_SEARCH_QUOTA_EXHAUSTED" { 402 } else { error.status },
+        if code == "WEB_SEARCH_QUOTA_EXHAUSTED" {
+            402
+        } else {
+            error.status
+        },
     )
     .with_retry_after(error.retry_after_ms)
     .with_details(details)
 }
 
 fn tool_failure(value: &Value) -> Option<GatewayError> {
-    let has_error = |value: &Value| value.get("error").is_some_and(|error| !error.is_null() && error != &Value::Bool(false));
-    if value["isError"] != true && value["structuredContent"]["isError"] != true
-        && !has_error(value) && !has_error(&value["structuredContent"]) {
+    let has_error = |value: &Value| {
+        value
+            .get("error")
+            .is_some_and(|error| !error.is_null() && error != &Value::Bool(false))
+    };
+    if value["isError"] != true
+        && value["structuredContent"]["isError"] != true
+        && !has_error(value)
+        && !has_error(&value["structuredContent"])
+    {
         return None;
     }
-    // MCP timeouts and disconnects return unknown results; read-only search may safely retry.
     // MCP 超时或断线返回未知结果；只读搜索可安全重试。
     if value["code"] == "MCP_EXECUTION_UNKNOWN"
-        && matches!(value["causeCode"].as_str(), Some("MCP_TIMEOUT" | "MCP_CONNECTION_LOST" | "MCP_CONNECTION_CLOSED"))
+        && matches!(
+            value["causeCode"].as_str(),
+            Some("MCP_TIMEOUT" | "MCP_CONNECTION_LOST" | "MCP_CONNECTION_CLOSED")
+        )
     {
-        return Some(failure("WEB_SEARCH_TRANSIENT", "搜索服务调用超时或连接中断，可重试或改用备用来源。", 504)
-            .with_details(json!({"failureOrigin":"mcp-transport","causeCode":value["causeCode"]})));
+        return Some(
+            failure(
+                "WEB_SEARCH_TRANSIENT",
+                "搜索服务调用超时或连接中断，可重试或改用备用来源。",
+                504,
+            )
+            .with_details(json!({"failureOrigin":"mcp-transport","causeCode":value["causeCode"]})),
+        );
     }
     let details = super::gateway_mcp::provider_failure_details(value, "provider-tool");
-    // An unspecified tool error is a failed dependency, not an invented upstream HTTP 502.
     // 未提供状态的工具失败属于依赖失败，不伪造远端 HTTP 502 并据此重试。
     let status = details["httpStatus"].as_u64().unwrap_or(424) as u16;
-    Some(failure("WEB_SEARCH_TOOL_FAILED", "搜索服务返回失败回执，未将其当作搜索结果。", status)
+    Some(
+        failure(
+            "WEB_SEARCH_TOOL_FAILED",
+            "搜索服务返回失败回执，未将其当作搜索结果。",
+            status,
+        )
         .with_retry_after(details["retryAfterMs"].as_u64())
-        .with_details(details))
+        .with_details(details),
+    )
 }
 
 fn failure_receipt(error: &GatewayError) -> Value {
@@ -285,8 +310,6 @@ fn cacheable(value: &Value) -> bool {
             Ok(())
         }
     }
-    // Measure serialized size without copying the full result.
-    // 计算序列化大小，不复制完整结果。
     serde_json::to_writer(LimitedSize(0), value).is_ok()
 }
 
@@ -317,7 +340,7 @@ async fn search_provider(
     if server["builtin"] == super::gateway_deepseek_search::SOURCE_ID {
         return super::gateway_deepseek_search::search(query, count, server, ctx).await;
     }
-    let brave =server["id"].as_str().is_some_and(|id| id.contains("brave"));
+    let brave = server["id"].as_str().is_some_and(|id| id.contains("brave"));
     let command = std::path::Path::new(server["command"].as_str().unwrap_or(""))
         .file_name()
         .and_then(|name| name.to_str())
@@ -362,7 +385,9 @@ async fn search_provider(
                 response.status().as_u16(),
             )
             .with_retry_after(super::gateway_mcp::retry_after_ms(response.headers()))
-            .with_details(json!({"failureOrigin":"provider-http","httpStatus":response.status().as_u16()})));
+            .with_details(
+                json!({"failureOrigin":"provider-http","httpStatus":response.status().as_u16()}),
+            ));
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -397,8 +422,7 @@ async fn search_provider(
             ).map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))?,
         }));
     }
-    // A catalog view tolerates unavailable extensions; a selected search needs the actual handshake error.
-    // 工具目录允许单个扩展不可用；选定搜索必须保留真实握手失败及冷却，而不是误报不存在。
+    // 工具目录允许单个扩展不可用；选定搜索要报告真实的握手失败及冷却。
     super::gateway_mcp::connection(server, ctx).await?;
     let descriptors = super::gateway_mcp::catalog_selected(ctx, vec![server.clone()]).await?;
     let plan = super::gateway::native(
@@ -485,15 +509,13 @@ async fn search_inner(input: Value, ctx: &GatewayToolContext) -> Result<Value, G
     search_shared(input, servers, key, ctx).await
 }
 
-/// Ordered sources for one query: the selected or all configured search services, then the built-in fallback.
 /// 一次查询的有序来源：选定或全部已配置搜索服务在前，内置备用来源在后。
 async fn search_sources_for(selected: &str, ctx: &GatewayToolContext) -> Vec<Value> {
     let loaded = ctx.runtime.schemas.read().await.clone();
     let mut servers = super::gateway_mcp::servers(ctx)
         .into_iter()
         .filter_map(|server| {
-            // Discovery metadata must not change the connection's configuration identity and force another handshake.
-            // 发现目录仅用于筛选能力，不能混入连接配置身份，否则执行时会无故重新握手。
+            // 发现目录只用于筛选能力，不混入连接配置身份，否则执行时会无故重新握手。
             let mut discovery = server.clone();
             discovery["tools"] = json!(
                 loaded
@@ -507,7 +529,6 @@ async fn search_sources_for(selected: &str, ctx: &GatewayToolContext) -> Vec<Val
                 .then_some(server)
         })
         .collect::<Vec<_>>();
-    // Use configured official DeepSeek search last, after other sources fail, cool down or exhaust quota.
     // 官方 DeepSeek 搜索放在最后，仅当前序来源失败、冷却或额度耗尽时使用。
     if selected == "auto" || selected == super::gateway_deepseek_search::SOURCE_ID {
         if let Some(source) = super::gateway_deepseek_search::source(ctx).await {
@@ -569,8 +590,7 @@ async fn search_shared(
         let pending = pending.clone();
         let mut operation_ctx = ctx.clone();
         operation_ctx.cancellation = pending.cancel.subscribe();
-        // Shared native transactions must not retain the first caller's independently cancellable request token.
-        // 共享原生事务不能继续使用首位调用者可独立取消的请求令牌。
+        // 共享原生事务不再使用首位调用者可独立取消的请求令牌。
         operation_ctx.config["nativeCancellationId"] = json!(uuid::Uuid::new_v4().to_string());
         tokio::spawn(async move {
             let mut cancelled = operation_ctx.cancellation.clone();
@@ -593,8 +613,7 @@ async fn search_shared(
                 }
                 state.pending = None;
             }
-            // send_replace retains completion even if a waiter subscribes just after the HTTP result arrived.
-            // 保留完成结果，避免 HTTP 先返回、等待者稍后订阅时错过通知。
+            // 保留完成结果，HTTP 先返回、等待者稍后订阅时也能取到。
             pending.reply.send_replace(Some(result));
         });
     }
@@ -661,7 +680,9 @@ async fn search_sources(
                 }
                 let mut receipt = failure_receipt(&error);
                 ctx.runtime.mcp_errors.lock().await.insert(
-                    server["id"].as_str().unwrap_or("").to_owned(), receipt.clone());
+                    server["id"].as_str().unwrap_or("").to_owned(),
+                    receipt.clone(),
+                );
                 if error.status == 400 {
                     return Err(error);
                 }
@@ -678,8 +699,7 @@ async fn search_sources(
             }
         }
     }
-    // Try allowed alternatives first; at most one short transient retry, never replay rate-limited or unauthorized requests.
-    // 先尝试允许的备用来源；最多重试一次短暂故障，限流或认证失败不重放。
+    // 先尝试允许的备用来源；最多重试一次短暂故障，限流或确认失败不重放。
     if let Some(index) = retries.first() {
         let server = &servers[*index];
         let delay = ctx
@@ -723,8 +743,10 @@ async fn search_sources(
                 {
                     return Err(error);
                 }
-                ctx.runtime.mcp_errors.lock().await.insert(server["id"].as_str().unwrap_or("").to_owned(),
-                    failure_receipt(&error));
+                ctx.runtime.mcp_errors.lock().await.insert(
+                    server["id"].as_str().unwrap_or("").to_owned(),
+                    failure_receipt(&error),
+                );
                 if error.status == 400 {
                     return Err(error);
                 }
@@ -763,19 +785,32 @@ mod tests {
 
     #[test]
     fn mcp_timeouts_become_retryable_search_failures_but_tool_errors_do_not() {
-        for cause in ["MCP_TIMEOUT", "MCP_START_TIMEOUT", "MCP_CONNECTION_FAILED", "MCP_CONNECTION_LOST", "MCP_CONNECTION_CLOSED"] {
+        for cause in [
+            "MCP_TIMEOUT",
+            "MCP_START_TIMEOUT",
+            "MCP_CONNECTION_FAILED",
+            "MCP_CONNECTION_LOST",
+            "MCP_CONNECTION_CLOSED",
+        ] {
             let error = search_failure(failure(cause, "Pre-dispatch transport fixture.", 502));
             assert_eq!(error.code, "WEB_SEARCH_TRANSIENT", "{cause}");
             assert_eq!(error.details["causeCode"], cause);
         }
-        for cause in ["MCP_TIMEOUT", "MCP_CONNECTION_LOST", "MCP_CONNECTION_CLOSED"] {
+        for cause in [
+            "MCP_TIMEOUT",
+            "MCP_CONNECTION_LOST",
+            "MCP_CONNECTION_CLOSED",
+        ] {
             let unknown = json!({"isError":true,"status":"unknown","code":"MCP_EXECUTION_UNKNOWN","causeCode":cause,"content":[]});
             let error = search_failure(tool_failure(&unknown).unwrap());
             assert_eq!(error.code, "WEB_SEARCH_TRANSIENT", "{cause}");
             assert!(error.retry_after_ms.unwrap_or(2000) <= 2000, "{cause}");
         }
         let rejected = json!({"isError":true,"content":[{"type":"text","text":"bad query"}]});
-        assert_ne!(search_failure(tool_failure(&rejected).unwrap()).code, "WEB_SEARCH_TRANSIENT");
+        assert_ne!(
+            search_failure(tool_failure(&rejected).unwrap()).code,
+            "WEB_SEARCH_TRANSIENT"
+        );
     }
 
     #[test]
@@ -853,15 +888,25 @@ mod tests {
                         if state.delay_ms > 0 {
                             tokio::time::sleep(Duration::from_millis(state.delay_ms)).await;
                         }
-                        if ["rpc-quota", "rpc-unknown", "rpc-schema"].contains(&state.kind.as_str()) {
+                        if ["rpc-quota", "rpc-unknown", "rpc-schema"].contains(&state.kind.as_str())
+                        {
                             let error = match state.kind.as_str() {
                                 "rpc-quota" => json!({"code":-32000,"message":"private diagnostic",
                                     "data":{"code":"insufficient_quota","httpStatus":402,"retryAfterMs":60000}}),
-                                "rpc-schema" => json!({"code":-32602,"message":"private diagnostic"}),
-                                _ => json!({"code":-32000,"message":"quota billing temporary failure without machine evidence"}),
+                                "rpc-schema" => {
+                                    json!({"code":-32602,"message":"private diagnostic"})
+                                }
+                                _ => {
+                                    json!({"code":-32000,"message":"quota billing temporary failure without machine evidence"})
+                                }
                             };
-                            return Response::builder().header("Content-Type", "application/json")
-                                .body(Body::from(json!({"jsonrpc":"2.0","id":request["id"],"error":error}).to_string())).unwrap();
+                            return Response::builder()
+                                .header("Content-Type", "application/json")
+                                .body(Body::from(
+                                    json!({"jsonrpc":"2.0","id":request["id"],"error":error})
+                                        .to_string(),
+                                ))
+                                .unwrap();
                         }
                         if call < state.failures {
                             return Response::builder()
@@ -876,10 +921,18 @@ mod tests {
                             json!({"results":[{"url":"https://example.org/evidence","title":"Evidence","excerpts":["原始证据 / original evidence"]}]})
                         };
                         match state.kind.as_str() {
-                            "nested-quota" => json!({"structuredContent":{"error":{"code":"insufficient_quota"}}}),
-                            "tool-unknown" => json!({"isError":true,"content":[{"type":"text","text":"quota exceeded but no machine code"}]}),
-                            "nested-rate" => json!({"structuredContent":{"error":{"code":"RATE_LIMITED","statusCode":429,"retryAfterMs":60000}}}),
-                            _ => json!({"content":[{"type":"text","text":sources.to_string()}],"structuredContent":sources}),
+                            "nested-quota" => {
+                                json!({"structuredContent":{"error":{"code":"insufficient_quota"}}})
+                            }
+                            "tool-unknown" => {
+                                json!({"isError":true,"content":[{"type":"text","text":"quota exceeded but no machine code"}]})
+                            }
+                            "nested-rate" => {
+                                json!({"structuredContent":{"error":{"code":"RATE_LIMITED","statusCode":429,"retryAfterMs":60000}}})
+                            }
+                            _ => {
+                                json!({"content":[{"type":"text","text":sources.to_string()}],"structuredContent":sources})
+                            }
                         }
                     }
                     _ => json!({}),
@@ -942,26 +995,39 @@ mod tests {
         assert_eq!(local.code, "MCP_CONNECTION_CAPACITY");
         assert_eq!(local.details["failureOrigin"], "local-capacity");
         assert!(local.details.get("httpStatus").is_none());
-        let remote = search_failure(failure("MCP_HTTP_REJECTED", "remote", 429)
-            .with_details(json!({"failureOrigin":"provider-http","httpStatus":429}))
-            .with_retry_after(Some(12345)));
+        let remote = search_failure(
+            failure("MCP_HTTP_REJECTED", "remote", 429)
+                .with_details(json!({"failureOrigin":"provider-http","httpStatus":429}))
+                .with_retry_after(Some(12345)),
+        );
         assert_eq!(remote.code, "WEB_SEARCH_RATE_LIMITED");
         assert_eq!(remote.retry_after_ms, Some(12345));
         assert_eq!(remote.response()["details"]["httpStatus"], 429);
         let unknown = search_failure(failure("MCP_RPC_ERROR", "quota exceeded", 502));
-        assert_eq!(unknown.code, "MCP_RPC_ERROR", "Unstructured prose and a gateway status do not establish upstream transience or quota.");
+        assert_eq!(
+            unknown.code, "MCP_RPC_ERROR",
+            "Unstructured prose and a gateway status do not establish upstream transience or quota."
+        );
     }
 
     #[tokio::test]
     async fn quota_receipts_keep_machine_evidence_without_retry_or_success_cache() {
         for kind in ["exa", "rpc-quota", "nested-quota"] {
-            let mut exa = SearchFixture::start(kind, if kind == "exa" { usize::MAX } else { 0 }, 402, 0).await;
+            let mut exa =
+                SearchFixture::start(kind, if kind == "exa" { usize::MAX } else { 0 }, 402, 0)
+                    .await;
             exa.server["id"] = json!("official-exa");
             let (mut ctx, _keep) = super::super::gateway::test_context();
             ctx.config["mcpServers"] = json!([exa.server]);
-            let error = search(json!({"query":"quota fixture"}), &ctx).await.unwrap_err();
+            let error = search(json!({"query":"quota fixture"}), &ctx)
+                .await
+                .unwrap_err();
             assert_eq!(error.code, "WEB_SEARCH_QUOTA_EXHAUSTED", "{kind}");
-            assert_eq!(exa.calls.load(Ordering::Acquire), 1, "Quota failures are not transient retries.");
+            assert_eq!(
+                exa.calls.load(Ordering::Acquire),
+                1,
+                "Quota failures are not transient retries."
+            );
             if kind == "rpc-quota" {
                 assert_eq!(error.details["failureOrigin"], "provider-rpc");
                 assert_eq!(error.details["rpcCode"], -32000);
@@ -971,27 +1037,50 @@ mod tests {
                 assert!(!error.response().to_string().contains("private diagnostic"));
             }
             if kind == "nested-quota" {
-                assert!(error.details.get("httpStatus").is_none(), "A quota machine code is not an HTTP response.");
+                assert!(
+                    error.details.get("httpStatus").is_none(),
+                    "A quota machine code is not an HTTP response."
+                );
             }
             ctx.runtime.web_search.cooldowns.lock().unwrap().clear();
-            assert_eq!(search(json!({"query":"quota fixture"}), &ctx).await.unwrap_err().code, "WEB_SEARCH_QUOTA_EXHAUSTED");
-            assert_eq!(exa.calls.load(Ordering::Acquire), 2, "A nested error must not become a cached empty success.");
+            assert_eq!(
+                search(json!({"query":"quota fixture"}), &ctx)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "WEB_SEARCH_QUOTA_EXHAUSTED"
+            );
+            assert_eq!(
+                exa.calls.load(Ordering::Acquire),
+                2,
+                "A nested error must not become a cached empty success."
+            );
             cleanup_search(&ctx).await;
         }
     }
 
     #[tokio::test]
-    async fn unknown_tool_and_rpc_errors_never_guess_quota_or_retry_while_schema_errors_keep_query() {
+    async fn unknown_tool_and_rpc_errors_never_guess_quota_or_retry_while_schema_errors_keep_query()
+    {
         for kind in ["tool-unknown", "rpc-unknown", "rpc-schema"] {
             let mut exa = SearchFixture::start(kind, 0, 200, 0).await;
             exa.server["id"] = json!("official-exa");
             let (mut ctx, _keep) = super::super::gateway::test_context();
             ctx.config["mcpServers"] = json!([exa.server]);
-            let error = search(json!({"query":"original query preserved"}), &ctx).await.unwrap_err();
-            assert!(!["WEB_SEARCH_TRANSIENT", "WEB_SEARCH_QUOTA_EXHAUSTED"].contains(&error.code.as_str()), "{kind}");
+            let error = search(json!({"query":"original query preserved"}), &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                !["WEB_SEARCH_TRANSIENT", "WEB_SEARCH_QUOTA_EXHAUSTED"]
+                    .contains(&error.code.as_str()),
+                "{kind}"
+            );
             assert!(error.details.get("httpStatus").is_none());
             assert_eq!(exa.calls.load(Ordering::Acquire), 1);
-            assert_eq!(exa.arguments.lock().unwrap()[0]["query"], "original query preserved");
+            assert_eq!(
+                exa.arguments.lock().unwrap()[0]["query"],
+                "original query preserved"
+            );
             if kind == "rpc-schema" {
                 assert_eq!(error.status, 400);
                 assert_eq!(error.details["rpcCode"], -32602);
@@ -1006,14 +1095,27 @@ mod tests {
         exa.server["id"] = json!("official-exa");
         let (mut ctx, _keep) = super::super::gateway::test_context();
         ctx.config["mcpServers"] = json!([exa.server]);
-        let error = search(json!({"query":"rate fixture"}), &ctx).await.unwrap_err();
+        let error = search(json!({"query":"rate fixture"}), &ctx)
+            .await
+            .unwrap_err();
         assert_eq!(error.code, "WEB_SEARCH_RATE_LIMITED");
         assert_eq!(error.retry_after_ms, Some(60000));
         let states = super::super::gateway_mcp::diagnostics(&ctx).await;
-        let state = states.iter().find(|state| state["serverId"] == "official-exa").unwrap();
+        let state = states
+            .iter()
+            .find(|state| state["serverId"] == "official-exa")
+            .unwrap();
         assert_eq!(state["searchCooldown"]["details"]["httpStatus"], 429);
-        assert!(state["searchCooldown"]["retryAfterMs"].as_u64().is_some_and(|remaining| remaining > 0 && remaining <= 60000));
-        assert_eq!(exa.calls.load(Ordering::Acquire), 1, "Reading diagnostics does not consume another search.");
+        assert!(
+            state["searchCooldown"]["retryAfterMs"]
+                .as_u64()
+                .is_some_and(|remaining| remaining > 0 && remaining <= 60000)
+        );
+        assert_eq!(
+            exa.calls.load(Ordering::Acquire),
+            1,
+            "Reading diagnostics does not consume another search."
+        );
         cleanup_search(&ctx).await;
     }
 
@@ -1022,14 +1124,22 @@ mod tests {
         let exa = SearchFixture::start("exa-objective", 0, 200, 0).await;
         let (mut ctx, _cancel) = super::super::gateway::test_context();
         ctx.config["mcpServers"] = json!([exa.server]);
-        let result = search(json!({
-            "query":"original entity and date", "reason":"Verify the current official release"
-        }), &ctx).await.unwrap();
+        let result = search(
+            json!({
+                "query":"original entity and date", "reason":"Verify the current official release"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert_eq!(result["providerId"], "official-exa-objective");
         assert_eq!(exa.calls.load(Ordering::Acquire), 1);
         let arguments = exa.arguments.lock().unwrap();
         assert_eq!(arguments[0]["query"], "original entity and date");
-        assert_eq!(arguments[0]["objective"], "Verify the current official release");
+        assert_eq!(
+            arguments[0]["objective"],
+            "Verify the current official release"
+        );
         assert!(arguments[0].get("reason").is_none());
         assert!(arguments[0].get("type").is_none());
         drop(arguments);
@@ -1109,8 +1219,12 @@ mod tests {
         let (mut ctx, _cancel) = super::super::gateway::test_context();
         ctx.config["mcpServers"] = json!([exa.server, parallel.server]);
         let configured = search_sources_for("auto", &ctx).await;
-        assert!(!configured.iter().any(|server| server["id"] == super::super::gateway_deepseek_search::SOURCE_ID),
-            "Without an official DeepSeek connection nothing is added.");
+        assert!(
+            !configured
+                .iter()
+                .any(|server| server["id"] == super::super::gateway_deepseek_search::SOURCE_ID),
+            "Without an official DeepSeek connection nothing is added."
+        );
         let home = ctx.workdir.parent().unwrap().join("search-model-home");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("connections.json"), json!({"version":1,"providers":[{"providerId":"deepseek",
@@ -1119,14 +1233,28 @@ mod tests {
         ctx.runtime.model_home.set(home).unwrap();
         let ordered = search_sources_for("auto", &ctx).await;
         assert_eq!(ordered.len(), configured.len() + 1);
-        assert_eq!(&ordered[..configured.len()], configured.as_slice(), "Configured sources keep their order and priority.");
-        assert_eq!(ordered.last().unwrap()["id"], super::super::gateway_deepseek_search::SOURCE_ID);
+        assert_eq!(
+            &ordered[..configured.len()],
+            configured.as_slice(),
+            "Configured sources keep their order and priority."
+        );
+        assert_eq!(
+            ordered.last().unwrap()["id"],
+            super::super::gateway_deepseek_search::SOURCE_ID
+        );
         assert!(!json!(ordered).to_string().contains("fixture-official-key"));
         let explicit = search_sources_for("official-exa", &ctx).await;
-        assert!(!explicit.iter().any(|server| server["builtin"].is_string()), "An explicit provider never gains a silent fallback.");
-        let selected = search_sources_for(super::super::gateway_deepseek_search::SOURCE_ID, &ctx).await;
+        assert!(
+            !explicit.iter().any(|server| server["builtin"].is_string()),
+            "An explicit provider never gains a silent fallback."
+        );
+        let selected =
+            search_sources_for(super::super::gateway_deepseek_search::SOURCE_ID, &ctx).await;
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0]["builtin"], super::super::gateway_deepseek_search::SOURCE_ID);
+        assert_eq!(
+            selected[0]["builtin"],
+            super::super::gateway_deepseek_search::SOURCE_ID
+        );
         cleanup_search(&ctx).await;
     }
 
@@ -1156,22 +1284,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_cached_connection_is_retired_before_read_retry_but_explicit_stop_is_preserved() {
+    async fn closed_cached_connection_is_retired_before_read_retry_but_explicit_stop_is_preserved()
+    {
         let exa = SearchFixture::start("exa", 0, 200, 0).await;
         let (mut ctx, _keep) = super::super::gateway::test_context();
         ctx.config["mcpServers"] = json!([exa.server]);
         let server = super::super::gateway_mcp::servers(&ctx).remove(0);
-        super::super::gateway_mcp::connection(&server, &ctx).await.unwrap();
+        super::super::gateway_mcp::connection(&server, &ctx)
+            .await
+            .unwrap();
         assert_eq!(exa.starts.load(Ordering::Acquire), 1);
-        let close = ctx.runtime.mcp_aborters.lock().unwrap().get(server["id"].as_str().unwrap()).unwrap().clone();
+        let close = ctx
+            .runtime
+            .mcp_aborters
+            .lock()
+            .unwrap()
+            .get(server["id"].as_str().unwrap())
+            .unwrap()
+            .clone();
         close.send(true).unwrap();
-        let value = search(json!({"query":"cached connection closed before dispatch"}), &ctx).await.unwrap();
-        assert_eq!(value["attempts"][0]["details"]["causeCode"], "MCP_CLEANUP_PENDING");
+        let value = search(
+            json!({"query":"cached connection closed before dispatch"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            value["attempts"][0]["details"]["causeCode"],
+            "MCP_CLEANUP_PENDING"
+        );
         assert_eq!(value["attempts"][1]["retry"], true);
-        assert_eq!(exa.starts.load(Ordering::Acquire), 2, "A fresh initialize must replace the closed cached connection.");
-        assert_eq!(exa.calls.load(Ordering::Acquire), 1, "Only the reconnected read may be dispatched.");
-        super::super::gateway_mcp::stop(server["id"].as_str().unwrap(), &ctx).await.unwrap();
-        let error = search(json!({"query":"stopped service must remain stopped"}), &ctx).await.unwrap_err();
+        assert_eq!(
+            exa.starts.load(Ordering::Acquire),
+            2,
+            "A fresh initialize must replace the closed cached connection."
+        );
+        assert_eq!(
+            exa.calls.load(Ordering::Acquire),
+            1,
+            "Only the reconnected read may be dispatched."
+        );
+        super::super::gateway_mcp::stop(server["id"].as_str().unwrap(), &ctx)
+            .await
+            .unwrap();
+        let error = search(json!({"query":"stopped service must remain stopped"}), &ctx)
+            .await
+            .unwrap_err();
         assert_eq!(error.code, "MCP_STOPPED");
         assert_eq!(exa.starts.load(Ordering::Acquire), 2);
         assert_eq!(exa.calls.load(Ordering::Acquire), 1);
@@ -1210,16 +1368,27 @@ while ($null -ne $requestLine) {
 }
 "#;
             std::fs::write(&script_path, script).unwrap();
-            let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
             ctx.config["mcpServers"] = json!([{"id":"official-exa","name":"EOF search fixture","transport":"stdio","trusted":true,"enabled":true,"command":powershell,"args":["-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",script_path.to_string_lossy(),marker_path.to_string_lossy(),if recover {"true"}else{"false"}],"cwd":root,"startupTimeoutMs":3000,"timeoutMs":5000}]);
             let result = search(json!({"query":"handshake EOF fixture"}), &ctx).await;
-            assert_eq!(std::fs::read_to_string(&marker_path).unwrap(), "2", "The bounded read retry must start a fresh MCP process exactly once: {result:?}");
+            assert_eq!(
+                std::fs::read_to_string(&marker_path).unwrap(),
+                "2",
+                "The bounded read retry must start a fresh MCP process exactly once: {result:?}"
+            );
             if recover {
                 let value = result.unwrap();
                 assert_eq!(value["attempts"][0]["code"], "WEB_SEARCH_TRANSIENT");
-                assert_eq!(value["attempts"][0]["details"]["causeCode"], "MCP_CONNECTION_CLOSED");
+                assert_eq!(
+                    value["attempts"][0]["details"]["causeCode"],
+                    "MCP_CONNECTION_CLOSED"
+                );
                 assert_eq!(value["attempts"][1]["retry"], true);
-                assert_eq!(value["sources"][0]["url"], "https://example.org/reconnected");
+                assert_eq!(
+                    value["sources"][0]["url"],
+                    "https://example.org/reconnected"
+                );
             } else {
                 let error = result.unwrap_err();
                 assert_eq!(error.code, "WEB_SEARCH_TRANSIENT");

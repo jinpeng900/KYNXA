@@ -7,7 +7,6 @@ using Windows.Foundation;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Keeps native modal dialogs on their owner's theme and the application's shared palette.
 /// 让原生模态对话框沿用所属窗口主题和应用共享配色。
 /// </summary>
 public static class DialogPresentation
@@ -54,7 +53,6 @@ public static class DialogPresentation
 
         private void ActionLayoutUpdated(object? sender, object args)
         {
-            // Recheck after action changes or a native template rebuild; ordinary layout passes keep the cached result.
             // 操作变化或原生模板重建后重新核对；普通布局过程沿用缓存，避免逐帧遍历模板。
             var actionTexts = (_dialog.PrimaryButtonText, _dialog.SecondaryButtonText, _dialog.CloseButtonText);
             if (_commandSpace?.IsLoaded == true && actionTexts == _actionTexts) return;
@@ -79,17 +77,14 @@ public static class DialogPresentation
                 _centeredAction = new(action, Grid.GetColumn(action), Grid.GetColumnSpan(action), action.HorizontalAlignment,
                     action.MinWidth, action.MinHeight, action.MaxWidth, action.Padding, action.CharacterSpacing, action.ContentTemplate);
             }
-            // The SDK keeps an unused star column when only Close is visible; span the whole command area.
             // SDK 仅显示关闭按钮时仍保留闲置星号列；让单个操作跨越整个命令区域，保证左右对称。
             Grid.SetColumn(action, 0);
             Grid.SetColumnSpan(action, _commandSpace.ColumnDefinitions.Count);
             action.HorizontalAlignment = HorizontalAlignment.Center;
-            // Keep short acknowledgements comfortably sized while allowing localized text to grow within the native cap.
             // 简短确认按钮保留适中的点击范围，本地化文字可在原生宽度上限内自适应。
             action.MinWidth = Math.Max(_centeredAction!.MinWidth, (double)Application.Current.Resources["KynxaDialogActionMinWidth"]);
             action.MinHeight = Math.Max(_centeredAction.MinHeight, (double)Application.Current.Resources["KynxaDialogActionMinHeight"]);
             action.Padding = (Thickness)Application.Current.Resources["KynxaDialogActionPadding"];
-            // Native tracking scales with the font; keep the original label intact for localization and automation.
             // 原生字间距随字体缩放；保留原始文字，避免插入空格影响本地化和辅助功能读取。
             bool isAcknowledgement = action.Content is string text && text == "知道了";
             action.CharacterSpacing = isAcknowledgement
@@ -135,9 +130,7 @@ public static class DialogPresentation
             _dialog.PrimaryButtonStyle = _dialog.SecondaryButtonStyle = _dialog.CloseButtonStyle =
                 (Style)resources["KynxaDialogButtonStyle"];
 
-            // Register shared brushes once; their colors update in place while this dialog is open.
             // 共享画刷只注册一次；打开期间原位更新颜色，避免把同一资源反复挂入字典。
-            // WinUI's inner clipping grid and its default action style resolve these local resources.
             // WinUI 内层裁剪网格和默认操作样式从此处解析资源，必须与外层圆角及应用按钮配色一致。
             _dialog.Resources["OverlayCornerRadius"] = _dialog.CornerRadius;
             _dialog.Resources["ControlCornerRadius"] = resources["KynxaControlRadius"];
@@ -194,7 +187,6 @@ public static class DialogPresentation
 
         private void AppearanceChanged(object? sender, EventArgs args)
         {
-            // A queued change must not retain or update a dialog after its modal lifetime ends.
             // 排队的主题更新不能在模态生命周期结束后继续更新或持有对话框。
             if (!_open) return;
             if (_dialog.DispatcherQueue.HasThreadAccess) Apply();

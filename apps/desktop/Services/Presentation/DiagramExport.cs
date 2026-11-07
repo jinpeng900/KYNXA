@@ -16,7 +16,6 @@ public sealed record DiagramExportDocument(string Format, byte[] Bytes, uint Wid
 public enum DiagramExportOutcome { Success, Cancelled, Error }
 
 /// <summary>
-/// Validate self-contained diagram files before opening a native save picker or writing any bytes.
 /// 在打开原生保存窗口或写入字节之前，验证图表文件独立且不包含可执行内容。
 /// </summary>
 public static class DiagramExport
@@ -88,7 +87,6 @@ public static class DiagramExport
             MaxCharactersInDocument = MaximumSvgBytes,
             MaxCharactersFromEntities = 0
         };
-        // Check depth and element count while streaming, before constructing an XML object tree.
         // 先流式检查深度与元素数量，再构造 XML 对象树，避免小文件造成大量节点分配。
         using (var boundsReader = XmlReader.Create(new StringReader(text), settings))
         {
@@ -149,7 +147,6 @@ public static class DiagramExport
             int separator = declaration.IndexOf(':');
             if (separator <= 0) throw new InvalidDataException("Unsupported diagram SVG style.");
             string property = declaration[..separator].Trim(), value = declaration[(separator + 1)..].Trim();
-            // Allow fixed responsive sizes only on the root; keep geometry numeric and inert.
             // 仅根文档允许这两个响应式尺寸；图形仍限明确数值，不放宽样式。
             if (isRoot && (property == "width" && value == "100%" || property == "height" && value == "100vh")) continue;
             if (isRoot && property == "background-color" && value.Length == 7 && value[0] == '#' && value.Skip(1).All(Uri.IsHexDigit)) continue;
@@ -190,7 +187,6 @@ public static class DiagramExport
         using var stream = new MemoryStream(bytes, writable: false).AsRandomAccessStream();
         var decoder = await BitmapDecoder.CreateAsync(BitmapDecoder.PngDecoderId, stream);
         ValidateDimensions(decoder.PixelWidth, decoder.PixelHeight);
-        // Decode all bounded pixels; a valid signature and header alone cannot prove the PNG is readable.
         // 解码容量受限的全部像素；仅有正确签名和头部并不能证明 PNG 文件可读。
         var pixels = await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
             new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage);
@@ -298,7 +294,6 @@ public static class DiagramExport
     public static string CreateSuggestedFileName(string format)
     {
         if (format is not ("svg" or "png")) throw new ArgumentException("Unsupported diagram export format.", nameof(format));
-        // Use a safe timestamp and process sequence to distinguish same-millisecond exports.
         // 用安全时间戳和进程序号区分同毫秒导出，不读取聊天文本或路径。
         return "KYNXA-diagram-" + format + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture)
             + "-" + Interlocked.Increment(ref _fileNameSequence).ToString("x4", CultureInfo.InvariantCulture);

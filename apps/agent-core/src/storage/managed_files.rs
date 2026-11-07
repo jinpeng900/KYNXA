@@ -51,7 +51,6 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
-/// Validate every ancestor before creating children; a missing final file does not authorize an alias.
 /// 创建子项前检查所有祖先；目标文件缺失不代表可接受链接或联接点。
 pub fn inspect(
     root: &Path,
@@ -133,8 +132,7 @@ fn inspect_handle_identity(path: &Path, handle: &std::fs::File) -> Result<bool, 
     if identity.is_link {
         return Err(unsafe_path());
     }
-    // SQLite may unlink a sidecar between metadata inspection and checking its opened handle.
-    // SQLite 可在路径检查与句柄核验之间删除旁车；仅已无目录项的零链接对象按不存在处理。
+    // SQLite 可在路径检查与句柄检查之间删除旁车；仅已无目录项的零链接对象按不存在处理。
     if identity.links == 0
         && matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
     {
@@ -174,8 +172,7 @@ mod identity_tests {
     }
 }
 
-/// A bounded reader holds one checked object and verifies its identity again after range reads.
-/// 有界读取持有已校验文件对象，窗口读取结束后再核验身份，避免绕过既有路径与版本保护。
+/// 限量读取持有已校验文件对象，窗口读取结束后再检查身份，避免绕过现有路径与版本保护。
 pub struct StableReader {
     pub file: std::fs::File,
     root: PathBuf,
@@ -184,8 +181,7 @@ pub struct StableReader {
     metadata: fs::Metadata,
 }
 
-/// Retain checked object identity without pinning an open file across another storage owner's lock.
-/// 保留已核验对象身份，不在等待另一存储所有者的锁时持有文件句柄。
+/// 保留已检查对象身份，不在等待另一存储所有者的锁时持有文件句柄。
 pub(crate) struct StableFileVersion {
     root: PathBuf,
     path: PathBuf,
@@ -251,7 +247,6 @@ impl StableReader {
         }
     }
 
-    /// Cache only against an observable change stamp, object identity and size; unsupported files stay byte-verified.
     /// 缓存绑定可观测变更时间、文件身份及大小；不支持该时间的文件仍逐次校验完整字节。
     pub fn version_token(&self) -> Result<Option<String>, ContractError> {
         let Some(stamp) = crate::file_identity::change_stamp(&self.file).map_err(io_failure)?
@@ -354,8 +349,7 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// Fsync an exclusively created sibling, then replace the canonical file and return its actual receipt.
-/// 独占创建同目录临时文件并同步落盘，再替换正式文件，返回实际提交回执。
+/// 独占创建同目录临时文件并同步写入磁盘，再替换正式文件，返回实际提交结果。
 pub fn atomic_write(
     root: &Path,
     path: &Path,

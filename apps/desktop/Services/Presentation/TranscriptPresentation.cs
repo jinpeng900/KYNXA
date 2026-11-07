@@ -3,8 +3,7 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Visible conversation content; the durable transcript and model history remain untouched.
-/// 聊天可见内容的投影；正式聊天记录与模型历史不变。
+/// 聊天可见内容的映射；正式聊天记录与模型历史不变。
 /// </summary>
 internal static class TranscriptPresentation
 {
@@ -22,8 +21,7 @@ internal static class TranscriptPresentation
             .OrderBy(item => item.Order).Select(item => item.Tool).ToArray();
         if (status == "completed")
         {
-            // Show delivered answers even when task acceptance still requires verification.
-            // 交付和验收分开；任务仍需核验时，已完成的正文也应正常展示。
+            // 交付和验收分开；任务仍需检查时，已完成的正文也应正常展示。
             if (ordered.Length == 0 && !string.IsNullOrWhiteSpace(content))
                 return new("final", content, [], []);
 
@@ -34,7 +32,6 @@ internal static class TranscriptPresentation
                 int first = finalIndex;
                 while (first > 0 && ordered[first - 1] is { IsAnswerContinuation: true,
                     Phase: "commentary", Status: "completed" }) first--;
-                // Merge explicit answer continuations for one Markdown render; preserve source records.
                 // 仅合并明确续写的正文后渲染 Markdown；保留原分段，工具进展不混入答案。
                 string answer = string.Join("\n\n", ordered[first..(finalIndex + 1)]
                     .Select(segment => segment.Content).Where(text => !string.IsNullOrWhiteSpace(text)));
@@ -42,8 +39,6 @@ internal static class TranscriptPresentation
                 return new("final", answer, [final], []);
             }
 
-            // A recorded phase is not proof that the enclosing request finished successfully.
-            // 存在阶段记录不代表整个请求已成功完成。
             return Process("incomplete", ordered, orderedTools, ordered.Length == 0 ? content : "");
         }
 
@@ -58,7 +53,6 @@ internal static class TranscriptPresentation
         var visibleTools = RecentTools(tools);
         var toolRounds = visibleTools.Select(tool => tool.Round).ToHashSet();
         var latest = segments.LastOrDefault();
-        // Spoken progress stays readable until a successful final answer replaces it.
         // 成功的最终回答替换中间进展之前，所有已输出的话仍可阅读。
         var visible = segments.Where(segment => !string.IsNullOrWhiteSpace(segment.Content)
             || toolRounds.Contains(segment.Round)

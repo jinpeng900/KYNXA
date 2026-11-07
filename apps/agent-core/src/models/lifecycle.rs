@@ -17,8 +17,7 @@ struct NativeRequest {
     waiting: bool,
 }
 
-/// Worker state and accepted native work outlive caller promises; only native receipts drain ownership.
-/// Worker 状态与已接纳原生工作独立于调用方 Promise；只有原生回执才能排空所有权。
+/// Worker 状态与已接纳原生工作独立于调用方 Promise；只有原生结果才能排空所有权。
 #[derive(Default)]
 pub struct InferenceLifecycleState {
     kind: String,
@@ -510,128 +509,7 @@ impl InferenceLifecycleState {
                 };
                 Ok(json!({"pending": pending, "releaseTicket": ticket}))
             }
-            "models.lifecycle.message" => {
-                let message = &args["message"];
-                let message_type = message["type"].as_str().unwrap_or("");
-                match message_type {
-                    "phase" => {
-                        if !self.closed {
-                            self.phase = message["phase"].as_str().unwrap_or("").into();
-                            if self.phase == "loading-model"
-                                && !self.loaded
-                                && ["ready", "loading"].contains(&self.state.as_str())
-                            {
-                                self.state = "loading".into();
-                            }
-                        }
-                        Ok(json!({}))
-                    }
-                    "settled" => {
-                        let id = message["id"].as_u64().unwrap_or(0);
-                        let ticket = self.requests.get_mut(&id).and_then(|request| {
-                            let ticket = std::mem::take(&mut request.ticket);
-                            (!ticket.is_null()).then_some(ticket)
-                        });
-                        self.requests
-                            .retain(|_, request| request.waiting || !request.ticket.is_null());
-                        Ok(json!({"releaseTickets": ticket.into_iter().collect::<Vec<_>>()}))
-                    }
-                    "idle" => {
-                        let through = message["throughId"].as_u64().unwrap_or(0);
-                        let ids: Vec<u64> = self
-                            .requests
-                            .keys()
-                            .filter(|id| **id <= through)
-                            .copied()
-                            .collect();
-                        let tickets: Vec<Value> = ids
-                            .iter()
-                            .filter_map(|id| {
-                                self.requests.get_mut(id).and_then(|request| {
-                                    let ticket = std::mem::take(&mut request.ticket);
-                                    (!ticket.is_null()).then_some(ticket)
-                                })
-                            })
-                            .collect();
-                        self.requests
-                            .retain(|_, request| request.waiting || !request.ticket.is_null());
-                        let current = if self.kind == "embedding" {
-                            through == self.sequence
-                        } else {
-                            through >= self.sequence
-                        };
-                        let idle =
-                            !self.closed && current && self.pending() == 0 && self.preparing == 0;
-                        if idle {
-                            self.phase = "idle".into();
-                            if self.idle_since == 0.0 {
-                                self.idle_since = now;
-                            }
-                            if !self.loaded && self.state == "loading" {
-                                self.state = "ready".into();
-                            }
-                        }
-                        Ok(json!({"releaseTickets": tickets, "idleResources": idle}))
-                    }
-                    "ready" | "tokenizer-ready" => {
-                        if self.closed || ["error", "unavailable"].contains(&self.state.as_str()) {
-                            return Ok(json!({}));
-                        }
-                        self.state = "ready".into();
-                        self.asset_verification = "verified".into();
-                        self.error_code = None;
-                        if message_type == "ready" {
-                            self.loaded = true;
-                            if let Some(backend) = message.get("inferenceBackend") {
-                                self.backend = backend.clone();
-                                return Ok(json!({"backend": backend}));
-                            }
-                        }
-                        Ok(json!({}))
-                    }
-                    "resource-pressure" => {
-                        self.resource_diagnostic = message["diagnostic"].clone();
-                        Ok(json!({"resourcePressure": true}))
-                    }
-                    "result" | "error" => {
-                        let id = message["id"].as_u64().unwrap_or(0);
-                        let Some(request) =
-                            self.requests.get(&id).filter(|request| request.waiting)
-                        else {
-                            return Ok(json!({}));
-                        };
-                        let result = if message_type == "result" {
-                            self.result(message, request)
-                        } else {
-                            Err(message["code"]
-                                .as_str()
-                                .unwrap_or_else(|| {
-                                    if self.kind == "embedding" {
-                                        "EMBEDDING_FAILED"
-                                    } else {
-                                        "RERANK_FAILED"
-                                    }
-                                })
-                                .into())
-                        };
-                        self.requests.get_mut(&id).unwrap().waiting = false;
-                        self.requests
-                            .retain(|_, request| request.waiting || !request.ticket.is_null());
-                        if message_type != "result"
-                            && self.kind == "reranker"
-                            && message["code"] != "RERANK_BUSY"
-                        {
-                            self.state = "error".into();
-                            self.error_code = result.as_ref().err().cloned();
-                        }
-                        Ok(match result {
-                            Ok(result) => json!({"id": id, "result": result}),
-                            Err(code) => json!({"id": id, "errorCode": code}),
-                        })
-                    }
-                    _ => Ok(json!({})),
-                }
-            }
+            "models.lifecycle.message" => self.apply_models_lifecycle_message(args),
             "models.lifecycle.fail" => {
                 let code = args["code"]
                     .as_str()
@@ -796,6 +674,130 @@ impl InferenceLifecycleState {
                 Ok(status)
             }
             _ => Err("AGENT_CORE_UNKNOWN_OPERATION".into()),
+        }
+    }
+
+    fn apply_models_lifecycle_message(&mut self, args: &Value) -> Result<Value, String> {
+        let now = number(&args["now"], 0.0);
+        let message = &args["message"];
+        let message_type = message["type"].as_str().unwrap_or("");
+        match message_type {
+            "phase" => {
+                if !self.closed {
+                    self.phase = message["phase"].as_str().unwrap_or("").into();
+                    if self.phase == "loading-model"
+                        && !self.loaded
+                        && ["ready", "loading"].contains(&self.state.as_str())
+                    {
+                        self.state = "loading".into();
+                    }
+                }
+                Ok(json!({}))
+            }
+            "settled" => {
+                let id = message["id"].as_u64().unwrap_or(0);
+                let ticket = self.requests.get_mut(&id).and_then(|request| {
+                    let ticket = std::mem::take(&mut request.ticket);
+                    (!ticket.is_null()).then_some(ticket)
+                });
+                self.requests
+                    .retain(|_, request| request.waiting || !request.ticket.is_null());
+                Ok(json!({"releaseTickets": ticket.into_iter().collect::<Vec<_>>()}))
+            }
+            "idle" => {
+                let through = message["throughId"].as_u64().unwrap_or(0);
+                let ids: Vec<u64> = self
+                    .requests
+                    .keys()
+                    .filter(|id| **id <= through)
+                    .copied()
+                    .collect();
+                let tickets: Vec<Value> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        self.requests.get_mut(id).and_then(|request| {
+                            let ticket = std::mem::take(&mut request.ticket);
+                            (!ticket.is_null()).then_some(ticket)
+                        })
+                    })
+                    .collect();
+                self.requests
+                    .retain(|_, request| request.waiting || !request.ticket.is_null());
+                let current = if self.kind == "embedding" {
+                    through == self.sequence
+                } else {
+                    through >= self.sequence
+                };
+                let idle =
+                    !self.closed && current && self.pending() == 0 && self.preparing == 0;
+                if idle {
+                    self.phase = "idle".into();
+                    if self.idle_since == 0.0 {
+                        self.idle_since = now;
+                    }
+                    if !self.loaded && self.state == "loading" {
+                        self.state = "ready".into();
+                    }
+                }
+                Ok(json!({"releaseTickets": tickets, "idleResources": idle}))
+            }
+            "ready" | "tokenizer-ready" => {
+                if self.closed || ["error", "unavailable"].contains(&self.state.as_str()) {
+                    return Ok(json!({}));
+                }
+                self.state = "ready".into();
+                self.asset_verification = "verified".into();
+                self.error_code = None;
+                if message_type == "ready" {
+                    self.loaded = true;
+                    if let Some(backend) = message.get("inferenceBackend") {
+                        self.backend = backend.clone();
+                        return Ok(json!({"backend": backend}));
+                    }
+                }
+                Ok(json!({}))
+            }
+            "resource-pressure" => {
+                self.resource_diagnostic = message["diagnostic"].clone();
+                Ok(json!({"resourcePressure": true}))
+            }
+            "result" | "error" => {
+                let id = message["id"].as_u64().unwrap_or(0);
+                let Some(request) =
+                    self.requests.get(&id).filter(|request| request.waiting)
+                else {
+                    return Ok(json!({}));
+                };
+                let result = if message_type == "result" {
+                    self.result(message, request)
+                } else {
+                    Err(message["code"]
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            if self.kind == "embedding" {
+                                "EMBEDDING_FAILED"
+                            } else {
+                                "RERANK_FAILED"
+                            }
+                        })
+                        .into())
+                };
+                self.requests.get_mut(&id).unwrap().waiting = false;
+                self.requests
+                    .retain(|_, request| request.waiting || !request.ticket.is_null());
+                if message_type != "result"
+                    && self.kind == "reranker"
+                    && message["code"] != "RERANK_BUSY"
+                {
+                    self.state = "error".into();
+                    self.error_code = result.as_ref().err().cloned();
+                }
+                Ok(match result {
+                    Ok(result) => json!({"id": id, "result": result}),
+                    Err(code) => json!({"id": id, "errorCode": code}),
+                })
+            }
+            _ => Ok(json!({})),
         }
     }
 }

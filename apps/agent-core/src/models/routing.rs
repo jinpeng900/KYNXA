@@ -14,7 +14,6 @@ impl Owner {
     }
 }
 
-/// Profile/device routing and failed-retirement barriers are owned by Rust, independent of JS objects.
 /// Rust 拥有配置/设备路由及退役失败屏障；JS 只保留实例对象和对应的异步完成句柄。
 #[derive(Default)]
 pub struct RoutingState {

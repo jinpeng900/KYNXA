@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml.Media.Imaging;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// One validated archive block; resizing reuses its bounded bytes instead of requesting the tool again.
 /// 一个已验证的归档图片块；调整尺寸时复用有容量上限的字节，不重复执行工具。
 /// </summary>
 public sealed class ArchivedScreenshot
@@ -20,7 +19,6 @@ public sealed class ArchivedScreenshot
 }
 
 /// <summary>
-/// Reads one current-conversation result through the existing archive API; no model or filesystem fallback.
 /// 只通过现有归档 API 读取当前聊天的结果；不回退到模型或文件系统。
 /// </summary>
 public static class ConversationScreenshotLoader

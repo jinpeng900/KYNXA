@@ -4,14 +4,15 @@ using System.Runtime.InteropServices;
 namespace KYNXA.ToolHost;
 
 /// <summary>
-/// Declares the Win32 ABI used by process isolation, handles and file identity checks.
-/// 声明进程隔离、句柄与文件身份核对使用的 Win32 ABI；字段顺序及封送方式保持原生合同。
+/// 声明进程隔离、句柄与文件身份核对使用的 Win32 ABI；字段顺序及封送方式保持原生约定。
 /// </summary>
 internal static class NativeMethods
 {
     internal const uint CreateSuspended = 0x4;
     internal const uint CreateUnicodeEnvironment = 0x400;
     internal const uint ExtendedStartupInfoPresent = 0x80000;
+    internal const uint ProcThreadAttributeDesktopAppPolicy = 0x20012;
+    internal const int DesktopAppBreakawayEnableProcessTree = 0x1;
     internal const uint CreateNoWindow = 0x08000000;
     internal const uint CreateBreakawayFromJob = 0x01000000;
     internal const uint StartfUseStdHandles = 0x100;
@@ -109,7 +110,6 @@ internal static class NativeMethods
         public uint NumberOfLinks, FileIndexHigh, FileIndexLow;
     }
 
-    // AppContainer profiles and security descriptors use Win32-owned pointers with explicit release functions.
     // AppContainer 配置与安全描述符使用 Win32 分配的指针，必须由对应原生函数释放。
     [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
     internal static extern int CreateAppContainerProfile(
@@ -145,7 +145,6 @@ internal static class NativeMethods
     [DllImport("kernel32.dll")]
     internal static extern IntPtr LocalFree(IntPtr memory);
 
-    // Pipe and startup attributes are prepared before CreateProcessW; only the intended handles may be inherited.
     // 在 CreateProcessW 前准备管道与启动属性，仅允许继承明确指定的句柄。
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -191,7 +190,6 @@ internal static class NativeMethods
         ref StartupInfoEx startupInfo,
         out ProcessInformation information);
 
-    // Jobs own descendant lifecycle; querying accounting does not certify command or task success.
     // 作业管理子进程生命周期；读取作业统计不能证明命令或任务成功。
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr CreateJobObjectW(IntPtr attributes, string? name);
@@ -213,8 +211,7 @@ internal static class NativeMethods
         uint length,
         IntPtr returnLength);
 
-    // Distinct managed names keep existing accounting calls with out var unambiguous.
-    // 使用不同托管名称，避免既有 out var 作业记账调用出现重载歧义。
+    // 使用不同托管名称，避免现有 out var 作业记账调用出现重载歧义。
     [DllImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetJobCpuRateControlInformation(
@@ -256,7 +253,6 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool CloseHandle(IntPtr handle);
 
-    // File handles preserve identity checks across path replacement; token queries confirm actual isolation.
     // 文件句柄支持路径替换时核对原身份；令牌查询用于确认真实隔离状态。
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern uint GetFinalPathNameByHandleW(

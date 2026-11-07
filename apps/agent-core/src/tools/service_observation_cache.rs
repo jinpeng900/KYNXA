@@ -11,8 +11,7 @@ struct ObservationEntry {
     scope: Value,
 }
 
-/// Request-local observation receipts are bounded and may only reuse known stateless MCP reads.
-/// 请求级观察回执具有容量上限，仅可复用已知无状态 MCP 读取操作。
+/// 请求级观察结果具有容量上限，仅可复用已知无状态 MCP 读取操作。
 pub struct ObservationCache {
     entries: Vec<ObservationEntry>,
     bytes: usize,

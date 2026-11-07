@@ -2,8 +2,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-/// Accepted lookahead and publication ownership outlive consumer cancellation until actual I/O settles.
-/// 已接纳预取及发布的所有权独立于消费者取消；只有真实 I/O 结算才释放，不承诺未落盘的批次。
+/// 已接纳预取及发布的所有权独立于消费者取消；只有真实 I/O 结算才释放，不承诺未写入磁盘的批次。
 #[derive(Default)]
 pub struct SourcePipelineState {
     count: u64,

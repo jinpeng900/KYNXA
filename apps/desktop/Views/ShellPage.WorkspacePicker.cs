@@ -59,7 +59,6 @@ public sealed partial class ShellPage
         }
         projects.ItemClick += async (_, args) =>
         {
-            // WinUI can return the explicit item's content instead of its container.
             // WinUI 可能返回选项的内容，而不是其容器。
             if (args.ClickedItem is not FrameworkElement { Tag: ProjectState project }) return;
             menu.Hide();
@@ -72,8 +71,6 @@ public sealed partial class ShellPage
             button.Click += (_, _) =>
             {
                 menu.Hide();
-                // Close this menu before opening the inline editor in the existing workspace pane.
-                // 先收起菜单，再在现有工作区右栏展开行内编辑。
                 DispatcherQueue.TryEnqueue(async () => await action());
             };
             actions.Children.Add(button);

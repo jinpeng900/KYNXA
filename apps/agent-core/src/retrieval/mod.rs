@@ -4,7 +4,6 @@ pub(crate) mod cache;
 pub(crate) mod cache_budget;
 pub(crate) mod cache_candidates;
 pub(crate) mod cache_passages;
-pub(crate) mod gateway_cache;
 pub mod candidates;
 pub mod chunking;
 pub mod code_units;
@@ -13,6 +12,7 @@ pub mod evidence;
 pub mod fusion;
 pub mod gateway;
 pub mod gateway_archives;
+pub(crate) mod gateway_cache;
 pub mod gateway_document_mail;
 pub mod gateway_documents;
 pub mod gateway_embedding;
@@ -36,7 +36,6 @@ pub mod window;
 
 use serde_json::Value;
 
-/// Pure retrieval rules share one Rust implementation across native and process transports.
 /// 检索纯规则由同一 Rust 实现提供给原生绑定和进程协议，不新增存储写入者。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     if operation.starts_with("retrieval.indexer-") {

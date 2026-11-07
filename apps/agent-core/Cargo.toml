@@ -9,6 +9,22 @@ publish = false
 name = "kynxa_agent_core_native"
 crate-type = ["rlib"]
 
+[[test]]
+name = "runtime_recovery"
+path = "../../tools/verification/runtime-storage.rs"
+
+[[test]]
+name = "local_download"
+path = "../../tools/verification/download-regression.rs"
+
+[[test]]
+name = "model_slots"
+path = "../../tools/verification/model-slots.rs"
+
+[[test]]
+name = "training"
+path = "../../tools/verification/training.rs"
+
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["raw_value", "float_roundtrip", "preserve_order"] }

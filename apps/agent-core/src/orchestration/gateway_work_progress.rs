@@ -1,5 +1,4 @@
-//! Task-local progress and delivery priorities derived from actual work receipts.
-//! 从真实工作回执派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式账本。
+//! 从真实工作结果派生任务进展与交付优先级；不执行工具、不授予权限、不拥有正式记录。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -7,11 +6,31 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const STAGNANT_ROUNDS_BEFORE_CORRECTION: u64 = 3;
+const MAX_TEXT_ONLY_ROUNDS: u64 = 3;
+const ACTION_ROUNDS_BEFORE_REMINDER: u64 = 8;
+const MAX_SEEN_OUTCOMES: usize = 512;
+const VOLATILE_OUTCOME_FIELDS: [&str; 16] = [
+    "processId",
+    "elapsedMs",
+    "durationMs",
+    "mountId",
+    "mountName",
+    "capturedOutputBytes",
+    "omittedOutputBytes",
+    "createdAt",
+    "updatedAt",
+    "startedAt",
+    "completedAt",
+    "timestamp",
+    "resultRef",
+    "requestId",
+    "sessionId",
+    "id",
+];
 const INITIAL_DISCOVERY_ROUNDS: u64 = 2;
 const IDENTICAL_FAILURE_ATTEMPTS: u64 = 2;
 
-/// Failure fingerprints travel in the existing task checkpoint, never in a second effect ledger.
-/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果核验账本。
+/// 失败指纹随原任务检查点保存；不取代正式副作用与未知结果检查记录。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeterministicFailures {
@@ -28,12 +47,25 @@ struct FailedAction {
 }
 
 impl DeterministicFailures {
-    /// Suppress only the unchanged failed action; callers still settle a paired tool result.
-    /// 只抑制条件未变的失败动作；调用端仍配对工具回执，任务和其他操作继续。
-    pub fn before_dispatch(&self, call: &Value, definition: &Value, environment: &Value) -> Option<Value> {
-        let (key, class, failure) = ["invalid-arguments", "capability-unavailable", "target-unavailable"].into_iter().find_map(|class| {
+    /// 只抑制条件未变的失败动作；调用端仍配对工具结果，任务和其他操作继续。
+    pub fn before_dispatch(
+        &self,
+        call: &Value,
+        definition: &Value,
+        environment: &Value,
+    ) -> Option<Value> {
+        let (key, class, failure) = [
+            "invalid-arguments",
+            "capability-unavailable",
+            "target-unavailable",
+        ]
+        .into_iter()
+        .find_map(|class| {
             let key = self.failure_key(call, definition, environment, class);
-            self.actions.get(&key)?.get(class).filter(|failure| failure.attempts >= IDENTICAL_FAILURE_ATTEMPTS)
+            self.actions
+                .get(&key)?
+                .get(class)
+                .filter(|failure| failure.attempts >= IDENTICAL_FAILURE_ATTEMPTS)
                 .map(|failure| (key, class, failure))
         })?;
         Some(json!({"status":"error","isError":true,"executed":false,
@@ -43,29 +75,50 @@ impl DeterministicFailures {
                 "notice":"This unchanged action already failed deterministically. Continue the same task: correct its parameters using the real schema, use an alternative capability, or observe the relevant target/configuration change before retrying. Preserve successful output and receipts; an unknown write must be verified, never replayed. Do not repeat this unchanged call or end the task because this action was suppressed. / 相同条件下该动作已确定失败；在原任务内修正参数、换可用能力或核实相关条件变化后再试，保留成果和成功回执，未知写入先核验。"}}))
     }
 
-    pub fn observe(&mut self, call: &Value, definition: &Value, environment: &Value, receipt: &Value) {
+    pub fn observe(
+        &mut self,
+        call: &Value,
+        definition: &Value,
+        environment: &Value,
+        receipt: &Value,
+    ) {
         if receipt["code"] == "TOOL_ACTION_REQUIRES_CORRECTION"
-            || receipt["reused"] == true && !receipt["resultRef"].is_object() {
+            || receipt["reused"] == true && !receipt["resultRef"].is_object()
+        {
             return;
         }
         if let Some((class, code)) = deterministic_failure(receipt) {
             let key = self.failure_key(call, definition, environment, class);
-            let receipt_identity = fingerprint(&json!([key, class,
-                environment.get("operationIdentity").unwrap_or(&call["id"])]));
-            if !self.observed_failures.insert(receipt_identity) { return; }
-            let failure = self.actions.entry(key).or_default().entry(class.into()).or_default();
-            failure.attempts = failure.attempts.saturating_add(1);
+            let receipt_identity = fingerprint(&json!([
+                key,
+                class,
+                environment.get("operationIdentity").unwrap_or(&call["id"])
+            ]));
+            if !self.observed_failures.insert(receipt_identity) {
+                return;
+            }
+            let failure = self
+                .actions
+                .entry(key)
+                .or_default()
+                .entry(class.into())
+                .or_default();
+            failure.attempts += 1;
             failure.code = code;
         } else if receipt["reused"] != true && settled_success(receipt) {
-            for class in ["invalid-arguments", "capability-unavailable", "target-unavailable"] {
+            for class in [
+                "invalid-arguments",
+                "capability-unavailable",
+                "target-unavailable",
+            ] {
                 let key = self.failure_key(call, definition, environment, class);
                 self.actions.remove(&key);
             }
-            // Only native receipt state changes conditions; call IDs, reasons and archive IDs do not.
-            // 条件只取真实回执状态；调用 ID、说明和归档 ID 变化不能重置保护。
+            // 条件只取真实结果状态，调用 ID、说明和归档 ID 变化不影响保护。
             if let Some(condition) = observed_condition(receipt) {
                 for target in action_targets(call) {
-                    self.observed_conditions.insert(condition_key(environment, &target), condition.clone());
+                    self.observed_conditions
+                        .insert(condition_key(environment, &target), condition.clone());
                 }
             }
         }
@@ -75,45 +128,96 @@ impl DeterministicFailures {
         self.scoped_action_key(call, definition, environment, true)
     }
 
-    fn failure_key(&self, call: &Value, definition: &Value, environment: &Value, class: &str) -> String {
+    fn failure_key(
+        &self,
+        call: &Value,
+        definition: &Value,
+        environment: &Value,
+        class: &str,
+    ) -> String {
         self.scoped_action_key(call, definition, environment, class != "invalid-arguments")
     }
 
-    fn scoped_action_key(&self, call: &Value, definition: &Value, environment: &Value, condition_sensitive: bool) -> String {
-        let arguments = call.get("arguments").or_else(|| call.get("input")).unwrap_or(&Value::Null);
+    fn scoped_action_key(
+        &self,
+        call: &Value,
+        definition: &Value,
+        environment: &Value,
+        condition_sensitive: bool,
+    ) -> String {
+        let arguments = call
+            .get("arguments")
+            .or_else(|| call.get("input"))
+            .unwrap_or(&Value::Null);
         let mut arguments = arguments.clone();
         if let Some(fields) = arguments.as_object_mut() {
-            for explanation in ["reason", "explanation", "rationale"] { fields.remove(explanation); }
+            for explanation in ["reason", "explanation", "rationale"] {
+                fields.remove(explanation);
+            }
         }
-        let mut conditions = action_targets(call).into_iter().filter(|_| condition_sensitive).map(|target| {
-            let observed = self.observed_conditions.get(&condition_key(environment, &target));
-            json!([target, observed])
-        }).collect::<Vec<_>>();
+        let mut conditions = action_targets(call)
+            .into_iter()
+            .filter(|_| condition_sensitive)
+            .map(|target| {
+                let observed = self
+                    .observed_conditions
+                    .get(&condition_key(environment, &target));
+                json!([target, observed])
+            })
+            .collect::<Vec<_>>();
         if call["name"] == "knowledge.search" && arguments["requirementId"].is_string() {
-            // Bind only the selected native requirement; unrelated additions cannot renew failed actions.
-            // 只绑定当前引用的原生要求；新增无关要求不能重置其他失败动作的次数。
+            // 只绑定当前引用的原生要求，其他失败动作的次数不变。
             let identity = arguments["requirementId"].as_str().unwrap_or("");
-            let requirement = identity.strip_prefix("requirement-").and_then(|index| index.parse::<usize>().ok())
+            let requirement = identity
+                .strip_prefix("requirement-")
+                .and_then(|index| index.parse::<usize>().ok())
                 .filter(|index| *index > 0 && identity == format!("requirement-{index}"))
-                .and_then(|index| environment["configuration"]["acceptanceRequirements"].as_array()?.get(index - 1))
-                .and_then(Value::as_str).filter(|text| !text.trim().is_empty());
+                .and_then(|index| {
+                    environment["configuration"]["acceptanceRequirements"]
+                        .as_array()?
+                        .get(index - 1)
+                })
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty());
             conditions.push(json!({"nativeRequirement":requirement}));
         }
         let mut environment = stable_environment(environment);
         if !condition_sensitive && let Some(fields) = environment.as_object_mut() {
-            fields.remove("version"); fields.remove("mutationRevision");
+            fields.remove("version");
+            fields.remove("mutationRevision");
         }
-        fingerprint(&json!([call["name"], definition, arguments, environment, conditions]))
+        fingerprint(&json!([
+            call["name"],
+            definition,
+            arguments,
+            environment,
+            conditions
+        ]))
     }
 }
 
 fn stable_environment(environment: &Value) -> Value {
     let mut stable = environment.clone();
-    if let Some(fields) = stable.as_object_mut() { fields.remove("operationIdentity"); }
-    if let Some(configuration) = stable.get_mut("configuration").and_then(Value::as_object_mut) {
-        for field in ["activeToolCallId", "activeOperationId", "activeRequestId", "activeAssistantMessageId",
-            "nativeCancellationId", "approvedInvocation", "operationNamespace", "attachmentContextChars",
-            "activeSteeringSequence", "renewOperationalExecutionBudget", "acceptanceRequirements"] {
+    if let Some(fields) = stable.as_object_mut() {
+        fields.remove("operationIdentity");
+    }
+    if let Some(configuration) = stable
+        .get_mut("configuration")
+        .and_then(Value::as_object_mut)
+    {
+        for field in [
+            "activeToolCallId",
+            "activeOperationId",
+            "activeRequestId",
+            "activeAssistantMessageId",
+            "nativeCancellationId",
+            "approvedInvocation",
+            "operationNamespace",
+            "attachmentContextChars",
+            "activeSteeringSequence",
+            "renewOperationalExecutionBudget",
+            "acceptanceRequirements",
+        ] {
             configuration.remove(field);
         }
     }
@@ -124,21 +228,41 @@ fn fingerprint(value: &Value) -> String {
     fn ordered(value: &Value) -> Value {
         match value {
             Value::Object(fields) => {
-                let fields = fields.iter().map(|(key, value)| (key.clone(), ordered(value))).collect::<BTreeMap<_, _>>();
+                let fields = fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), ordered(value)))
+                    .collect::<BTreeMap<_, _>>();
                 serde_json::to_value(fields).unwrap_or(Value::Null)
             }
             Value::Array(items) => Value::Array(items.iter().map(ordered).collect()),
             value => value.clone(),
         }
     }
-    format!("{:x}", Sha256::digest(ordered(value).to_string().as_bytes()))
+    format!(
+        "{:x}",
+        Sha256::digest(ordered(value).to_string().as_bytes())
+    )
 }
 
 fn action_targets(call: &Value) -> Vec<Value> {
-    let arguments = call.get("arguments").or_else(|| call.get("input")).unwrap_or(&Value::Null);
+    let arguments = call
+        .get("arguments")
+        .or_else(|| call.get("input"))
+        .unwrap_or(&Value::Null);
     let mut targets = Vec::new();
     for arguments in [arguments, &arguments["arguments"]] {
-        for field in ["path", "filePath", "url", "uri", "sourceId", "sourceIdentity", "windowId", "processId", "tabId", "sessionId"] {
+        for field in [
+            "path",
+            "filePath",
+            "url",
+            "uri",
+            "sourceId",
+            "sourceIdentity",
+            "windowId",
+            "processId",
+            "tabId",
+            "sessionId",
+        ] {
             if let Some(value) = arguments.get(field).filter(|value| !value.is_null()) {
                 targets.push(json!([field, value]));
             }
@@ -150,7 +274,11 @@ fn action_targets(call: &Value) -> Vec<Value> {
 }
 
 fn condition_key(environment: &Value, target: &Value) -> String {
-    fingerprint(&json!([environment["workspace"], environment["permission"], target]))
+    fingerprint(&json!([
+        environment["workspace"],
+        environment["permission"],
+        target
+    ]))
 }
 
 fn receipt_nodes(receipt: &Value) -> Vec<&Value> {
@@ -158,8 +286,17 @@ fn receipt_nodes(receipt: &Value) -> Vec<&Value> {
     let mut cursor = 0;
     while cursor < nodes.len() && nodes.len() < 32 {
         let node = nodes[cursor];
-        for field in ["content", "structuredContent", "value", "result", "error", "details"] {
-            if let Some(value) = node.get(field).filter(|value| value.is_object()) { nodes.push(value); }
+        for field in [
+            "content",
+            "structuredContent",
+            "value",
+            "result",
+            "error",
+            "details",
+        ] {
+            if let Some(value) = node.get(field).filter(|value| value.is_object()) {
+                nodes.push(value);
+            }
         }
         cursor += 1;
     }
@@ -167,61 +304,165 @@ fn receipt_nodes(receipt: &Value) -> Vec<&Value> {
 }
 
 fn settled_success(receipt: &Value) -> bool {
-    receipt["executed"] != false && receipt["status"] == "completed"
-        && receipt_nodes(receipt).iter().all(|node| node["isError"] != true
-            && !matches!(node["status"].as_str(), Some("unknown" | "running" | "pending" | "queued" | "waiting" | "error" | "failed"))
-            && node["code"].as_str().is_none_or(str::is_empty)
-            && node["exitCode"].as_i64().is_none_or(|code| code == 0))
+    receipt["executed"] != false
+        && receipt["status"] == "completed"
+        && receipt_nodes(receipt).iter().all(|node| {
+            node["isError"] != true
+                && !matches!(
+                    node["status"].as_str(),
+                    Some(
+                        "unknown"
+                            | "running"
+                            | "pending"
+                            | "queued"
+                            | "waiting"
+                            | "error"
+                            | "failed"
+                    )
+                )
+                && node["code"].as_str().is_none_or(str::is_empty)
+                && node["exitCode"].as_i64().is_none_or(|code| code == 0)
+        })
 }
 
 fn observed_condition(receipt: &Value) -> Option<String> {
     let mut facts = Vec::new();
     for node in receipt_nodes(receipt) {
         let mut state = serde_json::Map::new();
-        for field in ["sha256", "contentHash", "sourceVersion", "sourceRevision", "bindingRevision", "version",
-            "exists", "isRunning", "state", "processId", "windowId", "lastModified", "modifiedAt"] {
-            if let Some(value) = node.get(field).filter(|value| !value.is_null()) { state.insert(field.into(), value.clone()); }
+        for field in [
+            "sha256",
+            "contentHash",
+            "sourceVersion",
+            "sourceRevision",
+            "bindingRevision",
+            "version",
+            "exists",
+            "isRunning",
+            "state",
+            "processId",
+            "windowId",
+            "lastModified",
+            "modifiedAt",
+        ] {
+            if let Some(value) = node.get(field).filter(|value| !value.is_null()) {
+                state.insert(field.into(), value.clone());
+            }
         }
-        if !state.is_empty() { facts.push(Value::Object(state)); }
+        if !state.is_empty() {
+            facts.push(Value::Object(state));
+        }
     }
     (!facts.is_empty()).then(|| fingerprint(&json!(facts)))
 }
 
 fn deterministic_failure(receipt: &Value) -> Option<(&'static str, String)> {
     let nodes = receipt_nodes(receipt);
-    // Ambiguous execution and transient waits always win over an embedded validation code.
-    // 未知执行和暂时等待优先于嵌套参数错误；不能因此放行重放未知写入。
-    if nodes.iter().any(|node| node["outcomeUnknown"] == true || node["timedOut"] == true
-        || node["cancelled"] == true || node["retryable"] == true || node["requiresApproval"] == true
-        || node["retryAfterMs"].as_u64().is_some_and(|delay| delay > 0)
-        || node["httpStatus"].as_u64().is_some_and(|status| matches!(status, 408 | 429 | 500..=599))
-        || matches!(node["status"].as_str(), Some("unknown" | "running" | "pending" | "queued" | "waiting" | "waiting-network"))
-        || matches!(node["outcome"].as_str(), Some("unknown" | "running" | "pending"))
-        || node["code"].as_str().is_some_and(|code| ["UNKNOWN", "TIMEOUT", "NETWORK", "CONNECTION", "RATE_LIMIT", "QUEUE", "BUSY", "CANCEL", "UNCONFIRMED"].iter().any(|part| code.contains(part))
-            || matches!(code, "RESOURCE_UNAVAILABLE" | "RESOURCE_WAIT" | "RESOURCE_LIMIT"))) {
+    // 未知执行和暂时等待优先于嵌套参数错误。
+    if nodes.iter().any(|node| {
+        node["outcomeUnknown"] == true
+            || node["timedOut"] == true
+            || node["cancelled"] == true
+            || node["retryable"] == true
+            || node["requiresApproval"] == true
+            || node["retryAfterMs"].as_u64().is_some_and(|delay| delay > 0)
+            || node["httpStatus"]
+                .as_u64()
+                .is_some_and(|status| matches!(status, 408 | 429 | 500..=599))
+            || matches!(
+                node["status"].as_str(),
+                Some("unknown" | "running" | "pending" | "queued" | "waiting" | "waiting-network")
+            )
+            || matches!(
+                node["outcome"].as_str(),
+                Some("unknown" | "running" | "pending")
+            )
+            || node["code"].as_str().is_some_and(|code| {
+                [
+                    "UNKNOWN",
+                    "TIMEOUT",
+                    "NETWORK",
+                    "CONNECTION",
+                    "RATE_LIMIT",
+                    "QUEUE",
+                    "BUSY",
+                    "CANCEL",
+                    "UNCONFIRMED",
+                ]
+                .iter()
+                .any(|part| code.contains(part))
+                    || matches!(
+                        code,
+                        "RESOURCE_UNAVAILABLE" | "RESOURCE_WAIT" | "RESOURCE_LIMIT"
+                    )
+            })
+    }) {
         return None;
     }
-    if !nodes.iter().any(|node| node["isError"] == true || matches!(node["status"].as_str(), Some("error" | "failed"))) { return None; }
-    if nodes.iter().any(|node| node["rpcCode"] == -32602) { return Some(("invalid-arguments", "MCP_INVALID_PARAMS".into())); }
-    if nodes.iter().any(|node| node["rpcCode"] == -32601) { return Some(("capability-unavailable", "MCP_METHOD_NOT_FOUND".into())); }
+    if !nodes.iter().any(|node| {
+        node["isError"] == true || matches!(node["status"].as_str(), Some("error" | "failed"))
+    }) {
+        return None;
+    }
+    if nodes.iter().any(|node| node["rpcCode"] == -32602) {
+        return Some(("invalid-arguments", "MCP_INVALID_PARAMS".into()));
+    }
+    if nodes.iter().any(|node| node["rpcCode"] == -32601) {
+        return Some(("capability-unavailable", "MCP_METHOD_NOT_FOUND".into()));
+    }
     for node in nodes {
-        let Some(code) = node["code"].as_str() else { continue; };
-        let class = if code == "INVALID_TOOL_ARGUMENTS" || code == "INVALID_DOCUMENT_PROGRESS" || code == "INVALID_RETRIEVAL_INPUT"
+        let Some(code) = node["code"].as_str() else {
+            continue;
+        };
+        let class = if code == "INVALID_TOOL_ARGUMENTS"
+            || code == "INVALID_DOCUMENT_PROGRESS"
+            || code == "INVALID_RETRIEVAL_INPUT"
             || code.starts_with("INVALID_SKILL_") && code.ends_with("PAGINATION")
-            || matches!(code, "INVALID_TOOL_SEARCH_CURSOR" | "TOOL_SCHEMA_INVALID" | "TOOL_SCHEMA_REJECTED" | "INVALID_PARAMETERS" | "INVALID_PARAMS" | "INVALID_ARGUMENTS" | "MISSING_REQUIRED_ARGUMENT") {
+            || matches!(
+                code,
+                "INVALID_TOOL_SEARCH_CURSOR"
+                    | "TOOL_SCHEMA_INVALID"
+                    | "TOOL_SCHEMA_REJECTED"
+                    | "INVALID_PARAMETERS"
+                    | "INVALID_PARAMS"
+                    | "INVALID_ARGUMENTS"
+                    | "MISSING_REQUIRED_ARGUMENT"
+            ) {
             "invalid-arguments"
-        } else if matches!(code, "UNSUPPORTED_TOOL_OPERATION" | "UNSUPPORTED_RUNTIME" | "UNSUPPORTED_FILE_TYPE" | "SKILL_RUNTIME_UNSUPPORTED" | "TOOL_NOT_DISCOVERED" | "TOOL_NOT_LOADED" | "TOOL_NOT_FOUND" | "MCP_TOOL_NOT_FOUND") {
+        } else if matches!(
+            code,
+            "UNSUPPORTED_TOOL_OPERATION"
+                | "UNSUPPORTED_RUNTIME"
+                | "UNSUPPORTED_FILE_TYPE"
+                | "SKILL_RUNTIME_UNSUPPORTED"
+                | "TOOL_NOT_DISCOVERED"
+                | "TOOL_NOT_LOADED"
+                | "TOOL_NOT_FOUND"
+                | "MCP_TOOL_NOT_FOUND"
+        ) {
             "capability-unavailable"
-        } else if matches!(code, "FILE_NOT_FOUND" | "PATH_NOT_FOUND" | "SOURCE_NOT_FOUND" | "ELEMENT_NOT_FOUND" | "WINDOW_NOT_FOUND" | "INVALID_WINDOW" | "SELECTOR_NOT_FOUND" | "BROWSER_SESSION_NOT_FOUND" | "ENOENT" | "ENOTDIR") {
+        } else if matches!(
+            code,
+            "FILE_NOT_FOUND"
+                | "PATH_NOT_FOUND"
+                | "SOURCE_NOT_FOUND"
+                | "ELEMENT_NOT_FOUND"
+                | "WINDOW_NOT_FOUND"
+                | "INVALID_WINDOW"
+                | "SELECTOR_NOT_FOUND"
+                | "BROWSER_SESSION_NOT_FOUND"
+                | "ENOENT"
+                | "ENOTDIR"
+        ) {
             "target-unavailable"
-        } else { continue; };
+        } else {
+            continue;
+        };
         return Some((class, code.to_owned()));
     }
     None
 }
 
-/// The caller supplies source/range changes after canonical receipt validation.
-/// 调用端在核对正式回执后提供来源与范围变化；调用理由、归档新 ID 或缓存命中不算新证据。
+/// 调用端在核对正式结果后提供来源与范围变化；调用理由、归档新 ID 或缓存命中不算新证据。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RoundProgress {
@@ -234,17 +475,20 @@ pub struct RoundProgress {
     pub discovery_calls: u64,
     pub work_calls: u64,
     pub waiting_only: bool,
-    /// All such actions were refused by the existing same-condition failure guard.
-    /// 这些动作均被已有同条件失败保护拒绝，不把纠偏回执算成新工作。
+    /// 这些动作都被已有同条件失败保护拒绝，纠偏结果不算新工作。
     pub suppressed_calls: u64,
     pub strategy_changed: bool,
-    /// An execution turn that only narrates unchanged work is stagnant, unlike an ordinary text answer.
     /// 执行阶段只叙述未变工作的轮次计为停滞；普通文字回答不传入此标记。
     pub execution_without_action: bool,
+    /// 回复与上一轮纯文字不同，说明模型没有原地重复。
+    pub text_changed: bool,
+    /// 未见过的失败操作属于排查，既不算进展，也不计入停滞。
+    pub new_failed_outcomes: u64,
+    /// 本轮只因新的命令或操作结果算作进展，没有产物变化或新读取内容。
+    pub action_outcomes_only: bool,
 }
 
-/// These counters may travel in the task checkpoint; stored document facts remain elsewhere.
-/// 计数可随业务检查点保存；逐文档事实仍由现有工作记录保存，不复制另一份证据账本。
+/// 计数可随业务检查点保存；逐文档事实仍由现有工作记录保存，不复制另一份证据记录。
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkProgress {
@@ -255,6 +499,10 @@ pub struct WorkProgress {
     work_started: bool,
     correction_pending: bool,
     deterministic_failures: DeterministicFailures,
+    text_only_rounds: u64,
+    last_text_hash: String,
+    seen_outcomes: Vec<String>,
+    action_only_rounds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +518,23 @@ pub struct WorkProgressPlan {
     pub wait_for_user: bool,
 }
 
+/// 去掉每次运行都会变化的字段，使相同操作和相同结果仍能被识别。
+fn stable_outcome(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .filter(|(key, _)| {
+                    key.as_str() != "reason" && !VOLATILE_OUTCOME_FIELDS.contains(&key.as_str())
+                })
+                .map(|(key, value)| (key.clone(), stable_outcome(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(stable_outcome).collect()),
+        other => other.clone(),
+    }
+}
+
 impl WorkProgress {
     pub fn failed_actions(&self) -> &DeterministicFailures {
         &self.deterministic_failures
@@ -277,6 +542,46 @@ impl WorkProgress {
 
     pub fn failed_actions_mut(&mut self) -> &mut DeterministicFailures {
         &mut self.deterministic_failures
+    }
+
+    /// 描述一轮只有文字的执行回复，并记下文字供下一轮比较。
+    pub fn response_round(&mut self, text: &str) -> RoundProgress {
+        let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+        let text_changed = !normalized.is_empty() && hash != self.last_text_hash;
+        self.last_text_hash = hash;
+        RoundProgress {
+            execution_without_action: true,
+            text_changed,
+            ..Default::default()
+        }
+    }
+
+    /// 统计未见过的操作结果（成功数、失败数）；完全相同的重复两边都不计。
+    pub fn record_outcomes(&mut self, outcomes: &[(&Value, &Value, bool)]) -> (u64, u64) {
+        let (mut successful, mut failed) = (0, 0);
+        for (call, result, succeeded) in outcomes {
+            let identity = json!([
+                call["name"],
+                stable_outcome(&call["arguments"]),
+                result["status"],
+                stable_outcome(&result["content"])
+            ]);
+            let hash = format!("{:x}", Sha256::digest(identity.to_string().as_bytes()));
+            if self.seen_outcomes.contains(&hash) {
+                continue;
+            }
+            if self.seen_outcomes.len() >= MAX_SEEN_OUTCOMES {
+                self.seen_outcomes.remove(0);
+            }
+            self.seen_outcomes.push(hash);
+            if *succeeded {
+                successful += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        (successful, failed)
     }
 
     pub fn stagnant_rounds(&self) -> u64 {
@@ -287,15 +592,13 @@ impl WorkProgress {
         self.no_progress_rounds >= STAGNANT_ROUNDS_BEFORE_CORRECTION
     }
 
-    /// A real new user instruction permits a fresh strategy without deleting accumulated evidence.
     /// 真实新指令允许重新尝试策略，不删除已累计证据和重复读取诊断。
     pub fn resume_after_user_instruction(&mut self) {
         self.no_progress_rounds = 0;
         self.correction_pending = false;
+        self.text_only_rounds = 0;
     }
 
-    /// Stalled work can enter synthesis before its tool allowance is nearly spent.
-    /// 工作停滞时提前转入综合建议；不改变授额，不把已读资料认定为任务完成。
     pub fn delivery_plan(&self, max_tool_calls: u64, used_tool_calls: u64) -> DeliveryBudgetPlan {
         let mut plan = delivery_budget_plan(max_tool_calls, used_tool_calls);
         if self.needs_strategy_change() && plan.phase == ToolBudgetPhase::Analyze {
@@ -305,16 +608,16 @@ impl WorkProgress {
         plan
     }
 
-    /// Count useful changes, not calls; genuine wait-only rounds leave stagnation unchanged.
-    /// 统计有效变化而非调用数量；正式等待或状态轮询不增长、也不清除已有无进展轮次。
+    /// 统计有效变化而非调用数量；正式等待或状态轮询不改变无进展轮次。
     pub fn observe_round(&mut self, round: &RoundProgress) -> WorkProgressPlan {
         let made_progress = round.completed_source_count > self.completed_source_count
             || round.evidence_changed
             || round.artifact_updated
             || round.new_read_range;
-        // Text-only rounds carry no document count; they cannot erase the last witnessed completion watermark.
-        // 纯文字轮次不携带文档计数，不能清掉已有真实完成水位再制造假进展。
-        self.completed_source_count = self.completed_source_count.max(round.completed_source_count);
+        // 纯文字轮次不带文档计数，已有的完成位置保持不变。
+        self.completed_source_count = self
+            .completed_source_count
+            .max(round.completed_source_count);
         self.repeated_reads = self.repeated_reads.saturating_add(round.repeated_reads);
 
         let has_calls = round.work_calls > 0
@@ -325,10 +628,29 @@ impl WorkProgress {
         let all_actions_repeated = round.repeated_reads.saturating_add(round.suppressed_calls)
             >= round.work_calls.max(1)
             && round.repeated_reads.saturating_add(round.suppressed_calls) > 0;
-        // Pause only a witnessed unchanged route after correction; new methods and active waits remain possible.
         // 仅纠偏后又回到已证实不变的路径才等待用户；新方法和真实等待仍可继续。
-        let wait_for_user = self.correction_pending && !made_progress && !round.waiting_only && !round.strategy_changed
-            && (round.execution_without_action || all_actions_repeated);
+        // 纠偏后模型可以用新内容作答；只有重复或无休止的叙述才停止任务。
+        self.text_only_rounds = if round.execution_without_action {
+            self.text_only_rounds.saturating_add(1)
+        } else {
+            0
+        };
+        let stuck_text = round.execution_without_action
+            && (!round.text_changed || self.text_only_rounds > MAX_TEXT_ONLY_ROUNDS);
+        let wait_for_user = self.correction_pending
+            && !made_progress
+            && !round.waiting_only
+            && !round.strategy_changed
+            && round.new_failed_outcomes == 0
+            && (stuck_text || all_actions_repeated);
+        // 不同命令的输出总会不同；连续只靠它们推进时提醒模型汇报或换思路，但不强行停止。
+        if round.action_outcomes_only || round.new_failed_outcomes > 0 {
+            self.action_only_rounds += 1;
+        } else if made_progress {
+            self.action_only_rounds = 0;
+        }
+        let action_reminder = self.action_only_rounds > 0
+            && self.action_only_rounds % ACTION_ROUNDS_BEFORE_REMINDER == 0;
         if made_progress {
             self.work_started = true;
             self.no_progress_rounds = 0;
@@ -336,6 +658,8 @@ impl WorkProgress {
         } else if round.strategy_changed {
             self.no_progress_rounds = 0;
             self.correction_pending = false;
+        } else if round.new_failed_outcomes > 0 {
+            self.work_started = true;
         } else if !round.waiting_only && has_calls {
             let initial_discovery = !self.work_started
                 && round.source_reads == 0
@@ -346,18 +670,17 @@ impl WorkProgress {
                 self.initial_discovery_rounds += 1;
             } else {
                 self.work_started = true;
-                self.no_progress_rounds = self.no_progress_rounds.saturating_add(1);
+                self.no_progress_rounds += 1;
             }
         }
 
         let change_strategy = self.needs_strategy_change();
-        // Remind once per three stalled work rounds rather than after every polling response.
-        // 每三轮停滞工作提示一次，避免每次等待回执或每轮模型回复都追加纠偏文本。
-        let correction_due = change_strategy
-            && has_calls
-            && !round.waiting_only
-            && !wait_for_user
-            && self.no_progress_rounds % STAGNANT_ROUNDS_BEFORE_CORRECTION == 0;
+        let correction_due = action_reminder
+            || change_strategy
+                && has_calls
+                && !round.waiting_only
+                && !wait_for_user
+                && self.no_progress_rounds % STAGNANT_ROUNDS_BEFORE_CORRECTION == 0;
         self.correction_pending |= correction_due;
         WorkProgressPlan {
             made_progress,
@@ -379,8 +702,7 @@ pub enum ToolBudgetPhase {
     Deliver,
 }
 
-/// Priority advice never changes the caller's granted limit or exempts cached calls.
-/// 优先级建议不更改调用端真实授额，也不豁免缓存调用；耗尽工具额度仍可整理已有成果。
+/// 优先级建议不改变调用端额度；耗尽工具额度后仍可整理已有成果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryBudgetPlan {
@@ -396,8 +718,7 @@ pub struct DeliveryBudgetPlan {
 
 pub fn delivery_budget_plan(max_tool_calls: u64, used_tool_calls: u64) -> DeliveryBudgetPlan {
     let remaining_tool_calls = max_tool_calls.saturating_sub(used_tool_calls);
-    // Reserve about one fifth for synthesis/verification, scaled down for small grants.
-    // 常用额度约保留五分之一给综合和核验；小授额同比缩小，不锁死十二次调用。
+    // 常用额度约保留五分之一给综合和检查；小额度同比缩小，不锁死十二次调用。
     let proportional_reserve = max_tool_calls / 5 + u64::from(max_tool_calls % 5 != 0);
     let small_grant_cap = (max_tool_calls / 3).max(u64::from(max_tool_calls > 0));
     let delivery_reserve_calls = proportional_reserve.clamp(12, 48).min(small_grant_cap);
@@ -435,14 +756,88 @@ mod tests {
     }
 
     #[test]
+    fn endless_new_commands_get_a_reminder_without_being_stopped() {
+        let mut work = WorkProgress::default();
+        let action = RoundProgress {
+            work_calls: 1,
+            evidence_changed: true,
+            action_outcomes_only: true,
+            ..Default::default()
+        };
+        for round in 1..=16 {
+            let plan = work.observe_round(&action);
+            assert!(plan.made_progress && !plan.wait_for_user);
+            assert_eq!(
+                plan.correction_due,
+                round % ACTION_ROUNDS_BEFORE_REMINDER == 0,
+                "round {round}"
+            );
+        }
+        work.observe_round(&RoundProgress {
+            work_calls: 1,
+            artifact_updated: true,
+            ..Default::default()
+        });
+        assert!(
+            !work.observe_round(&action).correction_due,
+            "a real change restarts the count"
+        );
+    }
+
+    #[test]
+    fn corrected_models_may_answer_in_new_words_but_cannot_narrate_forever() {
+        let mut work = WorkProgress::default();
+        let stalled = RoundProgress {
+            work_calls: 1,
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            work.observe_round(&stalled);
+        }
+        let answer = work.response_round("完整回答");
+        assert!(answer.text_changed);
+        assert!(
+            !work.observe_round(&answer).wait_for_user,
+            "a new answer goes on to review"
+        );
+        let same = work.response_round("完整回答");
+        assert!(!same.text_changed);
+        assert!(
+            work.observe_round(&same).wait_for_user,
+            "the same text stops"
+        );
+
+        let mut endless = WorkProgress::default();
+        for _ in 0..3 {
+            endless.observe_round(&stalled);
+        }
+        let mut stopped = false;
+        for index in 0..=MAX_TEXT_ONLY_ROUNDS {
+            let round = endless.response_round(&format!("第{index}段说明"));
+            stopped = endless.observe_round(&round).wait_for_user;
+        }
+        assert!(stopped, "varied narration is still bounded");
+    }
+
+    #[test]
     fn deterministic_failures_allow_one_retry_then_preserve_correction_across_checkpoint() {
         let mut progress = WorkProgress::default();
         let definition = json!({"name":"filesystem.read","inputSchema":{"offset":{"minimum":0}}});
         let environment = json!({"workspace":"fixture","configuration":{"activeToolCallId":"one"}});
         for id in ["one", "two"] {
             let call = bad_call(id);
-            assert!(progress.failed_actions().before_dispatch(&call, &definition, &environment).is_none());
-            progress.failed_actions_mut().observe(&call, &definition, &environment, &failed("INVALID_TOOL_ARGUMENTS"));
+            assert!(
+                progress
+                    .failed_actions()
+                    .before_dispatch(&call, &definition, &environment)
+                    .is_none()
+            );
+            progress.failed_actions_mut().observe(
+                &call,
+                &definition,
+                &environment,
+                &failed("INVALID_TOOL_ARGUMENTS"),
+            );
         }
         let saved = serde_json::to_vec(&progress).unwrap();
         let restored: WorkProgress = serde_json::from_slice(&saved).unwrap();
@@ -450,13 +845,20 @@ mod tests {
         call["arguments"]["reason"] = json!("another explanation");
         let mut current = environment.clone();
         current["configuration"]["activeToolCallId"] = json!("different-call-id");
-        let blocked = restored.failed_actions().before_dispatch(&call, &definition, &current).unwrap();
+        let blocked = restored
+            .failed_actions()
+            .before_dispatch(&call, &definition, &current)
+            .unwrap();
         assert_eq!(blocked["executed"], false);
         assert_eq!(blocked["recoverable"], true);
         assert_eq!(blocked["content"]["originalCode"], "INVALID_TOOL_ARGUMENTS");
         assert_eq!(restored.stagnant_rounds(), 0);
         assert_eq!(restored.delivery_plan(100, 2).remaining_tool_calls, 98);
-        assert!(serde_json::from_value::<WorkProgress>(json!({"workStarted":true})).unwrap().work_started);
+        assert!(
+            serde_json::from_value::<WorkProgress>(json!({"workStarted":true}))
+                .unwrap()
+                .work_started
+        );
     }
 
     #[test]
@@ -466,45 +868,118 @@ mod tests {
         let definition = json!({"schemaVersion":1});
         let environment = json!({"workspace":"fixture","permission":"smart","mutationRevision":0});
         failures.observe(&call, &definition, &environment, &failed("ENOENT"));
-        failures.observe(&bad_call("two"), &definition, &environment, &failed("ENOENT"));
-        assert!(failures.before_dispatch(&call, &definition, &environment).is_some());
+        failures.observe(
+            &bad_call("two"),
+            &definition,
+            &environment,
+            &failed("ENOENT"),
+        );
+        assert!(
+            failures
+                .before_dispatch(&call, &definition, &environment)
+                .is_some()
+        );
         let mut corrected = call.clone();
         corrected["arguments"]["offset"] = json!(0);
-        assert!(failures.before_dispatch(&corrected, &definition, &environment).is_none());
-        assert!(failures.before_dispatch(&call, &json!({"schemaVersion":2}), &environment).is_none());
-        assert!(failures.before_dispatch(&call, &definition, &json!({"workspace":"fixture","permission":"smart","mutationRevision":1})).is_none());
-        let stat = json!({"id":"actual-stat","name":"filesystem.stat","arguments":{"path":"notes.txt"}});
-        failures.observe(&stat, &json!({}), &environment, &json!({"status":"completed","content":{"exists":true,"sha256":"a".repeat(64)}}));
-        assert!(failures.before_dispatch(&call, &definition, &environment).is_none());
+        assert!(
+            failures
+                .before_dispatch(&corrected, &definition, &environment)
+                .is_none()
+        );
+        assert!(
+            failures
+                .before_dispatch(&call, &json!({"schemaVersion":2}), &environment)
+                .is_none()
+        );
+        assert!(
+            failures
+                .before_dispatch(
+                    &call,
+                    &definition,
+                    &json!({"workspace":"fixture","permission":"smart","mutationRevision":1})
+                )
+                .is_none()
+        );
+        let stat =
+            json!({"id":"actual-stat","name":"filesystem.stat","arguments":{"path":"notes.txt"}});
+        failures.observe(
+            &stat,
+            &json!({}),
+            &environment,
+            &json!({"status":"completed","content":{"exists":true,"sha256":"a".repeat(64)}}),
+        );
+        assert!(
+            failures
+                .before_dispatch(&call, &definition, &environment)
+                .is_none()
+        );
 
         let mut failures = DeterministicFailures::default();
         let initial = json!({"configuration":{"acceptanceRequirements":["first requirement"]}});
-        let search = |id:&str|json!({"id":id,"name":"knowledge.search","arguments":{"query":"facts","requirementId":"requirement-3"}});
-        for id in ["one","two"] {
-            failures.observe(&search(id), &definition, &initial, &failed("INVALID_RETRIEVAL_INPUT"));
-            failures.observe(&bad_call(id), &definition, &initial, &failed("INVALID_TOOL_ARGUMENTS"));
+        let search = |id: &str| json!({"id":id,"name":"knowledge.search","arguments":{"query":"facts","requirementId":"requirement-3"}});
+        for id in ["one", "two"] {
+            failures.observe(
+                &search(id),
+                &definition,
+                &initial,
+                &failed("INVALID_RETRIEVAL_INPUT"),
+            );
+            failures.observe(
+                &bad_call(id),
+                &definition,
+                &initial,
+                &failed("INVALID_TOOL_ARGUMENTS"),
+            );
         }
-        assert!(failures.before_dispatch(&search("retry"), &definition, &initial).is_some());
+        assert!(
+            failures
+                .before_dispatch(&search("retry"), &definition, &initial)
+                .is_some()
+        );
         let unrelated = json!({"configuration":{"acceptanceRequirements":["first requirement","second requirement"]}});
-        assert!(failures.before_dispatch(&search("retry"), &definition, &unrelated).is_some());
+        assert!(
+            failures
+                .before_dispatch(&search("retry"), &definition, &unrelated)
+                .is_some()
+        );
         let now_valid = json!({"configuration":{"acceptanceRequirements":["first requirement","second requirement","new native third requirement"]}});
-        assert!(failures.before_dispatch(&search("retry"), &definition, &now_valid).is_none());
-        assert!(failures.before_dispatch(&bad_call("retry"), &definition, &now_valid).is_some());
+        assert!(
+            failures
+                .before_dispatch(&search("retry"), &definition, &now_valid)
+                .is_none()
+        );
+        assert!(
+            failures
+                .before_dispatch(&bad_call("retry"), &definition, &now_valid)
+                .is_some()
+        );
     }
 
     #[test]
     fn unrelated_state_observation_does_not_clear_a_failed_target() {
         let mut failures = DeterministicFailures::default();
-        for id in ["one", "two"] { failures.observe(&bad_call(id), &json!({}), &json!({}), &failed("ENOENT")); }
-        failures.observe(&json!({"id":"other","name":"filesystem.stat","arguments":{"path":"other.txt"}}),
-            &json!({}), &json!({}), &json!({"status":"completed","content":{"exists":true,"sha256":"a".repeat(64)}}));
-        assert!(failures.before_dispatch(&bad_call("retry"), &json!({}), &json!({})).is_some());
+        for id in ["one", "two"] {
+            failures.observe(&bad_call(id), &json!({}), &json!({}), &failed("ENOENT"));
+        }
+        failures.observe(
+            &json!({"id":"other","name":"filesystem.stat","arguments":{"path":"other.txt"}}),
+            &json!({}),
+            &json!({}),
+            &json!({"status":"completed","content":{"exists":true,"sha256":"a".repeat(64)}}),
+        );
+        assert!(
+            failures
+                .before_dispatch(&bad_call("retry"), &json!({}), &json!({}))
+                .is_some()
+        );
     }
 
     #[test]
     fn network_waits_polling_unknown_effects_and_generic_exits_never_enter_failure_suppression() {
         for receipt in [
-            failed("MCP_CONNECTION_LOST"), failed("MCP_TIMEOUT"), failed("RESOURCE_BUSY"),
+            failed("MCP_CONNECTION_LOST"),
+            failed("MCP_TIMEOUT"),
+            failed("RESOURCE_BUSY"),
             json!({"status":"queued","isError":true,"code":"INVALID_TOOL_ARGUMENTS"}),
             json!({"status":"running","content":{"code":"INVALID_PARAMS"}}),
             json!({"status":"unknown","isError":true,"content":{"code":"INVALID_PARAMS"}}),
@@ -513,18 +988,35 @@ mod tests {
             json!({"status":"error","isError":true,"code":"MCP_RPC_ERROR","content":{"details":{"rpcCode":-32602,"httpStatus":503}}}),
         ] {
             let mut failures = DeterministicFailures::default();
-            for id in ["one", "two", "three"] { failures.observe(&bad_call(id), &json!({}), &json!({}), &receipt); }
-            assert!(failures.before_dispatch(&bad_call("retry"), &json!({}), &json!({})).is_none(), "{receipt}");
+            for id in ["one", "two", "three"] {
+                failures.observe(&bad_call(id), &json!({}), &json!({}), &receipt);
+            }
+            assert!(
+                failures
+                    .before_dispatch(&bad_call("retry"), &json!({}), &json!({}))
+                    .is_none(),
+                "{receipt}"
+            );
         }
     }
 
     #[test]
     fn rpc_invalid_params_and_resource_pagination_are_structured_deterministic_failures() {
-        for receipt in [failed("INVALID_SKILL_RESOURCE_PAGINATION"), failed("INVALID_RETRIEVAL_INPUT"),
-            json!({"status":"error","isError":true,"code":"MCP_RPC_ERROR","content":{"details":{"rpcCode":-32602}}})] {
+        for receipt in [
+            failed("INVALID_SKILL_RESOURCE_PAGINATION"),
+            failed("INVALID_RETRIEVAL_INPUT"),
+            json!({"status":"error","isError":true,"code":"MCP_RPC_ERROR","content":{"details":{"rpcCode":-32602}}}),
+        ] {
             let mut failures = DeterministicFailures::default();
-            for id in ["one", "two"] { failures.observe(&bad_call(id), &json!({}), &json!({}), &receipt); }
-            assert_eq!(failures.before_dispatch(&bad_call("retry"), &json!({}), &json!({})).unwrap()["content"]["failureClass"], "invalid-arguments");
+            for id in ["one", "two"] {
+                failures.observe(&bad_call(id), &json!({}), &json!({}), &receipt);
+            }
+            assert_eq!(
+                failures
+                    .before_dispatch(&bad_call("retry"), &json!({}), &json!({}))
+                    .unwrap()["content"]["failureClass"],
+                "invalid-arguments"
+            );
         }
     }
 
@@ -536,11 +1028,31 @@ mod tests {
             "resultRef":{"id":"owned-archive","sha256":"a".repeat(64)}});
         let first = json!({"operationIdentity":"round-one"});
         failures.observe(&call, &json!({}), &first, &receipt);
-        for _ in 0..5 { failures.observe(&call, &json!({}), &first, &receipt); }
-        assert!(failures.before_dispatch(&call, &json!({}), &first).is_none());
-        let mut restored: DeterministicFailures = serde_json::from_slice(&serde_json::to_vec(&failures).unwrap()).unwrap();
-        restored.observe(&call, &json!({}), &json!({"operationIdentity":"round-two"}), &receipt);
-        assert!(restored.before_dispatch(&call, &json!({}), &json!({"operationIdentity":"round-three"})).is_some());
+        for _ in 0..5 {
+            failures.observe(&call, &json!({}), &first, &receipt);
+        }
+        assert!(
+            failures
+                .before_dispatch(&call, &json!({}), &first)
+                .is_none()
+        );
+        let mut restored: DeterministicFailures =
+            serde_json::from_slice(&serde_json::to_vec(&failures).unwrap()).unwrap();
+        restored.observe(
+            &call,
+            &json!({}),
+            &json!({"operationIdentity":"round-two"}),
+            &receipt,
+        );
+        assert!(
+            restored
+                .before_dispatch(
+                    &call,
+                    &json!({}),
+                    &json!({"operationIdentity":"round-three"})
+                )
+                .is_some()
+        );
     }
 
     #[test]
@@ -548,22 +1060,32 @@ mod tests {
         let failures = DeterministicFailures::default();
         let left = json!({"id":"left","name":"tool","arguments":{"path":"a","options":{"limit":2,"offset":0}}});
         let right: Value = serde_json::from_str(r#"{"id":"right","name":"tool","arguments":{"options":{"offset":0,"limit":2},"path":"a","reason":"new reason"}}"#).unwrap();
-        assert_eq!(failures.action_key(&left,&json!({}),&json!({"operationIdentity":"one"})),
-            failures.action_key(&right,&json!({}),&json!({"operationIdentity":"two"})));
+        assert_eq!(
+            failures.action_key(&left, &json!({}), &json!({"operationIdentity":"one"})),
+            failures.action_key(&right, &json!({}), &json!({"operationIdentity":"two"}))
+        );
     }
 
     #[test]
     fn completion_prose_without_action_changes_strategy_without_ending_or_spending_tools() {
         let mut progress = WorkProgress::default();
         for round in 1..=3 {
-            let plan = progress.observe_round(&RoundProgress { execution_without_action:true,..Default::default() });
-            assert_eq!(plan.no_progress_rounds,round);
-            assert_eq!(plan.correction_due,round==3);
+            let plan = progress.observe_round(&RoundProgress {
+                execution_without_action: true,
+                ..Default::default()
+            });
+            assert_eq!(plan.no_progress_rounds, round);
+            assert_eq!(plan.correction_due, round == 3);
         }
         assert!(progress.needs_strategy_change());
-        assert_eq!(progress.delivery_plan(256,14).remaining_tool_calls,242);
-        let useful = progress.observe_round(&RoundProgress { new_read_range:true,source_reads:1,..Default::default() });
-        assert!(useful.made_progress); assert_eq!(useful.no_progress_rounds,0);
+        assert_eq!(progress.delivery_plan(256, 14).remaining_tool_calls, 242);
+        let useful = progress.observe_round(&RoundProgress {
+            new_read_range: true,
+            source_reads: 1,
+            ..Default::default()
+        });
+        assert!(useful.made_progress);
+        assert_eq!(useful.no_progress_rounds, 0);
     }
 
     #[test]
@@ -650,23 +1172,45 @@ mod tests {
     #[test]
     fn only_a_repeated_unchanged_route_after_correction_waits_for_user() {
         let mut work = WorkProgress::default();
-        let repeated = RoundProgress {work_calls:1,source_reads:1,repeated_reads:1,..Default::default()};
-        for _ in 0..3 {assert!(!work.observe_round(&repeated).wait_for_user);}
+        let repeated = RoundProgress {
+            work_calls: 1,
+            source_reads: 1,
+            repeated_reads: 1,
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            assert!(!work.observe_round(&repeated).wait_for_user);
+        }
         let saved = serde_json::to_value(&work).unwrap();
         let mut work: WorkProgress = serde_json::from_value(saved).unwrap();
-        let waiting = work.observe_round(&RoundProgress {work_calls:1,waiting_only:true,..Default::default()});
+        let waiting = work.observe_round(&RoundProgress {
+            work_calls: 1,
+            waiting_only: true,
+            ..Default::default()
+        });
         assert!(!waiting.wait_for_user);
-        let alternative = work.observe_round(&RoundProgress {work_calls:1,..Default::default()});
+        let alternative = work.observe_round(&RoundProgress {
+            work_calls: 1,
+            ..Default::default()
+        });
         assert!(!alternative.wait_for_user);
         assert!(work.observe_round(&repeated).wait_for_user);
-        let new_range = work.observe_round(&RoundProgress {work_calls:1,source_reads:1,new_read_range:true,..Default::default()});
+        let new_range = work.observe_round(&RoundProgress {
+            work_calls: 1,
+            source_reads: 1,
+            new_read_range: true,
+            ..Default::default()
+        });
         assert!(new_range.made_progress);
         assert!(!new_range.wait_for_user);
         assert!(!work.observe_round(&repeated).wait_for_user);
-        for _ in 0..3 {work.observe_round(&repeated);}
+        for _ in 0..3 {
+            work.observe_round(&repeated);
+        }
         work.resume_after_user_instruction();
         assert!(!work.observe_round(&repeated).wait_for_user);
-        let legacy: WorkProgress = serde_json::from_value(json!({"workStarted":true,"noProgressRounds":9})).unwrap();
+        let legacy: WorkProgress =
+            serde_json::from_value(json!({"workStarted":true,"noProgressRounds":9})).unwrap();
         assert!(!legacy.correction_pending);
     }
 
@@ -674,38 +1218,93 @@ mod tests {
     fn long_work_with_new_evidence_keeps_running_and_unchanged_correction_survives_resume() {
         let mut work = WorkProgress::default();
         for _ in 0..24 {
-            assert!(work.observe_round(&RoundProgress {work_calls:1, new_read_range:true,
-                ..Default::default()}).made_progress);
+            assert!(
+                work.observe_round(&RoundProgress {
+                    work_calls: 1,
+                    new_read_range: true,
+                    ..Default::default()
+                })
+                .made_progress
+            );
             for _ in 0..2 {
-                assert!(!work.observe_round(&RoundProgress {execution_without_action:true,
-                    ..Default::default()}).wait_for_user);
+                assert!(
+                    !work
+                        .observe_round(&RoundProgress {
+                            execution_without_action: true,
+                            ..Default::default()
+                        })
+                        .wait_for_user
+                );
             }
         }
-        let correction = work.observe_round(&RoundProgress {execution_without_action:true,
-            ..Default::default()});
+        let correction = work.observe_round(&RoundProgress {
+            execution_without_action: true,
+            ..Default::default()
+        });
         assert!(correction.correction_due);
-        let mut restored: WorkProgress = serde_json::from_value(serde_json::to_value(work).unwrap()).unwrap();
-        assert!(!restored.observe_round(&RoundProgress {work_calls:1, waiting_only:true,
-            ..Default::default()}).wait_for_user);
-        assert!(restored.observe_round(&RoundProgress {execution_without_action:true,
-            ..Default::default()}).wait_for_user);
+        let mut restored: WorkProgress =
+            serde_json::from_value(serde_json::to_value(work).unwrap()).unwrap();
+        assert!(
+            !restored
+                .observe_round(&RoundProgress {
+                    work_calls: 1,
+                    waiting_only: true,
+                    ..Default::default()
+                })
+                .wait_for_user
+        );
+        assert!(
+            restored
+                .observe_round(&RoundProgress {
+                    execution_without_action: true,
+                    ..Default::default()
+                })
+                .wait_for_user
+        );
         restored.resume_after_user_instruction();
-        assert!(restored.observe_round(&RoundProgress {work_calls:1, artifact_updated:true,
-            ..Default::default()}).made_progress);
-        assert!(!restored.observe_round(&RoundProgress {execution_without_action:true,
-            ..Default::default()}).wait_for_user);
+        assert!(
+            restored
+                .observe_round(&RoundProgress {
+                    work_calls: 1,
+                    artifact_updated: true,
+                    ..Default::default()
+                })
+                .made_progress
+        );
+        assert!(
+            !restored
+                .observe_round(&RoundProgress {
+                    execution_without_action: true,
+                    ..Default::default()
+                })
+                .wait_for_user
+        );
     }
 
     #[test]
     fn text_rounds_do_not_erase_source_completion_and_fake_later_progress() {
         let mut work = WorkProgress::default();
-        assert!(work.observe_round(&RoundProgress {completed_source_count:2,..Default::default()}).made_progress);
-        let text = work.observe_round(&RoundProgress {execution_without_action:true,..Default::default()});
-        assert_eq!(text.completed_source_count,2);
-        let repeated = work.observe_round(&RoundProgress {completed_source_count:2,source_reads:1,
-            repeated_reads:1,work_calls:1,..Default::default()});
+        assert!(
+            work.observe_round(&RoundProgress {
+                completed_source_count: 2,
+                ..Default::default()
+            })
+            .made_progress
+        );
+        let text = work.observe_round(&RoundProgress {
+            execution_without_action: true,
+            ..Default::default()
+        });
+        assert_eq!(text.completed_source_count, 2);
+        let repeated = work.observe_round(&RoundProgress {
+            completed_source_count: 2,
+            source_reads: 1,
+            repeated_reads: 1,
+            work_calls: 1,
+            ..Default::default()
+        });
         assert!(!repeated.made_progress);
-        assert_eq!(repeated.no_progress_rounds,2);
+        assert_eq!(repeated.no_progress_rounds, 2);
     }
 
     #[test]

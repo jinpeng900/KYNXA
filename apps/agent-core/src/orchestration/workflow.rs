@@ -2,7 +2,6 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-/// The workflow owns recovery stages and dispatch identity; adapters execute only admitted effects.
 /// 工作流拥有恢复阶段和派发身份；适配器只执行已经准入的操作。
 #[derive(Default)]
 pub struct WorkflowState {

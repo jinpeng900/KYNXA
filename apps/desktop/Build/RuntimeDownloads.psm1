@@ -77,7 +77,6 @@ function Save-KynxaPinnedDownload {
     } else { @(Get-KynxaDownloadUrls -Url $Url -DownloadSourcesPath $DownloadSourcesPath) }
     $partialPaths = @{}
     foreach ($sourceUrl in $downloadUrls) {
-        # Keep one checkpoint per source; a failed mirror must not overwrite another source's progress.
         # 每个来源保留独立断点，失败的镜像不能覆盖另一来源已下载的内容。
         $suffix = ''
         if ($sourceUrl -ne $Url) {
@@ -154,7 +153,6 @@ function Save-KynxaPinnedDownload {
                     $contentLength = $response.Content.Headers.ContentLength
                     if ($statusCode -eq 206) {
                         $range = $response.Content.Headers.ContentRange
-                        # Resume only matching file ranges, then verify the pinned hash.
                         # 仅续传同一文件的匹配范围，完成后核对固定哈希。
                         if (-not $range -or $range.Unit -ne 'bytes' -or $range.From -ne $offset -or -not $range.HasLength -or
                             $range.To -lt $range.From -or $range.To -ge $range.Length -or
@@ -169,7 +167,6 @@ function Save-KynxaPinnedDownload {
                         $totalBytes = [long]$range.Length
                     }
                     else {
-                        # A server ignoring Range returns a fresh full body, never bytes to append.
                         # 服务端忽略 Range 返回完整正文时重新写入，不能追加到旧断点。
                         $offset = 0
                         if ($ExpectedBytes -gt 0 -and $contentLength -and $contentLength -ne $ExpectedBytes) { throw 'Downloaded length differs from the pinned size.' }
@@ -228,7 +225,6 @@ function Save-KynxaPinnedDownload {
     finally {
         if ($client) { $client.Dispose() }
         if ($downloadCompleted) {
-            # After publication, only the verified final file is needed; retain checkpoints only on failure.
             # 正式文件校验并发布后清理本次来源的重复断点，只有失败时继续保留。
             foreach ($path in $partialPaths.Values) {
                 foreach ($cachePath in @($path, ($path + '.json'))) {

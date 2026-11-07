@@ -291,7 +291,6 @@
     return formatLiteral(selected.slice(0, first)) + text + formatLiteral(selected.slice(last + 1)) + '%'.repeat(percentCount);
   }
 
-  // Sparse size overrides and cumulative differences avoid a million-entry array for mostly empty sheets.
   // 稀疏尺寸覆写及前缀差值避免为空白大表分配百万项数组，定位只依赖二分查找。
   class Axis {
     constructor(count, defaultSize, overrides) {
@@ -346,7 +345,6 @@
     }
     if (!sheets.length) throw failure('XLSX workbook has no visible worksheets');
     const first = sheets[clamp(Math.trunc(selectedSheet) || 0, 0, sheets.length - 1)];
-    // Begin the selected worksheet alongside shared strings/styles, without decoding every string first.
     // 选中表原件与共享字符串、样式并行读取；共享字符串只在实际单元格需要时解码一次。
     first.source = packageReader.xml(first.path, false, false);
     first.source.catch(() => {});
@@ -458,7 +456,6 @@
         if (++checked % 32 === 0 && performance.now() >= deadline) return;
       }
       entry.complete = true; remaining--;
-      // Completed rows no longer retain their XML subtree; cached values remain the source for later views.
       // 已解析行释放 XML 子树，之后滚动和切表只读缓存值，不再解压或重复解码。
       entry.node.remove(); entry.node = null;
     }
@@ -550,7 +547,6 @@
     function prepareInBackground() {
       if (worker || disposed) return;
       worker = (async () => {
-        // First paint and input get an event-loop turn before any remaining rows are decoded.
         // 首屏绘制和输入先获得事件循环时段，其余行按硬件适配的短批次继续解码。
         await pause();
         while (!disposed) {
@@ -603,7 +599,6 @@
       const cell = sheet.cells.get(`${row}:${column}`);
       const style = cell?.style || workbook.styles[sheet.rowStyles.get(row) ?? sheet.columnStyles.get(column) ?? 0] || workbook.styles[0];
       if (!node.firstChild) {
-        // Value formatting is cached on first visibility, not repeated for every cell in a large worksheet.
         // 数值格式只在单元格首次可见时计算并缓存，不为整张大表预先执行日期及数字格式化。
         if (cell && cell.text === undefined) cell.text = cell.numeric ? numberText(cell.value, style.format, workbook.date1904) : String(cell.value ?? '');
         const label = document.createElement('span'); label.className = 'xlsx-value'; label.textContent = cell?.text || ''; node.append(label);
@@ -644,7 +639,6 @@
       if (disposed || viewport !== current || current.revision !== viewportRevision) return;
       const deadline = performance.now() + Math.min(navigator.scheduling?.isInputPending?.() ? 4 : 8, sliceMs);
       let steps = 0;
-      // Complete the full visible range over short frames; a cell-count budget must never remove columns.
       // 单元格数量只限制每帧工作量，可见区域分帧完整补齐，不能用预算直接裁掉右侧列。
       while (steps++ < 512 && performance.now() < deadline) {
         if (current.phase === 'prune') {
@@ -678,7 +672,6 @@
           if (current.rowIndex === current.rows.length) { current.phase = 'merges'; continue; }
           const row = current.rows[current.rowIndex];
           if (!current.rowReady) {
-            // Decode each row before exposing its values, yielding if an unusually wide row needs more time.
             // 每行先解析再展示，超宽行可跨帧解码，不能将尚未解析的数据伪装成空白。
             if (!sheet.ensureRows([row], deadline)) break;
             current.rowRanges = current.merges.filter(range => range.r1 <= row && range.r2 >= row).sort((a, b) => a.c1 - b.c1);
@@ -713,8 +706,7 @@
       const width = scroll.clientWidth || 760, height = scroll.clientHeight || 440;
       const rows = sheet.rows.visible(scroll.scrollTop / zoom, (scroll.scrollTop + height - COLUMN_HEADER_HEIGHT) / zoom, MAX_VISIBLE_CELLS + 1);
       const columns = sheet.columns.visible(scroll.scrollLeft / zoom, (scroll.scrollLeft + width - ROW_HEADER_WIDTH) / zoom, MAX_VISIBLE_CELLS + 1);
-      // Only an exceptionally dense viewport falls back explicitly; ordinary wide/zoomed sheets stay complete.
-      // 仅当前视口超过十三万个格子时明确转入既有转换回退，常见大窗口及低缩放表格不再静默缺列。
+      // 仅当前视口超过十三万个格子时明确转入现有转换回退，常见大窗口及低缩放表格不再静默缺列。
       if (rows.length * columns.length > MAX_VISIBLE_CELLS) {
         finishViewport(); throw unsupported('XLSX visible area exceeds 131072 cells; Office page rendering is required');
       }

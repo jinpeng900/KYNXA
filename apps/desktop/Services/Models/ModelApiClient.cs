@@ -135,7 +135,6 @@ public sealed class ModelApiClient : IDisposable
             throw new ArgumentException("A saved chat request is required.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(3));
-        // Exit contacts the current gateway directly; it must not start a new service to close the desktop.
         // 退出直接联系当前网关，不能为了关闭桌面另行启动服务。
         using var response = await _httpClient.PostAsJsonAsync("/api/chat/pause",
             new { conversationId, requestId, taskId }, deadline.Token).ConfigureAwait(false);
@@ -196,7 +195,6 @@ public sealed class ModelApiClient : IDisposable
         int recoveryAttempt = 0;
         while (true)
         {
-            // Submit the prompt once; recovery observes the accepted request without replaying effects.
             // 消息只提交一次；恢复时观察原请求，不重发消息或重做工具操作。
             Func<HttpRequestMessage> nextRequest = isInitialRequest ? initialRequest : () => new HttpRequestMessage(HttpMethod.Get,
                 observeDurableTask && taskId is Guid durableTaskId
@@ -233,8 +231,7 @@ public sealed class ModelApiClient : IDisposable
 
             cancellationToken.ThrowIfCancellationRequested();
             if (!CanRecoverObservation(observationError)) throw observationError;
-            // Back off malformed snapshot retries while preserving the task and visible content.
-            // 异常投影按退避间隔重读，保留任务和已显示内容，避免快速空转。
+            // 异常映射按退避间隔重读，保留任务和已显示内容，避免快速空转。
             int delayMs = recoveryAttempt++ switch { 0 => 100, 1 => 300, 2 => 1000, 3 => 2000, _ => 5000 };
             await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
             ChatRunStatus? status = null;
@@ -315,7 +312,6 @@ public sealed class ModelApiClient : IDisposable
             if (recovered is not null) return recovered;
         }
 
-        // A closed request is immutable. Try its formal message, never resubmit its user prompt.
         // 已结束请求的结果不再生成；只尝试恢复原正式消息，不重发提示词或重做操作。
         try
         {
@@ -337,7 +333,6 @@ public sealed class ModelApiClient : IDisposable
             (error is HttpRequestException or OperationCanceledException or EndOfStreamException ||
                 error is GatewayApiException gateway && (int)gateway.StatusCode >= 500))
         {
-            // A transport failure may recover; invalid data in a settled reply cannot recover by rereading it.
             // 传输失败仍可重连；已结算回复中的错误数据不能靠反复读取自己恢复。
             return null;
         }
@@ -364,8 +359,10 @@ public sealed class ModelApiClient : IDisposable
     private async Task<Guid?> FindDurableTaskAsync(Guid conversationId, Guid requestId, CancellationToken cancellationToken)
     {
         string? cursor = null;
-        for (int pageIndex = 0; pageIndex < 3; pageIndex++)
+        var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+        while (true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string path = $"/api/tasks?conversationId={conversationId:D}";
             if (cursor is not null) path += "&afterTaskId=" + Uri.EscapeDataString(cursor);
             using var response = await _httpClient.GetAsync(path, cancellationToken).ConfigureAwait(false);
@@ -381,6 +378,8 @@ public sealed class ModelApiClient : IDisposable
             if (!page.TryGetProperty("hasMore", out var hasMore) || hasMore.ValueKind != JsonValueKind.True
                 || !page.TryGetProperty("nextTaskId", out var next) || next.ValueKind != JsonValueKind.String) break;
             cursor = next.GetString();
+            if (string.IsNullOrEmpty(cursor) || !seenCursors.Add(cursor))
+                throw new InvalidDataException(UiText.Get("任务接口返回的范围或版本无效。"));
         }
         return null;
     }
@@ -405,17 +404,14 @@ public sealed class ModelApiClient : IDisposable
         if (!waitingForUser && taskState is not ("completed" or "partial" or "failed" or "cancelled"))
             return new(conversationId, requestId, "running", null, DurableTaskState: taskState, DurableTaskVersion: taskVersion);
 
-        // After restart, restore terminal state only from the matching durable task and message.
         // 重启后仅用同一持久任务和正式消息补齐终态，不重做原请求。
         Guid replyId = requestId;
         if (detail.TryGetProperty("checkpoint", out var checkpoint) && checkpoint.ValueKind == JsonValueKind.Object
             && checkpoint.TryGetProperty("contextReference", out var context) && context.ValueKind == JsonValueKind.Object
             && context.TryGetProperty("assistantMessageId", out var assistantId) && assistantId.TryGetGuid(out var savedId)) replyId = savedId;
-        string? cursor = null;
-        for (int pageIndex = 0; pageIndex < 3; pageIndex++)
+        // 按原回复身份读取；不受历史页数和相邻消息大小影响，也不重新提交用户请求。
         {
-            string path = $"/api/conversations/{conversationId:D}/messages?limit=200&maxBytes=8388608";
-            if (cursor is not null) path += "&cursor=" + Uri.EscapeDataString(cursor);
+            string path = $"/api/conversations/{conversationId:D}/messages?messageId={replyId:D}";
             using var historyResponse = await _httpClient.GetAsync(path, deadline.Token).ConfigureAwait(false);
             var page = await ReadAsync<JsonElement>(historyResponse, deadline.Token).ConfigureAwait(false);
             if (page.GetProperty("conversationId").GetGuid() != conversationId)
@@ -427,7 +423,8 @@ public sealed class ModelApiClient : IDisposable
             {
                 var reply = stored.Deserialize<StoredReply>(JsonOptions)
                     ?? throw new InvalidDataException(UiText.Get("模型接口返回了无效的回复。"));
-                if (reply.Role != "assistant" || !waitingForUser && reply.Status is not ("completed" or "interrupted" or "error")) break;
+                if (reply.Role != "assistant" || !waitingForUser && reply.Status is not ("completed" or "interrupted" or "error"))
+                    throw new InvalidDataException(UiText.Get("模型接口返回了无效的回复。"));
                 JsonElement? completion = reply.ToolRun is { ValueKind: JsonValueKind.Object } toolRun
                     && toolRun.TryGetProperty("taskCompletion", out var outcome) ? outcome.Clone() : null;
                 var segments = waitingForUser ? reply.AssistantSegments?.Select(segment => segment.Status == "streaming"
@@ -444,11 +441,19 @@ public sealed class ModelApiClient : IDisposable
                 return new(conversationId, requestId, "completed", JsonSerializer.SerializeToElement(terminal, JsonOptions),
                     anchor, reply.ToolActivities, taskState, taskVersion);
             }
-            if (!page.TryGetProperty("hasMore", out var hasMore) || hasMore.ValueKind != JsonValueKind.True
-                || !page.TryGetProperty("nextCursor", out var nextCursor) || nextCursor.ValueKind != JsonValueKind.String) break;
-            cursor = nextCursor.GetString();
         }
-        return new(conversationId, requestId, "running", null, DurableTaskState: taskState, DurableTaskVersion: taskVersion);
+        if (waitingForUser)
+        {
+            // 暂停可能先于首条回复写入磁盘；仅结束展示计时，界面保留已收到的正文，不伪造完成结果。
+            var paused = new ChatStreamEvent("interrupted", conversationId, requestId, DateTimeOffset.UtcNow,
+                Content: "", Error: "", TaskId: taskId, RootRequestTaskId: taskId, ReplyMessageId: replyId,
+                Code: taskState == "paused" ? "TASK_PAUSED" : null);
+            return new(conversationId, requestId, "completed", JsonSerializer.SerializeToElement(paused, JsonOptions),
+                DurableTaskState: taskState, DurableTaskVersion: taskVersion);
+        }
+        // 已结算任务缺少正式回复属于展示数据错误，不能重新标成生成中并反复轮询。
+        throw new GatewayApiException(UiText.Get("答复显示数据有误，已保留原文和任务记录。"),
+            System.Net.HttpStatusCode.BadGateway, "CHAT_TERMINAL_PROTOCOL_INVALID");
     }
 
     private static async Task<List<ChatStreamEvent>?> ReadTerminalProjectionAsync(ChatRunStatus status, JsonElement result,

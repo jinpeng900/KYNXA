@@ -27,7 +27,6 @@ fn byte_offsets(text: &str) -> Vec<usize> {
     offsets
 }
 
-/// Use UTF-16 offsets while preserving the original text for slicing and hashing.
 /// 偏移使用 UTF-16 单位，切片与哈希保留原始文本。
 fn plain_chunks(raw_text: &str, text: &[u16], maximum: usize) -> Vec<Value> {
     static BOUNDARY: OnceLock<Regex> = OnceLock::new();

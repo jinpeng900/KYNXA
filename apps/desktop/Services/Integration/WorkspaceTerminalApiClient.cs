@@ -8,7 +8,6 @@ public sealed record WorkspaceTerminalOutput(string Output, ulong NextCursor, bo
     int? ExitCode = null, bool Truncated = false);
 
 /// <summary>
-/// The gateway owns the PTY and resolves the working directory; this client carries terminal I/O only.
 /// 网关拥有伪终端并解析正式工作目录；客户端只传递终端输入、输出和尺寸。
 /// </summary>
 public sealed class WorkspaceTerminalApiClient : IDisposable

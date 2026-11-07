@@ -20,8 +20,6 @@ public sealed partial class ShellPage
     public ObservableCollection<ProjectTreeEntry> WorkRecentEntries { get; } = [];
     public ObservableCollection<ProjectTreeEntry> WorkTaskEntries { get; } = [];
 
-    // Selecting a workspace and expanding its tree are independent actions.
-    // 选择工作与展开项目树是互相独立的操作。
     private void SelectWorkspaceProject(ProjectState project)
     {
         if (!_projectsReady || project.IsArchived || project.IsFolderlessWorkspace) return;
@@ -157,7 +155,6 @@ public sealed partial class ShellPage
             UpdateChatSidebarHeight();
             return;
         }
-        // Read arranged viewport boundaries; summing nominal row heights loses layout-rounding pixels.
         // 读取排版后的真实视口边界；累加名义行高会漏掉布局取整占用的像素。
         double scale = XamlRoot.RasterizationScale;
         double FloorToPixel(double height) => Math.Floor(Math.Max(0, height) * scale) / scale;
@@ -176,7 +173,6 @@ public sealed partial class ShellPage
             + (projectsExpanded && projectRows > 0 ? 1 : 0) + (_layout.WorkTasksExpanded && VisibleWorkTaskEntries.Count > 0 ? 1 : 0);
         double minimumContentHeight = ShellLayoutMetrics.WorkSidebarHeaderHeight + emptyHeight + dividerHeight + nonemptySections * rowHeight;
         bool outerScroll = available < minimumContentHeight;
-        // Very short windows scroll the section shell so each inner list can still show a readable whole row.
         // 极矮窗口滚动分区外壳，让每个内层列表仍能展示可读的完整一行。
         _workSidebarListBudget = Math.Max(available, minimumContentHeight) - ShellLayoutMetrics.WorkSidebarHeaderHeight - emptyHeight - dividerHeight;
         var geometry = WorkSidebarLayout.Calculate(Math.Max(available, minimumContentHeight) - emptyHeight - dividerHeight, _layout.WorkRecentExpanded,
@@ -209,7 +205,6 @@ public sealed partial class ShellPage
         double available = SidebarAvailableHeight(ChatSidebarContent);
         double headerHeight = ChatSidebarContent.RowDefinitions[0].Height.Value + SidebarHintHeight(ChatSearchEmpty);
         double rowHeight = (double)Application.Current.Resources["KynxaSidebarRowHeight"];
-        // Limit only complete visible rows; every saved conversation stays in the native scrolling list.
         // 仅限制完整可见行数；全部已保存聊天仍保留在原生滚动列表中。
         int fittingRows = (int)Math.Min(ShellLayoutMetrics.ChatSidebarVisibleRows,
             Math.Floor(Math.Max(0, available - headerHeight) / rowHeight));
@@ -271,7 +266,6 @@ public sealed partial class ShellPage
     private void QueueWorkSidebarLayout()
     {
         if (_workSidebarLayoutQueued || _projectViewClosed || _renderingProjects) return;
-        // Expansion binding settles after the native event; coalesce it without rebuilding rows.
         // 展开状态绑定在原生事件后完成；合并重排请求，不重建列表行。
         _workSidebarLayoutQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {

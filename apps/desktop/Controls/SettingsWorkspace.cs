@@ -9,7 +9,6 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Keeps settings categories in one window and retains each lazily created page.
 /// 在同一窗口中展示设置分类，按需创建并保留各页的编辑和滚动状态。
 /// </summary>
 public sealed partial class SettingsWorkspace : UserControl, IDisposable
@@ -79,8 +78,6 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         body.Children.Add(new FontIcon { Glyph = iconGlyph, FontSize = 16,
             FontFamily = new FontFamily("Segoe Fluent Icons"), IsHitTestVisible = false, VerticalAlignment = VerticalAlignment.Center });
-        // Let translated labels wrap within the available sidebar width.
-        // 标签在侧栏剩余宽度内换行，避免长名称被截断。
         var label = new TextBlock { FontFamily = font, FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.Wrap };
         UiLocalization.Bind(label, TextBlock.TextProperty, labelKey);
@@ -113,7 +110,6 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
             _pages.Add(key, page);
             _pageHost.Children.Add(page);
         }
-        // Collapse rather than detach: drafts, list selections and scroll viewers keep their state.
         // 切换仅折叠旧页，不从可视树卸载，以保留草稿、列表选择和滚动位置。
         foreach (var entry in _pages) entry.Value.Visibility = entry.Key == key ? Visibility.Visible : Visibility.Collapsed;
         SelectedKey = key;
@@ -146,9 +142,7 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
             double width = viewportWidth;
             if (double.IsNaN(frame.Width) || Math.Abs(frame.Width - width) > 0.1) frame.Width = width;
         }
-        // Match measured and arranged widths to prevent ScrollViewer drift.
         // 统一测量和排布宽度，防止 ScrollViewer 偏移。
-        // Viewport sizes are DIPs; do not apply monitor scaling again.
         // 视口尺寸使用 DIP，不重复乘以屏幕缩放比例。
         scroll.SizeChanged += (_, args) => FitWidth(args.NewSize.Width);
         scroll.Loaded += (_, _) => FitWidth(scroll.ActualWidth);

@@ -1,0 +1,42 @@
+name: Runtime contracts
+
+on:
+  pull_request:
+    paths: ['apps/desktop/**', 'apps/shared/**', 'tools/verification/**', '.github/workflows/runtime.yml']
+  push:
+    branches: [main]
+    paths: ['apps/desktop/**', 'apps/shared/**', 'tools/verification/**', '.github/workflows/runtime.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-contracts:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet run --project tools/verification/runtime/RuntimeSmoke.csproj --configuration Release
+      - run: node tools/verification/transcript-smoke.mjs
+      - name: Browser transcript lifecycle
+        shell: pwsh
+        run: |
+          $browser = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $browser) { throw 'No Chromium browser found on the Windows runner.' }
+          node tools/verification/transcript-browser-smoke.mjs $browser
+      # Native storage checks use the real repository, without a model account or desktop installation.
+      # 原生存储验证使用真实仓储，不需要模型账号或安装桌面软件；手动运行时补测。
+      - if: github.event_name == 'workflow_dispatch'
+        run: cargo test --manifest-path apps/agent-core/Cargo.toml --locked --test runtime_recovery
+      - if: github.event_name == 'workflow_dispatch'
+        run: cargo test --manifest-path apps/agent-core/Cargo.toml --locked --test local_download download

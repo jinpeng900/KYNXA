@@ -23,7 +23,6 @@ if ($Worker) {
         $existingDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($BootstrapPath))
         $existingInstaller = Join-Path $existingDirectory $release.fileName
         $readyInstaller = $null
-        # Verify a complete sibling installer in the worker, never on the UI thread.
         # 已有同目录完整安装包在后台核验，窗口不等待大文件读取。
         if ([IO.File]::Exists($existingInstaller) -and ([IO.FileInfo]::new($existingInstaller)).Length -eq [long]$release.bytes) {
             try {
@@ -228,7 +227,6 @@ $close.Add_Click({ $form.Close() })
 $form.Add_FormClosing({ $timer.Stop(); Stop-DownloadWorker })
 $timer.Add_Tick({
     try {
-        # Read only newly appended log bytes, so a long download never blocks the UI by rereading its history.
         # 只读取新增日志字节，长时间下载不会因反复读取整份日志拖慢界面。
         if ([IO.File]::Exists($LogPath)) {
             $logStream = [IO.File]::Open($LogPath, 'Open', 'Read', 'ReadWrite')
@@ -266,7 +264,6 @@ $timer.Add_Tick({
                 if ($result -and $result.status -eq 'ready') {
                     $script:launchingInstaller = $true
                     $status.Text = Get-Text '完整安装程序已就绪，正在打开…' 'The full installer is ready. Opening…'
-                    # Launch only the EXE verified by the shared download helper.
                     # 只启动共用下载工具核验通过的 EXE。
                     Start-Process -FilePath ([string]$result.path) -WorkingDirectory ([IO.Path]::GetDirectoryName([string]$result.path))
                     $form.Close()

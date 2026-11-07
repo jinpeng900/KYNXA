@@ -13,7 +13,6 @@ namespace KYNXA_Desktop.Controls;
 public sealed record ConversationWorkTabClosed(Guid ConversationId, ConversationWorkTab Tab);
 
 /// <summary>
-/// A neutral tab strip. The shell maps the selected logical resource to its existing content pane.
 /// 通用标签栏；主界面把选中的逻辑资源映射到已有内容面板。
 /// </summary>
 public sealed class ConversationWorkTabs : Grid, IDisposable
@@ -196,7 +195,6 @@ public sealed class ConversationWorkTabs : Grid, IDisposable
         var focus = Color(palette.AccentText);
         var selectedBorder = row.BorderBrush;
         var closeResting = close.Foreground;
-        // One capsule owns every visual state; title and close remain separate native actions.
         // 整个标签共用状态背景，名称与关闭保留独立原生操作。
         void UpdateChrome()
         {
@@ -343,7 +341,6 @@ public sealed class ConversationWorkTabs : Grid, IDisposable
         foreach (var row in _tabs.Children.OfType<FrameworkElement>())
             if (Math.Abs(row.Width - tabWidth) > 0.5) { row.Width = tabWidth; resized = true; }
         if (resized) return;
-        // Measure the full tab viewport before showing overflow arrows.
         // 按完整标签视口判断溢出，避免箭头反复撑大布局；沿用正常布局流程。
         var visibility = _tabs.DesiredSize.Width > _tabViewport.ActualWidth + 0.5 ? Visibility.Visible : Visibility.Collapsed;
         if (_scrollLeft.Visibility != visibility)

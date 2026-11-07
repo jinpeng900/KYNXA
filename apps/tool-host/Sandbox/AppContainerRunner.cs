@@ -59,8 +59,6 @@ internal static class AppContainerRunner
             {
                 BasicLimitInformation = new JobBasicLimitInformation
                 {
-                    // Children inherit this job. No breakaway flags are enabled.
-                    // 子进程继承此作业对象，不启用脱离作业的标志。
                     LimitFlags = 0x2000 | 0x8 | 0x100 | 0x200 | 0x400,
                     ActiveProcessLimit = MaximumProcessCount
                 },
@@ -70,7 +68,6 @@ internal static class AppContainerRunner
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "SetInformationJobObject");
             var cpuLimits = new JobCpuRateControlInformation { ControlFlags = JobCpuRateControlFlags, CpuRate = resources.CpuRate };
             Check(SetJobCpuRateControlInformation(jobHandle, 15, ref cpuLimits, (uint)Marshal.SizeOf<JobCpuRateControlInformation>()), "Set sandbox CPU hard cap");
-            // Query the actual Job before creating/resuming a child; requested limits alone are not evidence.
             // 创建或恢复子进程前回读真实 Job；请求中的额度本身不代表限制已经生效。
             Check(QueryJobExtendedLimitInformation(jobHandle, 9, out var appliedLimits,
                 (uint)Marshal.SizeOf<JobExtendedLimitInformation>(), IntPtr.Zero), "Query sandbox memory limits");
@@ -85,8 +82,7 @@ internal static class AppContainerRunner
 
             var output = new BoundedOutput(isCmd);
             string[] commandArguments = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
-            // Resolve modules only within the link-free snapshot; no access to host ancestor directories is added.
-            // 模块解析限定在已核验无链接快照中，不为 Node 探测宿主祖先目录扩大权限。
+            // 模块解析限定在已检查无链接快照中，不为 Node 探测宿主祖先目录扩大权限。
             string[] effectiveArguments = isCmd ? commandArguments : ["--preserve-symlinks", "--preserve-symlinks-main", .. commandArguments];
             var (stdout, stderr) = StartSandboxProcess(executable, effectiveArguments, stagingDirectory, temporaryDirectory, appContainerSid, jobHandle, ref processInformation, output, isCmd);
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
@@ -111,8 +107,6 @@ internal static class AppContainerRunner
                 }
                 await Task.Delay(10);
             }
-            // Also kill descendants when the original script exits normally.
-            // 原脚本正常退出时也终止仍存活的子孙进程。
             Check(TerminateJobObject(jobHandle, timedOut ? 124u : 125u), "TerminateJobObject completion");
             await WaitForEmptyJobAsync(jobHandle);
             Check(GetExitCodeProcess(processInformation.Process, out uint exitCode), "GetExitCodeProcess");
@@ -140,7 +134,6 @@ internal static class AppContainerRunner
         }
         finally
         {
-            // Closing the sole non-inherited job handle also kills the tree if this host is terminated.
             // 作业句柄不继承且只有一个；宿主终止时关闭它也会结束整个进程树。
             if (jobHandle != IntPtr.Zero) TerminateJobObject(jobHandle, 125);
             Close(ref processInformation.Thread);
@@ -238,14 +231,12 @@ internal static class AppContainerRunner
             string appSid = Marshal.PtrToStringUni(sidText)!;
             string userSid = WindowsIdentity.GetCurrent().User?.Value
                 ?? throw new SandboxException("SANDBOX_START_FAILED", "Cannot identify the current Windows user.");
-            // A protected DACL excludes other app containers; low integrity enables writes only here.
             // 受保护 DACL 排除其他 AppContainer，低完整性标签只允许在此处写入。
             string descriptor = $"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{userSid})(A;OICI;0x1301bf;;;{appSid})S:(ML;OICI;NW;;;LW)";
             Check(ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor, 1, out IntPtr security, out _), "ConvertSecurityDescriptor");
             try
             {
                 Check(SetFileSecurityW(stagingDirectory, 0x80000004 | 0x10, security), "SetFileSecurity sandbox workspace");
-                // Existing snapshot descendants must receive the same ACL and integrity label.
                 // 已有快照的所有子项必须使用相同 ACL 与完整性标签。
                 foreach (string path in Directory.EnumerateFileSystemEntries(stagingDirectory, "*", SearchOption.AllDirectories))
                     Check(SetFileSecurityW(path, 0x80000004 | 0x10, security), "SetFileSecurity sandbox content");
@@ -415,12 +406,10 @@ internal static class AppContainerRunner
                 long total = Interlocked.Add(ref _bytes, count);
                 int accepted = (int)Math.Clamp(MaximumOutputBytes - (total - count), 0L, count);
                 stored.Write(buffer, 0, accepted);
-                // Continue draining after bounded capture fills; verbose logs must not terminate useful work.
-                // 有界保留区满后仍持续排空；日志量大不能终止仍在正常推进的任务。
+                // 限量保留区满后仍持续排空；日志量大不能终止仍在正常推进的任务。
                 if (total > MaximumOutputBytes) Interlocked.Exchange(ref _truncated, 1);
             }
             byte[] bytes = stored.ToArray();
-            // /u produces UTF-16 for cmd builtins. Child programs and TYPE may emit plain UTF-8 bytes.
             // /u 使 cmd 内置命令输出 UTF-16，而子程序或 TYPE 仍可能输出普通 UTF-8 字节。
             return cmdOutput && bytes.Contains((byte)0) ? Encoding.Unicode.GetString(bytes) : Encoding.UTF8.GetString(bytes);
         });

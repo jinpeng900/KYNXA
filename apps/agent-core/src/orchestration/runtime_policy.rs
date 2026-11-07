@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 
-/// Public failures are based on observed categories, not guessed provider or resource causes.
 /// 公开失败依据实际分类，不猜测供应商或资源故障原因。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {

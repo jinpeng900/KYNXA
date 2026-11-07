@@ -36,6 +36,7 @@ public sealed partial class LocalModelsPage
         });
         public string ProgressText => Model.DownloadedBytes > 0 && !Model.Installed
             ? FormatBytes(Model.DownloadedBytes) + " / " + FormatBytes(Model.DownloadBytes) : "";
+        public string DownloadDetails => LocalModelDownloadPresentation.Describe(Model.Download);
         public double Progress => Model.DownloadBytes > 0 ? Math.Clamp(100d * Model.DownloadedBytes / Model.DownloadBytes, 0, 100) : 0;
         public string EnableLabel => UiText.Get(Model.Enabled ? "停用" : "启用");
         public string InstallLabel => UiText.Get(Model.Status is "failed" or "error" or "cancelled" ? "重新安装" : "安装");
@@ -46,7 +47,6 @@ public sealed partial class LocalModelsPage
         public string RecommendedLabel => Model.Recommended ? UiText.Get("适合本机") : "";
         public string PathText => Model.Path ?? "";
         public Visibility PathVisibility => string.IsNullOrWhiteSpace(Model.Path) ? Visibility.Collapsed : Visibility.Visible;
-        // Catalog capabilities describe the model family; runtime readiness needs an observed identity and template.
         // 目录能力描述模型类别；实际就绪须有模型身份与工具模板观测，连接成功不能冒充可调用工具。
         public string RuntimeDescription => Model.Installed && Model.Runtime is { } runtime
             ? string.Join(" · ", new[]

@@ -32,7 +32,6 @@ fn unknown(snapshot: &Value, reason: &str, breakdown: Option<Value>) -> Value {
     result
 }
 
-/// Forecast only pending growth; existing external residency is never reserved a second time.
 /// 只预测待发生的增量；外部已驻留资源不能被再次整份预约。
 pub fn demand(args: &Value) -> Value {
     let s = &args["snapshot"];

@@ -3,8 +3,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::intent::{analyze_clauses, file_references, js_trim, matches, pattern, task_relation};
 
-// Native calculations retain descriptor indices; opt-in scores allow relevance-preserving experience ranking.
-// 原生计算保留描述符索引；按需附带相关性分数，经验排序不能改变原 schema 或 wire 身份。
+// 原生计算保留描述符索引，按需附带相关性分数，schema 和 wire 身份不变。
 fn normalized(value: &Value, maximum: usize) -> String {
     let Some(text) = value.as_str() else {
         return String::new();
@@ -20,24 +19,35 @@ fn workspace_terminal_topic(text: &str) -> bool {
     )
 }
 
-/// Match authoring intent and format together; code documentation and file reads are not Office generation.
-/// 同时匹配创作意图与格式，代码文档查询或读取文件不会被误判为生成 Office 文档。
+/// 同时匹配创作意图与格式，代码文档查询和读取文件不算生成 Office 文档。
 pub(super) fn authoring_topics(query: &str) -> Vec<&'static str> {
     let text = query.to_lowercase();
-    if !matches(r"生成|创建|写|制作|导出|保存|整理成|做成|\b(?:create|generate|write|export|build|make|save)\b", &text) {
+    if !matches(
+        r"生成|创建|写|制作|导出|保存|整理成|做成|\b(?:create|generate|write|export|build|make|save)\b",
+        &text,
+    ) {
         return vec![];
     }
     let mut topics = Vec::new();
     if matches(r"\b(?:docx|word|pdf)\b|文档|报告|总结|论文|合同", &text) {
         topics.push("document-authoring");
     }
-    if matches(r"\b(?:pptx?|powerpoint|slides?|presentation)\b|幻灯片|演示文稿|汇报演示", &text) {
+    if matches(
+        r"\b(?:pptx?|powerpoint|slides?|presentation)\b|幻灯片|演示文稿|汇报演示",
+        &text,
+    ) {
         topics.push("slides-authoring");
     }
-    if matches(r"\b(?:xlsx?|excel|spreadsheet|workbook|csv|tsv)\b|电子表格|工作簿|数据表", &text) {
+    if matches(
+        r"\b(?:xlsx?|excel|spreadsheet|workbook|csv|tsv)\b|电子表格|工作簿|数据表",
+        &text,
+    ) {
         topics.push("spreadsheets-authoring");
     }
-    if matches(r"\b(?:svg|html|mermaid|diagram)\b|流程图|架构图|关系图|可视化", &text) {
+    if matches(
+        r"\b(?:svg|html|mermaid|diagram)\b|流程图|架构图|关系图|可视化",
+        &text,
+    ) {
         topics.push("visual-artifacts");
     }
     topics
@@ -74,7 +84,19 @@ pub(super) fn category(tool: &Value) -> &'static str {
     ) {
         return "web-search";
     }
-    if name.starts_with("filesystem.") || ["document.read", "document.create", "image.read", "image.retain", "attachment.read", "attachment.export", "artifact.open", "media.transcribe"].contains(&name.as_str()) {
+    if name.starts_with("filesystem.")
+        || [
+            "document.read",
+            "document.create",
+            "image.read",
+            "image.retain",
+            "attachment.read",
+            "attachment.export",
+            "artifact.open",
+            "media.transcribe",
+        ]
+        .contains(&name.as_str())
+    {
         return "filesystem";
     }
     "other"
@@ -115,6 +137,9 @@ fn aliases(tool: &Value) -> String {
     let name = normalized(&tool["name"], 256);
     let category = category(tool);
     let action = name.rsplit('.').next().unwrap_or("");
+    if name.starts_with("training.") {
+        return "training train finetune fine-tune model dataset loss metrics checkpoint resume pause predict inference learning rate layers freeze unfreeze lora qlora machine learning neural network 模型训练 训练台 训练数据 微调 机器学习 神经网络 学习率 训练层数 解冻 损失函数 验证集 暂停训练 断点续训 训练模型预测 批量预测".to_owned();
+    }
     if name == "work.folder.bind" {
         return "work project folder directory bind associate attach mount ongoing 长期工作 工作文件夹 工作目录 关联目录 绑定目录 挂载文件夹".to_owned();
     }
@@ -147,14 +172,17 @@ fn aliases(tool: &Value) -> String {
     }
     if category == "host-terminal" {
         if name.starts_with("terminal.workspace.") {
-            return format!("sidebar workspace embedded interactive terminal command powershell cmd right pane 右侧终端 右边终端 工作区终端 内置终端 交互终端 命令 执行 输入 输出 会话 {}", match action {
-                "open" => "open launch 打开 创建",
-                "list" => "list existing 列出 已有",
-                "read" => "read output 读取 查看 输出",
-                "write" => "write input run command 输入 运行命令 执行命令",
-                "close" => "close stop 关闭 停止",
-                _ => "",
-            });
+            return format!(
+                "sidebar workspace embedded interactive terminal command powershell cmd right pane 右侧终端 右边终端 工作区终端 内置终端 交互终端 命令 执行 输入 输出 会话 {}",
+                match action {
+                    "open" => "open launch 打开 创建",
+                    "list" => "list existing 列出 已有",
+                    "read" => "read output 读取 查看 输出",
+                    "write" => "write input run command 输入 运行命令 执行命令",
+                    "close" => "close stop 关闭 停止",
+                    _ => "",
+                }
+            );
         }
         let action = match action {
             "start" => "start launch 启动 运行",
@@ -239,17 +267,27 @@ fn search_tools(arguments: &Value) -> Value {
     let active = analyze_clauses(&text);
     let active_text = active["activeText"].as_str().unwrap_or(&text);
     let workspace_terminal = workspace_terminal_topic(active_text);
-    let image_read = matches(r"(?:\.(?:png|jpe?g|webp|gif)\b|图片|图像|照片|\b(?:image|photo|picture)\b)", active_text)
-        && matches(r"看图|读图|分析|读取|查看|辨认|识别|\b(?:read|inspect|analy[sz]e|describe|view)\b", active_text);
-    // Exact capability names in the active request outrank generic words in long tasks or exclusions.
+    let image_read = matches(
+        r"(?:\.(?:png|jpe?g|webp|gif)\b|图片|图像|照片|\b(?:image|photo|picture)\b)",
+        active_text,
+    ) && matches(
+        r"看图|读图|分析|读取|查看|辨认|识别|\b(?:read|inspect|analy[sz]e|describe|view)\b",
+        active_text,
+    );
     // 当前有效请求中的完整能力名优先于长任务里的泛词；被明确排除的能力名不获得此优先级。
     let named_tools = pattern(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)+|k_[a-z0-9_]+_[a-f0-9]{8}")
         .find_iter(active_text)
         .map(|found| (found.as_str(), found.start()))
         .collect::<Vec<_>>();
-    let has_file_target = file_references(active_text).as_array().is_some_and(|files| !files.is_empty());
-    let file_read = has_file_target.then(|| pattern(r"读取|读入|阅读|\bread\b").find(active_text)).flatten();
-    let file_write = has_file_target.then(|| pattern(r"写入|创建|新建|保存|\b(?:write|create|save)\b").find(active_text)).flatten();
+    let has_file_target = file_references(active_text)
+        .as_array()
+        .is_some_and(|files| !files.is_empty());
+    let file_read = has_file_target
+        .then(|| pattern(r"读取|读入|阅读|\bread\b").find(active_text))
+        .flatten();
+    let file_write = has_file_target
+        .then(|| pattern(r"写入|创建|新建|保存|\b(?:write|create|save)\b").find(active_text))
+        .flatten();
     let identity = matches(r"^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$", &text);
     let wire_identity = matches(r"^k_[a-z0-9_]+_[a-f0-9]{8}$", &text);
     let mut selected = Vec::new();
@@ -263,7 +301,10 @@ fn search_tools(arguments: &Value) -> Value {
         }
         let name = normalized(&tool["name"], 256);
         let wire_name = normalized(&tool["wireName"], 256);
-        if let Some((_, position)) = named_tools.iter().find(|(named, _)| *named == name || !wire_name.is_empty() && *named == wire_name) {
+        if let Some((_, position)) = named_tools
+            .iter()
+            .find(|(named, _)| *named == name || !wire_name.is_empty() && *named == wire_name)
+        {
             selected.push((index, 1_000_000usize.saturating_sub(*position)));
             continue;
         }
@@ -285,11 +326,16 @@ fn search_tools(arguments: &Value) -> Value {
         } else {
             0
         };
-        if name == "document.create" && authoring_topics(&text).iter().any(|topic| *topic != "visual-artifacts") {
+        if name == "document.create"
+            && authoring_topics(&text)
+                .iter()
+                .any(|topic| *topic != "visual-artifacts")
+        {
             score += 30_000;
         }
-        if name == "image.read" && image_read { score += 30_000; }
-        // A named file plus an explicit read/write action beats incidental local/keyboard vocabulary.
+        if name == "image.read" && image_read {
+            score += 30_000;
+        }
         // 明确文件目标及读写动作优先于偶然出现的本地或键盘词；此处只排序，不扩大执行权限。
         if let Some(action) = match name.as_str() {
             "filesystem.read" => file_read.as_ref(),
@@ -298,8 +344,7 @@ fn search_tools(arguments: &Value) -> Value {
         } {
             score += 20_000usize.saturating_sub(action.start());
         }
-        // A right-side command must keep its visible session instead of preferring hidden host diagnostics.
-        // 右侧命令优先保留可见会话，不能被通用本机诊断排序改成隐藏的宿主终端。
+        // 右侧命令优先保留可见会话。
         if workspace_terminal && name.starts_with("terminal.workspace.") {
             score += 6000;
         }
@@ -335,7 +380,12 @@ fn search_tools(arguments: &Value) -> Value {
         selected.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     }
     if arguments["includeScores"] == true {
-        json!(selected.into_iter().map(|(index, score)| json!({"index":index,"score":score})).collect::<Vec<_>>())
+        json!(
+            selected
+                .into_iter()
+                .map(|(index, score)| json!({"index":index,"score":score}))
+                .collect::<Vec<_>>()
+        )
     } else {
         json!(selected.into_iter().map(|item| item.0).collect::<Vec<_>>())
     }
@@ -456,7 +506,14 @@ pub(super) fn selection_signals(arguments: &Value) -> Value {
                 && subject["desktop"] != true
                 && signals["browser"] != true
                 && signals["desktop"] != true;
-            for key in ["desktop", "browser", "hostTerminal", "workspaceTerminal", "docs", "web"] {
+            for key in [
+                "desktop",
+                "browser",
+                "hostTerminal",
+                "workspaceTerminal",
+                "docs",
+                "web",
+            ] {
                 if subject[key] == true {
                     signals[key] = json!(true);
                 }
@@ -485,7 +542,9 @@ pub(super) fn selection_signals(arguments: &Value) -> Value {
                     "computer" => signals["desktop"] = json!(true),
                     "host-terminal" => {
                         signals["hostTerminal"] = json!(true);
-                        if name.starts_with("terminal.workspace.") { signals["workspaceTerminal"] = json!(true); }
+                        if name.starts_with("terminal.workspace.") {
+                            signals["workspaceTerminal"] = json!(true);
+                        }
                     }
                     "browser" => signals["browser"] = json!(true),
                     _ => {}
@@ -524,7 +583,10 @@ fn catalog_score(tool: &Value, signals: &Value) -> i32 {
         return if yes("workspaceTerminal") { 80 } else { 0 };
     }
     if name.starts_with("computer.") {
-        if name == "computer.launch" && yes("browser") && signals["browserPresentation"] == "workspace" {
+        if name == "computer.launch"
+            && yes("browser")
+            && signals["browserPresentation"] == "workspace"
+        {
             return 0;
         }
         return if yes("desktop") { 40 } else { 0 };
@@ -575,7 +637,8 @@ fn catalog_score(tool: &Value, signals: &Value) -> i32 {
     if yes("browser") && category(tool) == "browser" {
         score += 32;
     }
-    if name == "artifact.open" && (yes("browser") || yes("url"))
+    if name == "artifact.open"
+        && (yes("browser") || yes("url"))
         && signals["browserPresentation"] == "workspace"
     {
         score += 48;
@@ -745,8 +808,7 @@ fn device_state_topic(text: &str) -> Option<&'static str> {
     if !topic {
         return None;
     }
-    // A local owner is insufficient for a relationship or neural-network subject.
-    // “我的”不能把关系网络或神经网络变为设备诊断；真实连接与设备术语仍可提示候选。
+    // “我的”本身不指向设备诊断；真实连接与设备术语仍可提示候选。
     let non_device_network = matches(
         "人际|关系网络|社交网络|人脉|神经网络|\\b(?:social|professional|personal|neural|relationship)\\s+networks?\\b|\\bnetwork\\s+of\\s+(?:mentors|friends|contacts|colleagues|people)\\b",
         text,
@@ -897,7 +959,6 @@ fn current_signals(message: &str) -> Value {
     }
     if device_state {
         signals["hostTerminal"] = json!(true);
-        // Reading device state does not imply opening a GUI or performing an ordinary web search.
         // 读取设备状态不意味着打开界面或做普通网页搜索；用户明确要求的浏览器/界面动作仍保留。
         if !browser
             && !matches(
@@ -960,26 +1021,49 @@ mod search_score_tests {
     #[test]
     fn local_image_analysis_discovers_pixels_instead_of_text_or_desktop_capture() {
         let catalog: Value = serde_json::from_str(include_str!("gateway-catalog.json")).unwrap();
-        for query in ["读取本地 photo.png，分析图片构图", "Inspect local photo.webp pixels", "查看这张照片的颜色"] {
+        for query in [
+            "读取本地 photo.png，分析图片构图",
+            "Inspect local photo.webp pixels",
+            "查看这张照片的颜色",
+        ] {
             let hits = search_tools(&json!({"query":query,"descriptors":catalog["tools"]}));
-            assert_eq!(catalog["tools"][hits[0].as_u64().unwrap() as usize]["name"], "image.read", "{query}");
+            assert_eq!(
+                catalog["tools"][hits[0].as_u64().unwrap() as usize]["name"],
+                "image.read",
+                "{query}"
+            );
         }
     }
 
     #[test]
     fn document_authoring_prefers_real_generators_without_matching_ordinary_chat() {
         let catalog: Value = serde_json::from_str(include_str!("gateway-catalog.json")).unwrap();
-        for query in ["生成一份报告.docx", "Create an Excel workbook", "制作 PPT 幻灯片"] {
+        for query in [
+            "生成一份报告.docx",
+            "Create an Excel workbook",
+            "制作 PPT 幻灯片",
+        ] {
             let hits = search_tools(&json!({"query":query,"descriptors":catalog["tools"]}));
             let index = hits[0].as_u64().unwrap() as usize;
-            assert_eq!(catalog["tools"][index]["name"], "document.create", "{query}");
+            assert_eq!(
+                catalog["tools"][index]["name"], "document.create",
+                "{query}"
+            );
         }
         for query in ["你好", "hello"] {
-            assert!(search_tools(&json!({"query":query,"descriptors":catalog["tools"]})).as_array().unwrap().is_empty());
+            assert!(
+                search_tools(&json!({"query":query,"descriptors":catalog["tools"]}))
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
         }
         assert!(super::authoring_topics("读取 example.docx").is_empty());
         assert!(super::authoring_topics("查看这个 API 的代码文档").is_empty());
-        assert_eq!(super::authoring_topics("生成一个 SVG 流程图"), vec!["visual-artifacts"]);
+        assert_eq!(
+            super::authoring_topics("生成一个 SVG 流程图"),
+            vec!["visual-artifacts"]
+        );
     }
 
     #[test]
@@ -991,10 +1075,17 @@ mod search_score_tests {
             {"name":"unrelated","description":"Other capability."}
         ]);
         let legacy = search_tools(&json!({"query":"indexneedle","descriptors":descriptors}));
-        let scored = search_tools(&json!({"query":"indexneedle","descriptors":descriptors,"includeScores":true}));
+        let scored = search_tools(
+            &json!({"query":"indexneedle","descriptors":descriptors,"includeScores":true}),
+        );
         let hits = scored.as_array().unwrap();
         assert_eq!(legacy, json!([1, 0]));
-        assert_eq!(hits.iter().map(|hit| hit["index"].clone()).collect::<Vec<Value>>(), *legacy.as_array().unwrap());
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit["index"].clone())
+                .collect::<Vec<Value>>(),
+            *legacy.as_array().unwrap()
+        );
         assert!(hits[0]["score"].as_u64().unwrap() > hits[1]["score"].as_u64().unwrap());
     }
 
@@ -1006,7 +1097,12 @@ mod search_score_tests {
         ]);
         for query in ["你好", "hello"] {
             for include_scores in [false, true] {
-                assert_eq!(search_tools(&json!({"query":query,"descriptors":descriptors,"includeScores":include_scores})), json!([]));
+                assert_eq!(
+                    search_tools(
+                        &json!({"query":query,"descriptors":descriptors,"includeScores":include_scores})
+                    ),
+                    json!([])
+                );
             }
         }
     }
@@ -1023,10 +1119,18 @@ mod search_score_tests {
         let hits = search_tools(&json!({"query":query,"descriptors":descriptors}));
         assert_eq!(hits[0], 3);
         assert_eq!(hits[1], 2);
-        let excluded = search_tools(&json!({"query":"不要使用 filesystem.write。改用 filesystem.read 读取内容。","descriptors":descriptors,"includeScores":true}));
+        let excluded = search_tools(
+            &json!({"query":"不要使用 filesystem.write。改用 filesystem.read 读取内容。","descriptors":descriptors,"includeScores":true}),
+        );
         assert_eq!(excluded[0]["index"], 2);
-        assert!(excluded.as_array().unwrap().iter().filter(|hit| hit["index"] == 3)
-            .all(|hit| hit["score"].as_u64().unwrap() < 1_000_000 - 2000));
+        assert!(
+            excluded
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|hit| hit["index"] == 3)
+                .all(|hit| hit["score"].as_u64().unwrap() < 1_000_000 - 2000)
+        );
     }
 
     #[test]
@@ -1036,13 +1140,24 @@ mod search_score_tests {
             {"name":"filesystem.reader","description":"Inspect reader metadata."},
             {"name":"terminal.host.run","wireName":"k_terminal_host_run_725f3f35","description":"Run a local command."}
         ]);
-        let query = format!("{} Use filesystem.read to inspect the current file.", "Retain already completed work. ".repeat(10));
-        let hits = search_tools(&json!({"query":query,"descriptors":descriptors,"includeScores":true}));
+        let query = format!(
+            "{} Use filesystem.read to inspect the current file.",
+            "Retain already completed work. ".repeat(10)
+        );
+        let hits =
+            search_tools(&json!({"query":query,"descriptors":descriptors,"includeScores":true}));
         assert_eq!(hits[0]["index"], 0);
         assert!(hits[0]["score"].as_u64().unwrap() > 900_000);
-        assert!(hits.as_array().unwrap().iter().filter(|hit| hit["index"] == 1)
-            .all(|hit| hit["score"].as_u64().unwrap() < 900_000));
-        let wire = search_tools(&json!({"query":"Use k_terminal_host_run_725f3f35 to inspect the current command.","descriptors":descriptors}));
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .filter(|hit| hit["index"] == 1)
+                .all(|hit| hit["score"].as_u64().unwrap() < 900_000)
+        );
+        let wire = search_tools(
+            &json!({"query":"Use k_terminal_host_run_725f3f35 to inspect the current command.","descriptors":descriptors}),
+        );
         assert_eq!(wire[0], 2);
     }
 
@@ -1054,7 +1169,9 @@ mod search_score_tests {
             {"name":"filesystem.read","description":"Read a local file."},
             {"name":"filesystem.write","description":"Atomically write UTF-8 text."}
         ]);
-        let hits = search_tools(&json!({"query":"这是实际本地模型长任务测试。先新建 receipt.txt，内容是原始口令；再逐个读取 note-1.txt 到 note-8.txt，记录每个 SECRET KEY，最后保存 summary.md。","descriptors":descriptors}));
+        let hits = search_tools(
+            &json!({"query":"这是实际本地模型长任务测试。先新建 receipt.txt，内容是原始口令；再逐个读取 note-1.txt 到 note-8.txt，记录每个 SECRET KEY，最后保存 summary.md。","descriptors":descriptors}),
+        );
         assert_eq!(hits[0], 3);
         assert_eq!(hits[1], 2);
     }
@@ -1066,12 +1183,16 @@ mod search_score_tests {
             {"name":"terminal.workspace.open","description":"Open an embedded terminal"},
             {"name":"terminal.workspace.write","description":"Send input to a terminal"}
         ]);
-        let right = search_tools(&json!({"query":"在右侧终端运行 ipconfig 查看我的ip","descriptors":descriptors}));
+        let right = search_tools(
+            &json!({"query":"在右侧终端运行 ipconfig 查看我的ip","descriptors":descriptors}),
+        );
         assert_ne!(right[0], 0);
         let host = search_tools(&json!({"query":"查看我的ip","descriptors":descriptors}));
         assert_eq!(host[0], 0);
-        let followup = super::selection_signals(&json!({"message":"继续", "historySignals":["在右侧终端运行命令"],
-            "previousToolNames":["terminal.workspace.write"]}));
+        let followup = super::selection_signals(
+            &json!({"message":"继续", "historySignals":["在右侧终端运行命令"],
+            "previousToolNames":["terminal.workspace.write"]}),
+        );
         assert_eq!(followup["workspaceTerminal"], true);
         assert_eq!(followup["hostTerminal"], true);
     }

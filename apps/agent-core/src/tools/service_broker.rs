@@ -350,7 +350,7 @@ impl BrokerState {
                 if expected && previous == current {
                     return Ok(json!({"changed":false,"servers":[]}));
                 }
-                self.configuration_generation = self.configuration_generation.saturating_add(1);
+                self.configuration_generation += 1;
                 self.live_configuration = Some(arguments["current"].clone());
                 let servers = configuration::calculate("tools.changedMcpServerIds", arguments)
                     .map_err(|code| ServiceError::new(&code, "MCP 配置变化分析失败。", 400))?;
@@ -539,98 +539,7 @@ impl BrokerState {
                     json!({"indices":indices,"offset":offset,"nextOffset":offset+indices.len(),"hasMore":offset+indices.len()<skills.len(),"total":skills.len()}),
                 )
             }
-            "broker.catalog" => {
-                let config = &arguments["config"];
-                let effective = &arguments["effectiveConfig"];
-                let settings = &arguments["retrievalSettings"];
-                let servers = array(&effective["mcpServers"]);
-                let previous = self.descriptors.clone();
-                let mut changes = Vec::new();
-                let mut selected = Vec::new();
-                self.inventory.clear();
-                self.descriptors.clear();
-                for (index, original) in array(&arguments["descriptors"]).iter().enumerate() {
-                    let mut descriptor = original.clone();
-                    if descriptor["source"] == "builtin" {
-                        let availability = rule(
-                            "tools.nativeAvailability",
-                            &json!({"name":descriptor["name"],"context":self.context}),
-                        )?;
-                        if let Some(availability) = availability.as_object() {
-                            for (key, value) in availability {
-                                descriptor[key] = value.clone();
-                            }
-                        }
-                    } else {
-                        descriptor["enabled"] = json!(
-                            rule(
-                                "tools.configuredEnabled",
-                                &json!({"config":effective,"descriptor":descriptor})
-                            )? == true
-                                && rule(
-                                    "tools.configurationChanged",
-                                    &json!({"previous":config,"current":effective,"descriptor":descriptor})
-                                )? != true
-                        );
-                    }
-                    let server = servers.iter().find(|server| {
-                        server["id"] == descriptor["serverId"] && server["enabled"] != false
-                    });
-                    let owned = descriptor["serverId"].as_str().is_some_and(|id| {
-                        descriptor["source"] == format!("mcp:{id}")
-                            && string(&descriptor["name"]).starts_with(&format!("mcp.{id}."))
-                    }) && servers.len() <= 64;
-                    let connection = if owned {
-                        server
-                            .map(connection_facts)
-                            .transpose()?
-                            .map(|(_, facts)| facts["connection"].clone())
-                    } else {
-                        None
-                    };
-                    descriptor["executionEnvironment"] = rule(
-                        "tools.resolveEnvironment",
-                        &json!({"descriptor":{"name":descriptor["name"],"source":descriptor["source"]},
-                        "server":if owned{server.map(|server|json!({"transport":server["transport"]}))}else{None},"connection":connection,"sandbox":self.context["sandboxCapabilities"]}),
-                    )?;
-                    let name = string(&descriptor["name"]).to_owned();
-                    let enabled = descriptor["enabled"] != false
-                        && descriptor["available"] != false
-                        && browser_allowed(&self.context, server.unwrap_or(&Value::Null))?
-                        && (!name.starts_with("knowledge.")
-                            || arguments["hasRetrieval"] == true
-                                && settings["local"]["enabled"] != false)
-                        && (!name.starts_with("memory.") || arguments["hasMemory"] == true)
-                        && (settings["web"]["browserRead"] != "off"
-                            || !automatic_browser(&self.context, &descriptor))
-                        && (settings["web"]["mode"] != "off"
-                            || !(name.starts_with("web.")
-                                || provider_kind(&descriptor).is_some()
-                                || public_fetch(&descriptor)));
-                    if enabled {
-                        selected.push(index);
-                        self.descriptors.insert(name.clone(), descriptor.clone());
-                    }
-                    self.inventory.insert(name, descriptor.clone());
-                    changes.push(json!({"index":index,"enabled":descriptor["enabled"],"availability":descriptor.get("available"),"unavailableCode":descriptor.get("unavailableCode"),"executionEnvironment":descriptor["executionEnvironment"]}));
-                }
-                for (name, descriptor) in previous {
-                    if string(&descriptor["source"]).starts_with("mcp:")
-                        && rule(
-                            "tools.configuredEnabled",
-                            &json!({"config":effective,"descriptor":descriptor}),
-                        )? != true
-                    {
-                        self.revoked.insert(name);
-                    }
-                }
-                for name in self.descriptors.keys() {
-                    self.revoked.remove(name);
-                }
-                self.snapshot = Some(config.clone());
-                self.generation = arguments["generation"].as_u64().unwrap_or(0);
-                Ok(json!({"changes":changes,"selected":selected,"revokedNames":self.revoked}))
-            }
+            "broker.catalog" => self.apply_broker_catalog(arguments),
             "broker.assertConfiguration" => {
                 if self.snapshot.is_none() || arguments["generation"] == self.generation {
                     return Ok(Value::Null);
@@ -651,61 +560,155 @@ impl BrokerState {
                 }
                 Ok(Value::Null)
             }
-            "broker.resolve" => {
-                let name = string(&arguments["name"]);
-                if self.descriptors.contains_key(name) {
-                    return Ok(json!({"name":name,"builtin":false}));
-                }
-                if self
-                    .builtins
-                    .iter()
-                    .any(|descriptor| descriptor["name"] == name)
-                {
-                    return Ok(json!({"name":name,"builtin":true}));
-                }
-                // An injected SDK schema can preserve a denial diagnosis, but never gains native catalog authority.
-                // 注入的 SDK schema 只能保留拒绝诊断，不能获得原生目录执行权限。
-                let candidate = &arguments["candidate"];
-                if candidate["name"] == name {
-                    if let Some(server_id) = candidate["serverId"].as_str() {
-                        if candidate["source"] == format!("mcp:{server_id}")
-                            && name.starts_with(&format!("mcp.{server_id}."))
-                        {
-                            if let Some(server) = self
-                                .snapshot
-                                .as_ref()
-                                .and_then(|config| config["mcpServers"].as_array())
-                                .and_then(|servers| {
-                                    servers.iter().find(|server| server["id"] == server_id)
-                                })
-                            {
-                                if !browser_allowed(&self.context, server)? {
-                                    return Err(ServiceError::new(
-                                        "BROWSER_TASK_NOT_AUTHORIZED",
-                                        "当前用户任务没有授权此浏览器操作。",
-                                        403,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                if self.revoked.contains(name) {
-                    return Ok(
-                        json!({"failure":{"code":"AGENT_CONFIG_CHANGED","message":"此工具曾可用，但当前配置已撤销；请发现其他能力。","statusCode":409,"toolConfigurationRevoked":true}}),
-                    );
-                }
-                Err(ServiceError::new(
-                    "TOOL_NOT_FOUND",
-                    "工具不存在或尚未发现。",
-                    404,
-                ))
-            }
+            "broker.resolve" => self.apply_broker_resolve(arguments),
             _ => Err(ServiceError::new(
                 "AGENT_CORE_UNKNOWN_OPERATION",
                 "Unknown tool broker operation.",
                 400,
             )),
         }
+    }
+
+    fn apply_broker_catalog(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let config = &arguments["config"];
+        let effective = &arguments["effectiveConfig"];
+        let settings = &arguments["retrievalSettings"];
+        let servers = array(&effective["mcpServers"]);
+        let previous = self.descriptors.clone();
+        let mut changes = Vec::new();
+        let mut selected = Vec::new();
+        self.inventory.clear();
+        self.descriptors.clear();
+        for (index, original) in array(&arguments["descriptors"]).iter().enumerate() {
+            let mut descriptor = original.clone();
+            if descriptor["source"] == "builtin" {
+                let availability = rule(
+                    "tools.nativeAvailability",
+                    &json!({"name":descriptor["name"],"context":self.context}),
+                )?;
+                if let Some(availability) = availability.as_object() {
+                    for (key, value) in availability {
+                        descriptor[key] = value.clone();
+                    }
+                }
+            } else {
+                descriptor["enabled"] = json!(
+                    rule(
+                        "tools.configuredEnabled",
+                        &json!({"config":effective,"descriptor":descriptor})
+                    )? == true
+                        && rule(
+                            "tools.configurationChanged",
+                            &json!({"previous":config,"current":effective,"descriptor":descriptor})
+                        )? != true
+                );
+            }
+            let server = servers.iter().find(|server| {
+                server["id"] == descriptor["serverId"] && server["enabled"] != false
+            });
+            let owned = descriptor["serverId"].as_str().is_some_and(|id| {
+                descriptor["source"] == format!("mcp:{id}")
+                    && string(&descriptor["name"]).starts_with(&format!("mcp.{id}."))
+            }) && servers.len() <= 64;
+            let connection = if owned {
+                server
+                    .map(connection_facts)
+                    .transpose()?
+                    .map(|(_, facts)| facts["connection"].clone())
+            } else {
+                None
+            };
+            descriptor["executionEnvironment"] = rule(
+                "tools.resolveEnvironment",
+                &json!({"descriptor":{"name":descriptor["name"],"source":descriptor["source"]},
+                "server":if owned{server.map(|server|json!({"transport":server["transport"]}))}else{None},"connection":connection,"sandbox":self.context["sandboxCapabilities"]}),
+            )?;
+            let name = string(&descriptor["name"]).to_owned();
+            let enabled = descriptor["enabled"] != false
+                && descriptor["available"] != false
+                && browser_allowed(&self.context, server.unwrap_or(&Value::Null))?
+                && (!name.starts_with("knowledge.")
+                    || arguments["hasRetrieval"] == true
+                        && settings["local"]["enabled"] != false)
+                && (!name.starts_with("memory.") || arguments["hasMemory"] == true)
+                && (settings["web"]["browserRead"] != "off"
+                    || !automatic_browser(&self.context, &descriptor))
+                && (settings["web"]["mode"] != "off"
+                    || !(name.starts_with("web.")
+                        || provider_kind(&descriptor).is_some()
+                        || public_fetch(&descriptor)));
+            if enabled {
+                selected.push(index);
+                self.descriptors.insert(name.clone(), descriptor.clone());
+            }
+            self.inventory.insert(name, descriptor.clone());
+            changes.push(json!({"index":index,"enabled":descriptor["enabled"],"availability":descriptor.get("available"),"unavailableCode":descriptor.get("unavailableCode"),"executionEnvironment":descriptor["executionEnvironment"]}));
+        }
+        for (name, descriptor) in previous {
+            if string(&descriptor["source"]).starts_with("mcp:")
+                && rule(
+                    "tools.configuredEnabled",
+                    &json!({"config":effective,"descriptor":descriptor}),
+                )? != true
+            {
+                self.revoked.insert(name);
+            }
+        }
+        for name in self.descriptors.keys() {
+            self.revoked.remove(name);
+        }
+        self.snapshot = Some(config.clone());
+        self.generation = arguments["generation"].as_u64().unwrap_or(0);
+        Ok(json!({"changes":changes,"selected":selected,"revokedNames":self.revoked}))
+    }
+
+    fn apply_broker_resolve(&mut self, arguments: &Value) -> ServiceResult<Value> {
+        let name = string(&arguments["name"]);
+        if self.descriptors.contains_key(name) {
+            return Ok(json!({"name":name,"builtin":false}));
+        }
+        if self
+            .builtins
+            .iter()
+            .any(|descriptor| descriptor["name"] == name)
+        {
+            return Ok(json!({"name":name,"builtin":true}));
+        }
+        // 注入的 SDK schema 只保留拒绝诊断。
+        let candidate = &arguments["candidate"];
+        if candidate["name"] == name {
+            if let Some(server_id) = candidate["serverId"].as_str() {
+                if candidate["source"] == format!("mcp:{server_id}")
+                    && name.starts_with(&format!("mcp.{server_id}."))
+                {
+                    if let Some(server) = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|config| config["mcpServers"].as_array())
+                        .and_then(|servers| {
+                            servers.iter().find(|server| server["id"] == server_id)
+                        })
+                    {
+                        if !browser_allowed(&self.context, server)? {
+                            return Err(ServiceError::new(
+                                "BROWSER_TASK_NOT_AUTHORIZED",
+                                "当前用户任务没有授权此浏览器操作。",
+                                403,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if self.revoked.contains(name) {
+            return Ok(
+                json!({"failure":{"code":"AGENT_CONFIG_CHANGED","message":"此工具曾可用，但当前配置已撤销；请发现其他能力。","statusCode":409,"toolConfigurationRevoked":true}}),
+            );
+        }
+        Err(ServiceError::new(
+            "TOOL_NOT_FOUND",
+            "工具不存在或尚未发现。",
+            404,
+        ))
     }
 }

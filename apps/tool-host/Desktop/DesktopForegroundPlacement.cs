@@ -32,7 +32,6 @@ internal sealed class DesktopForegroundPlacement
                 if (HasIdentity(window, processId) && IsWindowVisible(window)) PlaceBehind(window, processId);
                 return true;
             }, 0);
-            // Startup observation never cancels/replays an already launched application's side effects.
             // 启动观察不会取消或重放已启动应用产生的副作用。
             if (cancellation.WaitHandle.WaitOne(25)) break;
         }
@@ -43,21 +42,15 @@ internal sealed class DesktopForegroundPlacement
         if (!HasIdentity(window, processId) || !IsWindowVisible(window)) return;
         nint current = GetForegroundWindow();
         if (current != 0 && current != window) RememberForeground(current);
-        // Operating on a window already selected by the user must not demote their current window.
         // 操作用户当前选中的窗口时，不应将该窗口置于后台。
         if (_protectedForegroundWindow == window) return;
         _ownedWindows[window] = processId;
-        // Place just behind the selected ordinary window, instead of behind every application.
-        // A topmost foreground uses HWND_BOTTOM to avoid making the target itself topmost.
-        // ASYNCWINDOWPOS avoids waiting on a slow app's thread; capture never needs activation.
         // 将目标放在当前普通窗口之后；若前台窗口置顶，则使用 HWND_BOTTOM，避免目标也被置顶。
         // ASYNCWINDOWPOS 避免等待慢应用线程，截屏无需激活窗口。
         nint precedingWindow = ProtectedForegroundExists() && (GetWindowLong(_protectedForegroundWindow, -20) & 0x8) == 0
             ? _protectedForegroundWindow : 1;
         SetWindowPos(window, precedingWindow, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200 | 0x4000);
         if (current != window || GetForegroundWindow() != window || !ProtectedForegroundExists()) return;
-        // Only undo this known target's startup activation. A user switching to an unrelated
-        // window updates the protected identity instead of having focus pulled back to KYNXA.
         // 只纠正已知目标启动时的抢焦点；用户切换到其他窗口时更新受保护身份，不把焦点强行拉回 KYNXA。
         FocusRestoreAttempted = true;
         FocusRestoreSucceeded |= SetForegroundWindow(_protectedForegroundWindow);

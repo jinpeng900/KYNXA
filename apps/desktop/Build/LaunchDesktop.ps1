@@ -6,7 +6,6 @@ $plan = Get-Content -LiteralPath $PlanPath -Raw -Encoding UTF8 | ConvertFrom-Jso
 try {
     $package = [Windows.ApplicationModel.Package, Windows.ApplicationModel, ContentType = WindowsRuntime]::Current
     if ($package.Id.Name -ne $plan.packageIdentity) { throw 'The desktop launcher received a different package identity.' }
-    # Set the application root inside the package context; broker activation does not inherit the caller's overrides.
     # 在包身份上下文内设置应用根目录；不能依赖激活代理继承外部调用者的环境覆盖。
     $root = [IO.Path]::GetFullPath($plan.applicationRoot)
     foreach ($name in @('KYNXA_DATA_HOME','KYNXA_MODEL_HOME','KYNXA_EXTENSION_HOME','KYNXA_STORAGE_POINTER','KYNXA_EXTENSION_POINTER','KYNXA_LEGACY_DESKTOP_HOME')) {
@@ -27,7 +26,6 @@ try {
         }
         catch { }
         if (-not $sameStorage) {
-            # Separate checkouts use separate ports instead of attaching to another workspace's gateway.
             # 独立项目副本改用空闲端口，不连接到其他工作区的网关。
             $free = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
             try { $free.Start(); $port = $free.LocalEndpoint.Port } finally { $free.Stop() }

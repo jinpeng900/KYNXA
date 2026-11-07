@@ -74,8 +74,6 @@ fn drift(reference: &Value, actual: &Value, dimensions: &Value) -> Option<Value>
     Some(json!({"minCosine": minimum_cosine, "maxDifference": maximum_difference}))
 }
 
-/// Backend qualification is based on actual numerical probes and operator traces, never provider names.
-/// 后端资格依据真实数值探针与算子追踪判断；提供程序名称或成功装载不能冒充 GPU 运算证据。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "models.inference.sessionOptions" => {

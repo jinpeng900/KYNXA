@@ -35,7 +35,6 @@ try {
     $state = Read-KynxaBuildState $statePath
     $desktopProject = Join-Path $repositoryRoot 'apps/desktop/KYNXA.Desktop.csproj'
     $toolHostProject = Join-Path $repositoryRoot 'apps/tool-host/KYNXA.ToolHost.csproj'
-    # Use one selected resource root for preparation, reuse checks and the desktop build.
     # 资源准备、复用检查与桌面构建使用同一选定根目录，避免再次生成另一份长路径缓存。
     $runtimeRoot = if ($NativeRuntimeRoot) { [IO.Path]::GetFullPath([IO.Path]::Combine($NativeRuntimeRoot, '.')) } else { Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64' }
     $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
@@ -158,7 +157,6 @@ try {
             $common = @('restore','--runtime','win-x64','-p:NuGetAudit=false','--verbosity','minimal')
             if ($NuGetSource) { $common += @('--source',$NuGetSource) }
             elseif ($Offline) {
-                # Resolve changed projects from cache and local sources, without stale assets or network access.
                 # 项目变化后从缓存和本地源重新还原，不复用过期资产或联网。
                 $feed = Join-Path $stateDirectory 'nuget-feed'
                 [IO.Directory]::CreateDirectory($feed) | Out-Null

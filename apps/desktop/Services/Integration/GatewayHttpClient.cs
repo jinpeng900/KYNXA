@@ -13,7 +13,6 @@ internal static class GatewayHttpClient
 
     public static HttpClient Create(Uri address, TimeSpan timeout)
     {
-        // Uri classifies literal loopback addresses and localhost; similar remote names keep system proxy handling.
         // 仅字面回环地址与 localhost 直连；相似的远端域名仍使用系统代理。
         bool isLoopback = address.IsLoopback;
         return new HttpClient(isLoopback ? LoopbackTransport : new SocketsHttpHandler(), disposeHandler: !isLoopback)

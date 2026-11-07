@@ -1,5 +1,4 @@
-//! Offline document extraction keeps bounded decoding, exact source identity and page coverage.
-//! 离线文档提取保留有界解码、精确来源身份与页面覆盖，不通过浏览器或 Node SDK。
+//! 离线文档提取保留限量解码、精确来源身份与页面覆盖，不通过浏览器或 Node SDK。
 
 use crate::storage::{ContractError, gateway};
 use serde_json::{Value, json};
@@ -23,8 +22,7 @@ fn cancelled(token: &Arc<AtomicBool>) -> Result<(), ContractError> {
     }
 }
 
-/// Equal OCR text cannot prove equal source bytes or decoder identity.
-/// 相同识别文字不能证明原文件字节或解码身份未变化；回源与发布共用这一检查。
+/// 识别文字相同不代表原文件字节或解码身份未变，回源与发布共用这一检查。
 pub(crate) fn verify_extraction(expected: &Value, current: &Value) -> Result<(), ContractError> {
     if expected.is_object() && expected != current {
         Err(gateway::error(
@@ -48,7 +46,6 @@ pub fn read_with_config(
     read_impl(Some(config), path, limits, cancel, true)
 }
 
-/// Tool callers already verified the exact file scope, including the conversation's own sandbox.
 /// 工具调用端已校验精确文件权限及会话自有沙箱；索引入口仍排除全部正式数据目录。
 pub(crate) fn read_authorized_with_config(
     config: &crate::gateway_contract::GatewayConfig,
@@ -141,7 +138,6 @@ fn read_impl(
     Ok(result)
 }
 
-/// Downloaded and archived bytes use the same decoder without inventing a temporary source path.
 /// 下载和包内字节共用正式解码器；虚拟成员名称用于选解析器，不被伪装成真实磁盘来源。
 pub(crate) fn parse_bytes(
     config: Option<&crate::gateway_contract::GatewayConfig>,
@@ -151,8 +147,14 @@ pub(crate) fn parse_bytes(
     cancel: &Arc<AtomicBool>,
 ) -> Result<Value, ContractError> {
     cancelled(cancel)?;
-    let input_maximum = limits["maximumDocumentInputBytes"].as_u64().unwrap_or(32 * 1024 * 1024)
-        .min(limits["maximumSourceBytes"].as_u64().unwrap_or(32 * 1024 * 1024));
+    let input_maximum = limits["maximumDocumentInputBytes"]
+        .as_u64()
+        .unwrap_or(32 * 1024 * 1024)
+        .min(
+            limits["maximumSourceBytes"]
+                .as_u64()
+                .unwrap_or(32 * 1024 * 1024),
+        );
     if bytes.is_empty() || bytes.len() as u64 > input_maximum {
         return Err(failure("DOCUMENT_INPUT_LIMIT"));
     }
@@ -164,18 +166,31 @@ pub(crate) fn parse_bytes(
         let text = if let Some(body) = bytes.strip_prefix(&[0xff, 0xfe]) {
             crate::tools::service_source_reading::decode(body, "utf-16le")
         } else {
-            crate::tools::service_source_reading::decode(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes), "utf-8")
-        }.map_err(|_| failure("DOCUMENT_TEXT_ENCODING_UNSUPPORTED"))?;
-        let maximum = limits["maximumDocumentOutputBytes"].as_u64().unwrap_or(2 * 1024 * 1024).clamp(1024, 32 * 1024 * 1024) as usize;
+            crate::tools::service_source_reading::decode(
+                bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes),
+                "utf-8",
+            )
+        }
+        .map_err(|_| failure("DOCUMENT_TEXT_ENCODING_UNSUPPORTED"))?;
+        let maximum = limits["maximumDocumentOutputBytes"]
+            .as_u64()
+            .unwrap_or(2 * 1024 * 1024)
+            .clamp(1024, 32 * 1024 * 1024) as usize;
         if text.len() > maximum {
-            let mut windows = Vec::new(); let mut start = 0; let mut utf16_start = 0;
+            let mut windows = Vec::new();
+            let mut start = 0;
+            let mut utf16_start = 0;
             while start < text.len() {
                 cancelled(cancel)?;
                 let mut end = start.saturating_add(maximum).min(text.len());
-                while !text.is_char_boundary(end) { end -= 1; }
-                let part = &text[start..end]; let length = part.encode_utf16().count();
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let part = &text[start..end];
+                let length = part.encode_utf16().count();
                 windows.push(json!({"text":part,"rawContentHash":digest,"textRange":{"startOffset":utf16_start,"endOffset":utf16_start+length,"unit":"utf16"},"windowIndex":windows.len(),"complete":true}));
-                start = end; utf16_start += length;
+                start = end;
+                utf16_start += length;
             }
             return Ok(json!({"documentWindows":windows,"rawContentHash":digest,"complete":true}));
         }
@@ -186,14 +201,17 @@ pub(crate) fn parse_bytes(
         ParserFamily::Pdf => pdf(config, bytes, limits, cancel, &digest),
         ParserFamily::Word => docx(bytes, limits, cancel, &digest),
         ParserFamily::Image => image(config, format.name, bytes, limits, cancel, &digest),
-        ParserFamily::Office => super::gateway_office_documents::decode(format.name, bytes, limits, cancel, &digest),
+        ParserFamily::Office => {
+            super::gateway_office_documents::decode(format.name, bytes, limits, cancel, &digest)
+        }
         ParserFamily::Archive => Err(failure("DOCUMENT_ARCHIVE_REQUIRES_EXPANSION")),
-        ParserFamily::LegacyOffice => super::gateway_legacy_office::decode(format.name, bytes, limits, cancel, &digest),
+        ParserFamily::LegacyOffice => {
+            super::gateway_legacy_office::decode(format.name, bytes, limits, cancel, &digest)
+        }
     }?;
     cancelled(cancel)?;
     Ok(result)
 }
-/// The existing Windows OCR protocol keeps a real process owner and lease until the child exits.
 /// 沿用 Windows OCR 协议，真实进程所有者与资源租约持续到子进程确认退出。
 fn recognize(
     config: &crate::gateway_contract::GatewayConfig,
@@ -270,11 +288,9 @@ fn recognize(
                         "bytesBase64":base64::engine::general_purpose::STANDARD.encode(bytes),
                         "pages":pages,"maximumOutputBytes":maximum,"format":format}).to_string();
                     wire.push('\n');
-                    // EOF is the ToolHost's owner-loss cancellation signal; retain stdin through the receipt and exit.
-                    // EOF 表示调用方丢失并触发 ToolHost 取消；收到回执并确认退出前保留标准输入。
+                    // EOF 表示调用方丢失并触发 ToolHost 取消；收到结果并确认退出前保留标准输入。
                     stdin.write_all(wire.as_bytes()).await.map_err(|_| failure("OCR_FAILED"))?;
-                    // JSON escaping and recognized UTF-8 text have separate bounded budgets.
-                    // JSON 转义帧与识别文字的 UTF-8 字节数分别按额度核验。
+                    // JSON 转义帧与识别文字的 UTF-8 字节数分别按额度检查。
                     let wire = gateway_process::bounded_line(&mut BufReader::new(stdout), maximum.saturating_mul(6) + 65536)
                         .await.map_err(|_| failure("DOCUMENT_OUTPUT_LIMIT"))?
                         .ok_or_else(|| failure("OCR_INVALID_RESULT"))?;
@@ -311,8 +327,7 @@ fn recognize(
     result
 }
 
-/// Raster OCR publishes recognized text with the original byte hash, not an invented image description.
-/// 栅格 OCR 发布识别文字并保留原图哈希，不把文字识别冒充图像语义理解。
+/// 栅格 OCR 发布识别文字并保留原图哈希，只提供文字，不作图像含义理解。
 fn image(
     config: Option<&crate::gateway_contract::GatewayConfig>,
     encoding: &str,
@@ -373,7 +388,11 @@ fn pdf(
     let start_page = limits["startPage"].as_u64().unwrap_or(1);
     let end_page = limits["endPage"].as_u64().unwrap_or(pages.len() as u64);
     if start_page == 0 || start_page > end_page || start_page > pages.len() as u64 {
-        return Err(gateway::error("PDF 页码范围无效。", "INVALID_TOOL_ARGUMENTS", 400));
+        return Err(gateway::error(
+            "PDF 页码范围无效。",
+            "INVALID_TOOL_ARGUMENTS",
+            400,
+        ));
     }
     let end_page = end_page.min(pages.len() as u64);
     let selected_pages = pages
@@ -568,7 +587,6 @@ fn docx(
                         .map_err(|_| failure("DOCUMENT_PARSE_FAILED"))?,
                 );
             }
-            // CDATA is legal XML content inside w:t; keep it as text without entity unescaping.
             // w:t 内允许出现合法 XML CDATA；其内容不经过实体解码，避免丢失正文中的字面量符号。
             quick_xml::events::Event::CData(event) if capture => {
                 let decoded = event

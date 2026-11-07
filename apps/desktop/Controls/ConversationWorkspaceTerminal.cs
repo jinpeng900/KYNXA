@@ -11,7 +11,6 @@ using Windows.ApplicationModel.DataTransfer;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Conversation terminals retain their PTY and renderer when hidden; closing the tab releases both.
 /// 切换标签保留聊天终端与渲染状态；关闭标签才释放对应的伪终端和视图。
 /// </summary>
 public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
@@ -200,12 +199,10 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
             ApplyTheme(view);
             if (view.PreviousClose is { } previousClose) await previousClose;
             if (view.Closed) return;
-            // An attached model session shares the existing PTY and output buffer with the user.
             // 模型会话直接共享已有伪终端及输出缓存；仅用户新建且尚无会话时才调用启动接口。
             if (view.SessionId is null)
             {
-                // Keep the open receipt observable even if the tab closes while Rust starts the PTY.
-                // Rust 正在启动伪终端时即使标签关闭，也等待真实接收回执后关闭对应会话。
+                // Rust 正在启动伪终端时即使标签关闭，也等待真实接收结果后关闭对应会话。
                 var session = await _api.OpenAsync(view.ConversationId, view.Cols, view.Rows, mountId: view.MountId);
                 view.SessionId = session.SessionId;
                 view.SentCols = session.Cols; view.SentRows = session.Rows;
@@ -270,7 +267,6 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
         }
         catch (Exception error) when (IsConnectionError(error))
         {
-            // An unknown write is not replayed: a pasted command may already have executed.
             // 写入结果未知时不自动重放，粘贴的命令可能已经执行。
             view.Input.Clear();
             if (!view.Closed) Notice(view, "终端输入未确认，请检查当前输出。");
@@ -418,7 +414,6 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
         view.Closed = true; view.Lifetime.Cancel(); view.Reading?.Cancel();
         _viewport.Children.Remove(view.Browser); view.Browser.Close();
         if (ReferenceEquals(_current, view)) _current = null;
-        // Reopening a tab waits only for that tab's previous PTY, never another terminal in the chat.
         // 重开标签只等待该标签旧伪终端关闭，不阻塞同一聊天的其他终端。
         var closing = CloseViewAsync(view); _closing[key] = closing;
         _ = ObserveCloseAsync(key, closing);
@@ -458,7 +453,6 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
         try
         {
             await core.TrySuspendAsync();
-            // A late suspension must not freeze a terminal the user has already returned to.
             // 挂起完成时如果用户已切回终端，立即恢复，避免快速切换后停留空白。
             if (view.Active && !view.Closed) core.Resume();
         }

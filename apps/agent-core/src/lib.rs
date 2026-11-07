@@ -1,13 +1,12 @@
-//! Shared native operation contracts and scoped state sessions used by gateway adapters.
-//! 网关适配器复用的原生操作合同与范围状态会话；HTTP/SSE 入口由 gateway 模块负责。
+//! 网关适配器复用的原生操作约定与范围状态会话；HTTP/SSE 入口由 gateway 模块负责。
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub mod file_identity;
 pub mod document_formats;
+pub mod file_identity;
 pub mod gateway;
 pub mod gateway_contract;
 pub mod gateway_storage;
@@ -19,6 +18,7 @@ pub mod service_cancellation;
 pub mod storage;
 pub mod text_metrics;
 pub mod tools;
+pub(crate) mod training;
 pub mod transport;
 
 use orchestration::{budget, progress::RunProgress, task::TaskState};
@@ -157,7 +157,6 @@ impl RunSession {
             let rounds = number("rounds")?;
             let tool_calls = number("toolCalls")?;
             let generated_tokens = number("generatedTokens")?;
-            // Counters only advance. A repaired model step cannot reset the same request's budget.
             // 计数只能向前推进；修复模型步骤不能重置同一请求的执行额度。
             if rounds < self.rounds
                 || tool_calls < self.tool_calls
@@ -179,15 +178,13 @@ impl RunSession {
     }
 }
 
-/// The engine owns isolated control and services; callers authorize and supply receipts.
-/// 引擎管理独立控制与服务，调用方负责授权并提供真实回执。
+/// 引擎管理独立控制与服务，调用方负责授权并提供真实结果。
 #[derive(Default)]
 pub struct AgentEngine {
     sessions: HashMap<String, RunSession>,
 }
 
 impl AgentEngine {
-    /// Signal scan cancellation when a service session closes, without waiting for exit.
     /// 关闭服务会话时通知原生扫描取消，不同步等待扫描退出。
     pub fn bind_service_cancellation(
         &mut self,
@@ -300,7 +297,6 @@ impl AgentEngine {
         ) {
             return orchestration::context::apply(&request.operation, &request.arguments);
         }
-        // Calculations are independent of sessions and never create permissions or provider requests.
         // 纯计算不依赖会话，也不产生权限或供应商请求。
         if request.operation.starts_with("budget.")
             || request.operation.starts_with("context.")

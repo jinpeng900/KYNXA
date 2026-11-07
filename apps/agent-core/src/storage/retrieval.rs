@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::{
-    ContractError, ContractResult, MAX_SAFE_INTEGER, hash, keys, member, object, safe_integer, trim,
-    utf16_length,
+    ContractError, ContractResult, MAX_SAFE_INTEGER, hash, keys, member, object, safe_integer,
+    trim, utf16_length,
 };
 
 const MAX_SOURCE_CHARACTERS: u64 = 2 * 1024 * 1024;
@@ -117,20 +117,34 @@ fn source_extraction(value: &Value, text_length: Option<&Value>) -> ContractResu
     }
     let mut result = json!({"format": value["format"], "version": value["version"], "rawContentHash": value["rawContentHash"]});
     if let Some(parts) = value.get("parts") {
-        let maximum_offset = text_length.and_then(Value::as_u64).unwrap_or(MAX_SOURCE_CHARACTERS);
-        if parts.as_array().is_none_or(|parts| parts.len() > 4096 || parts.iter().any(|part| {
-            !keys(part, &["kind", "name", "startOffset", "endOffset"])
-                || !valid_text(&part["kind"], 64) || !valid_text(&part["name"], 2048)
-                || !safe_integer(&part["startOffset"], 0, maximum_offset)
-                || !safe_integer(&part["endOffset"], 0, maximum_offset)
-                || part["endOffset"].as_u64() < part["startOffset"].as_u64()
-        })) { return Err(extraction_failure("Document structure positions are invalid. / 文档结构位置无效。")); }
+        let maximum_offset = text_length
+            .and_then(Value::as_u64)
+            .unwrap_or(MAX_SOURCE_CHARACTERS);
+        if parts.as_array().is_none_or(|parts| {
+            parts.len() > 4096
+                || parts.iter().any(|part| {
+                    !keys(part, &["kind", "name", "startOffset", "endOffset"])
+                        || !valid_text(&part["kind"], 64)
+                        || !valid_text(&part["name"], 2048)
+                        || !safe_integer(&part["startOffset"], 0, maximum_offset)
+                        || !safe_integer(&part["endOffset"], 0, maximum_offset)
+                        || part["endOffset"].as_u64() < part["startOffset"].as_u64()
+                })
+        }) {
+            return Err(extraction_failure(
+                "Document structure positions are invalid. / 文档结构位置无效。",
+            ));
+        }
         result["parts"] = parts.clone();
     }
     for field in ["capabilities", "omittedContent"] {
         if let Some(values) = value.get(field) {
-            if values.as_array().is_none_or(|values| values.len() > 64 || values.iter().any(|item| !valid_text(item, 512))) {
-                return Err(extraction_failure("Document capability metadata is invalid. / 文档能力元信息无效。"));
+            if values.as_array().is_none_or(|values| {
+                values.len() > 64 || values.iter().any(|item| !valid_text(item, 512))
+            }) {
+                return Err(extraction_failure(
+                    "Document capability metadata is invalid. / 文档能力元信息无效。",
+                ));
             }
             result[field] = values.clone();
         }
@@ -673,8 +687,7 @@ fn reference(value: &Value) -> ContractResult {
     Ok(Value::Null)
 }
 
-/// Source metadata never substitutes for the original bytes, permission scope or current file version.
-/// 来源元信息不能替代原始字节、权限范围或当前文件版本。
+/// 来源元信息不代表原始字节、权限范围或当前文件版本。
 pub fn apply(operation: &str, args: &Value) -> ContractResult {
     let value = &args["value"];
     match operation {

@@ -4,8 +4,7 @@ namespace KYNXA.Contracts;
 
 /// <summary>One public model round. Tool receipts belong to its round; private provider reasoning is never included.</summary>
 /// <remarks>
-/// 表示一轮公开模型响应；工具回执归属对应轮次，不包含供应商的私有推理。
-/// IsAnswerContinuation marks a completed output-limit continuation; it never promotes tool commentary.
+/// 表示一轮公开模型响应；工具结果归属对应轮次，不包含供应商的私有推理。
 /// IsAnswerContinuation 标记因输出上限续写的已完成正文，不把工具进展升级为最终答案。
 /// </remarks>
 public sealed record AssistantSegment(string Id, int Round, int Order, string Phase, string Status,
@@ -44,7 +43,7 @@ public sealed record ToolActivity(string ToolCallId, string Name, JsonElement? A
     string? TaskApprovalDescription = null);
 
 /// <summary>Ephemeral terminal display data. Formal output remains in the tool receipt archive.</summary>
-/// <remarks>仅用于临时终端展示；正式输出仍以工具回执归档为准。</remarks>
+/// <remarks>仅用于临时终端展示；正式输出仍以工具结果归档为准。</remarks>
 public sealed record HostTerminalOutput(string ToolCallId, int Sequence, string Stream, string Text, bool Replace = false);
 
 public static class HostTerminalOutputRules

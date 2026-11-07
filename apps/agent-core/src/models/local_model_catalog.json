@@ -16,7 +16,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF",
       "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
@@ -44,7 +44,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
       "revision": "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
@@ -72,7 +72,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
       "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
@@ -100,7 +100,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
       "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
@@ -128,7 +128,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-8B-GGUF",
       "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
@@ -156,7 +156,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-8B-GGUF",
       "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
@@ -184,7 +184,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-14B-GGUF",
       "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
@@ -212,7 +212,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-14B-GGUF",
       "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
@@ -240,7 +240,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF",
       "revision": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
@@ -268,7 +268,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF",
       "revision": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
@@ -296,7 +296,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-32B-GGUF",
       "revision": "938a7432affaec9157f883a87164e2646ae17555",
@@ -324,7 +324,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen3-32B-GGUF",
       "revision": "938a7432affaec9157f883a87164e2646ae17555",
@@ -352,7 +352,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
       "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
@@ -380,7 +380,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
       "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
@@ -408,7 +408,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF",
       "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
@@ -436,7 +436,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF",
       "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
@@ -464,7 +464,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "other",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF",
       "revision": "7dabda4d13d513e3e842b20f0d435c732f172cbe",
@@ -492,7 +492,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF",
       "revision": "bb5d59e06d9551d752d08b292a50eb208b07ab1f",
@@ -527,7 +527,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-GGUF",
       "revision": "b466e1f8c07172155743e8e1307507d8a4f91fbd",
@@ -569,7 +569,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF",
       "revision": "a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d",
@@ -625,7 +625,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "other",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF",
       "revision": "7ca3bc388f97b264c4283bc9bf1055e2abc38441",
@@ -730,7 +730,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
       "revision": "ebb2015119c907b064c512bf053e945850b5875f",
@@ -758,7 +758,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
       "revision": "f86cb2c1fa58255f8052cc32aeede1b7482d4361",
@@ -786,7 +786,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "other",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
       "revision": "f74adce6aa16316c625447af059dbebe4983757c",
@@ -814,7 +814,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
       "revision": "13fb94bfda8c8cf22497dc57b78f391a9acb426a",
@@ -842,7 +842,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
       "revision": "d0a692ef765eefbf2fabb130b3cb2e8917e3d225",
@@ -870,7 +870,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
       "revision": "9d3053fce650fe1cdbdb75998c2a87add9d178ef",
@@ -899,7 +899,7 @@
         "tools",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
       "revision": "5037fcf163dd95d1e41d1974465f0898ed108ca2",
@@ -935,7 +935,7 @@
         "tools",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
       "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6",
@@ -969,7 +969,7 @@
       "capabilities": [
         "text"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "mit",
       "sourceUrl": "https://huggingface.co/microsoft/phi-4-gguf",
       "revision": "6edc2ef6664b739a8e11e62f2672ff6afe0c15ac",
@@ -997,7 +997,7 @@
         "text",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "gemma",
       "sourceUrl": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF",
       "revision": "d0976223747697cb51e056d85c532013931fe52e",
@@ -1031,7 +1031,7 @@
       "capabilities": [
         "text"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "gemma",
       "sourceUrl": "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF",
       "revision": "f9c28bcd85737ffc5aef028638d3341d49869c27",
@@ -1058,7 +1058,7 @@
       "capabilities": [
         "text"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "mit",
       "sourceUrl": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
       "revision": "361004151d4f4f6b446dc5e6d46fbf4422a80d5f",
@@ -1085,7 +1085,7 @@
       "capabilities": [
         "text"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "llama3.2",
       "sourceUrl": "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF",
       "revision": "5ab33fa94d1d04e903623ae72c95d1696f09f9e8",
@@ -1113,7 +1113,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF",
       "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
@@ -1141,7 +1141,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-4B-Thinking-2507-GGUF",
       "revision": "f40adb104d4d44aee52f398b60597c5866a973a3",
@@ -1169,7 +1169,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
       "revision": "eea7b2be5805a5f151f8847ede8e5f9a9284bf77",
@@ -1197,7 +1197,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
       "revision": "eea7b2be5805a5f151f8847ede8e5f9a9284bf77",
@@ -1225,7 +1225,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",
       "revision": "a9b37aaac12b2bd0098783a443429543dd76a14d",
@@ -1253,7 +1253,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",
       "revision": "a9b37aaac12b2bd0098783a443429543dd76a14d",
@@ -1281,7 +1281,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
       "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350",
@@ -1309,7 +1309,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
       "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350",
@@ -1337,7 +1337,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
       "revision": "437d6915c5c512869e4cf8b16b840bbe3fb172bc",
@@ -1379,7 +1379,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
       "revision": "437d6915c5c512869e4cf8b16b840bbe3fb172bc",
@@ -1428,7 +1428,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
       "revision": "437d6915c5c512869e4cf8b16b840bbe3fb172bc",
@@ -1491,7 +1491,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF",
       "revision": "3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81",
@@ -1533,7 +1533,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF",
       "revision": "3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81",
@@ -1596,7 +1596,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
       "revision": "b86deeefd82f1a3374c5536dfc1dd0ce27ac092d",
@@ -1659,7 +1659,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
       "revision": "b86deeefd82f1a3374c5536dfc1dd0ce27ac092d",
@@ -1757,7 +1757,7 @@
         "text",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "gemma",
       "sourceUrl": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF",
       "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
@@ -1792,7 +1792,7 @@
         "text",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "gemma",
       "sourceUrl": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF",
       "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
@@ -1827,7 +1827,7 @@
         "text",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "gemma",
       "sourceUrl": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF",
       "revision": "7cd0121f2530b00e42c4df952d4cad4418c0b3c1",
@@ -1862,7 +1862,7 @@
         "text",
         "vision"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "gemma",
       "sourceUrl": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF",
       "revision": "7cd0121f2530b00e42c4df952d4cad4418c0b3c1",
@@ -1897,7 +1897,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "llama3.3",
       "sourceUrl": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF",
       "revision": "b6c5c9f176f3279204034e1d16d393105e95cb88",
@@ -1925,7 +1925,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "llama3.3",
       "sourceUrl": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF",
       "revision": "b6c5c9f176f3279204034e1d16d393105e95cb88",
@@ -1959,7 +1959,7 @@
       "capabilities": [
         "text"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "mit (base: apache-2.0)",
       "sourceUrl": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
       "revision": "1dc8cf9ffa5dd333057ea1b09ccf4772d8726dec",
@@ -1986,7 +1986,7 @@
       "capabilities": [
         "text"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "mit (base: llama3.3)",
       "sourceUrl": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-70B-GGUF",
       "revision": "1842c5f7280f933ead58adf8afd078672c9f6cd0",
@@ -2015,7 +2015,7 @@
         "vision",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
       "revision": "d63ca9416f5db4f54a78145fb9a025317a57289f",
@@ -2050,7 +2050,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "mistral-research-license-0.1",
       "sourceUrl": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF",
       "revision": "948e70cf583002c3b3218d88be46fcb960b7d661",
@@ -2085,7 +2085,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "mistral-research-license-0.1",
       "sourceUrl": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF",
       "revision": "948e70cf583002c3b3218d88be46fcb960b7d661",
@@ -2127,7 +2127,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF",
       "revision": "ef9b12f2ff56c69cf32153a02784e7a3c88bf524",
@@ -2155,7 +2155,7 @@
         "text",
         "tools"
       ],
-      "contextTokens": 8192,
+      "contextTokens": 16384,
       "license": "apache-2.0",
       "sourceUrl": "https://huggingface.co/ggml-org/gpt-oss-120b-GGUF",
       "revision": "238abdd290bb874b90a5da1b4549881b7d05c091",

@@ -3,8 +3,6 @@ using static KYNXA.ToolHost.DesktopNativeMethods;
 
 namespace KYNXA.ToolHost;
 
-// Track the prefix actually accepted by SendInput, including partial batches.
-// Cleanup releases only presses delivered by this operation, never unrelated physical keys.
 // 跟踪 SendInput 实际接收的事件前缀，包括部分批次；清理仅释放本次操作成功按下的键，不影响无关物理按键。
 internal sealed class DesktopInputSequence
 {
@@ -52,8 +50,6 @@ internal sealed class DesktopInputSequence
 
     internal void ReleaseOwnedPresses()
     {
-        // The target may have lost focus or cancellation may be set: key-up cleanup must still run.
-        // Retry only the remaining presses, at most three bounded batches; never add a new down event.
         // 即使目标失焦或已取消，也必须执行松键清理；仅重试剩余按键，最多三批，不增加新的按下事件。
         for (int attempt = 0; attempt < 3 && (_pressedKeys.Count > 0 || _pressedMouseButtons != 0); attempt++)
         {

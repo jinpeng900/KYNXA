@@ -4,8 +4,7 @@ use super::protocol::{
     array, characters, check_finish, error, final_parts, string, text_parts, truthy,
 };
 
-/// Plain model streams have their own 8 Mi UTF-16 limit, distinct from the 2 Mi tool-stream contract.
-/// 普通模型流独立保留 8 Mi UTF-16 上限，不与工具流 2 Mi 合同混用。
+/// 普通模型流独立保留 8 Mi UTF-16 上限，不与工具流 2 Mi 约定混用。
 #[derive(Default)]
 pub struct PlainStreamState {
     opened: bool,
@@ -13,7 +12,6 @@ pub struct PlainStreamState {
     protocol: String,
     content: String,
     reasoning: String,
-    // Account only the new delta; rescanning an entire long reply per frame would be quadratic.
     // 只计算新增片段；每帧重扫完整长回复会形成二次方开销。
     content_characters: usize,
     reasoning_characters: usize,
@@ -59,7 +57,6 @@ impl PlainStreamState {
             .iter()
             .any(|event| event["type"] == "content_snapshot");
         if is_json || has_snapshot {
-            // The final frame may reference 8 Mi UTF-16 of reasoning; send its snapshot once to stay within transport limits.
             // 最终帧可能引用已累积的 8 Mi UTF-16 思考内容；快照只传一次，避免重复转义超限。
             if result.get("result").is_none() {
                 result["result"] = self.completed()["result"].clone();

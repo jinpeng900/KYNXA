@@ -1,5 +1,4 @@
-//! Short-lived, metadata-only reuse for retrieval candidate channels.
-//! 检索候选通道仅短期复用元数据，原文、融合、权限和向量就绪状态仍逐次核验。
+//! 检索候选通道仅短期复用元数据，原文、融合、权限和向量就绪状态仍逐次检查。
 
 use super::cache::{ByteLru, retained_json_bytes};
 use super::cache_budget::Feedback;
@@ -99,12 +98,15 @@ impl CandidateCache {
     ) -> Result<(Value, Value), E> {
         cancelled()?;
         if !enabled {
-            let started=Instant::now();
+            let started = Instant::now();
             return load().map(|channels| {
-                let mut state=self.state.lock().unwrap_or_else(|error|error.into_inner());
-                state.misses=state.misses.saturating_add(1);
-                state.computed_micros=state.computed_micros.saturating_add(started.elapsed().as_micros().min(u64::MAX as u128) as u64);
-                drop(state); (channels,self.receipt("bypass"))
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.misses += 1;
+                state.computed_micros = state
+                    .computed_micros
+                    .saturating_add(started.elapsed().as_micros() as u64);
+                drop(state);
+                (channels, self.receipt("bypass"))
             });
         }
         let mut load = Some(load);
@@ -115,7 +117,9 @@ impl CandidateCache {
                 if let Some(entry) = state.entries.get(&key) {
                     if entry.created.elapsed() < self.ttl {
                         state.hits += 1;
-                        state.estimated_saved_micros=state.estimated_saved_micros.saturating_add(entry.computed_micros);
+                        state.estimated_saved_micros = state
+                            .estimated_saved_micros
+                            .saturating_add(entry.computed_micros);
                         let channels = entry.channels.as_ref().clone();
                         drop(state);
                         return Ok((channels, self.receipt("hit")));
@@ -128,7 +132,6 @@ impl CandidateCache {
                 if let Some(flight) = state.flights.get(&key) {
                     (flight.clone(), false, generation)
                 } else {
-                    // Cache bookkeeping shares the byte budget; overload keeps the original query path.
                     // 在途登记与缓存值共享字节预算；容量不足时执行原查询，不拒绝或中断任务。
                     if state.flights.len() >= MAX_FLIGHTS
                         || state
@@ -171,16 +174,16 @@ impl CandidateCache {
                     }
                 }
                 if let Some(channels) = result.channels.clone() {
-                    let computed_micros=result.computed_micros;
+                    let computed_micros = result.computed_micros;
                     drop(result);
                     cancelled()?;
-                    let mut state=self.state.lock().unwrap_or_else(|error|error.into_inner());
-                    state.shared+=1;
-                    state.estimated_saved_micros=state.estimated_saved_micros.saturating_add(computed_micros);
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.shared += 1;
+                    state.estimated_saved_micros =
+                        state.estimated_saved_micros.saturating_add(computed_micros);
                     drop(state);
                     return Ok((channels.as_ref().clone(), self.receipt("shared")));
                 }
-                // Failed or cancelled owners do not poison a waiting request.
                 // 计算方失败或取消时，等待方可接替计算，不缓存失败结果。
                 continue;
             }
@@ -189,15 +192,14 @@ impl CandidateCache {
                 key: &key,
                 flight: flight.clone(),
             };
-            let started=Instant::now();
+            let started = Instant::now();
             let channels = Arc::new(load.take().expect("candidate loader is consumed once")()?);
-            let computed_micros=started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            let computed_micros = started.elapsed().as_micros() as u64;
             cancelled()?;
             {
                 let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                state.computed_micros=state.computed_micros.saturating_add(computed_micros);
+                state.computed_micros = state.computed_micros.saturating_add(computed_micros);
                 if nonempty(&channels) {
-                    // Pressure reclamation must win over an older in-flight insertion.
                     // 内存压力回收后，不允许先前在途计算重新填回旧代缓存。
                     if state.entries.generation() == generation {
                         let bytes = retained_json_bytes(&channels)
@@ -216,8 +218,14 @@ impl CandidateCache {
                     state.empty += 1;
                 }
             }
-            { let mut result=flight.state.lock().unwrap_or_else(|error|error.into_inner());
-                result.channels=Some(channels.clone()); result.computed_micros=computed_micros; }
+            {
+                let mut result = flight
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                result.channels = Some(channels.clone());
+                result.computed_micros = computed_micros;
+            }
             drop(guard);
             return Ok((channels.as_ref().clone(), self.receipt("miss")));
         }
@@ -274,7 +282,12 @@ fn nonempty(channels: &Value) -> bool {
 fn cache() -> &'static CandidateCache {
     CACHE.get_or_init(|| CandidateCache::new(0, TTL))
 }
-pub(crate) fn status() -> Value {CACHE.get().map_or_else(||json!({"state":"not-used"}),|cache|cache.receipt("snapshot"))}
+pub(crate) fn status() -> Value {
+    CACHE.get().map_or_else(
+        || json!({"state":"not-used"}),
+        |cache| cache.receipt("snapshot"),
+    )
+}
 
 pub(crate) fn reclaim() {
     let mut state = cache()
@@ -286,8 +299,7 @@ pub(crate) fn reclaim() {
     state.entries.set_capacity(0);
 }
 
-/// The retrieval I/O boundary supplies an existing hardware grant; this module stays in memory.
-/// 检索 I/O 边界提供已有硬件授额；本模块只维护内存状态。
+/// 检索 I/O 边界提供已有硬件额度；本模块只维护内存状态。
 pub(crate) fn set_capacity(bytes: usize) {
     let mut state = cache()
         .state
@@ -307,10 +319,21 @@ pub(crate) fn admitted() -> bool {
         > 0
 }
 pub(crate) fn budget_feedback() -> Feedback {
-    let Some(cache)=CACHE.get() else {return Feedback::default();};
-    let state=cache.state.lock().unwrap_or_else(|error|error.into_inner());
-    Feedback {hits:state.hits.saturating_add(state.shared),misses:state.misses,evictions:state.entries.stats()["evictions"].as_u64().unwrap_or(0),
-        occupied_bytes:state.entries.occupied_bytes(),computed_micros:state.computed_micros,estimated_saved_micros:state.estimated_saved_micros}
+    let Some(cache) = CACHE.get() else {
+        return Feedback::default();
+    };
+    let state = cache
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Feedback {
+        hits: state.hits.saturating_add(state.shared),
+        misses: state.misses,
+        evictions: state.entries.stats()["evictions"].as_u64().unwrap_or(0),
+        occupied_bytes: state.entries.occupied_bytes(),
+        computed_micros: state.computed_micros,
+        estimated_saved_micros: state.estimated_saved_micros,
+    }
 }
 
 fn key(arguments: &Value, snapshot: &Value, database_identity: (u64, u64)) -> String {
@@ -590,7 +613,6 @@ mod tests {
             "hit"
         );
 
-        // A newly published source or withdrawal is reflected even if it was never in prior hits.
         // 即使新发布或撤销的来源从未出现在旧命中中，整范围版本也会使旧候选失效。
         snapshot["scopeSnapshots"][0]["generation"] = json!(2);
         snapshot["scopeSnapshots"][0]["snapshotId"] = json!("epoch:2");
@@ -645,7 +667,6 @@ mod tests {
             changed[field] = value;
             assert_ne!(original, key(&changed, &snapshot, (11, 22)), "{field}");
         }
-        // New source publication, removal and memory withdrawal advance the whole scope snapshot.
         // 新资料发布、删除和记忆撤销都会改变整个范围版本，不依赖此前命中哪些来源。
         let mut advanced = snapshot.clone();
         advanced["scopeSnapshots"][1]["generation"] = json!(4);

@@ -5,7 +5,6 @@
   const address = new URL(location.href);
   const google = /(^|\.)google\.[a-z.]{2,12}$/i.test(address.hostname);
   const cloudflareForm = !!document.querySelector("#challenge-form,#cf-challenge-running");
-  // Ordinary sites need no full-page text/layout pass during each navigation-state poll.
   // 普通站点的状态轮询无需逐秒读取整页文字和触发布局，仅对候选验证页补查正文。
   const summary = google || cloudflareForm ? (document.body?.innerText || "").slice(0, 3000) : "";
   const googleChallenge = google && (/^\/sorry(?:\/|$)/.test(address.pathname)

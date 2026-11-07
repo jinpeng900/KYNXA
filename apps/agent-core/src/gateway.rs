@@ -1,4 +1,3 @@
-//! Loopback HTTP/SSE adapter for the native backend; formal state lives in domain services.
 //! 原生后端的本机 HTTP/SSE 适配；正式状态仍属于领域服务。
 
 use crate::{
@@ -39,13 +38,17 @@ mod workspace_range_tests {
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
         headers.insert(header::RANGE, "bytes=-3".parse().unwrap());
-        assert_eq!(binary_content_response(vec![0;10],"audio/mpeg","version",&headers).headers()[header::CONTENT_RANGE],"bytes 7-9/10");
+        assert_eq!(
+            binary_content_response(vec![0; 10], "audio/mpeg", "version", &headers).headers()
+                [header::CONTENT_RANGE],
+            "bytes 7-9/10"
+        );
         for range in ["bytes=20-", "bytes=5-2", "bytes=0-1,3-4", "bytes=-0"] {
             headers.insert(header::RANGE, range.parse().unwrap());
-            let response = binary_content_response(vec![0;10],"video/mp4","version",&headers);
-            assert_eq!(response.status(),StatusCode::RANGE_NOT_SATISFIABLE);
-            assert_eq!(response.headers()[header::CONTENT_RANGE],"bytes */10");
-            assert_eq!(response.headers()[header::ACCEPT_RANGES],"bytes");
+            let response = binary_content_response(vec![0; 10], "video/mp4", "version", &headers);
+            assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
         }
     }
 }
@@ -88,7 +91,6 @@ fn reply_response(result: Result<Value, GatewayError>) -> Response {
     }))
 }
 
-/// Check the current chat binding before each preview or browser action.
 /// 每次预览或浏览器操作前，核对当前聊天绑定与权限。
 pub(crate) async fn workspace_tool_context(
     runtime: &GatewayRuntime,
@@ -107,7 +109,6 @@ pub(crate) async fn workspace_tool_context(
         .await
 }
 
-/// Workspace views refresh scope without rebuilding model, tool or retrieval settings.
 /// 工作区刷新当前范围，不重建模型、工具和检索配置。
 async fn workspace_view_context(
     runtime: &GatewayRuntime,
@@ -115,26 +116,45 @@ async fn workspace_view_context(
     closing: bool,
 ) -> Result<crate::tools::gateway::GatewayToolContext, GatewayError> {
     if conversation.trim().is_empty() {
-        return Err(GatewayError::new("INVALID_CONVERSATION", "缺少工作区所属聊天。", 400));
+        return Err(GatewayError::new(
+            "INVALID_CONVERSATION",
+            "缺少工作区所属聊天。",
+            400,
+        ));
     }
     let relationship = if closing {
         Value::Null
     } else {
         let root = runtime.config.data_root.clone();
         let id = conversation.to_owned();
-        tokio::task::spawn_blocking(move || crate::storage::gateway::current_relationship(&root, &id))
-            .await
-            .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "工作区范围读取失败。", 500))??
+        tokio::task::spawn_blocking(move || {
+            crate::storage::gateway::current_relationship(&root, &id)
+        })
+        .await
+        .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "工作区范围读取失败。", 500))??
     };
-    let workdir = relationship["folderPath"].as_str()
+    let workdir = relationship["folderPath"]
+        .as_str()
         .or_else(|| relationship["workspaceRoot"].as_str())
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| runtime.config.data_root.join("Sandboxes").join(conversation));
+        .unwrap_or_else(|| {
+            runtime
+                .config
+                .data_root
+                .join("Sandboxes")
+                .join(conversation)
+        });
     let (_owner, cancellation) = tokio::sync::watch::channel(false);
-    let mut authorized_roots = relationship["mounts"].as_array().into_iter().flatten()
-        .filter_map(|mount| mount["path"].as_str().map(std::path::PathBuf::from)).collect::<Vec<_>>();
-    if authorized_roots.is_empty() { authorized_roots.push(workdir.clone()); }
+    let mut authorized_roots = relationship["mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|mount| mount["path"].as_str().map(std::path::PathBuf::from))
+        .collect::<Vec<_>>();
+    if authorized_roots.is_empty() {
+        authorized_roots.push(workdir.clone());
+    }
     Ok(crate::tools::gateway::GatewayToolContext {
         data_home: runtime.config.data_root.clone(),
         extension_root: runtime.config.extension_root.clone(),
@@ -166,7 +186,12 @@ fn workspace_content_response(
     binary_content_response(content.bytes, content.mime_type, &content.version, headers)
 }
 
-fn binary_content_response(bytes: Vec<u8>, mime_type: &str, version: &str, headers: &HeaderMap) -> Response {
+fn binary_content_response(
+    bytes: Vec<u8>,
+    mime_type: &str,
+    version: &str,
+    headers: &HeaderMap,
+) -> Response {
     let total = bytes.len();
     let range = headers
         .get(header::RANGE)
@@ -222,7 +247,6 @@ fn binary_content_response(bytes: Vec<u8>, mime_type: &str, version: &str, heade
         );
     }
     if mime_type.starts_with("text/html") {
-        // Chart scripts run in an opaque sandbox without network or native-bridge access.
         // 图表脚本在隔离沙箱内运行，禁用网络和原生桥接。
         builder = builder.header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'");
     } else if mime_type == "image/svg+xml" {
@@ -255,7 +279,6 @@ pub fn health() -> Value {
         "taskProtocol": 1,
         "documentParsingProtocol": 2
     });
-    // Explicit development runs must prove both arms reached the intended native sending policy.
     // 显式开发评测须核对两组真实原生排序策略，防止旧构建忽略开关却产生伪对照。
     if let Ok(order) = std::env::var("KYNXA_BENCHMARK_TOOL_ORDER") {
         if matches!(order.as_str(), "stable" | "relevance") {
@@ -311,7 +334,6 @@ struct RequestEventStream {
 }
 impl RequestEventStream {
     async fn new(run: Arc<RequestRun>) -> Result<Self, GatewayError> {
-        // Subscribe before the atomic snapshot, so every later event remains observable.
         // 先订阅再取得原子快照，确保快照之后的事件仍能读取。
         let receiver = run.events.subscribe();
         let recovery = run.recovery(0).await?;
@@ -328,8 +350,7 @@ impl RequestEventStream {
         })
     }
     async fn recover(&mut self) -> bool {
-        // Resubscribe before reading the replacement snapshot; its watermark covers missed events.
-        // 先重新订阅，再读替换快照；快照水位覆盖已错过的事件。
+        // 先重新订阅，再读替换快照；快照位置覆盖已错过的事件。
         self.receiver = self.run.events.subscribe();
         match self.run.recovery(self.delivered).await {
             Ok(recovery) => {
@@ -353,7 +374,6 @@ impl RequestEventStream {
                 self.ended = terminal_event(&event);
                 return Some(event);
             }
-            // Apply the replacement snapshot and controls before skipping covered deltas.
             // 先应用替换快照和控制事件，再跳过已覆盖的增量。
             if let Some(through) = self.checkpoint.take() {
                 self.delivered = through;
@@ -396,9 +416,10 @@ impl RequestEventStream {
                 continue;
             }
             self.delivered = sequence;
-            // The connection already emitted its handshake; delayed execution starts are not new replies.
             // 当前连接已发送握手；延迟到达的执行开始事件不能让同一回复重复开始。
-            if event["type"] == "started" { continue; }
+            if event["type"] == "started" {
+                continue;
+            }
             self.ended = terminal_event(&event);
             return Some(event);
         }
@@ -429,6 +450,14 @@ async fn request_stream_response(run: Arc<RequestRun>) -> Response {
     result
 }
 
+fn loopback_host(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
+}
+
 async fn handle(
     State(lifecycle): State<Arc<crate::gateway_storage::StorageLifecycle>>,
     method: Method,
@@ -436,7 +465,18 @@ async fn handle(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
-    // Loopback browser requests cannot inherit desktop authority.
+    // DNS 重绑定后，网页的同源 GET 不带 Origin，只能靠 Host 识别。
+    if headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .is_some_and(|host| !loopback_host(host))
+    {
+        return response(Err(GatewayError::new(
+            "BROWSER_ORIGIN_FORBIDDEN",
+            "本机管理接口只接受回环地址访问。",
+            403,
+        )));
+    }
     // 来自浏览器的请求即使走回环地址，也不能继承桌面权限。
     if headers.contains_key(header::ORIGIN) {
         return response(Err(GatewayError::new(
@@ -455,12 +495,28 @@ async fn handle(
     if uri.path() == "/api/lifecycle/shutdown" && method == Method::POST {
         let body = match serde_json::from_slice::<Value>(&bytes) {
             Ok(body) => body,
-            Err(_) => return response(Err(GatewayError::new("INVALID_JSON", "请求 JSON 无效。", 400))),
+            Err(_) => {
+                return response(Err(GatewayError::new(
+                    "INVALID_JSON",
+                    "请求 JSON 无效。",
+                    400,
+                )));
+            }
         };
-        return response(lifecycle.request_shutdown(&body).await.map(|()| (202, json!({"accepted":true}))));
+        return response(
+            lifecycle
+                .request_shutdown(&body)
+                .await
+                .map(|()| (202, json!({"accepted":true}))),
+        );
     }
     let control = method == Method::POST
-        && (["/api/chat/cancel", "/api/chat/pause", "/api/agent/approvals"].contains(&uri.path())
+        && ([
+            "/api/chat/cancel",
+            "/api/chat/pause",
+            "/api/agent/approvals",
+        ]
+        .contains(&uri.path())
             || uri.path().starts_with("/api/tasks/")
                 && uri.path().ends_with("/control")
                 && serde_json::from_slice::<Value>(&bytes)
@@ -472,18 +528,18 @@ async fn handle(
         Ok(admitted) => admitted,
         Err(error) => return response(Err(error)),
     };
-    // Keep admitted writes alive until I/O settles, even if HTTP disconnects.
     // HTTP 断开后，已准入写入仍等到 I/O 结束再结算。
     let shutdown_signal = lifecycle.shutdown_signal();
     tokio::spawn(async move {
         let result = handle_request(runtime, method, uri, headers, bytes).await;
         let (parts, body) = result.into_parts();
-        // Keep admission ownership until SSE finishes or disconnects, including terminal journal reads.
         // SSE 发完或断开后才释放准入所有权，任务结束后的日志读取也一样。
         let source = stream::unfold(
             (body.into_data_stream(), admission, shutdown_signal),
             |(mut body, admission, mut shutdown)| async move {
-                if *shutdown.borrow() { return None; }
+                if *shutdown.borrow() {
+                    return None;
+                }
                 tokio::select! {
                     chunk = body.next() => chunk.map(|chunk| (chunk, (body, admission, shutdown))),
                     _ = shutdown.changed() => None,
@@ -537,150 +593,42 @@ async fn handle_request(
         .into_owned()
         .collect::<Vec<_>>();
     if method == Method::GET && ["/api/chat/status", "/api/chat/stream"].contains(&path) {
-        // Attach recovery with both stable IDs; GET never resubmits work.
-        // 恢复时按两个稳定 ID 接回；GET 不重新提交任务。
-        let identifier = |name| {
-            crate::orchestration::gateway_runtime::checked_id(
-                &json!(crate::storage::gateway::query_value(&query, name).unwrap_or("")),
-                name,
-            )
-        };
-        let conversation = match identifier("conversationId") {
-            Ok(id) => id,
-            Err(error) => return response(Err(error)),
-        };
-        let request = match identifier("requestId") {
-            Ok(id) => id,
-            Err(error) => return response(Err(error)),
-        };
-        if path == "/api/chat/status" {
-            return response(
-                runtime.run_status(&conversation, &request).await
-                    .map(|status| (200, status))
-                    .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404)),
-            );
-        }
-        return match runtime.observe_request(&conversation, &request).await {
-            Ok(run) => request_stream_response(run).await,
-            Err(error) => response(Err(error)),
-        };
+        return chat_resume_response(&runtime, path, &query).await;
     }
-    let attachment_page_number = |name, fallback| crate::storage::gateway::query_value(&query, name)
-        .and_then(|value| value.parse::<usize>().ok()).unwrap_or(fallback);
-    if method == Method::GET && let Some(tail) = path.strip_prefix("/api/projects/") {
+    let attachment_page_number = |name, fallback| {
+        crate::storage::gateway::query_value(&query, name)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(fallback)
+    };
+    if method == Method::GET
+        && let Some(tail) = path.strip_prefix("/api/projects/")
+    {
         let parts = tail.split('/').collect::<Vec<_>>();
         if let [project, "attachments"] = parts.as_slice() {
-            return response(crate::orchestration::gateway_attachments::project_list(&runtime, project,
-                attachment_page_number("offset", 0), attachment_page_number("limit", 50).clamp(1, 200))
-                .await.map(|value| (200, value)));
+            return response(
+                crate::orchestration::gateway_attachments::project_list(
+                    &runtime,
+                    project,
+                    attachment_page_number("offset", 0),
+                    attachment_page_number("limit", 50).clamp(1, 200),
+                )
+                .await
+                .map(|value| (200, value)),
+            );
         }
     }
     if let Some(tail) = path.strip_prefix("/api/conversations/") {
         let parts = tail.split('/').collect::<Vec<_>>();
         if parts.get(1) == Some(&"attachments") {
-            let conversation = parts[0];
-            let message = crate::storage::gateway::query_value(&query, "messageId").unwrap_or("");
-            return match (method.as_str(), parts.as_slice()) {
-                ("POST", [_, "attachments", "import"]) => response(crate::orchestration::gateway_attachments::import(&runtime, conversation, &body).await.map(|value| (200, value))),
-                ("GET", [_, "attachments"]) => response(if message.is_empty() {
-                    crate::orchestration::gateway_attachments::conversation_list(&runtime, conversation,
-                        attachment_page_number("offset", 0), attachment_page_number("limit", 50).clamp(1, 200)).await
-                } else {
-                    crate::orchestration::gateway_attachments::list(&runtime, conversation, message).await
-                }.map(|value| (200, value))),
-                ("GET", [_, "attachments", attachment, "content"]) => match crate::orchestration::gateway_attachments::content_representation(&runtime, conversation, message, attachment,
-                    crate::storage::gateway::query_value(&query, "version"), crate::storage::gateway::query_value(&query, "representation")).await {
-                    Ok(content) => binary_content_response(content.bytes, &content.mime_type, &content.sha256, &headers),
-                    Err(error) => response(Err(error)),
-                },
-                ("GET", [_, "attachments", attachment, "preview"]) => {
-                    let offset = crate::storage::gateway::query_value(&query, "offset").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
-                    let arguments = json!({"version":crate::storage::gateway::query_value(&query, "version"),
-                        "representation":crate::storage::gateway::query_value(&query, "representation"),"offset":offset});
-                    response(crate::orchestration::gateway_attachments::preview(&runtime, conversation, message, attachment, &arguments).await.map(|value| (200, value)))
-                },
-                ("GET", [_, "attachments", attachment, "text"]) => {
-                    let number = |name, fallback| crate::storage::gateway::query_value(&query, name).and_then(|value| value.parse::<usize>().ok()).unwrap_or(fallback);
-                    response(crate::orchestration::gateway_attachments::text(&runtime, conversation, message, attachment, number("offset", 0), number("maxChars", 24000)).await.map(|value| (200, value)))
-                },
-                _ => response(Err(GatewayError::new("NOT_FOUND", "附件接口不存在。", 404))),
-            };
+            return conversation_attachment_response(&runtime, &method, &parts, &query, &body, &headers).await;
         }
     }
     let workspace_path = path.strip_prefix("/api").unwrap_or(path);
     if workspace_path.starts_with("/agent/workspace/") {
-        let mut arguments = if method == Method::GET { json!({}) } else { body.clone() };
-        for (key, value) in &query { arguments[key] = json!(value); }
-        if method == Method::POST && workspace_path == "/agent/workspace/terminal/action" {
-            return response(Box::pin(crate::tools::gateway_workspace_terminal::action(
-                &arguments, &runtime.tools, &runtime.config.data_root)).await.map(|value| (200, value)));
-        }
-        let conversation = arguments["conversationId"].as_str().unwrap_or("");
-        let lightweight_view = matches!((method.as_str(), workspace_path),
-            ("POST", "/agent/workspace/chrome" | "/agent/workspace/chrome/action" | "/agent/workspace/preview")
-            | ("GET", "/agent/workspace/content" | "/agent/workspace/files" | "/agent/workspace/changes")
-            | ("POST", "/agent/workspace/files"));
-        let context = match if lightweight_view {
-            let closing = workspace_path == "/agent/workspace/chrome/action" && arguments["action"] == "close";
-            workspace_view_context(&runtime, conversation, closing).await
-        } else {
-            workspace_tool_context(&runtime, conversation).await
-        } {
-            Ok(context) => context,
-            Err(error) => return response(Err(error)),
-        };
-        let context = if matches!(workspace_path, "/agent/workspace/preview" | "/agent/workspace/content" | "/agent/workspace/changes" | "/agent/workspace/workbench") {
-            match crate::tools::gateway::select_workspace_context(&context, &arguments).await {
-                Ok(selected) => selected,
-                Err(error) => return response(Err(error)),
-            }
-        } else { context };
-        return match (method.as_str(), workspace_path) {
-            ("POST", "/agent/workspace/workbench") => response(
-                crate::tools::gateway_workspace_workbench::handle(&arguments, &context, &runtime.config).await.map(|value| (200, value))),
-            ("GET" | "POST", "/agent/workspace/files") => response(
-                crate::tools::gateway::workspace_files(&arguments, &context).await.map(|value| (200, value))),
-            ("POST", "/agent/workspace/preview") => response(
-                crate::tools::gateway_workspace_preview::preview(arguments, &context).await.map(|value| (200, value))),
-            ("GET", "/agent/workspace/changes") => response(
-                crate::tools::gateway_workspace_changes::changes(&context).await.map(|value| (200, value))),
-            ("POST", "/agent/workspace/terminal/open") => response(
-                Box::pin(crate::tools::gateway_workspace_terminal::open(&arguments, &context)).await.map(|value| (200, value))),
-            ("POST", "/agent/workspace/chrome") => response(
-                Box::pin(crate::tools::gateway_browser::workspace_open(&arguments, &context)).await.map(|value| (200, value))),
-            ("POST", "/agent/workspace/chrome/action") => response(
-                Box::pin(crate::tools::gateway_browser::workspace_action(&arguments, &context)).await.map(|value| (200, value))),
-            ("GET", "/agent/workspace/content") => match crate::tools::gateway_workspace_preview::content(&arguments, &context).await {
-                Ok(content) => workspace_content_response(content, &headers),
-                Err(error) => response(Err(error)),
-            },
-            ("POST", "/agent/workspace/browser") => response(crate::tools::gateway_browser::attach_embedded(
-                arguments["cdpEndpoint"].as_str().unwrap_or(""), arguments["targetId"].as_str().unwrap_or(""), &context).await.map(|value| (200, value))),
-            ("DELETE", "/agent/workspace/browser") => response(crate::tools::gateway_browser::detach_embedded(
-                arguments["sessionId"].as_str().unwrap_or(""), &context).await.map(|value| (200, value))),
-            _ => response(Err(GatewayError::new("NOT_FOUND", "文件工作区接口不存在。", 404))),
-        };
+        return workspace_response(&runtime, &method, workspace_path, &query, &body, &headers).await;
     }
     if method == Method::GET && path.starts_with("/api/tasks/") && path.ends_with("/stream") {
-        let task_path = path.trim_end_matches("/stream");
-        let authorized = crate::orchestration::gateway_task_http::handle(
-            &runtime, "GET", &path, &query, &body,
-        )
-        .await;
-        if let Some(Err(error)) = authorized {
-            return response(Err(error));
-        }
-        let task_id = task_path.trim_start_matches("/api/tasks/");
-        let conversation = query
-            .iter()
-            .find(|(key, _)| key == "conversationId")
-            .map(|(_, value)| value.as_str())
-            .unwrap_or("");
-        let run = match runtime.observe_task(task_id, conversation).await {
-            Ok(run) => run,
-            Err(error) => return response(Err(error)),
-        };
-        return request_stream_response(run).await;
+        return task_stream_response(&runtime, path, &query, &body).await;
     }
     if let Some(result) = crate::orchestration::gateway_task_http::handle(
         &runtime,
@@ -709,11 +657,16 @@ async fn handle_request(
         };
     }
     if path == "/api/chat/pause" && method == Method::POST {
-        return response(runtime.pause(
-            body["conversationId"].as_str().unwrap_or(""),
-            body["requestId"].as_str().unwrap_or(""),
-            body["taskId"].as_str(),
-        ).await.map(|value| (200, value)));
+        return response(
+            runtime
+                .pause(
+                    body["conversationId"].as_str().unwrap_or(""),
+                    body["requestId"].as_str().unwrap_or(""),
+                    body["taskId"].as_str(),
+                )
+                .await
+                .map(|value| (200, value)),
+        );
     }
     if path == "/api/chat/cancel" && method == Method::POST {
         return response(
@@ -738,29 +691,7 @@ async fn handle_request(
         }
     }
     if path.starts_with("/api/local-models") {
-        let result: Result<(u16, Value), GatewayError> = async {
-            let home = &runtime.config.data_home;
-            let affected = crate::models::gateway_local_models::affected_models(home, path, &body).await?;
-            // Keep model mutation fenced until its registry and connection updates have settled.
-            // 安装清单和连接更新完成前保持模型变更围栏，避免删除后又被并发生成重新加载。
-            let mut suspended = Vec::new();
-            for id in affected {
-                suspended.push(crate::models::gateway_local_engine::suspend(home, &id).await?);
-            }
-            let Some(result) = crate::models::gateway_local_models::handle(method.as_str(), path, body.clone(), home).await else {
-                return Err(GatewayError::new("LOCAL_MODEL_ROUTE_NOT_FOUND", "本地模型管理接口不存在。", 404));
-            };
-            let (status, mut snapshot) = result?;
-            if let Some(models) = snapshot["models"].as_array_mut() {
-                for model in models {
-                    if let Some(id) = model["id"].as_str().map(str::to_owned) {
-                        model["runtime"] = crate::models::gateway_local_engine::status(home, &id);
-                    }
-                }
-            }
-            Ok((status, snapshot))
-        }.await;
-        return response(result);
+        return local_models_response(&runtime, &method, path, &body).await;
     }
     if path.starts_with("/api/models") {
         if let Some(result) = crate::models::gateway_config::handle_models(
@@ -774,6 +705,374 @@ async fn handle_request(
             return response(result.map_err(Into::into));
         }
     }
+    if let Some(result) = stored_data_response(&runtime, &method, path, &query, &body, raw).await {
+        return result;
+    }
+    if path.starts_with("/api/agent/") || path == "/api/retrieval/providers" {
+        return agent_response(&runtime, method, path, query, body).await;
+    }
+    response(Err(GatewayError::new("NOT_FOUND", "接口不存在。", 404)))
+}
+
+async fn chat_resume_response(
+    runtime: &Arc<GatewayRuntime>,
+    path: &str,
+    query: &Vec<(String, String)>,
+) -> Response {
+    // 恢复时按两个稳定 ID 接回；GET 不重新提交任务。
+    let identifier = |name| {
+        crate::orchestration::gateway_runtime::checked_id(
+            &json!(crate::storage::gateway::query_value(&query, name).unwrap_or("")),
+            name,
+        )
+    };
+    let conversation = match identifier("conversationId") {
+        Ok(id) => id,
+        Err(error) => return response(Err(error)),
+    };
+    let request = match identifier("requestId") {
+        Ok(id) => id,
+        Err(error) => return response(Err(error)),
+    };
+    if path == "/api/chat/status" {
+        return response(
+            runtime
+                .run_status(&conversation, &request)
+                .await
+                .map(|status| (200, status))
+                .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404)),
+        );
+    }
+    return match runtime.observe_request(&conversation, &request).await {
+        Ok(run) => request_stream_response(run).await,
+        Err(error) => response(Err(error)),
+    };
+}
+
+async fn conversation_attachment_response(
+    runtime: &Arc<GatewayRuntime>,
+    method: &Method,
+    parts: &[&str],
+    query: &Vec<(String, String)>,
+    body: &Value,
+    headers: &HeaderMap,
+) -> Response {
+    let attachment_page_number = |name, fallback| {
+        crate::storage::gateway::query_value(query, name)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(fallback)
+    };
+    let conversation = parts[0];
+    let message = crate::storage::gateway::query_value(&query, "messageId").unwrap_or("");
+    return match (method.as_str(), parts) {
+        ("POST", [_, "attachments", "import"]) => response(
+            crate::orchestration::gateway_attachments::import(
+                &runtime,
+                conversation,
+                &body,
+            )
+            .await
+            .map(|value| (200, value)),
+        ),
+        ("GET", [_, "attachments"]) => response(
+            if message.is_empty() {
+                crate::orchestration::gateway_attachments::conversation_list(
+                    &runtime,
+                    conversation,
+                    attachment_page_number("offset", 0),
+                    attachment_page_number("limit", 50).clamp(1, 200),
+                )
+                .await
+            } else {
+                crate::orchestration::gateway_attachments::list(
+                    &runtime,
+                    conversation,
+                    message,
+                )
+                .await
+            }
+            .map(|value| (200, value)),
+        ),
+        ("GET", [_, "attachments", attachment, "content"]) => {
+            match crate::orchestration::gateway_attachments::content_representation(
+                &runtime,
+                conversation,
+                message,
+                attachment,
+                crate::storage::gateway::query_value(&query, "version"),
+                crate::storage::gateway::query_value(&query, "representation"),
+            )
+            .await
+            {
+                Ok(content) => binary_content_response(
+                    content.bytes,
+                    &content.mime_type,
+                    &content.sha256,
+                    &headers,
+                ),
+                Err(error) => response(Err(error)),
+            }
+        }
+        ("GET", [_, "attachments", attachment, "preview"]) => {
+            let offset = crate::storage::gateway::query_value(&query, "offset")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let arguments = json!({"version":crate::storage::gateway::query_value(&query, "version"),
+                "representation":crate::storage::gateway::query_value(&query, "representation"),"offset":offset});
+            response(
+                crate::orchestration::gateway_attachments::preview(
+                    &runtime,
+                    conversation,
+                    message,
+                    attachment,
+                    &arguments,
+                )
+                .await
+                .map(|value| (200, value)),
+            )
+        }
+        ("GET", [_, "attachments", attachment, "text"]) => {
+            let number = |name, fallback| {
+                crate::storage::gateway::query_value(&query, name)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(fallback)
+            };
+            response(
+                crate::orchestration::gateway_attachments::text(
+                    &runtime,
+                    conversation,
+                    message,
+                    attachment,
+                    number("offset", 0),
+                    number("maxChars", 24000),
+                )
+                .await
+                .map(|value| (200, value)),
+            )
+        }
+        _ => response(Err(GatewayError::new("NOT_FOUND", "附件接口不存在。", 404))),
+    };
+}
+
+async fn workspace_response(
+    runtime: &Arc<GatewayRuntime>,
+    method: &Method,
+    workspace_path: &str,
+    query: &Vec<(String, String)>,
+    body: &Value,
+    headers: &HeaderMap,
+) -> Response {
+    let mut arguments = if *method == Method::GET {
+        json!({})
+    } else {
+        body.clone()
+    };
+    for (key, value) in query {
+        arguments[key] = json!(value);
+    }
+    if *method == Method::POST && workspace_path == "/agent/workspace/terminal/action" {
+        return response(
+            Box::pin(crate::tools::gateway_workspace_terminal::action(
+                &arguments,
+                &runtime.tools,
+                &runtime.config.data_root,
+            ))
+            .await
+            .map(|value| (200, value)),
+        );
+    }
+    let conversation = arguments["conversationId"].as_str().unwrap_or("");
+    let lightweight_view = matches!(
+        (method.as_str(), workspace_path),
+        (
+            "POST",
+            "/agent/workspace/chrome"
+                | "/agent/workspace/chrome/action"
+                | "/agent/workspace/preview"
+        ) | (
+            "GET",
+            "/agent/workspace/content" | "/agent/workspace/files" | "/agent/workspace/changes"
+        ) | ("POST", "/agent/workspace/files")
+    );
+    let context = match if lightweight_view {
+        let closing = workspace_path == "/agent/workspace/chrome/action"
+            && arguments["action"] == "close";
+        workspace_view_context(&runtime, conversation, closing).await
+    } else {
+        workspace_tool_context(&runtime, conversation).await
+    } {
+        Ok(context) => context,
+        Err(error) => return response(Err(error)),
+    };
+    let context = if matches!(
+        workspace_path,
+        "/agent/workspace/preview"
+            | "/agent/workspace/content"
+            | "/agent/workspace/changes"
+            | "/agent/workspace/workbench"
+    ) {
+        match crate::tools::gateway::select_workspace_context(&context, &arguments).await {
+            Ok(selected) => selected,
+            Err(error) => return response(Err(error)),
+        }
+    } else {
+        context
+    };
+    return match (method.as_str(), workspace_path) {
+        ("POST", "/agent/workspace/workbench") => response(
+            crate::tools::gateway_workspace_workbench::handle(
+                &arguments,
+                &context,
+                &runtime.config,
+            )
+            .await
+            .map(|value| (200, value)),
+        ),
+        ("GET" | "POST", "/agent/workspace/files") => response(
+            crate::tools::gateway::workspace_files(&arguments, &context)
+                .await
+                .map(|value| (200, value)),
+        ),
+        ("POST", "/agent/workspace/preview") => response(
+            crate::tools::gateway_workspace_preview::preview(arguments, &context)
+                .await
+                .map(|value| (200, value)),
+        ),
+        ("GET", "/agent/workspace/changes") => response(
+            crate::tools::gateway_workspace_changes::changes(&context)
+                .await
+                .map(|value| (200, value)),
+        ),
+        ("POST", "/agent/workspace/terminal/open") => response(
+            Box::pin(crate::tools::gateway_workspace_terminal::open(
+                &arguments, &context,
+            ))
+            .await
+            .map(|value| (200, value)),
+        ),
+        ("POST", "/agent/workspace/chrome") => response(
+            Box::pin(crate::tools::gateway_browser::workspace_present(
+                &arguments, &context,
+            ))
+            .await
+            .map(|value| (200, value)),
+        ),
+        ("POST", "/agent/workspace/chrome/action") => response(
+            Box::pin(crate::tools::gateway_browser::workspace_action(
+                &arguments, &context,
+            ))
+            .await
+            .map(|value| (200, value)),
+        ),
+        ("GET", "/agent/workspace/content") => {
+            match crate::tools::gateway_workspace_preview::content(&arguments, &context).await {
+                Ok(content) => workspace_content_response(content, &headers),
+                Err(error) => response(Err(error)),
+            }
+        }
+        ("POST", "/agent/workspace/browser") => response(
+            crate::tools::gateway_browser::attach_embedded(
+                arguments["cdpEndpoint"].as_str().unwrap_or(""),
+                arguments["targetId"].as_str().unwrap_or(""),
+                &context,
+            )
+            .await
+            .map(|value| (200, value)),
+        ),
+        ("DELETE", "/agent/workspace/browser") => response(
+            crate::tools::gateway_browser::detach_embedded(
+                arguments["sessionId"].as_str().unwrap_or(""),
+                &context,
+            )
+            .await
+            .map(|value| (200, value)),
+        ),
+        _ => response(Err(GatewayError::new(
+            "NOT_FOUND",
+            "文件工作区接口不存在。",
+            404,
+        ))),
+    };
+}
+
+async fn task_stream_response(
+    runtime: &Arc<GatewayRuntime>,
+    path: &str,
+    query: &Vec<(String, String)>,
+    body: &Value,
+) -> Response {
+    let task_path = path.trim_end_matches("/stream");
+    let authorized =
+        crate::orchestration::gateway_task_http::handle(&runtime, "GET", &path, &query, &body)
+            .await;
+    if let Some(Err(error)) = authorized {
+        return response(Err(error));
+    }
+    let task_id = task_path.trim_start_matches("/api/tasks/");
+    let conversation = query
+        .iter()
+        .find(|(key, _)| key == "conversationId")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("");
+    let run = match runtime.observe_task(task_id, conversation).await {
+        Ok(run) => run,
+        Err(error) => return response(Err(error)),
+    };
+    return request_stream_response(run).await;
+}
+
+async fn local_models_response(
+    runtime: &Arc<GatewayRuntime>,
+    method: &Method,
+    path: &str,
+    body: &Value,
+) -> Response {
+    let result: Result<(u16, Value), GatewayError> = async {
+        let home = &runtime.config.data_home;
+        let affected =
+            crate::models::gateway_local_models::affected_models(home, path, &body).await?;
+        // 安装清单和连接更新完成前保持模型变更围栏，避免删除后又被并发生成重新加载。
+        let mut suspended = Vec::new();
+        for id in affected {
+            suspended.push(crate::models::gateway_local_engine::suspend(home, &id).await?);
+        }
+        let Some(result) = crate::models::gateway_local_models::handle(
+            method.as_str(),
+            path,
+            body.clone(),
+            home,
+        )
+        .await
+        else {
+            return Err(GatewayError::new(
+                "LOCAL_MODEL_ROUTE_NOT_FOUND",
+                "本地模型管理接口不存在。",
+                404,
+            ));
+        };
+        let (status, mut snapshot) = result?;
+        if let Some(models) = snapshot["models"].as_array_mut() {
+            for model in models {
+                if let Some(id) = model["id"].as_str().map(str::to_owned) {
+                    model["runtime"] = crate::models::gateway_local_engine::status(home, &id);
+                }
+            }
+        }
+        Ok((status, snapshot))
+    }
+    .await;
+    return response(result);
+}
+
+/// 依次交给正式文本、正式数据和检索处理；都不认领时返回 None。
+async fn stored_data_response(
+    runtime: &Arc<GatewayRuntime>,
+    method: &Method,
+    path: &str,
+    query: &Vec<(String, String)>,
+    body: &Value,
+    raw: String,
+) -> Option<Response> {
     let text_root = runtime.config.data_root.clone();
     let text_method = method.to_string();
     let text_path = path.to_owned();
@@ -784,20 +1083,22 @@ async fn handle_request(
     .await;
     match preserved {
         Ok(Some(Ok((status, raw)))) => {
-            return (
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-                raw,
-            )
-                .into_response();
+            return Some(
+                (
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                    raw,
+                )
+                    .into_response(),
+            );
         }
-        Ok(Some(Err(error))) => return response(Err(error.into())),
+        Ok(Some(Err(error))) => return Some(response(Err(error.into()))),
         Err(_) => {
-            return response(Err(GatewayError::new(
+            return Some(response(Err(GatewayError::new(
                 "DATA_WORKER_FAILED",
                 "正式数据读取未完成。",
                 500,
-            )));
+            ))));
         }
         _ => {}
     }
@@ -819,7 +1120,7 @@ async fn handle_request(
     .await;
     match stored {
         Ok(Some(result)) => {
-            if method == Method::PUT
+            if *method == Method::PUT
                 && path == "/api/conversations/catalog"
                 && result.as_ref().is_ok_and(|(status, _)| *status < 400)
             {
@@ -830,7 +1131,6 @@ async fn handle_request(
                 .await
                 {
                     if let Err(error) = runtime.tasks.reconcile_deleted_chats(&catalog).await {
-                        // Report task retirement failure without replaying the committed catalog update.
                         // 目录更新已生效，任务退出失败时报告错误，不重复提交。
                         eprintln!(
                             "{}",
@@ -839,14 +1139,14 @@ async fn handle_request(
                     }
                 }
             }
-            return response(result.map_err(Into::into));
+            return Some(response(result.map_err(Into::into)));
         }
         Err(_) => {
-            return response(Err(GatewayError::new(
+            return Some(response(Err(GatewayError::new(
                 "DATA_WORKER_FAILED",
                 "正式数据操作未完成。",
                 500,
-            )));
+            ))));
         }
         _ => {}
     }
@@ -866,92 +1166,99 @@ async fn handle_request(
     })
     .await;
     match retrieval {
-        Ok(Some(result)) => return response(result.map_err(Into::into)),
+        Ok(Some(result)) => return Some(response(result.map_err(Into::into))),
         Err(_) => {
-            return response(Err(GatewayError::new(
+            return Some(response(Err(GatewayError::new(
                 "RETRIEVAL_WORKER_FAILED",
                 "检索操作未完成。",
                 500,
-            )));
+            ))));
         }
         _ => {}
     }
-    if path.starts_with("/api/agent/") || path == "/api/retrieval/providers" {
-        let (_owner, cancellation) = tokio::sync::watch::channel(false);
-        let conversation = query
-            .iter()
-            .find(|(key, _)| key == "conversationId")
-            .map(|(_, value)| value.as_str());
-        let context = if let Some(id) = conversation {
-            runtime.tool_context(id, "ask", "", cancellation).await
-        } else {
-            Ok(crate::tools::gateway::GatewayToolContext {
-                data_home: runtime.config.data_root.clone(),
-                extension_root: runtime.config.extension_root.clone(),
-                workdir: runtime.config.data_root.join("Sandboxes"),
-                toolhost_exe: runtime.config.toolhost_exe.clone(),
-                permission_mode: "ask".into(),
-                conversation_id: String::new(),
-                project_id: None,
-                authorized_roots: vec![],
-                cancellation,
-                runtime: runtime.tools.clone(),
-                config: json!({"officialToolsRoot":runtime.config.application_root.join("official-tools")}),
-                approved: false,
-                events: None,
-                external_execute: None,
-            })
-        };
-        return response(match context {
+    None
+}
+
+async fn agent_response(
+    runtime: &Arc<GatewayRuntime>,
+    method: Method,
+    path: &str,
+    query: Vec<(String, String)>,
+    body: Value,
+) -> Response {
+    let (_owner, cancellation) = tokio::sync::watch::channel(false);
+    let conversation = query
+        .iter()
+        .find(|(key, _)| key == "conversationId")
+        .map(|(_, value)| value.as_str());
+    let context = if let Some(id) = conversation {
+        runtime.tool_context(id, "ask", "", cancellation).await
+    } else {
+        Ok(crate::tools::gateway::GatewayToolContext {
+            data_home: runtime.config.data_root.clone(),
+            extension_root: runtime.config.extension_root.clone(),
+            workdir: runtime.config.data_root.join("Sandboxes"),
+            toolhost_exe: runtime.config.toolhost_exe.clone(),
+            permission_mode: "ask".into(),
+            conversation_id: String::new(),
+            project_id: None,
+            authorized_roots: vec![],
+            cancellation,
+            runtime: runtime.tools.clone(),
+            config: json!({"officialToolsRoot":runtime.config.application_root.join("official-tools")}),
+            approved: false,
+            events: None,
+            external_execute: None,
+        })
+    };
+    return response(match context {
+        Err(error) => Err(error),
+        Ok(mut context) => match crate::tools::gateway::get_config(&context).await {
             Err(error) => Err(error),
-            Ok(mut context) => match crate::tools::gateway::get_config(&context).await {
-                Err(error) => Err(error),
-                Ok(mut config) => {
-                    config["officialToolsRoot"] =
-                        json!(runtime.config.application_root.join("official-tools"));
-                    context.config = config;
-                    if path == "/api/retrieval/providers" && method == Method::GET {
-                        let config = runtime.config.clone();
-                        let effective = tokio::task::spawn_blocking(move || {
-                            crate::retrieval::gateway::effective(&config, None)
-                        })
-                        .await;
-                        match effective {
-                            Ok(Ok(settings)) => Ok((
-                                200,
-                                crate::tools::gateway::providers(
-                                    &context,
-                                    settings["web"]["providerId"].as_str().unwrap_or(""),
-                                )
-                                .await,
-                            )),
-                            Ok(Err(error)) => Err(error.into()),
-                            Err(_) => Err(GatewayError::new(
-                                "RETRIEVAL_WORKER_FAILED",
-                                "检索设置读取失败。",
-                                500,
-                            )),
-                        }
-                    } else {
-                        match crate::tools::gateway::handle_route(
-                            method.as_str(),
-                            path,
-                            &query.into_iter().collect::<HashMap<_, _>>(),
-                            body,
-                            &context,
-                        )
-                        .await
-                        {
-                            Ok(Some(value)) => Ok(value),
-                            Ok(None) => Err(GatewayError::new("NOT_FOUND", "接口不存在。", 404)),
-                            Err(error) => Err(error),
-                        }
+            Ok(mut config) => {
+                config["officialToolsRoot"] =
+                    json!(runtime.config.application_root.join("official-tools"));
+                context.config = config;
+                if path == "/api/retrieval/providers" && method == Method::GET {
+                    let config = runtime.config.clone();
+                    let effective = tokio::task::spawn_blocking(move || {
+                        crate::retrieval::gateway::effective(&config, None)
+                    })
+                    .await;
+                    match effective {
+                        Ok(Ok(settings)) => Ok((
+                            200,
+                            crate::tools::gateway::providers(
+                                &context,
+                                settings["web"]["providerId"].as_str().unwrap_or(""),
+                            )
+                            .await,
+                        )),
+                        Ok(Err(error)) => Err(error.into()),
+                        Err(_) => Err(GatewayError::new(
+                            "RETRIEVAL_WORKER_FAILED",
+                            "检索设置读取失败。",
+                            500,
+                        )),
+                    }
+                } else {
+                    match crate::tools::gateway::handle_route(
+                        method.as_str(),
+                        path,
+                        &query.into_iter().collect::<HashMap<_, _>>(),
+                        body,
+                        &context,
+                    )
+                    .await
+                    {
+                        Ok(Some(value)) => Ok(value),
+                        Ok(None) => Err(GatewayError::new("NOT_FOUND", "接口不存在。", 404)),
+                        Err(error) => Err(error),
                     }
                 }
-            },
-        });
-    }
-    response(Err(GatewayError::new("NOT_FOUND", "接口不存在。", 404)))
+            }
+        },
+    });
 }
 
 pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
@@ -1002,7 +1309,6 @@ pub async fn serve_with_desktop_lifetime(
         }
     };
     crate::resources::gateway::install(resource);
-    // The embedding owner initializes its native DLL on demand; cloud readiness does not load ORT.
     // 嵌入模型所有者按需初始化原生 DLL；云端聊天就绪不等待 ORT 装载。
     crate::retrieval::gateway_embedding::install_runtime(tokio::runtime::Handle::current());
     let indexing_startup = startup::schedule_indexing(lifecycle.clone());
@@ -1027,19 +1333,25 @@ pub async fn serve_with_desktop_lifetime(
         }
         let runtime = shutdown.current().await;
         runtime.interrupt_for_shutdown().await;
-        // Cancel optional startup before joining it, then drain every writer independently of desktop exit.
         // 先取消可选启动再等待其退场；正式写入由网关排空，不依赖桌面继续存活。
         let config = runtime.config.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::retrieval::gateway::stop_background(&config)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::retrieval::gateway::stop_background(&config)
+        })
+        .await;
         let _ = indexing_startup.await;
         shutdown.shutdown().await;
     });
     let observation = lifecycle.clone();
     let served = axum::serve(listener, router_with_lifecycle(lifecycle.clone()))
-        .with_graceful_shutdown(async move { observation.wait_for_shutdown().await; })
+        .with_graceful_shutdown(async move {
+            observation.wait_for_shutdown().await;
+        })
         .await;
     lifecycle.begin_shutdown().await;
-    cleanup.await.map_err(|_| GatewayError::new("GATEWAY_SHUTDOWN_FAILED", "网关退出结算未完成。", 500))?;
+    cleanup
+        .await
+        .map_err(|_| GatewayError::new("GATEWAY_SHUTDOWN_FAILED", "网关退出结算未完成。", 500))?;
     served?;
     Ok(())
 }
@@ -1066,11 +1378,9 @@ pub fn initialize_storage(target: &str) -> Result<Value, GatewayError> {
     Ok(json!({"layoutVersion":1,"projects":projects,"chats":chats}))
 }
 
-/// The OS lock ends with its process; stale PID files cannot permit another writer.
 /// 进程退出即释放系统锁；旧 PID 文件不能授权第二个写入者。
 pub(crate) fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, GatewayError> {
-    // Only trusted application configuration selects this root; validate and prepare every missing ancestor.
-    // 此根目录仅由可信应用配置选定；逐层核验并准备缺失祖先，不能只假设最终一层存在。
+    // 此根目录仅由可信应用配置选定；逐层检查并准备缺失祖先，不能只假设最终一层存在。
     let volume_root: std::path::PathBuf = root
         .components()
         .take_while(|part| {
@@ -1099,7 +1409,6 @@ pub(crate) fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, Gat
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(0).custom_flags(0x00200000);
     }
-    // Acquire the exclusive Windows lock before inspecting the handle.
     // 先取得 Windows 独占锁，再核对句柄，避免第二次打开冲突。
     let lock = options.open(&path).map_err(|error| {
         if matches!(error.raw_os_error(), Some(32 | 33)) {
@@ -1134,7 +1443,10 @@ mod transport_tests {
 
     #[tokio::test]
     async fn browser_cleanup_context_survives_deleted_chat_without_reinitializing_storage() {
-        let fixture = std::env::temp_dir().join(format!("kynxa-browser-cleanup-{}", crate::gateway_contract::new_id()));
+        let fixture = std::env::temp_dir().join(format!(
+            "kynxa-browser-cleanup-{}",
+            crate::gateway_contract::new_id()
+        ));
         std::fs::create_dir_all(&fixture).unwrap();
         let data_root = fixture.join("Data");
         let runtime = GatewayRuntime::new(GatewayConfig {
@@ -1148,10 +1460,16 @@ mod transport_tests {
             inference_library: fixture.join("onnxruntime.dll"),
         });
         let conversation = crate::gateway_contract::new_id();
-        let context = workspace_view_context(&runtime, &conversation, true).await.unwrap();
+        let context = workspace_view_context(&runtime, &conversation, true)
+            .await
+            .unwrap();
         assert_eq!(context.conversation_id, conversation);
         assert!(!data_root.exists());
-        assert!(workspace_view_context(&runtime, &conversation, false).await.is_err());
+        assert!(
+            workspace_view_context(&runtime, &conversation, false)
+                .await
+                .is_err()
+        );
         assert!(!data_root.exists());
         assert!(workspace_view_context(&runtime, "", true).await.is_err());
         std::fs::remove_dir_all(fixture).unwrap();
@@ -1205,12 +1523,14 @@ mod transport_tests {
         assert_eq!(snapshot["replayThrough"], 41);
         assert_eq!(snapshot["content"], "");
         run.emit(json!({"type":"started","status":"queued"})).await;
-        run.emit(json!({"type":"text_delta","delta":"preserved after startup"})).await;
+        run.emit(json!({"type":"text_delta","delta":"preserved after startup"}))
+            .await;
         let next = stream.next().await.unwrap();
         assert_eq!(next["type"], "text_delta");
         assert_eq!(next["delta"], "preserved after startup");
         assert!(next["eventSequence"].as_u64().unwrap() > 41);
-        run.finish(json!({"type":"completed","content":"preserved after startup","reasoning":""})).await;
+        run.finish(json!({"type":"completed","content":"preserved after startup","reasoning":""}))
+            .await;
         assert_eq!(stream.next().await.unwrap()["type"], "completed");
         assert!(stream.next().await.is_none());
     }
@@ -1219,11 +1539,14 @@ mod transport_tests {
     async fn new_stream_after_reply_anchor_has_one_handshake_and_owned_complete_snapshot() {
         let run = RequestRun::test_run(2);
         run.emit(json!({"type":"started"})).await;
-        run.emit(json!({"type":"text_delta","delta":"previous reply"})).await;
+        run.emit(json!({"type":"text_delta","delta":"previous reply"}))
+            .await;
         let reply = crate::gateway_contract::new_id();
         let user = crate::gateway_contract::new_id();
-        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":user})).await;
-        run.emit(json!({"type":"text_delta","delta":"current reply"})).await;
+        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":user}))
+            .await;
+        run.emit(json!({"type":"text_delta","delta":"current reply"}))
+            .await;
         let mut stream = RequestEventStream::new(run.clone()).await.unwrap();
         assert_eq!(stream.next().await.unwrap()["type"], "started");
         let anchor = stream.next().await.unwrap();
@@ -1234,18 +1557,39 @@ mod transport_tests {
         assert_eq!(snapshot["type"], "content_snapshot");
         assert_eq!(snapshot["content"], "current reply");
         assert_eq!(snapshot["replyMessageId"], reply);
-        run.emit(json!({"type":"text_delta","delta":" continued"})).await;
+        run.emit(json!({"type":"text_delta","delta":" continued"}))
+            .await;
         assert_eq!(stream.next().await.unwrap()["delta"], " continued");
-        run.finish(json!({"type":"completed","content":"current reply continued","reasoning":""})).await;
+        run.finish(json!({"type":"completed","content":"current reply continued","reasoning":""}))
+            .await;
         let mut reconnect = RequestEventStream::new(run.clone()).await.unwrap();
         let mut events = Vec::new();
-        while let Some(event) = reconnect.next().await { events.push(event); }
+        while let Some(event) = reconnect.next().await {
+            events.push(event);
+        }
         assert_eq!(events[0]["type"], "started");
-        assert_eq!(events.iter().filter(|event| event["type"] == "started").count(), 1);
-        assert_eq!(events.iter().find(|event| event["type"] == "content_snapshot").unwrap()["content"], "current reply continued");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "started")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .find(|event| event["type"] == "content_snapshot")
+                .unwrap()["content"],
+            "current reply continued"
+        );
         assert_eq!(events.last().unwrap()["type"], "completed");
-        assert!(events.iter().all(|event| event["conversationId"] == run.conversation_id
-            && event["requestId"] == run.request_id && event["replyMessageId"] == reply));
+        assert!(
+            events
+                .iter()
+                .all(|event| event["conversationId"] == run.conversation_id
+                    && event["requestId"] == run.request_id
+                    && event["replyMessageId"] == reply)
+        );
     }
 
     #[tokio::test]
@@ -1459,5 +1803,20 @@ mod transport_tests {
         assert_eq!(body["taskCompletion"]["completionState"], "partial");
         assert_eq!(body["durationMs"].as_u64(), Some(1));
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::loopback_host;
+
+    #[test]
+    fn only_loopback_hosts_reach_the_local_api() {
+        for host in ["127.0.0.1:5218", "127.0.0.1", "localhost:5218", "LOCALHOST", "[::1]:5218"] {
+            assert!(loopback_host(host), "{host}");
+        }
+        for host in ["evil.example.com", "evil.example.com:5218", "127.0.0.1.evil.example.com", "localhost.evil.example.com:5218"] {
+            assert!(!loopback_host(host), "{host}");
+        }
     }
 }
