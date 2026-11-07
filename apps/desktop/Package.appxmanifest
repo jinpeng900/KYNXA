@@ -51,7 +51,9 @@
         </desktop:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:ExeServer Executable="$targetnametoken$.exe" Arguments="----AppNotificationActivated:" DisplayName="KYNXA">
+            <!-- WinApp expands the application token only on Application, not COM servers.
+                 WinApp 只在 Application 节点展开程序名令牌，COM 入口须填写实际文件名。 -->
+            <com:ExeServer Executable="KYNXA.Desktop.exe" Arguments="----AppNotificationActivated:" DisplayName="KYNXA">
               <com:Class Id="346F9F1A-A59C-4EC1-AB0A-4C6D94F20941" DisplayName="KYNXA" />
             </com:ExeServer>
           </com:ComServer>
