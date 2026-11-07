@@ -403,7 +403,9 @@ public sealed partial class ShellPage
                     RefreshPromptQueue();
                     if (pending.Message.Status == "completed" && !pending.StopRequested && !pending.PauseConfirmed)
                     {
-                        ExpansionNotifications.ReplyCompleted(FindChat(pending.ConversationId).Chat?.Title);
+                        var (chat, project) = FindChat(pending.ConversationId);
+                        if (chat is { IsArchived: false } && project?.IsArchived != true)
+                            ExpansionNotifications.ReplyCompleted(pending.ConversationId, chat.Title);
                         _ = DrainQueuedPromptsAsync(pending.ConversationId);
                     }
                 }

@@ -23,11 +23,11 @@ public sealed partial class ShellPage
             return text;
         }
         content.Children.Add(Label("回复完成通知", secondary: false));
-        content.Children.Add(Label("回复完成后通过系统通知提醒，点击通知可返回应用。", secondary: true));
+        content.Children.Add(Label("应用在后台、最小化或隐藏到托盘时提醒。点击通知打开对应会话。", secondary: true));
         var toggle = new ToggleSwitch { IsOn = ExpansionNotifications.Enabled, MinWidth = 0,
             OnContent = null, OffContent = null, VerticalAlignment = VerticalAlignment.Center };
         UiLocalization.Bind(toggle, AutomationProperties.NameProperty, "回复完成通知");
-        UiLocalization.Bind(toggle, AutomationProperties.HelpTextProperty, "回复完成后通过系统通知提醒，点击通知可返回应用。");
+        UiLocalization.Bind(toggle, AutomationProperties.HelpTextProperty, "应用在后台、最小化或隐藏到托盘时提醒。点击通知打开对应会话。");
         AutomationProperties.SetAutomationId(toggle, "ReplyCompletionNotificationToggle");
         var row = new Grid { ColumnSpacing = 20 };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

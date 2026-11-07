@@ -19,7 +19,7 @@ public static partial class UiText
         ["宽屏"] = "Wide",
         ["手机"] = "Mobile",
         ["回复完成通知"] = "Reply completion notifications",
-        ["回复完成后通过系统通知提醒，点击通知可返回应用。"] = "Show a system notification when a reply is complete. Click it to return to the app.",
+        ["应用在后台、最小化或隐藏到托盘时提醒。点击通知打开对应会话。"] = "Notify when the app is in the background, minimized, or in the tray. Click to open the conversation.",
         ["回复已完成"] = "Reply complete",
         ["可以返回应用查看回复。"] = "Return to the app to read the reply.",
         ["开启回复完成通知"] = "Enable reply completion notifications",

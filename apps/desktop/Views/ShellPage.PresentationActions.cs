@@ -139,10 +139,11 @@ public sealed partial class ShellPage
     private async void ScheduleNavigation_Click(object sender, RoutedEventArgs e) =>
         await ShowFeatureInfoAsync("定时任务", "定时任务尚未开放。当前任务由你发送消息后启动，不会自动按计划运行。");
 
-    private bool HasPresentationModal()
+    private bool HasPresentationModal() => _presentationDialogOpen || FindPresentationDialogPopup() is not null;
+
+    private Microsoft.UI.Xaml.Controls.Primitives.Popup? FindPresentationDialogPopup()
     {
-        if (_presentationDialogOpen) return true;
-        if (XamlRoot is null) return false;
+        if (XamlRoot is null) return null;
         // 尊重此 XamlRoot 上的所有弹窗，包括现有审批和设置。
         static bool ContainsDialog(DependencyObject? element)
         {
@@ -152,7 +153,7 @@ public sealed partial class ShellPage
                 if (ContainsDialog(VisualTreeHelper.GetChild(element, i))) return true;
             return false;
         }
-        return VisualTreeHelper.GetOpenPopupsForXamlRoot(XamlRoot).Any(popup => popup.IsOpen && ContainsDialog(popup.Child));
+        return VisualTreeHelper.GetOpenPopupsForXamlRoot(XamlRoot).FirstOrDefault(popup => popup.IsOpen && ContainsDialog(popup.Child));
     }
 
     private async Task ShowFeatureInfoAsync(string title, string content)

@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -16,7 +17,16 @@ public sealed record WorkspaceFolderEdit(string Name, string? FolderPath);
 /// <summary>A single folder draft, edited in the existing workspace pane.</summary>
 public sealed class WorkspaceFolderEditor : StackPanel
 {
+    private const double MaximumFormWidth = 460;
+    private const double FormInset = 18;
+    private const double MinimumInlinePathWidth = 144;
+
     private readonly SubmitTextBox _name, _path;
+    private readonly Grid _folderRow = new() { ColumnSpacing = 8 };
+    private readonly StackPanel _actions = new()
+    {
+        Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right
+    };
     private readonly TextBlock _error;
     private readonly Grid _errorRow;
     private readonly Button _submit, _cancel, _withoutFolder, _pickFolder;
@@ -33,8 +43,8 @@ public sealed class WorkspaceFolderEditor : StackPanel
     {
         _creating = creating; _commit = commit;
         _outsidePointer = DismissErrorOnPointer;
-        Spacing = 12; MaxWidth = 460; Margin = new Thickness(18);
-        HorizontalAlignment = HorizontalAlignment.Stretch; VerticalAlignment = VerticalAlignment.Center;
+        Spacing = 12; MaxWidth = MaximumFormWidth; Margin = new Thickness(FormInset);
+        HorizontalAlignment = HorizontalAlignment.Center; VerticalAlignment = VerticalAlignment.Center;
         var neutral = Brush("KynxaSecondaryTextBrush");
         Children.Add(new TextBlock { Text = title, FontSize = 20, TextWrapping = TextWrapping.Wrap,
             Foreground = Brush("KynxaTextBrush") });
@@ -42,7 +52,8 @@ public sealed class WorkspaceFolderEditor : StackPanel
         _name.MaxLength = 80;
         _name.Visibility = creating ? Visibility.Visible : Visibility.Collapsed;
         Children.Add(_name);
-        Children.Add(new TextBlock { Text = UiText.Get(creating ? "工作文件夹（可选）" : "工作文件夹"), FontSize = 12, Foreground = neutral });
+        Children.Add(new TextBlock { Text = UiText.Get(creating ? "工作文件夹（可选）" : "工作文件夹"), FontSize = 12,
+            Foreground = neutral, TextWrapping = TextWrapping.Wrap });
         _path = Input("WorkspaceFolderPath", "输入文件夹的完整路径", folderPath ?? string.Empty);
         _path.AllowDrop = true;
         _path.DragOver += (_, args) =>
@@ -68,15 +79,17 @@ public sealed class WorkspaceFolderEditor : StackPanel
             catch (Exception error) { if (!_closed) ShowError(error.Message); }
             finally { deferral.Complete(); }
         };
-        var folderRow = new Grid { ColumnSpacing = 8 };
-        folderRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        folderRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        folderRow.Children.Add(_path);
+        _folderRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        _folderRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        _folderRow.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        _folderRow.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        _folderRow.Children.Add(_path);
         _pickFolder = Button("选择文件夹", "WorkspaceFolderPick");
         _pickFolder.MinHeight = 36;
+        _pickFolder.HorizontalAlignment = HorizontalAlignment.Right;
         _pickFolder.Click += async (_, _) => await PickFolderAsync();
-        Grid.SetColumn(_pickFolder, 1); folderRow.Children.Add(_pickFolder);
-        Children.Add(folderRow);
+        Grid.SetColumn(_pickFolder, 1); _folderRow.Children.Add(_pickFolder);
+        Children.Add(_folderRow);
         var errorBrush = new SolidColorBrush(Microsoft.UI.Colors.IndianRed);
         _error = new TextBlock { FontSize = 12, Foreground = errorBrush, TextWrapping = TextWrapping.NoWrap,
             TextTrimming = TextTrimming.CharacterEllipsis, MaxLines = 1, VerticalAlignment = VerticalAlignment.Center };
@@ -94,8 +107,6 @@ public sealed class WorkspaceFolderEditor : StackPanel
         AutomationProperties.SetAutomationId(_error, "WorkspaceFolderError");
         AutomationProperties.SetLiveSetting(_error, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         Children.Add(_errorRow);
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
-            HorizontalAlignment = HorizontalAlignment.Right };
         _withoutFolder = Button(creating ? "不使用文件夹" : "取消关联文件夹", "WorkspaceFolderWithoutFolder");
         _withoutFolder.Visibility = creating || allowUnlink ? Visibility.Visible : Visibility.Collapsed;
         _withoutFolder.Click += async (_, _) => await SubmitAsync(withoutFolder: true);
@@ -103,8 +114,8 @@ public sealed class WorkspaceFolderEditor : StackPanel
         _cancel.Click += (_, _) => Cancel();
         _submit = Button(creating ? "创建" : "保存", "WorkspaceFolderCommit");
         _submit.Click += async (_, _) => await SubmitAsync();
-        actions.Children.Add(_withoutFolder); actions.Children.Add(_cancel); actions.Children.Add(_submit);
-        Children.Add(actions);
+        _actions.Children.Add(_withoutFolder); _actions.Children.Add(_cancel); _actions.Children.Add(_submit);
+        Children.Add(_actions);
         _path.TextChanged += (_, _) => HideError();
         _name.TextChanged += (_, _) => HideError();
         _path.SubmitRequested += async (_, _) => await SubmitAsync();
@@ -120,6 +131,36 @@ public sealed class WorkspaceFolderEditor : StackPanel
             FocusInput();
         };
         Unloaded += (_, _) => DetachPointerListener();
+    }
+
+    internal void FitToViewport(double viewportWidth)
+    {
+        double inset = Math.Min(FormInset, viewportWidth / 8);
+        double formWidth = Math.Min(MaximumFormWidth, viewportWidth - 2 * inset);
+        if (Width == formWidth) return;
+        Margin = new Thickness(inset, FormInset, inset, FormInset);
+        Width = formWidth;
+
+        // Reflow the same controls using their translated labels and native text sizes.
+        // 根据本地化文字和原生字号换行，继续使用同一组输入框与按钮。
+        var unbounded = new Size(double.PositiveInfinity, double.PositiveInfinity);
+        _pickFolder.Measure(unbounded);
+        bool stackPicker = formWidth < MinimumInlinePathWidth + _folderRow.ColumnSpacing + _pickFolder.DesiredSize.Width;
+        _folderRow.RowSpacing = stackPicker ? 8 : 0;
+        Grid.SetColumnSpan(_path, stackPicker ? 2 : 1);
+        Grid.SetRow(_pickFolder, stackPicker ? 1 : 0);
+        Grid.SetColumn(_pickFolder, stackPicker ? 0 : 1);
+        Grid.SetColumnSpan(_pickFolder, stackPicker ? 2 : 1);
+
+        double requiredActionsWidth = 0;
+        foreach (UIElement action in _actions.Children)
+        {
+            if (action.Visibility == Visibility.Collapsed) continue;
+            action.Measure(unbounded);
+            if (requiredActionsWidth > 0) requiredActionsWidth += _actions.Spacing;
+            requiredActionsWidth += action.DesiredSize.Width;
+        }
+        _actions.Orientation = requiredActionsWidth > formWidth ? Orientation.Vertical : Orientation.Horizontal;
     }
 
     public void FocusInput() => (_creating ? _name : _path).Focus(FocusState.Programmatic);
@@ -225,7 +266,8 @@ public sealed class WorkspaceFolderEditor : StackPanel
     }
     private static Button Button(string label, string id)
     {
-        var button = new Button { Content = UiText.Get(label), CornerRadius = new CornerRadius(9), MinWidth = 0,
+        var button = new Button { Content = new TextBlock { Text = UiText.Get(label), TextWrapping = TextWrapping.Wrap },
+            CornerRadius = new CornerRadius(9), MinWidth = 0, HorizontalContentAlignment = HorizontalAlignment.Center,
             Padding = new Thickness(10, 7, 10, 7), Background = Brush("KynxaReplySurfaceBrush"),
             BorderBrush = Brush("KynxaDividerBrush"), Foreground = Brush("KynxaTextBrush") };
         if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var style) && style is Style quiet) button.Style = quiet;

@@ -62,7 +62,8 @@ internal static class Program
         // XAML 启动前收到激活时，首次启动本身就会显示窗口，无需额外建窗。
         _dispatcher?.TryEnqueue(() =>
         {
-            if (App.Window is MainWindow existingWindow) existingWindow.RestoreFromActivation();
+            if (App.Window is MainWindow existingWindow && !ExpansionNotifications.TryActivate(existingWindow, args))
+                existingWindow.RestoreFromActivation();
         });
     }
 

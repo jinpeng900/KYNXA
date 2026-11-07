@@ -21,8 +21,13 @@ public sealed class ConversationWorkspaceHome : Grid
     private readonly StackPanel _files = new() { Spacing = 2 };
     private readonly ScrollViewer _fileScroll;
     private readonly ScrollViewer _homeScroll;
-    private readonly ScrollViewer _folderEditorHost = new() { Visibility = Visibility.Collapsed,
-        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    private readonly Grid _folderEditorLayout = new();
+    private readonly ScrollViewer _folderEditorHost = new()
+    {
+        Visibility = Visibility.Collapsed, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Disabled,
+        VerticalScrollBarVisibility = ScrollBarVisibility.Auto, ZoomMode = ZoomMode.Disabled
+    };
     private WorkspaceFolderEditor? _folderEditor;
     private readonly Grid _filePane = new() { Visibility = Visibility.Collapsed, RowSpacing = 10, Margin = new Thickness(14) };
     private readonly SegmentedSelector _fileKinds = new([
@@ -113,6 +118,8 @@ public sealed class ConversationWorkspaceHome : Grid
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Children.Add(_homeScroll);
         CreateFilePane();
+        _folderEditorHost.Content = _folderEditorLayout;
+        _folderEditorHost.SizeChanged += (_, args) => UpdateFolderEditorViewport(args.NewSize.Width, args.NewSize.Height);
         Children.Add(_folderEditorHost);
         _directory.Foreground = Brush("KynxaSecondaryTextBrush");
         _address.Foreground = Brush("KynxaTextBrush");
@@ -201,16 +208,28 @@ public sealed class ConversationWorkspaceHome : Grid
         CancelFolderEditor();
         HideFiles();
         _folderEditor = editor;
-        _folderEditorHost.Content = editor;
+        _folderEditorLayout.Children.Add(editor);
         _folderEditorHost.Visibility = Visibility.Visible;
         _homeScroll.Visibility = Visibility.Collapsed;
+        UpdateFolderEditorViewport(_folderEditorHost.ActualWidth, _folderEditorHost.ActualHeight);
         editor.Closed += (_, _) =>
         {
             if (!ReferenceEquals(_folderEditor, editor)) return;
             _folderEditor = null;
-            _folderEditorHost.Content = null; _folderEditorHost.Visibility = Visibility.Collapsed;
+            _folderEditorLayout.Children.Clear();
+            _folderEditorHost.Visibility = Visibility.Collapsed;
             _homeScroll.Visibility = Visibility.Visible;
         };
+    }
+
+    private void UpdateFolderEditorViewport(double width, double height)
+    {
+        if (_folderEditor is not { } editor || width <= 0 || height <= 0) return;
+        // Center the form in a tall pane and let a short pane scroll to its actions.
+        // 高窗口内居中，矮窗口可滚动到操作按钮。
+        _folderEditorLayout.Width = width;
+        _folderEditorLayout.MinHeight = height;
+        editor.FitToViewport(width);
     }
 
     public void CancelFolderEditor() => _folderEditor?.Cancel();

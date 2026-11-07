@@ -57,6 +57,7 @@ public sealed partial class ShellPage
             RebuildStandaloneRows();
             _projectsReady = true;
             RenderProjects();
+            OpenPendingReplyConversation();
         }
         catch (Exception error)
         {

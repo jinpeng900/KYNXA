@@ -3,11 +3,67 @@ using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
+using KYNXA_Desktop.Models.UI;
+using Microsoft.UI.Xaml.Controls.Primitives;
 
 namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
+    private Guid? _pendingReplyNotificationConversationId;
+    private Popup? _replyNotificationDialog;
+
+    internal void OpenReplyConversation(Guid conversationId)
+    {
+        if (_chatClosing || _projectViewClosed) return;
+        _pendingReplyNotificationConversationId = conversationId;
+        OpenPendingReplyConversation();
+    }
+
+    private void OpenPendingReplyConversation()
+    {
+        if (_chatClosing || _projectViewClosed || !_projectsReady ||
+            _pendingReplyNotificationConversationId is not Guid conversationId) return;
+
+        // A notification can arrive during startup or while a dialog owns the current conversation.
+        // 通知可能在目录加载或对话框仍占用当前会话时到达，待可切换后再定位。
+        if (FindPresentationDialogPopup() is { } dialog)
+        {
+            if (_replyNotificationDialog == dialog) return;
+            if (_replyNotificationDialog is { } previousDialog) previousDialog.Closed -= ReplyNotificationDialogClosed;
+            _replyNotificationDialog = dialog;
+            dialog.Closed += ReplyNotificationDialogClosed;
+            return;
+        }
+
+        _pendingReplyNotificationConversationId = null;
+        if (ActiveChatId == conversationId) return;
+        var (chat, project) = FindChat(conversationId);
+        if (chat is null || chat.IsArchived || project?.IsArchived == true)
+        {
+            ShowActionFeedback(UiText.Get("此会话不在当前会话目录中。"));
+            return;
+        }
+        SelectCatalogConversation(chat, project);
+    }
+
+    private void ReplyNotificationDialogClosed(object? sender, object args)
+    {
+        if (_replyNotificationDialog is { } dialog) dialog.Closed -= ReplyNotificationDialogClosed;
+        _replyNotificationDialog = null;
+        DispatcherQueue.TryEnqueue(OpenPendingReplyConversation);
+    }
+
+    private void SelectCatalogConversation(ProjectChatState chat, ProjectState? project)
+    {
+        if (project is not null) SelectProjectChat(project, chat);
+        else
+        {
+            SetPrimaryMode(true, updateConversation: false);
+            SelectStandaloneChat(new RecentConversation(chat.Title, "") { Id = chat.Id });
+        }
+    }
+
     private void InitializeExpansionWorkbench()
     {
         ExpansionRemoteService.ModelSelection = () => (_selectedModel?.ProviderId, _selectedModel?.ModelId);
@@ -32,8 +88,7 @@ public sealed partial class ShellPage
             if (_chatClosing || HasPresentationModal()) return;
             var (chat, project) = FindChat(id);
             if (chat is null) { ShowActionFeedback("此会话不在当前会话目录中。"); return; }
-            if (project is not null) SelectProjectChat(project, chat);
-            else { SetPrimaryMode(true, updateConversation: false); SelectStandaloneChat(new RecentConversation(chat.Title, "") { Id = id }); }
+            SelectCatalogConversation(chat, project);
         };
         DocumentPanel.WorkbenchActionRequested += (_, action) =>
         {

@@ -17,7 +17,13 @@ public sealed partial class MainWindow : Window
 
     internal void RequestExit() => _trayService.RequestExit();
     internal void RestoreFromActivation() => _trayService.Restore();
-    internal void ShowCompletionNotification(string? title) => _trayService.ShowCompletionNotification(title);
+    internal bool CanShowReplyNotification => _trayService.CanShowReplyNotification;
+
+    internal void OpenReplyNotification(Guid conversationId)
+    {
+        RestoreFromActivation();
+        if (RootFrame.Content is ShellPage page) page.OpenReplyConversation(conversationId);
+    }
 
     private async void MainWindowCloseRequested(object? sender, EventArgs args)
     {

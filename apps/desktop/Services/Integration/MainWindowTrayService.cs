@@ -72,24 +72,17 @@ internal sealed class MainWindowTrayService : IDisposable
         SendMessage(_windowHandle, CloseMessage, 0, 0);
     }
 
-    public void ShowCompletionNotification(string? title)
+    public bool CanShowReplyNotification
     {
-        if (_isDisposed || _exitRequested || !EnsureTrayIcon()) return;
-        var data = CreateCompletionNotificationData(title);
-        ShellNotifyIcon(1, ref data);
-    }
-
-    private NotifyIconData CreateCompletionNotificationData(string? title)
-    {
-        var data = CreateIconData();
-        data.Flags = 0x0010;
-        data.InfoTitle = UiText.Get("回复已完成");
-        data.Info = string.IsNullOrWhiteSpace(title) ? UiText.Get("可以返回应用查看回复。") : (title.Length > 180 ? title[..180] : title);
-        // NIIF_USER 使用大尺寸应用图标，替换系统信息符号。
-        // HICON 由托盘服务持有至释放，通知仅借用，不创建额外句柄。
-        data.InfoFlags = 0x0004 | 0x0010 | 0x0020;
-        data.BalloonIcon = _icon;
-        return data;
+        get
+        {
+            if (_isDisposed || _exitRequested || _sessionEnding) return false;
+            if (!IsWindowVisible(_windowHandle) || IsIconic(_windowHandle)) return true;
+            // Settings and other windows in this process still count as foreground use.
+            // 设置等同一进程的子窗口也算应用仍在前台使用。
+            GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundProcessId);
+            return foregroundProcessId != Environment.ProcessId;
+        }
     }
 
     private nint WindowProcedure(nint window, uint message, nint wParam, nint lParam, nuint subclassId, nuint referenceData)
@@ -264,6 +257,10 @@ internal sealed class MainWindowTrayService : IDisposable
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint window);

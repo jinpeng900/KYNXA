@@ -87,7 +87,10 @@ public partial class App : Application
         _ = Task.Run(WarmUpModelGatewayAsync);
         _ = Task.Run(Services.InstallerModelPreparation.RunAsync);
         Window = new MainWindow();
-        Window.Activate();
+        var mainWindow = (MainWindow)Window;
+        Services.ExpansionNotifications.Register(mainWindow);
+        var activation = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
+        if (!Services.ExpansionNotifications.TryActivate(mainWindow, activation)) mainWindow.Activate();
     }
 
     private static async Task WarmUpModelGatewayAsync()
